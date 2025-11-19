@@ -1,0 +1,5 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="app.joesscanner.com" android:versionCode="1">
+	<application android:usesCleartextTraffic="true" android:networkSecurityConfig="@xml/network_security_config" android:icon="@mipmap/appicon" android:label="JoesScanner" />
+	<uses-permission android:name="android.permission.INTERNET" />
+</manifest>

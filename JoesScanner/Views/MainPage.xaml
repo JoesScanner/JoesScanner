@@ -1,0 +1,338 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage
+    x:Class="JoesScanner.Views.MainPage"
+    xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    xmlns:vm="clr-namespace:JoesScanner.ViewModels"
+    xmlns:models="clr-namespace:JoesScanner.Models"
+    x:Name="Page"
+    Title="Joes Scanner"
+    BackgroundColor="{AppThemeBinding Light=#f3f4f6, Dark=#020617}"
+    Shell.NavBarIsVisible="False">
+
+    <!-- Root grid fills the window -->
+    <Grid Padding="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- Outer card that fills the available area -->
+        <Border
+            StrokeThickness="0"
+            BackgroundColor="{AppThemeBinding Light=White, Dark=#020617}"
+            StrokeShape="RoundRectangle 24"
+            VerticalOptions="FillAndExpand"
+            HorizontalOptions="FillAndExpand">
+
+            <Border.Shadow>
+                <Shadow
+                    Brush="#000000"
+                    Offset="0,1"
+                    Radius="8"
+                    Opacity="0.10" />
+            </Border.Shadow>
+
+            <!-- Inner grid: header, calls, footer -->
+            <Grid
+                RowDefinitions="Auto,Auto,*,Auto"
+                ColumnDefinitions="*">
+
+                <!-- HEADER PANEL: title, server, controls -->
+                <Grid
+    Grid.Row="0"
+    RowDefinitions="Auto,Auto"
+    ColumnDefinitions="Auto,*,Auto"
+    Padding="16,16,16,8"
+    ColumnSpacing="16">
+
+                    <!-- Logo and title -->
+                    <HorizontalStackLayout
+        Grid.Row="0"
+        Grid.Column="0"
+        Spacing="8"
+        VerticalOptions="Center">
+
+                        <VerticalStackLayout
+            Spacing="0"
+            VerticalOptions="Center">
+
+                            <Label
+                Text="JoesScanner"
+                FontSize="22"
+                FontAttributes="Bold"
+                TextColor="{AppThemeBinding Light=#111827, Dark=White}" />
+
+                            <!-- Tagline should be 'Server: <url>' from TaglineText -->
+                            <Label
+                Text="{Binding TaglineText}"
+                FontSize="12"
+                TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+                LineBreakMode="CharacterWrap" />
+                        </VerticalStackLayout>
+                    </HorizontalStackLayout>
+
+                    <!-- Row 0 right side: Connect/Disconnect + Settings -->
+                    <HorizontalStackLayout
+        Grid.Row="0"
+        Grid.Column="2"
+        Spacing="4"
+        VerticalOptions="Center"
+        HorizontalOptions="End">
+
+                        <!-- Connect or Disconnect button -->
+                        <Button
+            Style="{StaticResource PillButtonStyle}"
+            Margin="0,0,0,0"
+            Text="Connect"
+            Command="{Binding StartCommand}">
+
+                            <Button.Triggers>
+                                <!-- When streaming: green, says Disconnect, uses StopCommand -->
+                                <DataTrigger
+                    TargetType="Button"
+                    Binding="{Binding IsRunning}"
+                    Value="True">
+                                    <Setter Property="Text" Value="Disconnect" />
+                                    <Setter Property="BackgroundColor" Value="{AppThemeBinding Light=#16a34a, Dark=#15803d}" />
+                                    <Setter Property="Command" Value="{Binding StopCommand}" />
+                                </DataTrigger>
+                            </Button.Triggers>
+                        </Button>
+
+                        <!-- Settings button moved up to row 0 -->
+                        <Button
+            Text="Settings"
+            Clicked="OnSettingsTapped"
+            Style="{StaticResource SecondaryPillButtonStyle}"
+            Margin="4,0,0,0" />
+                    </HorizontalStackLayout>
+
+                    <!-- Second header row:
+         Left side: Audio On or Off + Speed + Calls waiting
+         Right side: Filters indicator only -->
+                    <!-- Left: audio, speed, and calls waiting -->
+                    <HorizontalStackLayout
+        Grid.Row="1"
+        Grid.Column="0"
+        Grid.ColumnSpan="2"
+        Spacing="12"
+        VerticalOptions="Center">
+
+                        <!-- Audio On or Off button (global audio control) -->
+                        <Button
+            Text="{Binding AudioButtonText}"
+            Command="{Binding ToggleAudioCommand}"
+            Style="{StaticResource SecondaryPillButtonStyle}"
+            BackgroundColor="{Binding AudioButtonBackground}"
+            VerticalOptions="Center" />
+
+                        <!-- Playback speed slider and label -->
+                        <HorizontalStackLayout
+            Spacing="4"
+            VerticalOptions="Center">
+
+                            <Label
+                Text="Speed"
+                FontSize="11"
+                VerticalOptions="Center"
+                TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
+
+                            <Slider
+                WidthRequest="90"
+                Minimum="0"
+                Maximum="2"
+                Value="{Binding PlaybackSpeedStep}"
+                VerticalOptions="Center" />
+
+                            <Label
+                Text="{Binding PlaybackSpeedLabel}"
+                FontSize="11"
+                VerticalOptions="Center"
+                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                        </HorizontalStackLayout>
+
+                        <!-- Calls waiting indicator to the right of the speed slider -->
+                        <Label
+            Text="{Binding CallsWaiting, StringFormat='Calls waiting: {0}'}"
+            FontSize="10"
+            VerticalOptions="Center"
+            Margin="6,0,0,0"
+            TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}"
+            IsVisible="{Binding HasCallsWaiting}" />
+                    </HorizontalStackLayout>
+
+                    <!-- Right: Filters indicator on row 1 only -->
+                    <HorizontalStackLayout
+        Grid.Row="1"
+        Grid.Column="2"
+        Spacing="4"
+        VerticalOptions="Center"
+        HorizontalOptions="End">
+
+                        <!-- Filters indicator when any filter is active -->
+                        <Label
+            Text="Filters"
+            FontSize="10"
+            FontAttributes="Bold"
+            VerticalOptions="Center"
+            TextColor="{AppThemeBinding Light=#2563eb, Dark=#60a5fa}"
+            IsVisible="{Binding HasActiveFilters}" />
+                    </HorizontalStackLayout>
+                </Grid>
+
+
+                <!-- CALL LIST -->
+                <!-- CALL LIST -->
+                <CollectionView
+    Grid.Row="1"
+    x:Name="CallsView"
+    ItemsSource="{Binding Calls}"
+    ItemsUpdatingScrollMode="KeepLastItemInView">
+
+                    <CollectionView.ItemTemplate>
+                        <DataTemplate>
+
+                            <!-- Single call card -->
+                            <Border
+                Margin="0,0,0,8"
+                Padding="6"
+                BackgroundColor="{AppThemeBinding Light=White, Dark=#111827}"
+                StrokeThickness="1"
+                StrokeShape="RoundRectangle 8">
+
+                                <!-- Default border stroke -->
+                                <Border.Stroke>
+                                    <SolidColorBrush Color="{AppThemeBinding Light=#374151, Dark=#1f2937}" />
+                                </Border.Stroke>
+
+                                <!-- Tap anywhere on the card to replay the call and continue from there -->
+                                <Border.GestureRecognizers>
+                                    <TapGestureRecognizer
+                        Command="{Binding BindingContext.PlayAudioCommand, Source={x:Reference Page}}"
+                        CommandParameter="{Binding .}" />
+                                </Border.GestureRecognizers>
+
+                                <!-- Highlight the card in green while its audio is playing -->
+                                <Border.Triggers>
+                                    <DataTrigger
+                        TargetType="Border"
+                        Binding="{Binding IsPlaying}"
+                        Value="True">
+
+                                        <!-- Slightly thicker green border -->
+                                        <Setter Property="StrokeThickness" Value="2" />
+                                        <Setter Property="Stroke" Value="#22c55e" />
+
+                                        <!-- Soft green inner background to give a glow effect -->
+                                        <Setter Property="BackgroundColor" Value="{AppThemeBinding Light=#ecfdf5, Dark=#022c22}" />
+                                    </DataTrigger>
+                                </Border.Triggers>
+
+                                <!-- Call layout: header row + transcription row -->
+                                <Grid
+                    ColumnDefinitions="*,Auto"
+                    RowDefinitions="Auto,Auto">
+
+                                    <!-- Header row: time > receiver > site > talkgroup -->
+                                    <Label
+                        Grid.Row="0"
+                        Grid.Column="0">
+                                        <Label.FormattedText>
+                                            <FormattedString>
+                                                <Span
+                                    Text="{Binding TimeDisplay}"
+                                    FontAttributes="Bold"
+                                    TextColor="{AppThemeBinding Light=#111827, Dark=White}" />
+                                                <Span Text=" > " />
+                                                <Span
+                                    Text="{Binding ReceiverName}"
+                                    TextColor="{AppThemeBinding Light=#374151, Dark=#9ca3af}" />
+                                                <Span Text=" > " />
+                                                <Span
+                                    Text="{Binding SystemName}"
+                                    TextColor="{AppThemeBinding Light=#374151, Dark=#9ca3af}" />
+                                                <Span Text=" > " />
+                                                <Span
+                                    Text="{Binding Talkgroup}"
+                                    FontAttributes="Bold"
+                                    TextColor="{AppThemeBinding Light=#111827, Dark=#bfdbfe}" />
+                                            </FormattedString>
+                                        </Label.FormattedText>
+                                    </Label>
+
+                                    <!-- Duration on the right -->
+                                    <Label
+                        Grid.Row="0"
+                        Grid.Column="1"
+                        HorizontalTextAlignment="End"
+                        VerticalTextAlignment="Center"
+                        FontSize="11"
+                        TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}">
+                                        <Label.FormattedText>
+                                            <FormattedString>
+                                                <Span Text="{Binding DurationDisplay}" />
+                                            </FormattedString>
+                                        </Label.FormattedText>
+                                    </Label>
+
+                                    <!-- Transcription row: only transcription text -->
+                                    <Label
+                        Grid.Row="1"
+                        Grid.Column="0"
+                        Grid.ColumnSpan="2"
+                        Margin="0,4,0,0"
+                        FontSize="12"
+                        LineBreakMode="WordWrap"
+                        TextColor="{AppThemeBinding Light=#374151, Dark=#e5e7eb}"
+                        MaxLines="4">
+                                        <Label.FormattedText>
+                                            <FormattedString>
+                                                <Span Text="{Binding Transcription}" />
+                                            </FormattedString>
+                                        </Label.FormattedText>
+                                    </Label>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </CollectionView.ItemTemplate>
+                </CollectionView>
+
+
+
+                <!-- FOOTER: client info and donate button -->
+                <Grid
+                    Grid.Row="2"
+                    Padding="16,8,16,16"
+                    RowDefinitions="Auto"
+                    ColumnDefinitions="*,Auto">
+
+                    <!-- Desktop-only label: links to JoesScanner.com -->
+                    <Label
+                        Grid.Row="0"
+                        Grid.Column="0"
+                        FontSize="11"
+                        TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+                        LineBreakMode="TailTruncation"
+                        IsVisible="{OnPlatform WinUI=true, MacCatalyst=true, Android=false, iOS=false}">
+                        <Label.FormattedText>
+                            <FormattedString>
+                                <Span Text="JoesScanner desktop client" />
+                            </FormattedString>
+                        </Label.FormattedText>
+                        <Label.GestureRecognizers>
+                            <TapGestureRecognizer Tapped="OnSiteTapped" />
+                        </Label.GestureRecognizers>
+                    </Label>
+
+                    <!-- Donate button (visible on all platforms) -->
+                    <Button
+                        Grid.Column="1"
+                        Text="Donate to the app developer"
+                        Style="{StaticResource SecondaryPillButtonStyle}"
+                        FontSize="10"
+                        Command="{Binding OpenDonateCommand}" />
+                </Grid>
+            </Grid>
+        </Border>
+    </Grid>
+</ContentPage>
