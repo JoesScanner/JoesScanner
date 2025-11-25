@@ -1,7 +1,4 @@
-﻿using Microsoft.Maui;
-using Microsoft.Maui.Hosting;
-
-namespace JoesScanner.WinUI;
+﻿namespace JoesScanner.WinUI;
 
 public partial class App : Microsoft.Maui.MauiWinUIApplication
 {

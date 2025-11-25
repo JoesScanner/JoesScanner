@@ -1,14 +1,7 @@
-using System;
-using System.Collections.ObjectModel;
-using System.Collections.Generic;
-using System.Linq;
-using System.Net.Http;
-using System.Threading.Tasks;
-using System.Windows.Input;
 using JoesScanner.Models;
 using JoesScanner.Services;
-using Microsoft.Maui;
-using Microsoft.Maui.Controls;
+using System.Collections.ObjectModel;
+using System.Windows.Input;
 
 namespace JoesScanner.ViewModels
 {
@@ -146,38 +139,6 @@ namespace JoesScanner.ViewModels
             ResetServerCommand = new Command(ResetServerUrl);
             ValidateServerCommand = new Command(async () => await ValidateServerUrlAsync());
 
-            // Per line toggle (talkgroup level)
-            ToggleFilterLineCommand = new Command(param =>
-            {
-                if (param is FilterLine fl)
-                    ToggleFilterLine(fl);
-            });
-
-            // Receiver wide toggle
-            ToggleReceiverFilterCommand = new Command(param =>
-            {
-                if (param is FilterLine fl)
-                    ToggleReceiverFilter(fl);
-            });
-
-            // Site wide toggle for a given receiver and site
-            ToggleSiteFilterCommand = new Command(param =>
-            {
-                if (param is FilterLine fl)
-                    ToggleSiteFilter(fl);
-            });
-
-            // Remove one line from the list
-            RemoveFilterLineCommand = new Command(param =>
-            {
-                if (param is FilterLine fl)
-                    RemoveFilterLine(fl);
-            });
-
-            // Apply persisted disabled keys to any preexisting lines, then sort
-            ApplyDisabledKeysToExistingLines();
-            SortFilterLines();
-            RaiseFilterStateChanged();
 
         }
 
@@ -241,7 +202,9 @@ namespace JoesScanner.ViewModels
             get => _maxCalls;
             set
             {
-                var clamped = value <= 0 ? 1 : value;
+                var clamped = value;
+                if (clamped < 10) clamped = 10;
+                if (clamped > 50) clamped = 50;
                 if (_maxCalls == clamped)
                     return;
 
@@ -292,7 +255,6 @@ namespace JoesScanner.ViewModels
                 ApplyTheme(_themeMode);
             }
         }
-
 
         /// <summary>
         /// Helper booleans for the three theme radio buttons.
@@ -349,8 +311,6 @@ namespace JoesScanner.ViewModels
                     return;
 
                 _sortAscending = value;
-                SortFilterLines();
-                RaiseFilterStateChanged();
                 OnPropertyChanged();
             }
         }
@@ -379,7 +339,7 @@ namespace JoesScanner.ViewModels
             _savedUseDefaultConnection = _useDefaultConnection;
 
             // Calls
-            _maxCalls = _settings.MaxCalls <= 0 ? 25 : _settings.MaxCalls;
+            _maxCalls = _settings.MaxCalls;
 
             // Scroll direction from settings service
             var scrollDirection = _settings.ScrollDirection;
@@ -461,7 +421,6 @@ namespace JoesScanner.ViewModels
             app.UserAppTheme = theme;
         }
 
-
         /// <summary>
         /// Persists connection, call list, and theme settings,
         /// and updates main view model mirrors where needed.
@@ -493,9 +452,6 @@ namespace JoesScanner.ViewModels
 
             // Persist disabled lines
             _settings.ReceiverFilter = string.Join(";", _disabledKeys);
-
-            // Mirror active filter state to main view model for the "Filters" badge
-            _mainViewModel.HasActiveFilters = HasAnyActiveFilters;
 
             // Update our saved snapshot for "HasChanges"
             _savedServerUrl = _settings.ServerUrl;
@@ -569,7 +525,6 @@ namespace JoesScanner.ViewModels
             UseDefaultConnection = _savedUseDefaultConnection;
             HasChanges = false;
         }
-
         private void UpdateHasChanges()
         {
             var has = !string.Equals(_serverUrl, _savedServerUrl, StringComparison.OrdinalIgnoreCase)
@@ -609,126 +564,6 @@ namespace JoesScanner.ViewModels
             {
                 _disabledKeys.Remove(key);
             }
-        }
-
-        /// <summary>
-        /// Toggle a single filter line on or off.
-        /// This is what the talkgroup label uses.
-        /// </summary>
-        private void ToggleFilterLine(FilterLine line)
-        {
-            if (line == null)
-                return;
-
-            SetLineEnabled(line, !line.IsEnabled);
-
-            RaiseFilterStateChanged();
-            _mainViewModel.HasActiveFilters = HasAnyActiveFilters;
-        }
-
-        /// <summary>
-        /// Toggle all lines that share the same Receiver as the source line.
-        /// If any of them are enabled, they all become disabled.
-        /// If all are disabled, they all become enabled.
-        /// </summary>
-        private void ToggleReceiverFilter(FilterLine source)
-        {
-            if (source == null)
-                return;
-
-            var receiver = source.Receiver ?? string.Empty;
-
-            var lines = _filterLines
-                .Where(l => string.Equals(l.Receiver, receiver, StringComparison.OrdinalIgnoreCase))
-                .ToList();
-
-            if (lines.Count == 0)
-                return;
-
-            var anyEnabled = lines.Any(l => l.IsEnabled);
-            var newState = !anyEnabled;
-
-            foreach (var line in lines)
-            {
-                SetLineEnabled(line, newState);
-            }
-
-            RaiseFilterStateChanged();
-            _mainViewModel.HasActiveFilters = HasAnyActiveFilters;
-        }
-
-        /// <summary>
-        /// Toggle all lines that share the same Receiver and Site as the source line.
-        /// This lets the user flip an entire site worth of talkgroups at once.
-        /// </summary>
-        private void ToggleSiteFilter(FilterLine source)
-        {
-            if (source == null)
-                return;
-
-            var receiver = source.Receiver ?? string.Empty;
-            var site = source.Site ?? string.Empty;
-
-            var lines = _filterLines
-                .Where(l =>
-                    string.Equals(l.Receiver, receiver, StringComparison.OrdinalIgnoreCase) &&
-                    string.Equals(l.Site, site, StringComparison.OrdinalIgnoreCase))
-                .ToList();
-
-            if (lines.Count == 0)
-                return;
-
-            var anyEnabled = lines.Any(l => l.IsEnabled);
-            var newState = !anyEnabled;
-
-            foreach (var line in lines)
-            {
-                SetLineEnabled(line, newState);
-            }
-
-            RaiseFilterStateChanged();
-            _mainViewModel.HasActiveFilters = HasAnyActiveFilters;
-        }
-
-        /// <summary>
-        /// Remove a single filter line from the list.
-        /// Any future calls for this triple will recreate the line.
-        /// </summary>
-        private void RemoveFilterLine(FilterLine line)
-        {
-            if (line == null)
-                return;
-
-            var key = MakeKey(line.Receiver, line.Site, line.Talkgroup);
-
-            _disabledKeys.Remove(key);
-            _filterLines.Remove(line);
-
-            RaiseFilterStateChanged();
-            _mainViewModel.HasActiveFilters = HasAnyActiveFilters;
-        }
-
-
-        private void SortFilterLines()
-        {
-            if (_filterLines.Count <= 1)
-                return;
-
-            var ordered = _sortAscending
-                ? _filterLines
-                    .OrderBy(l => l.Receiver)
-                    .ThenBy(l => l.Site)
-                    .ThenBy(l => l.Talkgroup)
-                    .ToList()
-                : _filterLines
-                    .OrderByDescending(l => l.Receiver)
-                    .ThenByDescending(l => l.Site)
-                    .ThenByDescending(l => l.Talkgroup)
-                    .ToList();
-
-            _filterLines.Clear();
-            foreach (var fl in ordered)
-                _filterLines.Add(fl);
         }
 
         private static string MakeKey(string receiver, string site, string talkgroup)
@@ -775,9 +610,7 @@ namespace JoesScanner.ViewModels
 
             if (Current != null)
             {
-                Current.SortFilterLines();
-                Current.RaiseFilterStateChanged();
-                Current._mainViewModel.HasActiveFilters = Current.HasAnyActiveFilters;
+                
             }
         }
 

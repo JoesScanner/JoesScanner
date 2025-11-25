@@ -1,17 +1,7 @@
-using System;
-using System.Collections.ObjectModel;
-using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
-using System.Windows.Input;
 using JoesScanner.Models;
 using JoesScanner.Services;
-using Microsoft.Maui;
-using Microsoft.Maui.ApplicationModel;
-using Microsoft.Maui.Controls;
-using Microsoft.Maui.Dispatching;
-using Microsoft.Maui.Graphics;
-using Microsoft.Maui.Storage;
+using System.Collections.ObjectModel;
+using System.Windows.Input;
 
 
 namespace JoesScanner.ViewModels
@@ -32,10 +22,11 @@ namespace JoesScanner.ViewModels
         private bool _isRunning;
         private string _serverUrl = string.Empty;
         private bool _autoPlay;
-        private int _maxCalls = 25;
-        private bool _scrollNewestAtBottom = true;
+        private int _maxCalls = 20;
         private bool _audioEnabled;
-        private bool _hasActiveFilters;
+        private int _totalCallsReceived;
+        private int _totalCallsInserted;
+        private string _lastQueueEvent = string.Empty;
 
         // 0 = 1x, 1 = 1.5x, 2 = 2x
         private double _playbackSpeedStep = 0;
@@ -43,12 +34,11 @@ namespace JoesScanner.ViewModels
         // Currently playing call, used to compute calls waiting.
         private CallItem? _currentPlayingCall;
 
-        // True while we are playing through a queue of calls after a tap.
-        private bool _isQueuePlaybackRunning;
+        // Most recently finished call, used as the anchor when nothing is playing.
+        private CallItem? _lastPlayedCall;
 
-        // Current position in the playback queue. Calls "waiting" are those
-        // newer than this call (at lower indices, since newest is at the top).
-        private CallItem? _queuePosition;
+        // True while we are playing through the backlog.
+        private bool _isQueuePlaybackRunning;
 
         /// <summary>
         /// Optional settings view model reference, used for live filter chips.
@@ -118,21 +108,19 @@ namespace JoesScanner.ViewModels
             _settingsService.AutoPlay = _autoPlay;
 
             // Other persisted settings.
-            _maxCalls = _settingsService.MaxCalls <= 0 ? 25 : _settingsService.MaxCalls;
+            _maxCalls = _settingsService.MaxCalls <= 0 ? 20 : _settingsService.MaxCalls;
+
+            // Restore playback speed step (0 = 1x, 1 = 1.5x, 2 = 2x).
+            var savedSpeed = Preferences.Get(PlaybackSpeedStepPreferenceKey, 0.0);
+            PlaybackSpeedStep = savedSpeed;
 
             // Always show newest calls at the top now.
-            _scrollNewestAtBottom = false;
             _settingsService.ScrollDirection = "Up";
 
 
             // Initial theme.
             var initialTheme = _settingsService.ThemeMode;
             ApplyTheme(initialTheme);
-
-            // Initial filters indicator: true if any filter is configured.
-            HasActiveFilters =
-                !string.IsNullOrWhiteSpace(_settingsService.ReceiverFilter) ||
-                !string.IsNullOrWhiteSpace(_settingsService.TalkgroupFilter);
 
             // Commands.
             StartCommand = new Command(Start, () => !IsRunning);
@@ -142,6 +130,7 @@ namespace JoesScanner.ViewModels
             PlayAudioCommand = new Command<CallItem>(async item => await OnCallTappedAsync(item));
         }
         private const string LastConnectedPreferenceKey = "LastConnectedOnExit";
+        private const string PlaybackSpeedStepPreferenceKey = "PlaybackSpeedStep";
 
         /// <summary>
         /// True when connected to the server stream.
@@ -181,24 +170,6 @@ namespace JoesScanner.ViewModels
                 UpdateQueueDerivedState();
 
                 Preferences.Set("AudioEnabled", value);
-            }
-        }
-
-
-        /// <summary>
-        /// True when any receiver or talkgroup filter is active.
-        /// Used to show the Filters indicator on the main page.
-        /// </summary>
-        public bool HasActiveFilters
-        {
-            get => _hasActiveFilters;
-            set
-            {
-                if (_hasActiveFilters == value)
-                    return;
-
-                _hasActiveFilters = value;
-                OnPropertyChanged();
             }
         }
 
@@ -243,25 +214,81 @@ namespace JoesScanner.ViewModels
         {
             get
             {
-                if (!AudioEnabled || Calls == null || Calls.Count == 0)
+                if (Calls == null || Calls.Count == 0)
                     return 0;
 
-                // Use the call that is currently playing if we have one.
-                // If nothing is playing, fall back to the queue position anchor.
-                var anchor = _currentPlayingCall ?? _queuePosition;
+                // Anchor is the call that is currently playing, or the last one
+                // that finished if nothing is playing.
+                var anchor = _currentPlayingCall ?? _lastPlayedCall;
+
+                // If we have no anchor at all, then all calls are considered waiting.
                 if (anchor == null)
-                    return 0;
+                    return Calls.Count;
 
                 var index = Calls.IndexOf(anchor);
+
+                // If the anchor is not found (trimmed out), treat all calls as waiting.
+                if (index < 0)
+                    return Calls.Count;
+
+                // Newest is at index 0. Anything above the anchor (lower index)
+                // is waiting to be played.
                 if (index <= 0)
                     return 0;
 
-                // With newest at the top (index 0), calls at indices 0..index-1
-                // are newer than the queue position and therefore "waiting".
                 return index;
             }
         }
 
+        /// <summary>
+        /// Total number of CallItem objects that have been received from the stream
+        /// since the last connect.
+        /// </summary>
+        public int TotalCallsReceived
+        {
+            get => _totalCallsReceived;
+            private set
+            {
+                if (_totalCallsReceived == value)
+                    return;
+
+                _totalCallsReceived = value;
+                OnPropertyChanged();
+            }
+        }
+
+        /// <summary>
+        /// Total number of CallItem objects successfully inserted into the Calls
+        /// collection for the current session.
+        /// </summary>
+        public int TotalCallsInserted
+        {
+            get => _totalCallsInserted;
+            private set
+            {
+                if (_totalCallsInserted == value)
+                    return;
+
+                _totalCallsInserted = value;
+                OnPropertyChanged();
+            }
+        }
+
+        /// <summary>
+        /// Last high level queue or audio event, for quick debugging.
+        /// </summary>
+        public string LastQueueEvent
+        {
+            get => _lastQueueEvent;
+            private set
+            {
+                if (_lastQueueEvent == value)
+                    return;
+
+                _lastQueueEvent = value ?? string.Empty;
+                OnPropertyChanged();
+            }
+        }
 
         /// <summary>
         /// Whether the "Calls waiting" indicator should be visible in the UI.
@@ -269,48 +296,47 @@ namespace JoesScanner.ViewModels
         /// </summary>
         public bool IsCallsWaitingVisible => AudioEnabled;
 
-        /// <summary>
-        /// Finds the next call to play, based on the current queue position.
-        /// Newest call is at index 0.
-        /// - If no queue position is set, start from the newest call (index 0).
-        /// - If the position is no longer in the list, also start from the newest.
-        /// - If the position is at index i > 0, the next call is at index i - 1 (newer).
-        /// - If the position is at index 0, there is nothing newer to play.
-        /// </summary>
+        // Returns the next call to play from the backlog.
+        // Calls are stored newest at index 0, oldest at the end.
+        // We walk from oldest to newest so you hear things in order.
         private CallItem? GetNextQueuedCall()
         {
             if (Calls.Count == 0)
                 return null;
 
-            if (_queuePosition == null)
-            {
-                // No anchor yet: start from newest.
-                return Calls[0];
-            }
-
-            var index = Calls.IndexOf(_queuePosition);
-            if (index < 0)
-            {
-                // Anchor not found (maybe trimmed): start from newest.
-                return Calls[0];
-            }
-
-            if (index == 0)
-            {
-                // Already at newest; nothing newer to play.
+            // Never start a new call while one is already playing.
+            if (_currentPlayingCall != null)
                 return null;
+
+            // If we have never played anything, start from the oldest call.
+            if (_lastPlayedCall == null)
+            {
+                return Calls[Calls.Count - 1];
             }
 
-            // Newest at top: index - 1 is the next newer call.
+            var index = Calls.IndexOf(_lastPlayedCall);
+
+            // If the anchor is gone (trimmed), start from the oldest call.
+            if (index < 0)
+                return Calls[Calls.Count - 1];
+
+            // If the anchor is the oldest call already, we are caught up.
+            if (index == 0)
+                return null;
+
+            // Newest at index 0; next newer than the anchor is at index - 1.
             return Calls[index - 1];
         }
-        /// <summary>
-        /// Queue playback engine.
-        /// While audio is on and we are connected, repeatedly finds the next queued
-        /// call and plays it, updating the queue position as it goes.
-        /// New calls that arrive while this is running will be picked up on the
-        /// next iteration, so nothing is skipped.
-        /// </summary>
+
+        // Queue playback engine.
+        //
+        // While audio is on and we are connected, repeatedly finds the next queued
+        // call and plays it, updating the queue position as it goes.
+        // New calls that arrive while this is running will be picked up on the
+        // next iteration, so nothing is skipped.
+        // Queue playback engine.
+        // While audio is on and we are connected, it repeatedly finds the next
+        // queued call (based on _lastPlayedCall) and plays it until we are caught up.
         private async Task EnsureQueuePlaybackAsync()
         {
             if (_isQueuePlaybackRunning)
@@ -320,6 +346,9 @@ namespace JoesScanner.ViewModels
                 return;
 
             _isQueuePlaybackRunning = true;
+            var aborted = false;
+
+            LastQueueEvent = "Queue playback started";
 
             try
             {
@@ -329,28 +358,31 @@ namespace JoesScanner.ViewModels
                     if (next == null)
                         break;
 
-                    // Move the queue anchor to the call we are about to play
-                    // so CallsWaiting and the queue state stay in sync.
-                    _queuePosition = next;
                     UpdateQueueDerivedState();
 
                     await PlayAudioAsync(next);
 
                     if (!AudioEnabled || !IsRunning)
+                    {
+                        aborted = true;
                         break;
+                    }
                 }
+            }
+            catch (Exception ex)
+            {
+                aborted = true;
+                System.Diagnostics.Debug.WriteLine($"Error in EnsureQueuePlaybackAsync: {ex}");
             }
             finally
             {
                 _isQueuePlaybackRunning = false;
 
-                // Once we have walked the queue and are caught up,
-                // clear the anchor so live auto-play can resume.
-                _queuePosition = null;
                 UpdateQueueDerivedState();
+
+                LastQueueEvent = aborted ? "Queue playback aborted" : "Queue playback finished";
             }
         }
-
 
         /// <summary>
         /// Numbered playback speed step used by the slider on the main page.
@@ -372,6 +404,9 @@ namespace JoesScanner.ViewModels
                 _playbackSpeedStep = clamped;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(PlaybackSpeedLabel));
+
+                // Persist the setting so it survives app restarts.
+                Preferences.Set(PlaybackSpeedStepPreferenceKey, _playbackSpeedStep);
             }
         }
 
@@ -412,7 +447,9 @@ namespace JoesScanner.ViewModels
             get => _maxCalls;
             set
             {
-                var clamped = value <= 0 ? 1 : value;
+                var clamped = value;
+                if (clamped < 10) clamped = 10;
+                if (clamped > 50) clamped = 50;
                 if (_maxCalls == clamped)
                     return;
 
@@ -423,6 +460,7 @@ namespace JoesScanner.ViewModels
                 EnforceMaxCalls();
             }
         }
+
 
         /// <summary>
         /// Tagline bound to the subtitle under the JoesScanner header.
@@ -478,7 +516,7 @@ namespace JoesScanner.ViewModels
             IsRunning = true;
             Calls.Clear();
             _currentPlayingCall = null;
-            _queuePosition = null;
+            _lastPlayedCall = null;
             UpdateQueueDerivedState();
 
             // Fire-and-forget the background stream loop.
@@ -499,26 +537,29 @@ namespace JoesScanner.ViewModels
                     if (token.IsCancellationRequested)
                         break;
 
+                    TotalCallsReceived++;
+
                     try
                     {
-                        await MainThread.InvokeOnMainThreadAsync(async () =>
+                        await MainThread.InvokeOnMainThreadAsync(() =>
                         {
                             if (token.IsCancellationRequested)
                                 return;
 
                             // Always show newest calls at the top (index 0).
                             Calls.Insert(0, call);
+                            TotalCallsInserted++;
+                            LastQueueEvent = $"Inserted call at {DateTime.Now:T}";
 
                             EnforceMaxCalls();
 
                             // Recompute CallsWaiting, visibility, etc.
                             UpdateQueueDerivedState();
 
-                            // Auto-play new calls only when audio is enabled
-                            // and we are not walking a manual queue started from a tap.
-                            if (AutoPlay && AudioEnabled && _queuePosition == null)
+                            // Kick the queue engine if audio + autoplay are enabled.
+                            if (AudioEnabled && AutoPlay)
                             {
-                                await PlayAudioAsync(call);
+                                _ = EnsureQueuePlaybackAsync();
                             }
                         });
                     }
@@ -569,7 +610,7 @@ namespace JoesScanner.ViewModels
                     }
 
                     _currentPlayingCall = null;
-                    _queuePosition = null;
+                    _lastPlayedCall = null;
                     UpdateQueueDerivedState();
                 });
             }
@@ -630,19 +671,44 @@ namespace JoesScanner.ViewModels
             }
 
             _currentPlayingCall = null;
-            _queuePosition = null;
+            _lastPlayedCall = null;
             UpdateQueueDerivedState();
 
             // We are no longer connected, remember this for next launch.
             Preferences.Set(LastConnectedPreferenceKey, false);
         }
-
+        // Called only from the audio toggle path to stop playback.
+        // This must never cancel the call stream CTS or change IsRunning.
         public async Task StopAudioFromToggleAsync()
         {
-            // Stop the underlying audio player.
-            await _audioPlaybackService.StopAsync();
+            // Cancel any in-flight audio playback so PlayAudioAsync can finish.
+            if (_audioCts != null)
+            {
+                try
+                {
+                    _audioCts.Cancel();
+                }
+                catch
+                {
+                }
 
-            // Clear any IsPlaying flags and current-call anchor.
+                _audioCts.Dispose();
+                _audioCts = null;
+            }
+
+            try
+            {
+                // Stop the underlying audio player. Any errors here should
+                // never affect the call stream or UI.
+                await _audioPlaybackService.StopAsync();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error stopping audio: {ex}");
+                // Swallow the exception so the app keeps running normally.
+            }
+
+            // Clear any IsPlaying flags on all calls.
             foreach (var call in Calls)
             {
                 if (call.IsPlaying)
@@ -650,6 +716,8 @@ namespace JoesScanner.ViewModels
             }
 
             _currentPlayingCall = null;
+            // We intentionally do NOT touch _queuePosition here.
+            // The queue anchor will be managed by the queue engine itself.
             OnPropertyChanged(nameof(CallsWaiting));
             OnPropertyChanged(nameof(IsCallsWaitingVisible));
         }
@@ -662,61 +730,104 @@ namespace JoesScanner.ViewModels
             return StopAudioFromToggleAsync();
         }
 
-        /// <summary>
-        /// Handles a user tap on a call in the list.
-        /// When audio is on:
-        ///   - Plays that call.
-        ///   - Then walks forward toward the newest call at the top using the queue engine.
-        /// When audio is off:
-        ///   - Plays only the tapped call at normal speed (preview).
-        /// </summary>
+        // Handles a user tap on a call in the list.
+        //
+        // When audio is off:
+        //   - Plays only the tapped call at normal speed (preview) and returns.
+        //
+        // When audio is on:
+        //   - Plays the tapped call using the normal queue playback path
+        //     so it becomes _lastPlayedCall.
+        //   - Then, if autoplay is enabled and we are connected,
+        //     resumes the queue from that point forward.
         private async Task OnCallTappedAsync(CallItem? item)
         {
             if (item == null)
                 return;
 
-            // If audio is off, just play this one call and do not walk the queue.
-            if (!AudioEnabled)
+            LastQueueEvent = $"Call tapped at {DateTime.Now:T}";
+
+            try
             {
-                await PlaySingleCallWithoutQueueAsync(item);
-                return;
+                if (!AudioEnabled)
+                {
+                    // Audio off: pure preview.
+                    await PlaySingleCallWithoutQueueAsync(item);
+                    return;
+                }
+
+                // Audio on: treat this as the next queue item.
+                await PlayAudioAsync(item);
+
+                // If audio is still on, we are connected, and autoplay is enabled,
+                // have the queue engine continue from this call forward.
+                if (AudioEnabled && IsRunning && AutoPlay)
+                {
+                    _ = EnsureQueuePlaybackAsync();
+                }
             }
-
-            // Audio is on: set the queue position to the tapped call,
-            // play it, then let the queue engine walk forward.
-            _queuePosition = item;
-
-            await PlayAudioAsync(item);
-
-            if (!AudioEnabled || !IsRunning)
-                return;
-
-            await EnsureQueuePlaybackAsync();
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error in OnCallTappedAsync: {ex}");
+                LastQueueEvent = "Error while playing tapped call (see debug output)";
+            }
         }
 
-        /// <summary>
-        /// Toggles AudioEnabled. This controls whether audio is allowed to play
-        /// and whether new calls are auto-played.
-        /// When turning audio off, stop playback and forget the queue position.
-        /// When turning audio on, jump to the newest call and start from there.
-        /// </summary>
+        // Handles the global audio on or off toggle from the UI.
+        // This only affects audio playback and autoplay.
+        // It does not touch the call stream connection state or tokens.
         private async Task OnToggleAudioAsync()
         {
             var newValue = !AudioEnabled;
 
-            // Flip the audio flag.
-            AudioEnabled = newValue;
-
-            // Tie AutoPlay to the audio state so we do not auto-play while muted.
-            AutoPlay = newValue;
-
-            // When turning audio off, stop any current playback immediately.
-            if (!newValue)
+            try
             {
-                await StopAudioFromToggleAsync();
+                // Flip the audio flag.
+                AudioEnabled = newValue;
+
+                // Tie AutoPlay to the audio state so we do not auto play while muted.
+                AutoPlay = newValue;
+
+                LastQueueEvent = newValue ? "Audio toggled ON" : "Audio toggled OFF";
+
+                if (!newValue)
+                {
+                    // Turning audio OFF - stop any current playback immediately,
+                    // but do not touch the call stream.
+                    await StopAudioFromToggleAsync();
+
+                    // When we mute, treat everything that exists right now as
+                    // "already handled" so that when we turn audio back on, we
+                    // only play calls that arrive AFTER this point.
+                    if (Calls.Count > 0)
+                    {
+                        // Newest call is always at index 0.
+                        _lastPlayedCall = Calls[0];
+                    }
+                    else
+                    {
+                        _lastPlayedCall = null;
+                    }
+
+                    UpdateQueueDerivedState();
+                }
+                else
+                {
+                    // Turning audio ON.
+                    // If we are connected and have calls waiting, kick the queue engine
+                    // so playback resumes with calls that arrived AFTER the mute.
+                    if (IsRunning && AutoPlay && CallsWaiting > 0)
+                    {
+                        _ = EnsureQueuePlaybackAsync();
+                    }
+                }
             }
-            // When turning audio back on, we do not try to catch up automatically.
-            // The next new call (or a tap on a call) will drive playback.
+            catch (Exception ex)
+            {
+                // Never let a toggle failure affect the stream.
+                System.Diagnostics.Debug.WriteLine($"Error in OnToggleAudioAsync: {ex}");
+                LastQueueEvent = "Error while toggling audio (see debug output)";
+            }
         }
 
         /// <summary>
@@ -749,35 +860,55 @@ namespace JoesScanner.ViewModels
         {
             var max = MaxCalls <= 0 ? 1 : MaxCalls;
 
+            if (Calls.Count <= max)
+                return;
+
             while (Calls.Count > max)
             {
-                var lastIndex = Calls.Count - 1;
-                if (lastIndex >= 0)
-                {
-                    var removed = Calls[lastIndex];
-                    Calls.RemoveAt(lastIndex);
+                // Prefer to trim the oldest call that is not currently playing
+                // and not the last played anchor.
+                var indexToRemove = -1;
 
-                    // If we trimmed away the current queue position, clear it.
-                    if (_queuePosition == removed)
-                        _queuePosition = null;
+                for (var i = Calls.Count - 1; i >= 0; i--)
+                {
+                    var candidate = Calls[i];
+
+                    if (candidate != _currentPlayingCall && candidate != _lastPlayedCall)
+                    {
+                        indexToRemove = i;
+                        break;
+                    }
                 }
+
+                // If every call is protected, still trim the very oldest call.
+                if (indexToRemove < 0)
+                    indexToRemove = Calls.Count - 1;
+
+                var removed = Calls[indexToRemove];
+                Calls.RemoveAt(indexToRemove);
+
+                // If we trimmed away the currently playing call, clear it.
+                if (removed == _currentPlayingCall)
+                    _currentPlayingCall = null;
+
+                // If we trimmed away the last played anchor, clear it.
+                if (removed == _lastPlayedCall)
+                    _lastPlayedCall = null;
             }
 
-            // Queue position may now point to a different index or be null.
+            // Anchors may now be null, so refresh derived state.
             UpdateQueueDerivedState();
         }
 
-        /// <summary>
-        /// Recomputes queue derived UI state: CallsWaiting, IsCallsWaitingVisible,
-        /// and applies automatic playback speed adjustments based on backlog.
-        /// </summary>
+        // Refreshes CallsWaiting and auto-adjusts playback speed when there is backlog.
+        // This must never touch the call stream state (IsRunning, _cts, etc.).
         private void UpdateQueueDerivedState()
         {
             // Refresh bindings
             OnPropertyChanged(nameof(CallsWaiting));
             OnPropertyChanged(nameof(IsCallsWaitingVisible));
 
-            // Only auto adjust when audio is on and there is backlog
+            // Only auto-adjust when audio is on and there is backlog.
             if (!AudioEnabled)
                 return;
 
@@ -787,22 +918,21 @@ namespace JoesScanner.ViewModels
 
             // If it starts to back up more than 10 calls, automatically turn on 1.5x.
             // If it gets to 20 calls or more, automatically move to 2x.
+            //
+            // This only manipulates the playback speed step; it does not affect
+            // the connection or queue anchor.
             if (waiting >= 20)
             {
-                PlaybackSpeedStep = 2;    // 2x
+                PlaybackSpeedStep = 2;
             }
-            else if (waiting > 10)
+            else if (waiting >= 10 && PlaybackSpeedStep < 1)
             {
-                // Only bump up, do not force down from a higher user choice.
-                if (PlaybackSpeedStep < 1)
-                    PlaybackSpeedStep = 1; // 1.5x
+                PlaybackSpeedStep = 1;
             }
         }
 
-        /// <summary>
-        /// Plays a single call when audio is off, without affecting the queue,
-        /// waiting count, or playback speed logic. Used for manual preview.
-        /// </summary>
+        // Plays a single call when audio is off, without affecting the queue,
+        // waiting count, or playback speed logic. Used for manual preview.
         private async Task PlaySingleCallWithoutQueueAsync(CallItem item)
         {
             if (item == null || string.IsNullOrWhiteSpace(item.AudioUrl))
@@ -810,7 +940,7 @@ namespace JoesScanner.ViewModels
 
             try
             {
-                // For the UI, briefly mark this call as playing.
+                // Mark only this call as playing for UI feedback.
                 foreach (var call in Calls)
                 {
                     if (call.IsPlaying)
@@ -818,26 +948,23 @@ namespace JoesScanner.ViewModels
                 }
 
                 item.IsPlaying = true;
-                UpdateQueueDerivedState();
 
                 // Always play at normal speed in this mode.
                 await _audioPlaybackService.PlayAsync(item.AudioUrl, 1.0);
             }
-            catch
+            catch (Exception ex)
             {
-                // Swallow any playback errors for now.
+                System.Diagnostics.Debug.WriteLine($"Error in PlaySingleCallWithoutQueueAsync: {ex}");
             }
             finally
             {
                 item.IsPlaying = false;
-                UpdateQueueDerivedState();
             }
         }
 
-        /// <summary>
-        /// Plays audio for a given call, respecting the global AudioEnabled flag.
-        /// Any playback failures are swallowed so they do not affect the call stream.
-        /// </summary>
+        // Core audio playback helper used by both autoplay and the queue engine.
+        // Respects AudioEnabled but never touches the call stream.
+        // Uses _audioCts so we can cancel in-flight playback when audio is toggled or stopped.
         private async Task PlayAudioAsync(CallItem? item)
         {
             if (item == null || string.IsNullOrWhiteSpace(item.AudioUrl))
@@ -847,6 +974,25 @@ namespace JoesScanner.ViewModels
             if (!AudioEnabled)
                 return;
 
+            // Cancel any existing audio operation so only one play is active at a time.
+            if (_audioCts != null)
+            {
+                try
+                {
+                    _audioCts.Cancel();
+                }
+                catch
+                {
+                }
+
+                _audioCts.Dispose();
+                _audioCts = null;
+            }
+
+            // New CTS for this specific playback.
+            _audioCts = new CancellationTokenSource();
+            var token = _audioCts.Token;
+
             // Clear the playing flag on all other calls.
             foreach (var call in Calls)
             {
@@ -854,29 +1000,39 @@ namespace JoesScanner.ViewModels
                     call.IsPlaying = false;
             }
 
-            // Mark this as the current playing call.
-            _currentPlayingCall = item;
             item.IsPlaying = true;
+            _currentPlayingCall = item;
+
             OnPropertyChanged(nameof(CallsWaiting));
             OnPropertyChanged(nameof(IsCallsWaitingVisible));
 
             try
             {
-                var playbackRate = GetEffectivePlaybackRate(item);
+                var rate = GetEffectivePlaybackRate(item);
 
-                // Any exception here should not kill the stream, so we catch below.
-                await _audioPlaybackService.PlayAsync(item.AudioUrl, playbackRate);
+                // This call must never hang forever. It will complete either
+                // when playback ends or when token is canceled (mute / stop).
+                await _audioPlaybackService.PlayAsync(item.AudioUrl, rate, token);
             }
-            catch
+            catch (OperationCanceledException)
             {
-                // Optionally log later; for now, ignore playback errors so the stream keeps running.
+                // Expected when audio is toggled off or the stream is stopped.
+            }
+            catch (Exception ex)
+            {
+                // Ignore playback errors so the stream and UI keep running.
+                System.Diagnostics.Debug.WriteLine($"Error in PlayAudioAsync: {ex}");
             }
             finally
             {
                 item.IsPlaying = false;
 
-                // When nothing is playing, treat this as caught up.
-                _currentPlayingCall = null;
+                // This call is now the most recently finished (or aborted) call.
+                _lastPlayedCall = item;
+
+                if (_currentPlayingCall == item)
+                    _currentPlayingCall = null;
+
                 OnPropertyChanged(nameof(CallsWaiting));
                 OnPropertyChanged(nameof(IsCallsWaitingVisible));
             }

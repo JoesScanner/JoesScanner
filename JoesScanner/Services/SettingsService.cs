@@ -1,5 +1,3 @@
-using Microsoft.Maui.Storage;
-
 namespace JoesScanner.Services
 {
     public class SettingsService : ISettingsService
@@ -28,10 +26,12 @@ namespace JoesScanner.Services
 
         public int MaxCalls
         {
-            get => Preferences.Get(MaxCallsKey, 100);
+            get => Preferences.Get(MaxCallsKey, 20);
             set
             {
-                var v = value <= 0 ? 10 : value;
+                var v = value;
+                if (v < 10) v = 10;
+                if (v > 50) v = 50;
                 Preferences.Set(MaxCallsKey, v);
             }
         }

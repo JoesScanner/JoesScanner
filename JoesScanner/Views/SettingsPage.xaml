@@ -207,15 +207,16 @@
                                     TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
 
                                 <Slider
-                                    Minimum="1"
-                                    Maximum="25"
+                                    Minimum="10"
+                                    Maximum="50"
                                     Value="{Binding MaxCalls}"
                                     HorizontalOptions="FillAndExpand" />
 
                                 <Label
                                     Text="Use the slider to increase or decrease how many calls stay visible."
                                     FontSize="10"
-                                    TextColor="{AppThemeBinding Light=#9ca3af, Dark=#6b7280}" />
+                                    TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" />
+
                             </VerticalStackLayout>
                         </VerticalStackLayout>
                     </Border>

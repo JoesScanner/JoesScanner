@@ -1,6 +1,3 @@
-using System;
-using Microsoft.Maui.Controls;
-
 namespace JoesScanner.Models
 {
     /// <summary>

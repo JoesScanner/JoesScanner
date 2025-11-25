@@ -39,59 +39,72 @@
 
                 <!-- HEADER PANEL: title, server, controls -->
                 <Grid
-    Grid.Row="0"
-    RowDefinitions="Auto,Auto"
-    ColumnDefinitions="Auto,*,Auto"
-    Padding="16,16,16,8"
-    ColumnSpacing="16">
+                    Grid.Row="0"
+                    RowDefinitions="Auto,Auto"
+                    ColumnDefinitions="Auto,*,Auto"
+                    Padding="16,16,16,8"
+                    ColumnSpacing="16">
 
                     <!-- Logo and title -->
                     <HorizontalStackLayout
-        Grid.Row="0"
-        Grid.Column="0"
-        Spacing="8"
-        VerticalOptions="Center">
+                        Grid.Row="0"
+                        Grid.Column="0"
+                        Spacing="8"
+                        VerticalOptions="Center">
 
                         <VerticalStackLayout
-            Spacing="0"
-            VerticalOptions="Center">
+                            Spacing="0"
+                            VerticalOptions="Center">
 
                             <Label
-                Text="JoesScanner"
-                FontSize="22"
-                FontAttributes="Bold"
-                TextColor="{AppThemeBinding Light=#111827, Dark=White}" />
+                                Text="JoesScanner"
+                                FontSize="22"
+                                FontAttributes="Bold"
+                                TextColor="{AppThemeBinding Light=#111827, Dark=White}" />
 
                             <!-- Tagline should be 'Server: <url>' from TaglineText -->
                             <Label
-                Text="{Binding TaglineText}"
-                FontSize="12"
-                TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
-                LineBreakMode="CharacterWrap" />
+                                Text="{Binding TaglineText}"
+                                FontSize="12"
+                                TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+                                LineBreakMode="CharacterWrap" />
                         </VerticalStackLayout>
                     </HorizontalStackLayout>
-
+                    
                     <!-- Row 0 right side: Connect/Disconnect + Settings -->
                     <HorizontalStackLayout
-        Grid.Row="0"
-        Grid.Column="2"
-        Spacing="4"
-        VerticalOptions="Center"
-        HorizontalOptions="End">
+                        Grid.Row="0"
+                        Grid.Column="2"
+                        Spacing="4"
+                        VerticalOptions="Center"
+                        HorizontalOptions="End">
 
+                        <!-- Small debug line: last queue / audio event -->
+                        <Label
+                            Text="{Binding LastQueueEvent}"
+                            FontSize="10"
+                            TextColor="{AppThemeBinding Light=#9ca3af, Dark=#6b7280}"
+                            VerticalOptions="Center"/>
+
+                        <Label
+                            Text="{Binding TotalCallsInserted, StringFormat='Calls: {0}'}"
+                            FontSize="10"
+                            TextColor="{AppThemeBinding Light=#9ca3af, Dark=#6b7280}"
+                            VerticalOptions="Center"/>
+                        
                         <!-- Connect or Disconnect button -->
                         <Button
-            Style="{StaticResource PillButtonStyle}"
-            Margin="0,0,0,0"
-            Text="Connect"
-            Command="{Binding StartCommand}">
+                                Style="{StaticResource PillButtonStyle}"
+                                Margin="0,0,0,0"
+                                Text="Connect"
+                                Command="{Binding StartCommand}">
 
                             <Button.Triggers>
                                 <!-- When streaming: green, says Disconnect, uses StopCommand -->
                                 <DataTrigger
-                    TargetType="Button"
-                    Binding="{Binding IsRunning}"
-                    Value="True">
+                                        TargetType="Button"
+                                        Binding="{Binding IsRunning}"
+                                        Value="True">
                                     <Setter Property="Text" Value="Disconnect" />
                                     <Setter Property="BackgroundColor" Value="{AppThemeBinding Light=#16a34a, Dark=#15803d}" />
                                     <Setter Property="Command" Value="{Binding StopCommand}" />
@@ -101,10 +114,10 @@
 
                         <!-- Settings button moved up to row 0 -->
                         <Button
-            Text="Settings"
-            Clicked="OnSettingsTapped"
-            Style="{StaticResource SecondaryPillButtonStyle}"
-            Margin="4,0,0,0" />
+                            Text="Settings"
+                            Clicked="OnSettingsTapped"
+                            Style="{StaticResource SecondaryPillButtonStyle}"
+                            Margin="4,0,0,0" />
                     </HorizontalStackLayout>
 
                     <!-- Second header row:
@@ -161,27 +174,10 @@
                             FontSize="10"
                             VerticalOptions="Center"
                             Margin="6,0,0,0"
-                            TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
+                            TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />                        
 
                     </HorizontalStackLayout>
 
-                    <!-- Right: Filters indicator on row 1 only -->
-                    <HorizontalStackLayout
-                        Grid.Row="1"
-                        Grid.Column="2"
-                        Spacing="4"
-                        VerticalOptions="Center"
-                        HorizontalOptions="End">
-
-                        <!-- Filters indicator when any filter is active -->
-                        <Label
-                            Text="Filters"
-                            FontSize="10"
-                            FontAttributes="Bold"
-                            VerticalOptions="Center"
-                            TextColor="{AppThemeBinding Light=#2563eb, Dark=#60a5fa}"
-                            IsVisible="{Binding HasActiveFilters}" />
-                    </HorizontalStackLayout>
                 </Grid>
 
                 <!-- CALL LIST -->
@@ -189,7 +185,7 @@
                     Grid.Row="1"
                     x:Name="CallsView"
                     ItemsSource="{Binding Calls}"
-                    ItemsUpdatingScrollMode="KeepLastItemInView">
+                    ItemsUpdatingScrollMode="KeepScrollOffset">
 
                     <CollectionView.ItemTemplate>
                         <DataTemplate>

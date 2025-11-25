@@ -1,15 +1,9 @@
-using System;
-using System.Collections.Generic;
+using JoesScanner.Models;
 using System.Globalization;
-using System.Net.Http;
-using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Threading;
-using System.Threading.Tasks;
-using JoesScanner.Models;
 
 namespace JoesScanner.Services
 {

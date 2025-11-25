@@ -1,19 +1,13 @@
-using System;
-using System.Threading;
-using System.Threading.Tasks;
-using Microsoft.Maui;
-using Microsoft.Maui.ApplicationModel;
-
 #if WINDOWS
-using WinMediaPlayer = Windows.Media.Playback.MediaPlayer;
 using Windows.Media.Core;
+using WinMediaPlayer = Windows.Media.Playback.MediaPlayer;
 #endif
 
 #if ANDROID
 using Android.Media;
+using Android.OS;
 using AndroidUri = Android.Net.Uri;
 using AStream = Android.Media.Stream;
-using Android.OS;
 #endif
 
 namespace JoesScanner.Services
