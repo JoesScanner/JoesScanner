@@ -69,7 +69,7 @@
                         StrokeShape="RoundRectangle 16"
                         Margin="0,0,0,12">
 
-                        <Grid RowDefinitions="Auto,Auto,Auto" ColumnDefinitions="*">
+                        <Grid RowDefinitions="Auto,Auto,Auto,Auto" ColumnDefinitions="*">
                             <Label
                                 Grid.Row="0"
                                 Text="Connection"
@@ -78,22 +78,28 @@
                                 Margin="0,0,0,8"
                                 TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
 
-                            <!-- Connection mode radio buttons -->
-                            <HorizontalStackLayout
+                            <VerticalStackLayout
                                 Grid.Row="1"
-                                Spacing="12"
-                                Margin="0,0,0,8">
+                                Spacing="4">
 
-                                <RadioButton
-                                    Content="Use default server"
-                                    IsChecked="{Binding UseDefaultConnection}"
-                                    GroupName="ConnectionMode" />
+                                <Label
+                                    Text="Choose which server the app connects to."
+                                    FontSize="12"
+                                    TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" />
 
-                                <RadioButton
-                                    Content="Use custom server"
-                                    IsChecked="{Binding UseDefaultConnection, Converter={StaticResource InverseBooleanConverter}}"
-                                    GroupName="ConnectionMode" />
-                            </HorizontalStackLayout>
+                                <!-- Default vs custom connection -->
+                                <HorizontalStackLayout Spacing="12">
+                                    <RadioButton
+                                        Content="Use default connection"
+                                        GroupName="ConnectionMode"
+                                        IsChecked="{Binding UseDefaultConnection}" />
+
+                                    <RadioButton
+                                        Content="Custom server"
+                                        GroupName="ConnectionMode"
+                                        IsChecked="{Binding UseDefaultConnection, Converter={StaticResource InverseBooleanConverter}}" />
+                                </HorizontalStackLayout>
+                            </VerticalStackLayout>
 
                             <!-- Server URL entry -->
                             <Grid
@@ -109,8 +115,41 @@
                                     IsEnabled="{Binding UseDefaultConnection, Converter={StaticResource InverseBooleanConverter}}"
                                     FontSize="13" />
                             </Grid>
+
+                            <!-- Save button only for connection changes -->
+                            <Grid
+                                Grid.Row="3"
+                                ColumnDefinitions="*,Auto"
+                                Margin="0,8,0,0">
+
+                                <Label
+                                    Grid.Column="0"
+                                    Text=""
+                                    FontSize="11" />
+
+                                <Button
+                                    Grid.Column="1"
+                                    Text="Save settings"
+                                    Style="{StaticResource PillButtonStyle}"
+                                    Command="{Binding SaveCommand}"
+                                    IsEnabled="{Binding HasChanges}">
+
+                                    <Button.Triggers>
+                                        <!-- When there are valid changes to save, make the button red -->
+                                        <DataTrigger
+                                            TargetType="Button"
+                                            Binding="{Binding HasChanges}"
+                                            Value="True">
+                                            <Setter Property="BackgroundColor" Value="#dc2626" />
+                                            <Setter Property="TextColor" Value="White" />
+                                        </DataTrigger>
+                                    </Button.Triggers>
+                                </Button>
+
+                            </Grid>
                         </Grid>
                     </Border>
+
 
                     <!-- CALL LIST BEHAVIOR CARD -->
                     <Border
@@ -265,24 +304,25 @@
                                                 </DataTrigger>
                                             </Border.Triggers>
 
-                                            <!-- Toggle enabled/disabled by tapping the row -->
-                                            <Border.GestureRecognizers>
-                                                <TapGestureRecognizer
-                                                    Command="{Binding BindingContext.ToggleFilterLineCommand, Source={x:Reference FilterLinesView}}"
-                                                    CommandParameter="{Binding .}" />
-                                            </Border.GestureRecognizers>
-
+                                            <!-- Row content: Receiver > Site > Talkgroup [X] -->
                                             <HorizontalStackLayout
                                                 Spacing="4"
                                                 VerticalOptions="Center"
                                                 MinimumHeightRequest="0">
 
+                                                <!-- Receiver label: toggles all lines with this receiver -->
                                                 <Label
                                                     Text="{Binding Receiver}"
                                                     FontSize="11"
                                                     LineBreakMode="TailTruncation"
                                                     VerticalOptions="Center"
-                                                    TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                                                    TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}">
+                                                    <Label.GestureRecognizers>
+                                                        <TapGestureRecognizer
+                                                            Command="{Binding Source={x:Reference SettingsRoot}, Path=BindingContext.ToggleReceiverFilterCommand}"
+                                                            CommandParameter="{Binding .}" />
+                                                    </Label.GestureRecognizers>
+                                                </Label>
 
                                                 <Label
                                                     Text=">"
@@ -290,12 +330,19 @@
                                                     VerticalOptions="Center"
                                                     TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" />
 
+                                                <!-- Site label: toggles all lines with this receiver and site -->
                                                 <Label
                                                     Text="{Binding Site}"
                                                     FontSize="11"
                                                     LineBreakMode="TailTruncation"
                                                     VerticalOptions="Center"
-                                                    TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                                                    TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}">
+                                                    <Label.GestureRecognizers>
+                                                        <TapGestureRecognizer
+                                                            Command="{Binding Source={x:Reference SettingsRoot}, Path=BindingContext.ToggleSiteFilterCommand}"
+                                                            CommandParameter="{Binding .}" />
+                                                    </Label.GestureRecognizers>
+                                                </Label>
 
                                                 <Label
                                                     Text=">"
@@ -303,17 +350,44 @@
                                                     VerticalOptions="Center"
                                                     TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" />
 
+                                                <!-- Talkgroup label: toggles just this one line -->
                                                 <Label
                                                     Text="{Binding Talkgroup}"
                                                     FontSize="11"
                                                     LineBreakMode="TailTruncation"
                                                     VerticalOptions="Center"
-                                                    TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                                                    TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}">
+                                                    <Label.GestureRecognizers>
+                                                        <TapGestureRecognizer
+                                                            Command="{Binding Source={x:Reference SettingsRoot}, Path=BindingContext.ToggleFilterLineCommand}"
+                                                            CommandParameter="{Binding .}" />
+                                                    </Label.GestureRecognizers>
+                                                </Label>
+
+                                                <!-- Spacer so the remove button does not crush the text -->
+                                                <Label
+                                                    Text=""
+                                                    HorizontalOptions="FillAndExpand" />
+
+                                                <!-- Remove button: clears this line; new calls will repopulate it -->
+                                                <Button
+                                                    Text="X"
+                                                    FontSize="10"
+                                                    Padding="6,0"
+                                                    Margin="8,0,0,0"
+                                                    VerticalOptions="Center"
+                                                    HorizontalOptions="End"
+                                                    BackgroundColor="Transparent"
+                                                    TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+                                                    BorderWidth="0"
+                                                    Command="{Binding Source={x:Reference SettingsRoot}, Path=BindingContext.RemoveFilterLineCommand}"
+                                                    CommandParameter="{Binding .}" />
                                             </HorizontalStackLayout>
                                         </Border>
                                     </DataTemplate>
                                 </CollectionView.ItemTemplate>
                             </CollectionView>
+
                         </Grid>
                     </Border>
 
@@ -342,38 +416,20 @@
                                 <RadioButton
                                     Content="System"
                                     GroupName="ThemeMode"
-                                    IsChecked="{Binding ThemeMode, Converter={StaticResource EqualsStringConverter}, ConverterParameter=System}" />
+                                    IsChecked="{Binding IsThemeSystem}" />
 
                                 <RadioButton
                                     Content="Light"
                                     GroupName="ThemeMode"
-                                    IsChecked="{Binding ThemeMode, Converter={StaticResource EqualsStringConverter}, ConverterParameter=Light}" />
+                                    IsChecked="{Binding IsThemeLight}" />
 
                                 <RadioButton
                                     Content="Dark"
                                     GroupName="ThemeMode"
-                                    IsChecked="{Binding ThemeMode, Converter={StaticResource EqualsStringConverter}, ConverterParameter=Dark}" />
+                                    IsChecked="{Binding IsThemeDark}" />
                             </HorizontalStackLayout>
                         </Grid>
                     </Border>
-
-                    <!-- SAVE BUTTON ROW -->
-                    <Grid
-                        Grid.Row="5"
-                        ColumnDefinitions="*,Auto"
-                        Margin="0,8,0,0">
-
-                        <Label
-                            Grid.Column="0"
-                            Text=""
-                            FontSize="11" />
-
-                        <Button
-                            Grid.Column="1"
-                            Text="Save settings"
-                            Style="{StaticResource PillButtonStyle}"
-                            Command="{Binding SaveCommand}" />
-                    </Grid>
                 </Grid>
             </Border>
         </Grid>

@@ -128,66 +128,68 @@
 
                         <!-- Playback speed slider and label -->
                         <HorizontalStackLayout
-            Spacing="4"
-            VerticalOptions="Center">
+                            Spacing="4"
+                            VerticalOptions="Center">
 
                             <Label
-                Text="Speed"
-                FontSize="11"
-                VerticalOptions="Center"
-                TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
+                                IsVisible="{Binding AudioEnabled}"
+                                Text="Speed"
+                                FontSize="11"
+                                VerticalOptions="Center"
+                                TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
 
                             <Slider
-                WidthRequest="90"
-                Minimum="0"
-                Maximum="2"
-                Value="{Binding PlaybackSpeedStep}"
-                VerticalOptions="Center" />
+                                IsVisible="{Binding AudioEnabled}"
+                                WidthRequest="90"
+                                Minimum="0"
+                                Maximum="2"
+                                Value="{Binding PlaybackSpeedStep}"
+                                VerticalOptions="Center" />
 
                             <Label
-                Text="{Binding PlaybackSpeedLabel}"
-                FontSize="11"
-                VerticalOptions="Center"
-                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                                IsVisible="{Binding AudioEnabled}"
+                                Text="{Binding PlaybackSpeedLabel}"
+                                FontSize="11"
+                                VerticalOptions="Center"
+                                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
                         </HorizontalStackLayout>
 
                         <!-- Calls waiting indicator to the right of the speed slider -->
                         <Label
-            Text="{Binding CallsWaiting, StringFormat='Calls waiting: {0}'}"
-            FontSize="10"
-            VerticalOptions="Center"
-            Margin="6,0,0,0"
-            TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}"
-            IsVisible="{Binding HasCallsWaiting}" />
+                            IsVisible="{Binding IsCallsWaitingVisible}"
+                            Text="{Binding CallsWaiting, StringFormat='Calls waiting: {0}'}"
+                            FontSize="10"
+                            VerticalOptions="Center"
+                            Margin="6,0,0,0"
+                            TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
+
                     </HorizontalStackLayout>
 
                     <!-- Right: Filters indicator on row 1 only -->
                     <HorizontalStackLayout
-        Grid.Row="1"
-        Grid.Column="2"
-        Spacing="4"
-        VerticalOptions="Center"
-        HorizontalOptions="End">
+                        Grid.Row="1"
+                        Grid.Column="2"
+                        Spacing="4"
+                        VerticalOptions="Center"
+                        HorizontalOptions="End">
 
                         <!-- Filters indicator when any filter is active -->
                         <Label
-            Text="Filters"
-            FontSize="10"
-            FontAttributes="Bold"
-            VerticalOptions="Center"
-            TextColor="{AppThemeBinding Light=#2563eb, Dark=#60a5fa}"
-            IsVisible="{Binding HasActiveFilters}" />
+                            Text="Filters"
+                            FontSize="10"
+                            FontAttributes="Bold"
+                            VerticalOptions="Center"
+                            TextColor="{AppThemeBinding Light=#2563eb, Dark=#60a5fa}"
+                            IsVisible="{Binding HasActiveFilters}" />
                     </HorizontalStackLayout>
                 </Grid>
 
-
-                <!-- CALL LIST -->
                 <!-- CALL LIST -->
                 <CollectionView
-    Grid.Row="1"
-    x:Name="CallsView"
-    ItemsSource="{Binding Calls}"
-    ItemsUpdatingScrollMode="KeepLastItemInView">
+                    Grid.Row="1"
+                    x:Name="CallsView"
+                    ItemsSource="{Binding Calls}"
+                    ItemsUpdatingScrollMode="KeepLastItemInView">
 
                     <CollectionView.ItemTemplate>
                         <DataTemplate>
@@ -228,46 +230,46 @@
                                     </DataTrigger>
                                 </Border.Triggers>
 
-                                <!-- Call layout: header row + transcription row -->
+                                <!-- Call layout: header row + transcription row + debug row -->
                                 <Grid
-                    ColumnDefinitions="*,Auto"
-                    RowDefinitions="Auto,Auto">
+                                    ColumnDefinitions="*,Auto"
+                                    RowDefinitions="Auto,Auto,Auto">
 
                                     <!-- Header row: time > receiver > site > talkgroup -->
                                     <Label
-                        Grid.Row="0"
-                        Grid.Column="0">
+                                        Grid.Row="0"
+                                        Grid.Column="0">
                                         <Label.FormattedText>
                                             <FormattedString>
                                                 <Span
-                                    Text="{Binding TimeDisplay}"
-                                    FontAttributes="Bold"
-                                    TextColor="{AppThemeBinding Light=#111827, Dark=White}" />
+                                                    Text="{Binding TimeDisplay}"
+                                                    FontAttributes="Bold"
+                                                    TextColor="{AppThemeBinding Light=#111827, Dark=White}" />
                                                 <Span Text=" > " />
                                                 <Span
-                                    Text="{Binding ReceiverName}"
-                                    TextColor="{AppThemeBinding Light=#374151, Dark=#9ca3af}" />
+                                                    Text="{Binding ReceiverName}"
+                                                    TextColor="{AppThemeBinding Light=#374151, Dark=#9ca3af}" />
                                                 <Span Text=" > " />
                                                 <Span
-                                    Text="{Binding SystemName}"
-                                    TextColor="{AppThemeBinding Light=#374151, Dark=#9ca3af}" />
+                                                    Text="{Binding SystemName}"
+                                                    TextColor="{AppThemeBinding Light=#374151, Dark=#9ca3af}" />
                                                 <Span Text=" > " />
                                                 <Span
-                                    Text="{Binding Talkgroup}"
-                                    FontAttributes="Bold"
-                                    TextColor="{AppThemeBinding Light=#111827, Dark=#bfdbfe}" />
+                                                    Text="{Binding Talkgroup}"
+                                                    FontAttributes="Bold"
+                                                    TextColor="{AppThemeBinding Light=#111827, Dark=#bfdbfe}" />
                                             </FormattedString>
                                         </Label.FormattedText>
                                     </Label>
 
                                     <!-- Duration on the right -->
                                     <Label
-                        Grid.Row="0"
-                        Grid.Column="1"
-                        HorizontalTextAlignment="End"
-                        VerticalTextAlignment="Center"
-                        FontSize="11"
-                        TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}">
+                                        Grid.Row="0"
+                                        Grid.Column="1"
+                                        HorizontalTextAlignment="End"
+                                        VerticalTextAlignment="Center"
+                                        FontSize="11"
+                                        TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}">
                                         <Label.FormattedText>
                                             <FormattedString>
                                                 <Span Text="{Binding DurationDisplay}" />
@@ -277,20 +279,33 @@
 
                                     <!-- Transcription row: only transcription text -->
                                     <Label
-                        Grid.Row="1"
-                        Grid.Column="0"
-                        Grid.ColumnSpan="2"
-                        Margin="0,4,0,0"
-                        FontSize="12"
-                        LineBreakMode="WordWrap"
-                        TextColor="{AppThemeBinding Light=#374151, Dark=#e5e7eb}"
-                        MaxLines="4">
+                                        Grid.Row="1"
+                                        Grid.Column="0"
+                                        Grid.ColumnSpan="2"
+                                        Margin="0,4,0,0"
+                                        FontSize="12"
+                                        LineBreakMode="WordWrap"
+                                        TextColor="{AppThemeBinding Light=#374151, Dark=#e5e7eb}"
+                                        MaxLines="4">
                                         <Label.FormattedText>
                                             <FormattedString>
                                                 <Span Text="{Binding Transcription}" />
                                             </FormattedString>
                                         </Label.FormattedText>
                                     </Label>
+
+                                    <!-- Debug or error info row: only visible when there is debug info -->
+                                    <Label
+                                        Grid.Row="2"
+                                        Grid.Column="0"
+                                        Grid.ColumnSpan="2"
+                                        Margin="0,2,0,0"
+                                        FontSize="10"
+                                        LineBreakMode="WordWrap"
+                                        MaxLines="3"
+                                        TextColor="{AppThemeBinding Light=#b91c1c, Dark=#fecaca}"
+                                        IsVisible="{Binding HasDebugInfo}"
+                                        Text="{Binding DebugInfo}" />
                                 </Grid>
                             </Border>
                         </DataTemplate>

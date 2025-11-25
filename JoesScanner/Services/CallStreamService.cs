@@ -62,8 +62,6 @@ namespace JoesScanner.Services
             while (!cancellationToken.IsCancellationRequested)
             {
                 var baseUrl = (_settingsService.ServerUrl ?? string.Empty).TrimEnd('/');
-                var receiverFilter = GetReceiverFilter();
-                var talkgroupFilter = GetTalkgroupFilter();
 
                 if (string.IsNullOrWhiteSpace(baseUrl))
                 {
@@ -128,27 +126,6 @@ namespace JoesScanner.Services
                 {
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    // Receiver filter uses the VoiceReceiver field from the server.
-                    if (receiverFilter.Length > 0)
-                    {
-                        var voice = r.VoiceReceiver?.Trim();
-                        if (string.IsNullOrEmpty(voice))
-                            continue;
-
-                        var matched = false;
-                        foreach (var filter in receiverFilter)
-                        {
-                            if (voice.Equals(filter, StringComparison.OrdinalIgnoreCase))
-                            {
-                                matched = true;
-                                break;
-                            }
-                        }
-
-                        if (!matched)
-                            continue;
-                    }
-
                     var rawId = r.DT_RowId?.Trim();
                     if (string.IsNullOrEmpty(rawId))
                         continue;
@@ -159,38 +136,28 @@ namespace JoesScanner.Services
 
                     _seenIds.Add(rawId);
 
+                    // Start with no debug message for this call
+                    var debugInfo = string.Empty;
+
+                    // Transcription text from the server, may be empty if there is no transcription
                     var text = r.CallText?.Trim() ?? string.Empty;
-                    if (string.IsNullOrEmpty(text))
-                        continue;
+
+                    if (string.IsNullOrWhiteSpace(text))
+                    {
+                        // Server did not send any transcription text for this call
+                        debugInfo = AppendDebug(debugInfo, "No transcription from server");
+                    }
 
                     // Timestamp from StartTime / StartTimeUTC
                     var timestamp = ParseTimestamp(r.StartTime, r.StartTimeUTC);
+
+
+
 
                     // Talkgroup from label or ID
                     var talkgroup = !string.IsNullOrWhiteSpace(r.TargetLabel)
                         ? r.TargetLabel
                         : r.TargetID ?? string.Empty;
-
-                    // Talkgroup filter uses the combined display string
-                    if (talkgroupFilter.Length > 0)
-                    {
-                        var tgName = talkgroup?.Trim();
-                        if (string.IsNullOrEmpty(tgName))
-                            continue;
-
-                        var matchedTg = false;
-                        foreach (var filter in talkgroupFilter)
-                        {
-                            if (tgName.Equals(filter, StringComparison.OrdinalIgnoreCase))
-                            {
-                                matchedTg = true;
-                                break;
-                            }
-                        }
-
-                        if (!matchedTg)
-                            continue;
-                    }
 
                     // Source radio ID / label
                     var source = !string.IsNullOrWhiteSpace(r.SourceLabel)
@@ -235,6 +202,22 @@ namespace JoesScanner.Services
                         }
                     }
 
+                    if (string.IsNullOrWhiteSpace(audioUrl))
+                    {
+                        // No usable audio URL even though the call exists
+                        debugInfo = AppendDebug(debugInfo, "No audio URL from server");
+                    }
+
+                    // If we still do not have an audio URL, note that in debug info.
+                    if (string.IsNullOrWhiteSpace(audioUrl))
+                    {
+                        var suffix = "No audio URL built from server data";
+                        debugInfo = string.IsNullOrWhiteSpace(debugInfo)
+                            ? suffix
+                            : $"{debugInfo}; {suffix}";
+                    }
+
+
                     // At this point the call has passed filters and is tracked in _seenIds.
                     // If this is the initial batch after connect, do not surface it in the UI.
                     if (skipYieldForThisBatch)
@@ -250,8 +233,10 @@ namespace JoesScanner.Services
                         Site = site,
                         VoiceReceiver = voiceReceiver,
                         Transcription = text,
-                        AudioUrl = audioUrl
+                        AudioUrl = audioUrl,
+                        DebugInfo = debugInfo
                     };
+
                 }
 
                 await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
@@ -319,7 +304,7 @@ namespace JoesScanner.Services
 
         private static DateTime ParseTimestamp(string? startTime, string? startTimeUtc)
         {
-            var value = !string.IsNullOrWhiteSpace(startTime) ? startTime : startTimeUtc;
+            var value = !string.IsNullOrWhiteSpace(startTimeUtc) ? startTimeUtc : startTime;
 
             if (string.IsNullOrWhiteSpace(value))
                 return DateTime.Now;
@@ -368,41 +353,16 @@ namespace JoesScanner.Services
                     return prop.ToString();
             }
         }
-
-        private string[] GetReceiverFilter()
+        private static string AppendDebug(string existing, string message)
         {
-            var raw = _settingsService.ReceiverFilter;
-            if (string.IsNullOrWhiteSpace(raw))
-                return Array.Empty<string>();
+            if (string.IsNullOrWhiteSpace(message))
+                return existing ?? string.Empty;
 
-            var parts = raw.Split(',', StringSplitOptions.RemoveEmptyEntries);
-            for (var i = 0; i < parts.Length; i++)
-            {
-                parts[i] = parts[i].Trim();
-            }
+            if (string.IsNullOrWhiteSpace(existing))
+                return message;
 
-            return parts
-                .Where(p => !string.IsNullOrWhiteSpace(p))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToArray();
-        }
-
-        private string[] GetTalkgroupFilter()
-        {
-            var raw = _settingsService.TalkgroupFilter;
-            if (string.IsNullOrWhiteSpace(raw))
-                return Array.Empty<string>();
-
-            var parts = raw.Split(',', StringSplitOptions.RemoveEmptyEntries);
-            for (var i = 0; i < parts.Length; i++)
-            {
-                parts[i] = parts[i].Trim();
-            }
-
-            return parts
-                .Where(p => !string.IsNullOrWhiteSpace(p))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToArray();
+            // Combine multiple debug messages in a compact way
+            return existing + " | " + message;
         }
 
         private sealed class DataTablesPayload

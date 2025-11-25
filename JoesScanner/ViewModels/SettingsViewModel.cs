@@ -56,7 +56,12 @@ namespace JoesScanner.ViewModels
         public ICommand SaveCommand { get; }
         public ICommand ResetServerCommand { get; }
         public ICommand ValidateServerCommand { get; }
+
+        // Filter commands
         public ICommand ToggleFilterLineCommand { get; }
+        public ICommand ToggleReceiverFilterCommand { get; }
+        public ICommand ToggleSiteFilterCommand { get; }
+        public ICommand RemoveFilterLineCommand { get; }
 
         public const string DefaultServerUrl = "https://app.joesscanner.com";
 
@@ -141,16 +146,39 @@ namespace JoesScanner.ViewModels
             ResetServerCommand = new Command(ResetServerUrl);
             ValidateServerCommand = new Command(async () => await ValidateServerUrlAsync());
 
+            // Per line toggle (talkgroup level)
             ToggleFilterLineCommand = new Command(param =>
             {
                 if (param is FilterLine fl)
                     ToggleFilterLine(fl);
             });
 
+            // Receiver wide toggle
+            ToggleReceiverFilterCommand = new Command(param =>
+            {
+                if (param is FilterLine fl)
+                    ToggleReceiverFilter(fl);
+            });
+
+            // Site wide toggle for a given receiver and site
+            ToggleSiteFilterCommand = new Command(param =>
+            {
+                if (param is FilterLine fl)
+                    ToggleSiteFilter(fl);
+            });
+
+            // Remove one line from the list
+            RemoveFilterLineCommand = new Command(param =>
+            {
+                if (param is FilterLine fl)
+                    RemoveFilterLine(fl);
+            });
+
             // Apply persisted disabled keys to any preexisting lines, then sort
             ApplyDisabledKeysToExistingLines();
             SortFilterLines();
             RaiseFilterStateChanged();
+
         }
 
         /// <summary>
@@ -258,8 +286,13 @@ namespace JoesScanner.ViewModels
                 OnPropertyChanged(nameof(IsThemeSystem));
                 OnPropertyChanged(nameof(IsThemeLight));
                 OnPropertyChanged(nameof(IsThemeDark));
+
+                // Apply theme immediately and persist to the settings service
+                _settings.ThemeMode = _themeMode;
+                ApplyTheme(_themeMode);
             }
         }
+
 
         /// <summary>
         /// Helper booleans for the three theme radio buttons.
@@ -404,6 +437,31 @@ namespace JoesScanner.ViewModels
             }
         }
 
+        private void ApplyTheme(string mode)
+        {
+            var app = Application.Current;
+            if (app == null)
+                return;
+
+            AppTheme theme;
+
+            if (string.Equals(mode, "Light", StringComparison.OrdinalIgnoreCase))
+            {
+                theme = AppTheme.Light;
+            }
+            else if (string.Equals(mode, "Dark", StringComparison.OrdinalIgnoreCase))
+            {
+                theme = AppTheme.Dark;
+            }
+            else
+            {
+                theme = AppTheme.Unspecified; // follow system
+            }
+
+            app.UserAppTheme = theme;
+        }
+
+
         /// <summary>
         /// Persists connection, call list, and theme settings,
         /// and updates main view model mirrors where needed.
@@ -428,7 +486,6 @@ namespace JoesScanner.ViewModels
             _mainViewModel.MaxCalls = MaxCalls;
 
             _settings.ScrollDirection = ScrollNewestAtBottom ? "Down" : "Up";
-            _mainViewModel.ScrollNewestAtBottom = ScrollNewestAtBottom;
 
             // Theme (apply on save)
             _settings.ThemeMode = ThemeMode;
@@ -529,12 +586,19 @@ namespace JoesScanner.ViewModels
 
         #region Filter helpers for UI
 
-        private void ToggleFilterLine(FilterLine line)
+        /// <summary>
+        /// Helper to set a line enabled or disabled and keep the backing
+        /// disabled key set in sync.
+        /// </summary>
+        private void SetLineEnabled(FilterLine line, bool isEnabled)
         {
             if (line == null)
                 return;
 
-            line.IsEnabled = !line.IsEnabled;
+            if (line.IsEnabled == isEnabled)
+                return;
+
+            line.IsEnabled = isEnabled;
 
             var key = MakeKey(line.Receiver, line.Site, line.Talkgroup);
             if (!line.IsEnabled)
@@ -545,10 +609,105 @@ namespace JoesScanner.ViewModels
             {
                 _disabledKeys.Remove(key);
             }
+        }
+
+        /// <summary>
+        /// Toggle a single filter line on or off.
+        /// This is what the talkgroup label uses.
+        /// </summary>
+        private void ToggleFilterLine(FilterLine line)
+        {
+            if (line == null)
+                return;
+
+            SetLineEnabled(line, !line.IsEnabled);
 
             RaiseFilterStateChanged();
             _mainViewModel.HasActiveFilters = HasAnyActiveFilters;
         }
+
+        /// <summary>
+        /// Toggle all lines that share the same Receiver as the source line.
+        /// If any of them are enabled, they all become disabled.
+        /// If all are disabled, they all become enabled.
+        /// </summary>
+        private void ToggleReceiverFilter(FilterLine source)
+        {
+            if (source == null)
+                return;
+
+            var receiver = source.Receiver ?? string.Empty;
+
+            var lines = _filterLines
+                .Where(l => string.Equals(l.Receiver, receiver, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (lines.Count == 0)
+                return;
+
+            var anyEnabled = lines.Any(l => l.IsEnabled);
+            var newState = !anyEnabled;
+
+            foreach (var line in lines)
+            {
+                SetLineEnabled(line, newState);
+            }
+
+            RaiseFilterStateChanged();
+            _mainViewModel.HasActiveFilters = HasAnyActiveFilters;
+        }
+
+        /// <summary>
+        /// Toggle all lines that share the same Receiver and Site as the source line.
+        /// This lets the user flip an entire site worth of talkgroups at once.
+        /// </summary>
+        private void ToggleSiteFilter(FilterLine source)
+        {
+            if (source == null)
+                return;
+
+            var receiver = source.Receiver ?? string.Empty;
+            var site = source.Site ?? string.Empty;
+
+            var lines = _filterLines
+                .Where(l =>
+                    string.Equals(l.Receiver, receiver, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(l.Site, site, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (lines.Count == 0)
+                return;
+
+            var anyEnabled = lines.Any(l => l.IsEnabled);
+            var newState = !anyEnabled;
+
+            foreach (var line in lines)
+            {
+                SetLineEnabled(line, newState);
+            }
+
+            RaiseFilterStateChanged();
+            _mainViewModel.HasActiveFilters = HasAnyActiveFilters;
+        }
+
+        /// <summary>
+        /// Remove a single filter line from the list.
+        /// Any future calls for this triple will recreate the line.
+        /// </summary>
+        private void RemoveFilterLine(FilterLine line)
+        {
+            if (line == null)
+                return;
+
+            var key = MakeKey(line.Receiver, line.Site, line.Talkgroup);
+
+            _disabledKeys.Remove(key);
+            _filterLines.Remove(line);
+
+            RaiseFilterStateChanged();
+            _mainViewModel.HasActiveFilters = HasAnyActiveFilters;
+        }
+
 
         private void SortFilterLines()
         {
@@ -648,33 +807,5 @@ namespace JoesScanner.ViewModels
         }
 
         #endregion
-
-        /// <summary>
-        /// Applies a theme string (System, Light, Dark) to the MAUI app.
-        /// Called on Save.
-        /// </summary>
-        private static void ApplyTheme(string? mode)
-        {
-            var app = Application.Current;
-            if (app == null)
-                return;
-
-            AppTheme theme;
-
-            if (string.Equals(mode, "Light", StringComparison.OrdinalIgnoreCase))
-            {
-                theme = AppTheme.Light;
-            }
-            else if (string.Equals(mode, "Dark", StringComparison.OrdinalIgnoreCase))
-            {
-                theme = AppTheme.Dark;
-            }
-            else
-            {
-                theme = AppTheme.Unspecified;
-            }
-
-            app.UserAppTheme = theme;
-        }
     }
 }

@@ -40,5 +40,15 @@ namespace JoesScanner.Views
                 // Swallow browser launch errors for now
             }
         }
+        protected override async void OnAppearing()
+        {
+            base.OnAppearing();
+
+            if (BindingContext is MainViewModel vm)
+            {
+                await vm.TryAutoReconnectAsync();
+            }
+        }
+
     }
 }
