@@ -34,7 +34,7 @@
 
             <!-- Inner grid: header, calls, footer -->
             <Grid
-                RowDefinitions="Auto,Auto,*,Auto"
+                RowDefinitions="Auto,*,Auto"
                 ColumnDefinitions="*">
 
                 <!-- HEADER PANEL: title, server, controls -->
@@ -79,19 +79,13 @@
                         VerticalOptions="Center"
                         HorizontalOptions="End">
 
-                        <!-- Small debug line: last queue / audio event -->
-                        <Label
-                            Text="{Binding LastQueueEvent}"
-                            FontSize="10"
-                            TextColor="{AppThemeBinding Light=#9ca3af, Dark=#6b7280}"
-                            VerticalOptions="Center"/>
+                        <!-- Jump to live button -->
+                        <Button
+                            Text="Jump to live"
+                            Command="{Binding JumpToLiveCommand}"
+                            Style="{StaticResource SecondaryPillButtonStyle}"
+                            Margin="4,0,0,0" />
 
-                        <Label
-                            Text="{Binding TotalCallsInserted, StringFormat='Calls: {0}'}"
-                            FontSize="10"
-                            TextColor="{AppThemeBinding Light=#9ca3af, Dark=#6b7280}"
-                            VerticalOptions="Center"/>
-                        
                         <!-- Connect or Disconnect button -->
                         <Button
                                 Style="{StaticResource PillButtonStyle}"
@@ -185,18 +179,21 @@
                     Grid.Row="1"
                     x:Name="CallsView"
                     ItemsSource="{Binding Calls}"
-                    ItemsUpdatingScrollMode="KeepScrollOffset">
+                    ItemsUpdatingScrollMode="KeepScrollOffset"
+                    ItemsLayout="VerticalList"
+                    VerticalOptions="FillAndExpand">
+
 
                     <CollectionView.ItemTemplate>
                         <DataTemplate>
 
                             <!-- Single call card -->
                             <Border
-                Margin="0,0,0,8"
-                Padding="6"
-                BackgroundColor="{AppThemeBinding Light=White, Dark=#111827}"
-                StrokeThickness="1"
-                StrokeShape="RoundRectangle 8">
+                                Margin="0,0,0,8"
+                                Padding="6"
+                                BackgroundColor="{AppThemeBinding Light=White, Dark=#111827}"
+                                StrokeThickness="1"
+                                StrokeShape="RoundRectangle 8">
 
                                 <!-- Default border stroke -->
                                 <Border.Stroke>
@@ -334,7 +331,6 @@
                             <TapGestureRecognizer Tapped="OnSiteTapped" />
                         </Label.GestureRecognizers>
                     </Label>
-
                     <!-- Donate button (visible on all platforms) -->
                     <Button
                         Grid.Column="1"

@@ -25,19 +25,36 @@ namespace JoesScanner.ViewModels
         private bool _savedUseDefaultConnection;
         private bool _hasChanges;
 
+        // True when any setting on this page differs from what was last saved.
+        // Used by the Save button to decide when to turn red.
+        public bool HasUnsavedSettings
+        {
+            get
+            {
+                // Connection changes (server URL / default connection)
+                if (HasChanges)
+                    return true;
+
+                // Call list settings
+                if (_maxCalls != _savedMaxCalls)
+                    return true;
+
+                return false;
+            }
+        }
+
+        // Saved snapshot for other settings that are only committed on Save
+        private int _savedMaxCalls;
+
         // Call display settings
         private int _maxCalls;
-        private bool _scrollNewestAtBottom;
 
         // Theme as a single string: "System", "Light", "Dark"
         private string _themeMode = "System";
 
-        // Unified filter list backing storage (shared static so MainViewModel can update it)
-        private static readonly ObservableCollection<FilterLine> _filterLines = new();
-
         // Disabled entries persisted in settings, keyed as "receiver|site|talkgroup"
         private static readonly HashSet<string> _disabledKeys =
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // Track the "current" instance for static helpers
         public static SettingsViewModel? Current { get; private set; }
@@ -51,77 +68,10 @@ namespace JoesScanner.ViewModels
         public ICommand ValidateServerCommand { get; }
 
         // Filter commands
-        public ICommand ToggleFilterLineCommand { get; }
         public ICommand ToggleReceiverFilterCommand { get; }
         public ICommand ToggleSiteFilterCommand { get; }
-        public ICommand RemoveFilterLineCommand { get; }
 
         public const string DefaultServerUrl = "https://app.joesscanner.com";
-
-        /// <summary>
-        /// A single receiver/site/talkgroup line in the filter list.
-        /// Clicking the row toggles IsEnabled.
-        /// Entire line is green when enabled, red when disabled.
-        /// </summary>
-        public sealed class FilterLine : BindableObject
-        {
-            private string _receiver = string.Empty;
-            private string _site = string.Empty;
-            private string _talkgroup = string.Empty;
-            private bool _isEnabled = true;
-
-            public string Receiver
-            {
-                get => _receiver;
-                set
-                {
-                    if (_receiver == value)
-                        return;
-                    _receiver = value ?? string.Empty;
-                    OnPropertyChanged();
-                }
-            }
-
-            public string Site
-            {
-                get => _site;
-                set
-                {
-                    if (_site == value)
-                        return;
-                    _site = value ?? string.Empty;
-                    OnPropertyChanged();
-                }
-            }
-
-            public string Talkgroup
-            {
-                get => _talkgroup;
-                set
-                {
-                    if (_talkgroup == value)
-                        return;
-                    _talkgroup = value ?? string.Empty;
-                    OnPropertyChanged();
-                }
-            }
-
-            /// <summary>
-            /// True when this line is allowed.
-            /// Used by the UI to color green or red.
-            /// </summary>
-            public bool IsEnabled
-            {
-                get => _isEnabled;
-                set
-                {
-                    if (_isEnabled == value)
-                        return;
-                    _isEnabled = value;
-                    OnPropertyChanged();
-                }
-            }
-        }
 
         public SettingsViewModel(ISettingsService settingsService, MainViewModel mainViewModel)
         {
@@ -156,6 +106,7 @@ namespace JoesScanner.ViewModels
 
                 _hasChanges = value;
                 OnPropertyChanged();
+                OnPropertyChanged(nameof(HasUnsavedSettings));
             }
         }
 
@@ -210,22 +161,7 @@ namespace JoesScanner.ViewModels
 
                 _maxCalls = clamped;
                 OnPropertyChanged();
-            }
-        }
-
-        /// <summary>
-        /// True if the value representing "Newest at bottom" is selected.
-        /// </summary>
-        public bool ScrollNewestAtBottom
-        {
-            get => _scrollNewestAtBottom;
-            set
-            {
-                if (_scrollNewestAtBottom == value)
-                    return;
-
-                _scrollNewestAtBottom = value;
-                OnPropertyChanged();
+                OnPropertyChanged(nameof(HasUnsavedSettings));
             }
         }
 
@@ -294,12 +230,6 @@ namespace JoesScanner.ViewModels
         }
 
         /// <summary>
-        /// Unified filter lines (Receiver > Site > Talkgroup).
-        /// Populated dynamically from live calls.
-        /// </summary>
-        public ObservableCollection<FilterLine> FilterLines => _filterLines;
-
-        /// <summary>
         /// Sort order flag. True for A to Z, false for Z to A.
         /// </summary>
         public bool SortAscending
@@ -314,14 +244,6 @@ namespace JoesScanner.ViewModels
                 OnPropertyChanged();
             }
         }
-
-        /// <summary>
-        /// True when at least one filter is actually restricting calls
-        /// (that is, at least one line is disabled).
-        /// MainViewModel can mirror this for its "Filters" header badge.
-        /// </summary>
-        public bool HasAnyActiveFilters =>
-            FilterLines.Any(l => !l.IsEnabled);
 
         /// <summary>
         /// Reloads view model fields from ISettingsService.
@@ -340,10 +262,6 @@ namespace JoesScanner.ViewModels
 
             // Calls
             _maxCalls = _settings.MaxCalls;
-
-            // Scroll direction from settings service
-            var scrollDirection = _settings.ScrollDirection;
-            _scrollNewestAtBottom = string.Equals(scrollDirection, "Down", StringComparison.OrdinalIgnoreCase);
 
             // Theme – normalize to a safe value and push back into settings if needed
             var rawTheme = _settings.ThemeMode;
@@ -382,19 +300,15 @@ namespace JoesScanner.ViewModels
                 }
             }
 
-            HasChanges = false;
-        }
+            // Capture snapshots used for unsaved-change detection.
+            _savedServerUrl = _settings.ServerUrl;
+            _savedUseDefaultConnection = UseDefaultConnection;
+            _savedMaxCalls = _maxCalls;
 
-        /// <summary>
-        /// Applies the current _disabledKeys set to any already loaded filter lines.
-        /// </summary>
-        private void ApplyDisabledKeysToExistingLines()
-        {
-            foreach (var line in _filterLines)
-            {
-                var key = MakeKey(line.Receiver, line.Site, line.Talkgroup);
-                line.IsEnabled = !_disabledKeys.Contains(key);
-            }
+            // At this point everything matches the persisted state.
+            HasChanges = false;
+            OnPropertyChanged(nameof(HasUnsavedSettings));
+
         }
 
         private void ApplyTheme(string mode)
@@ -440,23 +354,23 @@ namespace JoesScanner.ViewModels
                 _mainViewModel.ServerUrl = ServerUrl;
             }
 
-            // Max calls and scroll direction
+            // Max calls
             _settings.MaxCalls = MaxCalls;
             _mainViewModel.MaxCalls = MaxCalls;
-
-            _settings.ScrollDirection = ScrollNewestAtBottom ? "Down" : "Up";
 
             // Theme (apply on save)
             _settings.ThemeMode = ThemeMode;
             ApplyTheme(ThemeMode);
 
-            // Persist disabled lines
-            _settings.ReceiverFilter = string.Join(";", _disabledKeys);
-
-            // Update our saved snapshot for "HasChanges"
+            // Update our saved snapshots so the UI knows everything is clean.
             _savedServerUrl = _settings.ServerUrl;
             _savedUseDefaultConnection = UseDefaultConnection;
+            _savedMaxCalls = _maxCalls;
+
+            // This will also raise HasUnsavedSettings.
             HasChanges = false;
+            OnPropertyChanged(nameof(HasUnsavedSettings));
+
         }
 
         /// <summary>
@@ -533,112 +447,6 @@ namespace JoesScanner.ViewModels
             HasChanges = has;
         }
 
-        private void RaiseFilterStateChanged()
-        {
-            OnPropertyChanged(nameof(FilterLines));
-            OnPropertyChanged(nameof(HasAnyActiveFilters));
-        }
 
-        #region Filter helpers for UI
-
-        /// <summary>
-        /// Helper to set a line enabled or disabled and keep the backing
-        /// disabled key set in sync.
-        /// </summary>
-        private void SetLineEnabled(FilterLine line, bool isEnabled)
-        {
-            if (line == null)
-                return;
-
-            if (line.IsEnabled == isEnabled)
-                return;
-
-            line.IsEnabled = isEnabled;
-
-            var key = MakeKey(line.Receiver, line.Site, line.Talkgroup);
-            if (!line.IsEnabled)
-            {
-                _disabledKeys.Add(key);
-            }
-            else
-            {
-                _disabledKeys.Remove(key);
-            }
-        }
-
-        private static string MakeKey(string receiver, string site, string talkgroup)
-        {
-            return $"{receiver}|{site}|{talkgroup}";
-        }
-
-        #endregion
-
-        #region Filter helpers for MainViewModel
-
-        /// <summary>
-        /// Called from MainViewModel for every call seen.
-        /// Populates the unified filter list on first sight of each triple.
-        /// </summary>
-        public static void OnCallSeen(CallItem call)
-        {
-            if (call == null)
-                return;
-
-            var receiver = call.ReceiverName ?? string.Empty;
-            var site = call.SystemName ?? string.Empty;
-            var talkgroup = call.Talkgroup ?? string.Empty;
-
-            var existing = _filterLines.FirstOrDefault(l =>
-                string.Equals(l.Receiver, receiver, StringComparison.OrdinalIgnoreCase) &&
-                string.Equals(l.Site, site, StringComparison.OrdinalIgnoreCase) &&
-                string.Equals(l.Talkgroup, talkgroup, StringComparison.OrdinalIgnoreCase));
-
-            if (existing != null)
-                return;
-
-            var key = MakeKey(receiver, site, talkgroup);
-
-            var line = new FilterLine
-            {
-                Receiver = receiver,
-                Site = site,
-                Talkgroup = talkgroup,
-                IsEnabled = !_disabledKeys.Contains(key)
-            };
-
-            _filterLines.Add(line);
-
-            if (Current != null)
-            {
-                
-            }
-        }
-
-        /// <summary>
-        /// Called from MainViewModel before adding a call to the list.
-        /// Returns true if the call should be shown and played, false if filtered out.
-        /// </summary>
-        public static bool IsCallAllowed(CallItem call)
-        {
-            if (call == null)
-                return true;
-
-            var receiver = call.ReceiverName ?? string.Empty;
-            var site = call.SystemName ?? string.Empty;
-            var talkgroup = call.Talkgroup ?? string.Empty;
-
-            var line = _filterLines.FirstOrDefault(l =>
-                string.Equals(l.Receiver, receiver, StringComparison.OrdinalIgnoreCase) &&
-                string.Equals(l.Site, site, StringComparison.OrdinalIgnoreCase) &&
-                string.Equals(l.Talkgroup, talkgroup, StringComparison.OrdinalIgnoreCase));
-
-            if (line != null)
-                return line.IsEnabled;
-
-            // No line yet. By default allow new calls.
-            return true;
-        }
-
-        #endregion
     }
 }

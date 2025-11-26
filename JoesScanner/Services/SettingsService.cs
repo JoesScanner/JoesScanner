@@ -26,12 +26,15 @@ namespace JoesScanner.Services
 
         public int MaxCalls
         {
-            get => Preferences.Get(MaxCallsKey, 20);
+            get => Preferences.Get(MaxCallsKey, 20); // default 20
             set
             {
                 var v = value;
+
+                // Clamp to 10–50
                 if (v < 10) v = 10;
                 if (v > 50) v = 50;
+
                 Preferences.Set(MaxCallsKey, v);
             }
         }

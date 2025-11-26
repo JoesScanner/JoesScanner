@@ -80,6 +80,11 @@ namespace JoesScanner.ViewModels
         /// </summary>
         public ICommand PlayAudioCommand { get; }
 
+        /// <summary>
+        /// Command to skip backlog and jump playback to the newest call.
+        /// </summary>
+        public ICommand JumpToLiveCommand { get; }
+
         public MainViewModel(
             ICallStreamService callStreamService,
             ISettingsService settingsService,
@@ -108,7 +113,15 @@ namespace JoesScanner.ViewModels
             _settingsService.AutoPlay = _autoPlay;
 
             // Other persisted settings.
-            _maxCalls = _settingsService.MaxCalls <= 0 ? 20 : _settingsService.MaxCalls;
+            // Repair any out-of-range stored values and enforce 10–50 with a default of 20.
+            var storedMax = _settingsService.MaxCalls;
+            if (storedMax < 10 || storedMax > 50)
+            {
+                storedMax = 20;
+                _settingsService.MaxCalls = storedMax;
+            }
+            _maxCalls = storedMax;
+
 
             // Restore playback speed step (0 = 1x, 1 = 1.5x, 2 = 2x).
             var savedSpeed = Preferences.Get(PlaybackSpeedStepPreferenceKey, 0.0);
@@ -128,6 +141,7 @@ namespace JoesScanner.ViewModels
             OpenDonateCommand = new Command(async () => await OpenDonateAsync());
             ToggleAudioCommand = new Command(async () => await OnToggleAudioAsync());
             PlayAudioCommand = new Command<CallItem>(async item => await OnCallTappedAsync(item));
+            JumpToLiveCommand = new Command(async () => await JumpToLiveAsync());
         }
         private const string LastConnectedPreferenceKey = "LastConnectedOnExit";
         private const string PlaybackSpeedStepPreferenceKey = "PlaybackSpeedStep";
@@ -448,8 +462,11 @@ namespace JoesScanner.ViewModels
             set
             {
                 var clamped = value;
+
+                // Clamp to 10–50
                 if (clamped < 10) clamped = 10;
                 if (clamped > 50) clamped = 50;
+
                 if (_maxCalls == clamped)
                     return;
 
@@ -460,7 +477,6 @@ namespace JoesScanner.ViewModels
                 EnforceMaxCalls();
             }
         }
-
 
         /// <summary>
         /// Tagline bound to the subtitle under the JoesScanner header.
@@ -512,12 +528,24 @@ namespace JoesScanner.ViewModels
             // Remember that we were connected when the app last ran.
             Preferences.Set(LastConnectedPreferenceKey, true);
 
-            // Reset call state for this session.
+            // Reset call state for this connection, but keep history in Calls.
+            // We treat everything currently in Calls as "already handled" so
+            // only calls that arrive after this point are considered backlog.
             IsRunning = true;
-            Calls.Clear();
             _currentPlayingCall = null;
-            _lastPlayedCall = null;
+
+            if (Calls.Count > 0)
+            {
+                // Newest call is at index 0, so this becomes our anchor.
+                _lastPlayedCall = Calls[0];
+            }
+            else
+            {
+                _lastPlayedCall = null;
+            }
+
             UpdateQueueDerivedState();
+
 
             // Fire-and-forget the background stream loop.
             _ = Task.Run(() => RunCallStreamLoopAsync(token));
@@ -759,9 +787,9 @@ namespace JoesScanner.ViewModels
                 // Audio on: treat this as the next queue item.
                 await PlayAudioAsync(item);
 
-                // If audio is still on, we are connected, and autoplay is enabled,
+                // If audio is still on, we are connected, and there is backlog,
                 // have the queue engine continue from this call forward.
-                if (AudioEnabled && IsRunning && AutoPlay)
+                if (AudioEnabled && IsRunning && CallsWaiting > 0)
                 {
                     _ = EnsureQueuePlaybackAsync();
                 }
@@ -770,6 +798,56 @@ namespace JoesScanner.ViewModels
             {
                 System.Diagnostics.Debug.WriteLine($"Error in OnCallTappedAsync: {ex}");
                 LastQueueEvent = "Error while playing tapped call (see debug output)";
+            }
+        }
+        // Skips backlog and moves playback to the newest call.
+        // If audio is on, plays the newest call once and treats older calls as already handled.
+        // If audio is off, only updates the anchor so that when audio comes on
+        // the queue will start from calls that arrive after this point.
+        private async Task JumpToLiveAsync()
+        {
+            try
+            {
+                if (Calls.Count == 0)
+                {
+                    _currentPlayingCall = null;
+                    _lastPlayedCall = null;
+                    UpdateQueueDerivedState();
+                    LastQueueEvent = "Jump to live ignored (no calls)";
+                    return;
+                }
+
+                var newest = Calls[0];
+
+                // Clear any playing flags before we adjust the anchor.
+                foreach (var call in Calls)
+                {
+                    if (call.IsPlaying)
+                        call.IsPlaying = false;
+                }
+
+                _currentPlayingCall = null;
+
+                if (!AudioEnabled)
+                {
+                    // Audio off: just move the anchor so backlog is considered handled.
+                    _lastPlayedCall = newest;
+                    UpdateQueueDerivedState();
+                    LastQueueEvent = "Jumped to live (audio off)";
+                    return;
+                }
+
+                // Audio on: play the newest call and treat older ones as handled.
+                LastQueueEvent = "Jump to live (playing newest call)";
+
+                await PlayAudioAsync(newest);
+                // PlayAudioAsync will set _lastPlayedCall to newest when it finishes,
+                // so older entries will not be replayed by the queue.
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error in JumpToLiveAsync: {ex}");
+                LastQueueEvent = "Error jumping to live (see debug output)";
             }
         }
 
@@ -858,45 +936,18 @@ namespace JoesScanner.ViewModels
         /// </summary>
         private void EnforceMaxCalls()
         {
-            var max = MaxCalls <= 0 ? 1 : MaxCalls;
-
-            if (Calls.Count <= max)
-                return;
+            var max = MaxCalls; // already clamped to 10–50
 
             while (Calls.Count > max)
             {
-                // Prefer to trim the oldest call that is not currently playing
-                // and not the last played anchor.
-                var indexToRemove = -1;
-
-                for (var i = Calls.Count - 1; i >= 0; i--)
+                var lastIndex = Calls.Count - 1;
+                if (lastIndex >= 0)
                 {
-                    var candidate = Calls[i];
-
-                    if (candidate != _currentPlayingCall && candidate != _lastPlayedCall)
-                    {
-                        indexToRemove = i;
-                        break;
-                    }
+                    var removed = Calls[lastIndex];
+                    Calls.RemoveAt(lastIndex);
                 }
-
-                // If every call is protected, still trim the very oldest call.
-                if (indexToRemove < 0)
-                    indexToRemove = Calls.Count - 1;
-
-                var removed = Calls[indexToRemove];
-                Calls.RemoveAt(indexToRemove);
-
-                // If we trimmed away the currently playing call, clear it.
-                if (removed == _currentPlayingCall)
-                    _currentPlayingCall = null;
-
-                // If we trimmed away the last played anchor, clear it.
-                if (removed == _lastPlayedCall)
-                    _lastPlayedCall = null;
             }
 
-            // Anchors may now be null, so refresh derived state.
             UpdateQueueDerivedState();
         }
 
