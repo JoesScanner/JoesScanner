@@ -52,23 +52,72 @@
                         Spacing="8"
                         VerticalOptions="Center">
 
-                        <VerticalStackLayout
-                            Spacing="0"
+                        <HorizontalStackLayout
+                            Grid.Row="0"
+                            Grid.Column="0"
+                            Spacing="8"
                             VerticalOptions="Center">
 
-                            <Label
-                                Text="JoesScanner"
-                                FontSize="22"
-                                FontAttributes="Bold"
-                                TextColor="{AppThemeBinding Light=#111827, Dark=White}" />
+                            <VerticalStackLayout
+                                Spacing="2"
+                                VerticalOptions="Center">
 
-                            <!-- Tagline should be 'Server: <url>' from TaglineText -->
-                            <Label
-                                Text="{Binding TaglineText}"
-                                FontSize="12"
-                                TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
-                                LineBreakMode="CharacterWrap" />
-                        </VerticalStackLayout>
+                                <Label
+                                    Text="JoesScanner"
+                                    FontSize="22"
+                                    FontAttributes="Bold"
+                                    TextColor="{AppThemeBinding Light=#111827, Dark=White}" />
+
+                                <StackLayout Orientation="Horizontal"
+                                    Spacing="6"
+                                    VerticalOptions="Center">
+
+                                    <!-- Connection dot -->
+                                    <BoxView WidthRequest="8"
+                                         HeightRequest="8"
+                                         Color="{Binding ConnectionStatusColor}"
+                                         CornerRadius="4"
+                                         VerticalOptions="Center" />
+
+                                    <!-- Text block with connection and queue status -->
+                                    <StackLayout Orientation="Vertical"
+                                        Spacing="0"
+                                        VerticalOptions="Center">
+
+                                        <!-- Connection status -->
+                                        <Label Text="{Binding ConnectionStatusText}"
+                                           FontSize="12"
+                                           VerticalOptions="Center" />
+
+                                        <!-- Queue status -->
+                                        <Label Text="{Binding QueueStatusText}"
+                                           FontSize="10"
+                                           Opacity="0.8"
+                                           VerticalOptions="Center" />
+
+                                        <!-- Debug queue event (optional, small and subtle) -->
+                                        <Label Text="{Binding LastQueueEvent}"
+                                           FontSize="9"
+                                           Opacity="0.6"
+                                           LineBreakMode="TailTruncation"
+                                           MaxLines="1"
+                                           VerticalOptions="Center" />
+                                    </StackLayout>
+
+
+                                </StackLayout>
+
+
+                                <!-- Tagline should be 'Server: <url>' from TaglineText -->
+                                <Label
+                                    Text="{Binding TaglineText}"
+                                    FontSize="12"
+                                    Margin="0,2,0,0"
+                                    TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+                                    LineBreakMode="CharacterWrap" />
+                            </VerticalStackLayout>
+                        </HorizontalStackLayout>
+
                     </HorizontalStackLayout>
                     
                     <!-- Row 0 right side: Connect/Disconnect + Settings -->
@@ -119,19 +168,19 @@
          Right side: Filters indicator only -->
                     <!-- Left: audio, speed, and calls waiting -->
                     <HorizontalStackLayout
-        Grid.Row="1"
-        Grid.Column="0"
-        Grid.ColumnSpan="2"
-        Spacing="12"
-        VerticalOptions="Center">
+                        Grid.Row="1"
+                        Grid.Column="0"
+                        Grid.ColumnSpan="2"
+                        Spacing="12"
+                        VerticalOptions="Center">
 
                         <!-- Audio On or Off button (global audio control) -->
                         <Button
-            Text="{Binding AudioButtonText}"
-            Command="{Binding ToggleAudioCommand}"
-            Style="{StaticResource SecondaryPillButtonStyle}"
-            BackgroundColor="{Binding AudioButtonBackground}"
-            VerticalOptions="Center" />
+                            Text="{Binding AudioButtonText}"
+                            Command="{Binding ToggleAudioCommand}"
+                            Style="{StaticResource SecondaryPillButtonStyle}"
+                            BackgroundColor="{Binding AudioButtonBackground}"
+                            VerticalOptions="Center" />
 
                         <!-- Playback speed slider and label -->
                         <HorizontalStackLayout
@@ -203,25 +252,40 @@
                                 <!-- Tap anywhere on the card to replay the call and continue from there -->
                                 <Border.GestureRecognizers>
                                     <TapGestureRecognizer
-                        Command="{Binding BindingContext.PlayAudioCommand, Source={x:Reference Page}}"
-                        CommandParameter="{Binding .}" />
+                                        Command="{Binding BindingContext.PlayAudioCommand, Source={x:Reference Page}}"
+                                        CommandParameter="{Binding .}" />
                                 </Border.GestureRecognizers>
 
                                 <!-- Highlight the card in green while its audio is playing -->
                                 <Border.Triggers>
-                                    <DataTrigger
-                        TargetType="Border"
-                        Binding="{Binding IsPlaying}"
-                        Value="True">
 
+                                    <!-- De emphasize calls that are in history (already played) -->
+                                    <DataTrigger
+                                        TargetType="Border"
+                                        Binding="{Binding IsHistory}"
+                                        Value="True">
+                                        <Setter Property="Opacity" Value="0.55" />
+                                    </DataTrigger>
+
+                                    <!-- Highlight the card in green while its audio is playing -->
+                                    <DataTrigger
+                                        TargetType="Border"
+                                        Binding="{Binding IsPlaying}"
+                                        Value="True">
                                         <!-- Slightly thicker green border -->
                                         <Setter Property="StrokeThickness" Value="2" />
                                         <Setter Property="Stroke" Value="#22c55e" />
 
                                         <!-- Soft green inner background to give a glow effect -->
-                                        <Setter Property="BackgroundColor" Value="{AppThemeBinding Light=#ecfdf5, Dark=#022c22}" />
+                                        <Setter Property="BackgroundColor"
+                                             Value="{AppThemeBinding Light=#ecfdf5, Dark=#022c22}" />
+
+                                        <!-- Playing cards are always fully opaque -->
+                                        <Setter Property="Opacity" Value="1" />
                                     </DataTrigger>
+
                                 </Border.Triggers>
+
 
                                 <!-- Call layout: header row + transcription row + debug row -->
                                 <Grid

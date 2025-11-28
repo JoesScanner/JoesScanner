@@ -1,7 +1,15 @@
 using JoesScanner.Models;
 using JoesScanner.Services;
+using Microsoft.Maui.Controls;
+using System;
 using System.Collections.ObjectModel;
+using System.Net;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text;
 using System.Windows.Input;
+using System.Threading.Tasks;
+
 
 namespace JoesScanner.ViewModels
 {
@@ -20,10 +28,23 @@ namespace JoesScanner.ViewModels
         private string _serverUrl = string.Empty;
         private bool _useDefaultConnection;
 
+        // Basic auth credentials for the TR server
+        private string _basicAuthUsername = string.Empty;
+        private string _basicAuthPassword = string.Empty;
+        private string _savedBasicAuthUsername = string.Empty;
+        private string _savedBasicAuthPassword = string.Empty;
+
+        // Inline server validation status
+        private bool _isValidatingServer;
+        private bool _hasServerValidationResult;
+        private string _serverValidationMessage = string.Empty;
+        private bool _serverValidationIsError;
+
         // Saved snapshot to detect connection changes
         private string _savedServerUrl = string.Empty;
         private bool _savedUseDefaultConnection;
         private bool _hasChanges;
+
 
         // True when any setting on this page differs from what was last saved.
         // Used by the Save button to decide when to turn red.
@@ -71,15 +92,25 @@ namespace JoesScanner.ViewModels
         public ICommand ToggleReceiverFilterCommand { get; }
         public ICommand ToggleSiteFilterCommand { get; }
 
+        // Password visibility command
+        public ICommand ToggleBasicAuthPasswordVisibilityCommand { get; }
+
         public const string DefaultServerUrl = "https://app.joesscanner.com";
 
         public SettingsViewModel(ISettingsService settingsService, MainViewModel mainViewModel)
         {
             _settings = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
             _mainViewModel = mainViewModel ?? throw new ArgumentNullException(nameof(mainViewModel));
-            _httpClient = new HttpClient();
+            _httpClient = new HttpClient
+            {
+                Timeout = TimeSpan.FromSeconds(3)
+            };
+
 
             Current = this;
+
+            ToggleBasicAuthPasswordVisibilityCommand =
+                new Command(() => IsBasicAuthPasswordVisible = !IsBasicAuthPasswordVisible);
 
             // Seed state from persisted settings
             InitializeFromSettings();
@@ -89,8 +120,60 @@ namespace JoesScanner.ViewModels
             ResetServerCommand = new Command(ResetServerUrl);
             ValidateServerCommand = new Command(async () => await ValidateServerUrlAsync());
 
-
         }
+
+        public bool IsValidatingServer
+        {
+            get => _isValidatingServer;
+            private set
+            {
+                if (_isValidatingServer == value)
+                    return;
+
+                _isValidatingServer = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public bool HasServerValidationResult
+        {
+            get => _hasServerValidationResult;
+            private set
+            {
+                if (_hasServerValidationResult == value)
+                    return;
+
+                _hasServerValidationResult = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public string ServerValidationMessage
+        {
+            get => _serverValidationMessage;
+            private set
+            {
+                if (_serverValidationMessage == value)
+                    return;
+
+                _serverValidationMessage = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public bool ServerValidationIsError
+        {
+            get => _serverValidationIsError;
+            private set
+            {
+                if (_serverValidationIsError == value)
+                    return;
+
+                _serverValidationIsError = value;
+                OnPropertyChanged();
+            }
+        }
+
 
         /// <summary>
         /// If true, there are unsaved connection changes.
@@ -118,14 +201,82 @@ namespace JoesScanner.ViewModels
             get => _serverUrl;
             set
             {
-                if (_serverUrl == value)
+                var newValue = value ?? string.Empty;
+                if (string.Equals(_serverUrl, newValue, StringComparison.Ordinal))
                     return;
 
-                _serverUrl = value ?? string.Empty;
+                _serverUrl = newValue;
+                OnPropertyChanged();
+
+                // Auto-track default vs custom based on the current text.
+                var defaultUrl = DefaultServerUrl;
+                var isDefault = string.Equals(_serverUrl, defaultUrl, StringComparison.OrdinalIgnoreCase);
+
+                if (_useDefaultConnection != isDefault)
+                {
+                    _useDefaultConnection = isDefault;
+                    OnPropertyChanged(nameof(UseDefaultConnection));
+                }
+
+                UpdateHasChanges();
+            }
+        }
+
+
+        // Basic auth username for the TR server
+        public string BasicAuthUsername
+        {
+            get => _basicAuthUsername;
+            set
+            {
+                if (string.Equals(_basicAuthUsername, value, StringComparison.Ordinal))
+                    return;
+
+                _basicAuthUsername = value ?? string.Empty;
                 OnPropertyChanged();
                 UpdateHasChanges();
             }
         }
+
+        // Basic auth password for the TR server
+        public string BasicAuthPassword
+        {
+            get => _basicAuthPassword;
+            set
+            {
+                if (string.Equals(_basicAuthPassword, value, StringComparison.Ordinal))
+                    return;
+
+                _basicAuthPassword = value ?? string.Empty;
+                OnPropertyChanged();
+                UpdateHasChanges();
+            }
+        }
+        // Password visibility state
+        private bool _isBasicAuthPasswordVisible;
+
+        // True when the password Entry should mask input
+        public bool IsBasicAuthPasswordHidden => !_isBasicAuthPasswordVisible;
+
+        // Button text
+        public string BasicAuthPasswordToggleText =>
+            _isBasicAuthPasswordVisible ? "Hide" : "Show";
+
+        public bool IsBasicAuthPasswordVisible
+        {
+            get => _isBasicAuthPasswordVisible;
+            set
+            {
+                if (_isBasicAuthPasswordVisible == value)
+                    return;
+
+                _isBasicAuthPasswordVisible = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(IsBasicAuthPasswordHidden));
+                OnPropertyChanged(nameof(BasicAuthPasswordToggleText));
+            }
+        }
+
 
         /// <summary>
         /// True when "Default connection" is selected.
@@ -255,6 +406,12 @@ namespace JoesScanner.ViewModels
             _serverUrl = _settings.ServerUrl ?? string.Empty;
             _savedServerUrl = _serverUrl;
 
+            // Basic auth seed
+            _basicAuthUsername = _settings.BasicAuthUsername ?? string.Empty;
+            _basicAuthPassword = _settings.BasicAuthPassword ?? string.Empty;
+            _savedBasicAuthUsername = _basicAuthUsername;
+            _savedBasicAuthPassword = _basicAuthPassword;
+
             // Default connection flag
             var defaultUrl = DefaultServerUrl;
             _useDefaultConnection = string.Equals(_serverUrl, defaultUrl, StringComparison.OrdinalIgnoreCase);
@@ -304,6 +461,8 @@ namespace JoesScanner.ViewModels
             _savedServerUrl = _settings.ServerUrl;
             _savedUseDefaultConnection = UseDefaultConnection;
             _savedMaxCalls = _maxCalls;
+            _savedBasicAuthUsername = _basicAuthUsername;
+            _savedBasicAuthPassword = _basicAuthPassword;
 
             // At this point everything matches the persisted state.
             HasChanges = false;
@@ -354,6 +513,10 @@ namespace JoesScanner.ViewModels
                 _mainViewModel.ServerUrl = ServerUrl;
             }
 
+            // Basic auth
+            _settings.BasicAuthUsername = BasicAuthUsername;
+            _settings.BasicAuthPassword = BasicAuthPassword;
+
             // Max calls
             _settings.MaxCalls = MaxCalls;
             _mainViewModel.MaxCalls = MaxCalls;
@@ -366,6 +529,9 @@ namespace JoesScanner.ViewModels
             _savedServerUrl = _settings.ServerUrl;
             _savedUseDefaultConnection = UseDefaultConnection;
             _savedMaxCalls = _maxCalls;
+            _savedBasicAuthUsername = _basicAuthUsername;
+            _savedBasicAuthPassword = _basicAuthPassword;
+
 
             // This will also raise HasUnsavedSettings.
             HasChanges = false;
@@ -390,42 +556,104 @@ namespace JoesScanner.ViewModels
         private async Task ValidateServerUrlAsync()
         {
             var url = ServerUrl?.Trim();
+
+            // Start: inline "validating" state
+            IsValidatingServer = true;
+            HasServerValidationResult = true;
+            ServerValidationMessage = "Validating server...";
+            ServerValidationIsError = false;
+
             if (string.IsNullOrEmpty(url))
             {
-                await Application.Current.MainPage.DisplayAlert(
-                    "Server validation",
-                    "Please enter a server url first.",
-                    "OK");
+                ServerValidationMessage = "Enter a server url first.";
+                ServerValidationIsError = true;
+                IsValidatingServer = false;
                 return;
             }
 
             try
             {
                 using var request = new HttpRequestMessage(HttpMethod.Head, url);
+
+                // Apply basic auth using current edited values, if present
+                if (!string.IsNullOrWhiteSpace(BasicAuthUsername))
+                {
+                    var raw = $"{BasicAuthUsername}:{BasicAuthPassword ?? string.Empty}";
+                    var bytes = Encoding.ASCII.GetBytes(raw);
+                    var base64 = Convert.ToBase64String(bytes);
+
+                    request.Headers.Authorization =
+                        new AuthenticationHeaderValue("Basic", base64);
+                }
+
                 using var response = await _httpClient.SendAsync(request);
 
-                if (response.IsSuccessStatusCode)
+                var statusCode = response.StatusCode;
+                var statusInt = (int)statusCode;
+
+                if (response.IsSuccessStatusCode
+                    || statusCode == HttpStatusCode.NotImplemented) // treat 501 as reachable
                 {
-                    await Application.Current.MainPage.DisplayAlert(
-                        "Server validation",
-                        "Server appears to be reachable.",
-                        "OK");
+                    if (statusCode == HttpStatusCode.NotImplemented)
+                    {
+                        ServerValidationMessage =
+                            "Server reachable. Connection looks good.";
+                    }
+                    else
+                    {
+                        ServerValidationMessage =
+                            $"Server reachable (HTTP {statusInt} {response.ReasonPhrase}).";
+                    }
+
+                    ServerValidationIsError = false;
+                }
+                else if (statusCode == HttpStatusCode.Unauthorized || statusCode == HttpStatusCode.Forbidden)
+                {
+                    ServerValidationMessage =
+                        $"Authentication failed (HTTP {statusInt} {response.ReasonPhrase}). " +
+                        "Check basic auth username/password and that the server/firewall is configured to allow this client.";
+                    ServerValidationIsError = true;
                 }
                 else
                 {
-                    await Application.Current.MainPage.DisplayAlert(
-                        "Server validation",
-                        $"Server responded with status {(int)response.StatusCode}.",
-                        "OK");
+                    ServerValidationMessage =
+                        $"Server responded with HTTP {statusInt} {response.ReasonPhrase}.";
+                    ServerValidationIsError = true;
                 }
+
+
+            }
+            catch (HttpRequestException ex)
+            {
+                ServerValidationMessage = $"Could not reach server: {ex.Message}";
+                ServerValidationIsError = true;
+            }
+            catch (TaskCanceledException)
+            {
+                // This is what HttpClient throws on timeout
+                ServerValidationMessage = "Server did not respond in time (validation timed out).";
+                ServerValidationIsError = true;
             }
             catch (Exception ex)
             {
-                await Application.Current.MainPage.DisplayAlert(
-                    "Server validation",
-                    $"Could not reach server: {ex.Message}",
-                    "OK");
+                ServerValidationMessage = $"Unexpected error validating server: {ex.Message}";
+                ServerValidationIsError = true;
             }
+            finally
+            {
+                IsValidatingServer = false;
+            }
+        }
+
+        private void UpdateHasChanges()
+        {
+            var has =
+                !string.Equals(_serverUrl, _savedServerUrl, StringComparison.OrdinalIgnoreCase)
+                || _useDefaultConnection != _savedUseDefaultConnection
+                || !string.Equals(_basicAuthUsername, _savedBasicAuthUsername, StringComparison.Ordinal)
+                || !string.Equals(_basicAuthPassword, _savedBasicAuthPassword, StringComparison.Ordinal);
+
+            HasChanges = has;
         }
 
         /// <summary>
@@ -437,15 +665,13 @@ namespace JoesScanner.ViewModels
         {
             ServerUrl = _savedServerUrl;
             UseDefaultConnection = _savedUseDefaultConnection;
+            BasicAuthUsername = _savedBasicAuthUsername;
+            BasicAuthPassword = _savedBasicAuthPassword;
             HasChanges = false;
         }
-        private void UpdateHasChanges()
-        {
-            var has = !string.Equals(_serverUrl, _savedServerUrl, StringComparison.OrdinalIgnoreCase)
-                      || _useDefaultConnection != _savedUseDefaultConnection;
 
-            HasChanges = has;
-        }
+
+
 
 
     }

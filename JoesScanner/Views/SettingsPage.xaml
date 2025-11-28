@@ -27,7 +27,7 @@
                         Opacity="0.10" />
                 </Border.Shadow>
 
-                <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" ColumnDefinitions="*">
+                <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto" ColumnDefinitions="*">
 
                     <!-- HEADER CARD -->
                     <Border
@@ -38,7 +38,7 @@
                         StrokeShape="RoundRectangle 16"
                         Margin="0,0,0,12">
 
-                        <Grid ColumnDefinitions="*,Auto" VerticalOptions="Center">
+                        <Grid ColumnDefinitions="*,Auto,Auto" VerticalOptions="Center">
                             <VerticalStackLayout Grid.Column="0" Spacing="2">
                                 <Label
                                     Text="Settings"
@@ -51,29 +51,28 @@
                                     TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" />
                             </VerticalStackLayout>
 
+                            <!-- Save button (turns red when HasUnsavedSettings is true) -->
                             <Button
-                                    Text="Save"
-                                    Command="{Binding SaveCommand}"
-                                    Style="{StaticResource PillButtonStyle}"
-                                    >
+                                Grid.Column="1"
+                                Text="Save"
+                                Command="{Binding SaveCommand}"
+                                Style="{StaticResource PillButtonStyle}">
                                 <Button.Triggers>
-                                    <!-- Save button turns red when ANY relevant setting has changed -->
                                     <DataTrigger
-                                            TargetType="Button"
-                                            Binding="{Binding HasUnsavedSettings}"
-                                            Value="True">
-
+                                        TargetType="Button"
+                                        Binding="{Binding HasUnsavedSettings}"
+                                        Value="True">
                                         <Setter Property="BackgroundColor" Value="#b91c1c" />
                                         <Setter Property="TextColor" Value="White" />
                                     </DataTrigger>
                                 </Button.Triggers>
                             </Button>
 
+                            <!-- Close button -->
                             <Button
-                                Grid.Column="1"
+                                Grid.Column="2"
                                 Text="Close"
-                                Style="{StaticResource SecondaryPillButtonStyle}
-                                "
+                                Style="{StaticResource SecondaryPillButtonStyle}"
                                 Clicked="OnBackClicked" />
                         </Grid>
                     </Border>
@@ -87,7 +86,10 @@
                         StrokeShape="RoundRectangle 16"
                         Margin="0,0,0,12">
 
-                        <Grid RowDefinitions="Auto,Auto,Auto,Auto" ColumnDefinitions="*">
+                        <!-- Note: 0=title, 1=description, 2=server entry, 3=username, 4=password, 5=buttons, 6=status -->
+                        <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto" ColumnDefinitions="*">
+
+                            <!-- Title -->
                             <Label
                                 Grid.Row="0"
                                 Text="Connection"
@@ -96,27 +98,14 @@
                                 Margin="0,0,0,8"
                                 TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
 
+                            <!-- Description -->
                             <VerticalStackLayout
                                 Grid.Row="1"
                                 Spacing="4">
-
                                 <Label
                                     Text="Choose which server the app connects to."
                                     FontSize="12"
                                     TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" />
-
-                                <!-- Default vs custom connection -->
-                                <HorizontalStackLayout Spacing="12">
-                                    <RadioButton
-                                        Content="Use default connection"
-                                        GroupName="ConnectionMode"
-                                        IsChecked="{Binding UseDefaultConnection}" />
-
-                                    <RadioButton
-                                        Content="Custom server"
-                                        GroupName="ConnectionMode"
-                                        IsChecked="{Binding UseDefaultConnection, Converter={StaticResource InverseBooleanConverter}}" />
-                                </HorizontalStackLayout>
                             </VerticalStackLayout>
 
                             <!-- Server URL entry -->
@@ -129,25 +118,106 @@
                                 <Entry
                                     Grid.Column="0"
                                     Text="{Binding ServerUrl}"
-                                    Placeholder="Server url"
-                                    IsEnabled="{Binding UseDefaultConnection, Converter={StaticResource InverseBooleanConverter}}"
+                                    Placeholder="Server url (for example https://app.joesscanner.com)"
                                     FontSize="13" />
                             </Grid>
 
-                            <!-- Save button only for connection changes -->
+                            <!-- Basic auth username -->
+                            <VerticalStackLayout Grid.Row="3" Spacing="4" Margin="0,8,0,0">
+                                <Label
+                                    Text="Basic auth username"
+                                    FontSize="12"
+                                    TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" />
+                                <Entry
+                                    Text="{Binding BasicAuthUsername}"
+                                    Placeholder="Username"
+                                    FontSize="13" />
+                            </VerticalStackLayout>
+
+                            <!-- Basic auth password + Show/Hide button -->
                             <Grid
-                                Grid.Row="3"
+                                Grid.Row="4"
                                 ColumnDefinitions="*,Auto"
+                                ColumnSpacing="8"
                                 Margin="0,8,0,0">
 
-                                <Label
-                                    Grid.Column="0"
-                                    Text=""
-                                    FontSize="11" />
+                                <VerticalStackLayout Grid.Column="0" Spacing="4">
+                                    <Label
+                                        Text="Basic auth password"
+                                        FontSize="12"
+                                        TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" />
+                                    <Entry
+                                        Text="{Binding BasicAuthPassword}"
+                                        Placeholder="Password"
+                                        IsPassword="{Binding IsBasicAuthPasswordHidden}"
+                                        FontSize="13" />
+                                </VerticalStackLayout>
+
+                                <Button
+                                    Grid.Column="1"
+                                    Text="{Binding BasicAuthPasswordToggleText}"
+                                    Command="{Binding ToggleBasicAuthPasswordVisibilityCommand}"
+                                    VerticalOptions="End"
+                                    Style="{StaticResource SecondaryPillButtonStyle}" />
                             </Grid>
+
+                            <!-- Buttons: Joe's server reset + Validate -->
+                            <HorizontalStackLayout
+                                Grid.Row="5"
+                                Spacing="8"
+                                Margin="0,12,0,0">
+
+                                <Button
+                                    Text="Joe's server"
+                                    Command="{Binding ResetServerCommand}"
+                                    Style="{StaticResource SecondaryPillButtonStyle}" />
+
+                                <Button
+                                    Text="Validate"
+                                    Command="{Binding ValidateServerCommand}"
+                                    Style="{StaticResource PillButtonStyle}">
+                                    <Button.Triggers>
+                                        <!-- While validating: change text and disable button -->
+                                        <DataTrigger
+                                            TargetType="Button"
+                                            Binding="{Binding IsValidatingServer}"
+                                            Value="True">
+                                            <Setter Property="Text" Value="Validating..." />
+                                            <Setter Property="IsEnabled" Value="False" />
+                                        </DataTrigger>
+                                    </Button.Triggers>
+                                </Button>
+
+                            </HorizontalStackLayout>
+
+                            <!-- Inline validation status -->
+                            <Label
+                                Grid.Row="6"
+                                Margin="0,8,0,0"
+                                FontSize="11"
+                                IsVisible="{Binding HasServerValidationResult}"
+                                Text="{Binding ServerValidationMessage}">
+
+                                <Label.Triggers>
+                                    <!-- Error: red -->
+                                    <DataTrigger
+                                        TargetType="Label"
+                                        Binding="{Binding ServerValidationIsError}"
+                                        Value="True">
+                                        <Setter Property="TextColor" Value="#b91c1c" />
+                                    </DataTrigger>
+                                    <!-- Non error: green -->
+                                    <DataTrigger
+                                        TargetType="Label"
+                                        Binding="{Binding ServerValidationIsError}"
+                                        Value="False">
+                                        <Setter Property="TextColor" Value="#15803d" />
+                                    </DataTrigger>
+                                </Label.Triggers>
+                            </Label>
+
                         </Grid>
                     </Border>
-
 
                     <!-- CALL LIST BEHAVIOR CARD -->
                     <Border
@@ -186,14 +256,13 @@
                                     Maximum="50"
                                     Value="{Binding MaxCalls}"
                                     HorizontalOptions="FillAndExpand" />
-
                             </VerticalStackLayout>
                         </VerticalStackLayout>
                     </Border>
 
                     <!-- THEME CARD -->
                     <Border
-                        Grid.Row="4"
+                        Grid.Row="3"
                         Padding="12"
                         BackgroundColor="{AppThemeBinding Light=#f9fafb, Dark=#020617}"
                         StrokeThickness="1"

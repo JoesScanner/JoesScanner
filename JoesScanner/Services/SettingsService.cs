@@ -3,6 +3,8 @@ namespace JoesScanner.Services
     public class SettingsService : ISettingsService
     {
         private const string ServerUrlKey = "ServerUrl";
+        private const string BasicAuthUserKey = "BasicAuthUser";
+        private const string BasicAuthPassKey = "BasicAuthPass";
         private const string AutoPlayKey = "AutoPlay";
         private const string MaxCallsKey = "MaxCalls";
         private const string ScrollDirectionKey = "ScrollDirection";
@@ -16,6 +18,17 @@ namespace JoesScanner.Services
         {
             get => Preferences.Get(ServerUrlKey, DefaultServerUrl);
             set => Preferences.Set(ServerUrlKey, string.IsNullOrWhiteSpace(value) ? DefaultServerUrl : value);
+        }
+        public string BasicAuthUsername
+        {
+            get => Preferences.Get(BasicAuthUserKey, string.Empty);
+            set => Preferences.Set(BasicAuthUserKey, value ?? string.Empty);
+        }
+
+        public string BasicAuthPassword
+        {
+            get => Preferences.Get(BasicAuthPassKey, string.Empty);
+            set => Preferences.Set(BasicAuthPassKey, value ?? string.Empty);
         }
 
         public bool AutoPlay

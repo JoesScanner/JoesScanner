@@ -15,7 +15,39 @@ namespace JoesScanner.Models
         private string _transcription = string.Empty;
         private string _audioUrl = string.Empty;
         private string _debugInfo = string.Empty;
+        private bool _isHistory;
         private bool _isPlaying;
+        private string _backendId = string.Empty;
+        private bool _isTranscriptionUpdate;
+
+        // Stable identifier for this call from the server (for example DT_RowId).
+        public string BackendId
+        {
+            get => _backendId;
+            set
+            {
+                if (_backendId == value)
+                    return;
+
+                _backendId = value ?? string.Empty;
+                OnPropertyChanged();
+            }
+        }
+
+        // True when this item represents an update to an existing call
+        // (used for refreshing transcription without inserting a new row).
+        public bool IsTranscriptionUpdate
+        {
+            get => _isTranscriptionUpdate;
+            set
+            {
+                if (_isTranscriptionUpdate == value)
+                    return;
+
+                _isTranscriptionUpdate = value;
+                OnPropertyChanged();
+            }
+        }
 
         /// <summary>
         /// Timestamp of the call (local time). Comes from the server StartTime / StartTimeUTC.
@@ -174,6 +206,22 @@ namespace JoesScanner.Models
         /// </summary>
         public bool HasDebugInfo => !string.IsNullOrWhiteSpace(DebugInfo);
 
+        /// <summary>
+        /// True for calls that have already been played and are now in history.
+        /// Used to visually de emphasize older calls in the UI.
+        /// </summary>
+        public bool IsHistory
+        {
+            get => _isHistory;
+            set
+            {
+                if (_isHistory == value)
+                    return;
+
+                _isHistory = value;
+                OnPropertyChanged();
+            }
+        }
 
         /// <summary>
         /// True while this call is being played back. Used for visual state only.

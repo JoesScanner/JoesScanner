@@ -4,6 +4,10 @@ namespace JoesScanner.Services
     {
         string ServerUrl { get; set; }
 
+        // Optional basic auth credentials for the TR server
+        string BasicAuthUsername { get; set; }
+        string BasicAuthPassword { get; set; }
+
         bool AutoPlay { get; set; }
 
         int MaxCalls { get; set; }
