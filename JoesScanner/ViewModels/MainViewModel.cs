@@ -22,6 +22,7 @@ namespace JoesScanner.ViewModels
         private readonly ISettingsService _settingsService;
         private readonly IAudioPlaybackService _audioPlaybackService;
         private readonly HttpClient _audioHttpClient;
+        private readonly FilterService _filterService = FilterService.Instance;
 
         private CancellationTokenSource? _cts;
         private CancellationTokenSource? _audioCts;
@@ -149,6 +150,9 @@ namespace JoesScanner.ViewModels
             ToggleAudioCommand = new Command(async () => await OnToggleAudioAsync());
             PlayAudioCommand = new Command<CallItem>(async item => await OnCallTappedAsync(item));
             JumpToLiveCommand = new Command(async () => await JumpToLiveAsync());
+
+            // NEW: react when filters change (mute/disable/clear)
+            _filterService.RulesChanged += FilterServiceOnRulesChanged;
         }
 
         private const string LastConnectedPreferenceKey = "LastConnectedOnExit";
@@ -239,9 +243,13 @@ namespace JoesScanner.ViewModels
                 // that finished if nothing is playing.
                 var anchor = _currentPlayingCall ?? _lastPlayedCall;
 
-                // Helper to check if a call actually has audio to play.
-                static bool HasAudio(CallItem c) =>
-                    !string.IsNullOrWhiteSpace(c.AudioUrl);
+                // A call is "playable" for the queue if:
+                //  - it has an audio URL
+                //  - it is not hidden or muted by filters
+                bool IsPlayable(CallItem c) =>
+                    !string.IsNullOrWhiteSpace(c.AudioUrl) &&
+                    !_filterService.ShouldHide(c) &&
+                    !_filterService.ShouldMute(c);
 
                 // If we have no anchor at all, then all playable calls are considered waiting.
                 if (anchor == null)
@@ -249,7 +257,7 @@ namespace JoesScanner.ViewModels
                     var total = 0;
                     for (var i = 0; i < Calls.Count; i++)
                     {
-                        if (HasAudio(Calls[i]))
+                        if (IsPlayable(Calls[i]))
                             total++;
                     }
 
@@ -264,7 +272,7 @@ namespace JoesScanner.ViewModels
                     var total = 0;
                     for (var i = 0; i < Calls.Count; i++)
                     {
-                        if (HasAudio(Calls[i]))
+                        if (IsPlayable(Calls[i]))
                             total++;
                     }
 
@@ -272,14 +280,14 @@ namespace JoesScanner.ViewModels
                 }
 
                 // Newest is at index 0. Anything above the anchor (lower index)
-                // that has audio is waiting to be played.
+                // that is playable is waiting to be played.
                 if (anchorIndex <= 0)
                     return 0;
 
                 var count = 0;
                 for (var i = anchorIndex - 1; i >= 0; i--)
                 {
-                    if (HasAudio(Calls[i]))
+                    if (IsPlayable(Calls[i]))
                         count++;
                 }
 
@@ -479,6 +487,7 @@ namespace JoesScanner.ViewModels
         // Returns the next call to play from the backlog.
         // Calls are stored newest at index 0, oldest at the end.
         // We walk from oldest to newest so you hear things in order.
+        // We walk from oldest to newest so you hear things in order.
         private CallItem? GetNextQueuedCall()
         {
             if (Calls.Count == 0)
@@ -516,16 +525,59 @@ namespace JoesScanner.ViewModels
                 }
             }
 
-            // Walk toward the newest call (index 0) and pick the first one that actually has audio.
+            // Walk toward the newest call (index 0) and pick the first one
+            // that actually has audio and is not muted/disabled by filters.
             for (var i = startIndex; i >= 0; i--)
             {
                 var candidate = Calls[i];
-                if (!string.IsNullOrWhiteSpace(candidate.AudioUrl))
-                    return candidate;
+
+                if (string.IsNullOrWhiteSpace(candidate.AudioUrl))
+                    continue;
+
+                if (_filterService.ShouldMute(candidate) || _filterService.ShouldHide(candidate))
+                    continue;
+
+                return candidate;
             }
 
             // No playable calls found.
             return null;
+        }
+        private async void FilterServiceOnRulesChanged(object? sender, EventArgs e)
+        {
+            try
+            {
+                await MainThread.InvokeOnMainThreadAsync(ApplyFiltersToExistingCalls);
+            }
+            catch
+            {
+                // Best effort only; never crash on filter updates.
+            }
+        }
+
+        private void ApplyFiltersToExistingCalls()
+        {
+            if (Calls == null || Calls.Count == 0)
+                return;
+
+            var removedCount = 0;
+
+            // Walk from bottom to top so index removal is safe
+            for (int i = Calls.Count - 1; i >= 0; i--)
+            {
+                var call = Calls[i];
+                if (_filterService.ShouldHide(call))
+                {
+                    Calls.RemoveAt(i);
+                    removedCount++;
+                }
+            }
+
+            if (removedCount > 0)
+            {
+                LastQueueEvent = $"Filters updated: removed {removedCount} calls at {DateTime.Now:T}";
+                UpdateQueueDerivedState();
+            }
         }
 
         // Queue playback engine.
@@ -803,6 +855,16 @@ namespace JoesScanner.ViewModels
                                 return;
                             }
 
+                            // Update filters based on this call (receiver, site, talkgroup).
+                            _filterService.EnsureRulesForCall(call);
+
+                            // If any matching filter rule has IsDisabled, drop this call completely.
+                            if (_filterService.ShouldHide(call))
+                            {
+                                LastQueueEvent = $"Call dropped by filter at {DateTime.Now:T}";
+                                return;
+                            }
+
                             // Normal new call path: always show newest calls at the top (index 0).
                             Calls.Insert(0, call);
                             TotalCallsInserted++;
@@ -818,6 +880,7 @@ namespace JoesScanner.ViewModels
                             {
                                 _ = EnsureQueuePlaybackAsync();
                             }
+
                         });
                     }
                     catch (Exception ex)
@@ -1292,6 +1355,10 @@ namespace JoesScanner.ViewModels
             if (item == null || string.IsNullOrWhiteSpace(item.AudioUrl))
                 return;
 
+            // Respect filters for preview playback as well.
+            if (_filterService.ShouldMute(item) || _filterService.ShouldHide(item))
+                return;
+
             try
             {
                 // Mark only this call as playing for UI feedback.
@@ -1327,6 +1394,10 @@ namespace JoesScanner.ViewModels
         private async Task PlayAudioAsync(CallItem? item)
         {
             if (item == null || string.IsNullOrWhiteSpace(item.AudioUrl))
+                return;
+
+            // Do not play audio for muted or disabled items.
+            if (_filterService.ShouldMute(item) || _filterService.ShouldHide(item))
                 return;
 
             // If audio is disabled, do not play but keep everything else updating.

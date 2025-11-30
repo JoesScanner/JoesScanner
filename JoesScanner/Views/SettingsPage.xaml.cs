@@ -1,4 +1,7 @@
+using System;
+using JoesScanner.Models;
 using JoesScanner.ViewModels;
+using Microsoft.Maui.Controls;
 
 namespace JoesScanner.Views
 {
@@ -6,11 +9,13 @@ namespace JoesScanner.Views
     /// Settings page code behind.
     /// Responsible for wiring up navigation and discarding unsaved
     /// connection changes when the user leaves the page.
+    /// Also provides handlers for filter tap gestures.
     /// </summary>
     public partial class SettingsPage : ContentPage
     {
         /// <summary>
         /// Default constructor used by XAML.
+        /// BindingContext is expected to be supplied by DI / Shell.
         /// </summary>
         public SettingsPage()
         {
@@ -35,29 +40,29 @@ namespace JoesScanner.Views
         {
             if (BindingContext is SettingsViewModel vm)
             {
-                // If there are unsaved connection edits (server URL / mode),
-                // discard them when closing the page.
                 if (vm.HasChanges)
                 {
                     vm.DiscardConnectionChanges();
                 }
             }
 
-            // Prefer Shell navigation if available, otherwise use Navigation stack.
             if (Shell.Current != null)
             {
-                await Shell.Current.GoToAsync("..");
-            }
-            else if (Navigation?.NavigationStack?.Count > 0)
-            {
-                await Navigation.PopAsync();
+                try
+                {
+                    await Shell.Current.GoToAsync("..");
+                }
+                catch
+                {
+                    // Ignore navigation failures.
+                }
             }
         }
 
         /// <summary>
-        /// When the page is disappearing (user navigates away),
-        /// discard any unsaved connection changes so they do not leak
-        /// into the next time settings is opened.
+        /// If the user leaves the page (back, tab change, etc.)
+        /// discard any unsaved connection changes to avoid
+        /// half-applied states.
         /// </summary>
         protected override void OnDisappearing()
         {
@@ -69,6 +74,60 @@ namespace JoesScanner.Views
                 {
                     vm.DiscardConnectionChanges();
                 }
+            }
+        }
+
+        /// <summary>
+        /// Tap handler for the Mute (M) cell in the Filters grid.
+        /// Invokes SettingsViewModel.ToggleMuteFilterCommand with the FilterRule.
+        /// </summary>
+        private void OnMuteFilterTapped(object sender, TappedEventArgs e)
+        {
+            var rule = e.Parameter as FilterRule ?? (sender as BindableObject)?.BindingContext as FilterRule;
+            if (rule == null)
+                return;
+
+            if (BindingContext is SettingsViewModel vm &&
+                vm.ToggleMuteFilterCommand != null &&
+                vm.ToggleMuteFilterCommand.CanExecute(rule))
+            {
+                vm.ToggleMuteFilterCommand.Execute(rule);
+            }
+        }
+
+        /// <summary>
+        /// Tap handler for the Disable (X) cell in the Filters grid.
+        /// Invokes SettingsViewModel.ToggleDisableFilterCommand with the FilterRule.
+        /// </summary>
+        private void OnDisableFilterTapped(object sender, TappedEventArgs e)
+        {
+            var rule = e.Parameter as FilterRule ?? (sender as BindableObject)?.BindingContext as FilterRule;
+            if (rule == null)
+                return;
+
+            if (BindingContext is SettingsViewModel vm &&
+                vm.ToggleDisableFilterCommand != null &&
+                vm.ToggleDisableFilterCommand.CanExecute(rule))
+            {
+                vm.ToggleDisableFilterCommand.Execute(rule);
+            }
+        }
+
+        /// <summary>
+        /// Tap handler for the Clear (Clr) cell in the Filters grid.
+        /// Invokes SettingsViewModel.ClearFilterCommand with the FilterRule.
+        /// </summary>
+        private void OnClearFilterTapped(object sender, TappedEventArgs e)
+        {
+            var rule = e.Parameter as FilterRule ?? (sender as BindableObject)?.BindingContext as FilterRule;
+            if (rule == null)
+                return;
+
+            if (BindingContext is SettingsViewModel vm &&
+                vm.ClearFilterCommand != null &&
+                vm.ClearFilterCommand.CanExecute(rule))
+            {
+                vm.ClearFilterCommand.Execute(rule);
             }
         }
     }

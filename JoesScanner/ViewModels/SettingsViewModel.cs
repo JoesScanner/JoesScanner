@@ -23,6 +23,9 @@ namespace JoesScanner.ViewModels
         private readonly ISettingsService _settings;
         private readonly MainViewModel _mainViewModel;
         private readonly HttpClient _httpClient;
+        private readonly FilterService _filterService = FilterService.Instance;
+
+        public ObservableCollection<FilterRule> FilterRules => _filterService.Rules;
 
         // Connection fields
         private string _serverUrl = string.Empty;
@@ -84,6 +87,9 @@ namespace JoesScanner.ViewModels
         private static bool _sortAscending = true;
 
         // Commands
+        public ICommand ToggleMuteFilterCommand { get; }
+        public ICommand ToggleDisableFilterCommand { get; }
+        public ICommand ClearFilterCommand { get; }
         public ICommand SaveCommand { get; }
         public ICommand ResetServerCommand { get; }
         public ICommand ValidateServerCommand { get; }
@@ -119,6 +125,10 @@ namespace JoesScanner.ViewModels
             SaveCommand = new Command(SaveSettings);
             ResetServerCommand = new Command(ResetServerUrl);
             ValidateServerCommand = new Command(async () => await ValidateServerUrlAsync());
+
+            ToggleMuteFilterCommand = new Command<FilterRule>(OnToggleMuteFilter);
+            ToggleDisableFilterCommand = new Command<FilterRule>(OnToggleDisableFilter);
+            ClearFilterCommand = new Command<FilterRule>(OnClearFilter);
 
         }
 
@@ -394,6 +404,31 @@ namespace JoesScanner.ViewModels
                 _sortAscending = value;
                 OnPropertyChanged();
             }
+        }
+
+        private void OnToggleMuteFilter(FilterRule? rule)
+        {
+            if (rule == null)
+                return;
+
+            _filterService.ToggleMute(rule);
+        }
+
+        private void OnToggleDisableFilter(FilterRule? rule)
+        {
+            if (rule == null)
+                return;
+
+            _filterService.ToggleDisable(rule);
+        }
+
+        // Clear handler stays as-is
+        private void OnClearFilter(FilterRule? rule)
+        {
+            if (rule == null)
+                return;
+
+            _filterService.ClearRule(rule);
         }
 
         /// <summary>

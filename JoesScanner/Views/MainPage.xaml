@@ -40,21 +40,52 @@
                 <!-- HEADER PANEL: title, server, controls -->
                 <Grid
                     Grid.Row="0"
-                    RowDefinitions="Auto,Auto"
+                    RowDefinitions="Auto,Auto,Auto"
                     ColumnDefinitions="Auto,*,Auto"
                     Padding="16,16,16,8"
                     ColumnSpacing="16">
 
+                    <!-- Connection status banners -->
+                    <Border
+                        Grid.Row="0"
+                        Grid.ColumnSpan="3"
+                        IsVisible="{Binding ConnectionStatusIsWarning}"
+                        BackgroundColor="#facc15"
+                        Padding="6"
+                        StrokeThickness="0"
+                        StrokeShape="RoundRectangle 6"
+                        Margin="0,0,0,4">
+                        <Label
+                            Text="{Binding ConnectionStatusText}"
+                            TextColor="Black"
+                            FontSize="12"
+                            HorizontalOptions="Center" />
+                    </Border>
+
+                    <Border
+                        Grid.Row="0"
+                        Grid.ColumnSpan="3"
+                        IsVisible="{Binding ConnectionStatusIsError}"
+                        BackgroundColor="#dc2626"
+                        Padding="6"
+                        StrokeThickness="0"
+                        StrokeShape="RoundRectangle 6"
+                        Margin="0,0,0,4">
+                        <Label
+                            Text="{Binding ConnectionStatusText}"
+                            TextColor="White"
+                            FontSize="12"
+                            HorizontalOptions="Center" />
+                    </Border>
+
                     <!-- Logo and title -->
                     <HorizontalStackLayout
-                        Grid.Row="0"
+                        Grid.Row="1"
                         Grid.Column="0"
                         Spacing="8"
                         VerticalOptions="Center">
 
                         <HorizontalStackLayout
-                            Grid.Row="0"
-                            Grid.Column="0"
                             Spacing="8"
                             VerticalOptions="Center">
 
@@ -68,45 +99,48 @@
                                     FontAttributes="Bold"
                                     TextColor="{AppThemeBinding Light=#111827, Dark=White}" />
 
-                                <StackLayout Orientation="Horizontal"
+                                <StackLayout
+                                    Orientation="Horizontal"
                                     Spacing="6"
                                     VerticalOptions="Center">
 
                                     <!-- Connection dot -->
-                                    <BoxView WidthRequest="8"
-                                         HeightRequest="8"
-                                         Color="{Binding ConnectionStatusColor}"
-                                         CornerRadius="4"
-                                         VerticalOptions="Center" />
+                                    <BoxView
+                                        WidthRequest="8"
+                                        HeightRequest="8"
+                                        Color="{Binding ConnectionStatusColor}"
+                                        CornerRadius="4"
+                                        VerticalOptions="Center" />
 
                                     <!-- Text block with connection and queue status -->
-                                    <StackLayout Orientation="Vertical"
+                                    <StackLayout
+                                        Orientation="Vertical"
                                         Spacing="0"
                                         VerticalOptions="Center">
 
                                         <!-- Connection status -->
-                                        <Label Text="{Binding ConnectionStatusText}"
-                                           FontSize="12"
-                                           VerticalOptions="Center" />
+                                        <Label
+                                            Text="{Binding ConnectionStatusText}"
+                                            FontSize="12"
+                                            VerticalOptions="Center" />
 
                                         <!-- Queue status -->
-                                        <Label Text="{Binding QueueStatusText}"
-                                           FontSize="10"
-                                           Opacity="0.8"
-                                           VerticalOptions="Center" />
+                                        <Label
+                                            Text="{Binding QueueStatusText}"
+                                            FontSize="10"
+                                            Opacity="0.8"
+                                            VerticalOptions="Center" />
 
-                                        <!-- Debug queue event (optional, small and subtle) -->
-                                        <Label Text="{Binding LastQueueEvent}"
-                                           FontSize="9"
-                                           Opacity="0.6"
-                                           LineBreakMode="TailTruncation"
-                                           MaxLines="1"
-                                           VerticalOptions="Center" />
+                                        <!-- Debug queue event -->
+                                        <Label
+                                            Text="{Binding LastQueueEvent}"
+                                            FontSize="9"
+                                            Opacity="0.6"
+                                            LineBreakMode="TailTruncation"
+                                            MaxLines="1"
+                                            VerticalOptions="Center" />
                                     </StackLayout>
-
-
                                 </StackLayout>
-
 
                                 <!-- Tagline should be 'Server: <url>' from TaglineText -->
                                 <Label
@@ -117,12 +151,11 @@
                                     LineBreakMode="CharacterWrap" />
                             </VerticalStackLayout>
                         </HorizontalStackLayout>
-
                     </HorizontalStackLayout>
-                    
-                    <!-- Row 0 right side: Connect/Disconnect + Settings -->
+
+                    <!-- Row 1 right side: Connect/Disconnect + Settings -->
                     <HorizontalStackLayout
-                        Grid.Row="0"
+                        Grid.Row="1"
                         Grid.Column="2"
                         Spacing="4"
                         VerticalOptions="Center"
@@ -137,17 +170,15 @@
 
                         <!-- Connect or Disconnect button -->
                         <Button
-                                Style="{StaticResource PillButtonStyle}"
-                                Margin="0,0,0,0"
-                                Text="Connect"
-                                Command="{Binding StartCommand}">
-
+                            Style="{StaticResource PillButtonStyle}"
+                            Margin="0,0,0,0"
+                            Text="Connect"
+                            Command="{Binding StartCommand}">
                             <Button.Triggers>
-                                <!-- When streaming: green, says Disconnect, uses StopCommand -->
                                 <DataTrigger
-                                        TargetType="Button"
-                                        Binding="{Binding IsRunning}"
-                                        Value="True">
+                                    TargetType="Button"
+                                    Binding="{Binding IsRunning}"
+                                    Value="True">
                                     <Setter Property="Text" Value="Disconnect" />
                                     <Setter Property="BackgroundColor" Value="{AppThemeBinding Light=#16a34a, Dark=#15803d}" />
                                     <Setter Property="Command" Value="{Binding StopCommand}" />
@@ -155,7 +186,7 @@
                             </Button.Triggers>
                         </Button>
 
-                        <!-- Settings button moved up to row 0 -->
+                        <!-- Settings button -->
                         <Button
                             Text="Settings"
                             Clicked="OnSettingsTapped"
@@ -163,12 +194,9 @@
                             Margin="4,0,0,0" />
                     </HorizontalStackLayout>
 
-                    <!-- Second header row:
-         Left side: Audio On or Off + Speed + Calls waiting
-         Right side: Filters indicator only -->
-                    <!-- Left: audio, speed, and calls waiting -->
+                    <!-- Second header row: audio, speed, calls waiting -->
                     <HorizontalStackLayout
-                        Grid.Row="1"
+                        Grid.Row="2"
                         Grid.Column="0"
                         Grid.ColumnSpan="2"
                         Spacing="12"
@@ -217,10 +245,8 @@
                             FontSize="10"
                             VerticalOptions="Center"
                             Margin="6,0,0,0"
-                            TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />                        
-
+                            TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
                     </HorizontalStackLayout>
-
                 </Grid>
 
                 <!-- CALL LIST -->
@@ -231,7 +257,6 @@
                     ItemsUpdatingScrollMode="KeepScrollOffset"
                     ItemsLayout="VerticalList"
                     VerticalOptions="FillAndExpand">
-
 
                     <CollectionView.ItemTemplate>
                         <DataTemplate>
@@ -249,17 +274,15 @@
                                     <SolidColorBrush Color="{AppThemeBinding Light=#374151, Dark=#1f2937}" />
                                 </Border.Stroke>
 
-                                <!-- Tap anywhere on the card to replay the call and continue from there -->
+                                <!-- Tap anywhere on the card to replay the call -->
                                 <Border.GestureRecognizers>
                                     <TapGestureRecognizer
                                         Command="{Binding BindingContext.PlayAudioCommand, Source={x:Reference Page}}"
                                         CommandParameter="{Binding .}" />
                                 </Border.GestureRecognizers>
 
-                                <!-- Highlight the card in green while its audio is playing -->
+                                <!-- Highlight / history flags -->
                                 <Border.Triggers>
-
-                                    <!-- De emphasize calls that are in history (already played) -->
                                     <DataTrigger
                                         TargetType="Border"
                                         Binding="{Binding IsHistory}"
@@ -267,27 +290,19 @@
                                         <Setter Property="Opacity" Value="0.55" />
                                     </DataTrigger>
 
-                                    <!-- Highlight the card in green while its audio is playing -->
                                     <DataTrigger
                                         TargetType="Border"
                                         Binding="{Binding IsPlaying}"
                                         Value="True">
-                                        <!-- Slightly thicker green border -->
                                         <Setter Property="StrokeThickness" Value="2" />
                                         <Setter Property="Stroke" Value="#22c55e" />
-
-                                        <!-- Soft green inner background to give a glow effect -->
                                         <Setter Property="BackgroundColor"
-                                             Value="{AppThemeBinding Light=#ecfdf5, Dark=#022c22}" />
-
-                                        <!-- Playing cards are always fully opaque -->
+                                                Value="{AppThemeBinding Light=#ecfdf5, Dark=#022c22}" />
                                         <Setter Property="Opacity" Value="1" />
                                     </DataTrigger>
-
                                 </Border.Triggers>
 
-
-                                <!-- Call layout: header row + transcription row + debug row -->
+                                <!-- Call layout: header row + transcription + debug -->
                                 <Grid
                                     ColumnDefinitions="*,Auto"
                                     RowDefinitions="Auto,Auto,Auto">
@@ -334,7 +349,7 @@
                                         </Label.FormattedText>
                                     </Label>
 
-                                    <!-- Transcription row: only transcription text -->
+                                    <!-- Transcription row -->
                                     <Label
                                         Grid.Row="1"
                                         Grid.Column="0"
@@ -351,7 +366,7 @@
                                         </Label.FormattedText>
                                     </Label>
 
-                                    <!-- Debug or error info row: only visible when there is debug info -->
+                                    <!-- Debug / error info -->
                                     <Label
                                         Grid.Row="2"
                                         Grid.Column="0"
@@ -369,8 +384,6 @@
                     </CollectionView.ItemTemplate>
                 </CollectionView>
 
-
-
                 <!-- FOOTER: client info and donate button -->
                 <Grid
                     Grid.Row="2"
@@ -378,7 +391,7 @@
                     RowDefinitions="Auto"
                     ColumnDefinitions="*,Auto">
 
-                    <!-- Desktop-only label: links to JoesScanner.com -->
+                    <!-- Desktop-only label -->
                     <Label
                         Grid.Row="0"
                         Grid.Column="0"
@@ -395,7 +408,8 @@
                             <TapGestureRecognizer Tapped="OnSiteTapped" />
                         </Label.GestureRecognizers>
                     </Label>
-                    <!-- Donate button (visible on all platforms) -->
+
+                    <!-- Donate button -->
                     <Button
                         Grid.Column="1"
                         Text="Donate to the app developer"
