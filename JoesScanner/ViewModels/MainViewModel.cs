@@ -438,6 +438,10 @@ namespace JoesScanner.ViewModels
         // Central helper to update the status and all derived properties in one place.
         private void SetConnectionStatus(ConnectionStatus status, string? detailMessage = null)
         {
+            // Avoid pointless churn if status and text would be identical
+            if (_connectionStatus == status && string.IsNullOrWhiteSpace(detailMessage))
+                return;
+
             _connectionStatus = status;
 
             string text = status switch
@@ -486,7 +490,11 @@ namespace JoesScanner.ViewModels
             }
 
             ConnectionStatusColor = color;
+
+            // Log the status change to the circular log
+            AppLog.Add($"Connection status changed to {status} ({text})");
         }
+
 
         // Returns the next call to play from the backlog.
         // Calls are stored newest at index 0, oldest at the end.
@@ -716,6 +724,7 @@ namespace JoesScanner.ViewModels
         // Entry point used by the Connect button, wraps the async Start.
         public void Start()
         {
+            AppLog.Add("User clicked Start Monitoring");
             _ = StartAsync();
         }
 
@@ -953,6 +962,8 @@ namespace JoesScanner.ViewModels
         // Fully stops the call stream and audio playback.
         private async Task StopAsync()
         {
+            AppLog.Add("User clicked Stop monitoring.");
+
             // Stop the call stream.
             if (_cts != null)
             {

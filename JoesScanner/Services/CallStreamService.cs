@@ -74,9 +74,14 @@ namespace JoesScanner.Services
             while (!cancellationToken.IsCancellationRequested)
             {
                 var baseUrl = (_settingsService.ServerUrl ?? string.Empty).TrimEnd('/');
+                var username = _settingsService.BasicAuthUsername;
+                var usernameForLog = string.IsNullOrWhiteSpace(username) ? "(none)" : username;
+
 
                 if (string.IsNullOrWhiteSpace(baseUrl))
                 {
+                    AppLog.Add("CallStream: No Server URL configured in settings. Username is not applicable.");
+
                     // No server configured yet
                     yield return new CallItem
                     {
@@ -130,6 +135,9 @@ namespace JoesScanner.Services
                           "Verify the basic auth username/password and any firewall authentication."
                         : $"Error talking to {callsUrl}: {errorMessage}";
 
+                    AppLog.Add(
+                        $"CallStream: {talkgroup} - {transcription} [ServerUrl={callsUrl}, Username={usernameForLog}]");
+
                     // Surface a clear error row in the UI
                     yield return new CallItem
                     {
@@ -152,6 +160,10 @@ namespace JoesScanner.Services
                     if (!hasReportedIdleConnection)
                     {
                         hasReportedIdleConnection = true;
+
+                        AppLog.Add(
+                            $"CallStream: HEARTBEAT - connected to server, waiting for calls. " +
+                            $"[ServerUrl={baseUrl}/calljson, Username={usernameForLog}]");
 
                         yield return new CallItem
                         {
@@ -177,6 +189,10 @@ namespace JoesScanner.Services
                     if (!hasReportedIdleConnection)
                     {
                         hasReportedIdleConnection = true;
+
+                        AppLog.Add(
+                            $"CallStream: HEARTBEAT - connected to server, waiting for calls. " +
+                            $"[ServerUrl={baseUrl}/calljson, Username={usernameForLog}]");
 
                         yield return new CallItem
                         {
