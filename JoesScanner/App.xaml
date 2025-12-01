@@ -10,6 +10,34 @@
                 <ResourceDictionary Source="Resources/Styles/Colors.xaml" />
                 <ResourceDictionary Source="Resources/Styles/Styles.xaml" />
             </ResourceDictionary.MergedDictionaries>
+
+            <!-- Global compact Entry style -->
+            <Style TargetType="Entry">
+                <!-- Shared look -->
+                <Setter Property="FontSize" Value="14" />
+                <Setter Property="Margin" Value="0,2" />
+                <Setter Property="BackgroundColor" Value="{AppThemeBinding Light=#ffffff, Dark=#1f2937}" />
+                <Setter Property="TextColor" Value="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                <Setter Property="VerticalOptions" Value="Center" />
+
+                <!-- Platform-specific minimum height so text does not get clipped -->
+                <Setter Property="MinimumHeightRequest">
+                    <Setter.Value>
+                        <OnPlatform x:TypeArguments="x:Double">
+                            <!-- Windows / desktop can be a bit tighter -->
+                            <On Platform="WinUI" Value="32" />
+                            <!-- Android needs more height for underline + padding -->
+                            <On Platform="Android" Value="44" />
+                            <!-- iOS / Mac can sit in between -->
+                            <On Platform="iOS, MacCatalyst" Value="38" />
+                        </OnPlatform>
+                    </Setter.Value>
+                </Setter>
+
+                <!-- Important: do NOT set HeightRequest here -->
+            </Style>
+
         </ResourceDictionary>
     </Application.Resources>
+
 </Application>

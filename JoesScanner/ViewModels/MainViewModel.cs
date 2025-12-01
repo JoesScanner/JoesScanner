@@ -1197,9 +1197,19 @@ namespace JoesScanner.ViewModels
                     // but do not touch the call stream.
                     await StopAudioFromToggleAsync();
 
-                    // When we mute, treat everything that exists right now as
-                    // already handled so that when we turn audio back on, we
-                    // only play calls that arrive after this point.
+                    // When audio is off we do not want to keep any queue anchor.
+                    // This prevents the queue from resuming from an old position
+                    // when audio is turned back on.
+                    _lastPlayedCall = null;
+
+                    UpdateQueueDerivedState();
+                }
+                else
+                {
+                    // Turning audio ON.
+                    // Treat everything that currently exists in the list as history
+                    // so we start from live and do not play backlog that arrived
+                    // while audio was off.
                     if (Calls.Count > 0)
                     {
                         // Newest call is always at index 0.
@@ -1211,16 +1221,9 @@ namespace JoesScanner.ViewModels
                     }
 
                     UpdateQueueDerivedState();
-                }
-                else
-                {
-                    // Turning audio ON.
-                    // If we are connected and have calls waiting, kick the queue engine
-                    // so playback resumes with calls that arrived after the mute.
-                    if (IsRunning && AutoPlay && CallsWaiting > 0)
-                    {
-                        _ = EnsureQueuePlaybackAsync();
-                    }
+
+                    // Do not kick the queue engine from here; we wait for the
+                    // next new call, or the user can jump to live explicitly.
                 }
             }
             catch (Exception ex)

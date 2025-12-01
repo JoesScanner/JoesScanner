@@ -17,23 +17,34 @@ namespace JoesScanner
             var window = new Window(new AppShell());
 
 #if WINDOWS
-            // Restore saved size and position (if we have them)
-            double width = Preferences.Get("WindowWidth", 0d);
-            double height = Preferences.Get("WindowHeight", 0d);
-            double x = Preferences.Get("WindowX", double.NaN);
-            double y = Preferences.Get("WindowY", double.NaN);
+            // Default size if we have no stored values yet
+            const double defaultWidth = 1100;
+            const double defaultHeight = 720;
 
-            if (width > 0)
-                window.Width = width;
+            // Minimum size so users can resize larger but not shrink to unusable
+            const double minWidth = 900;
+            const double minHeight = 600;
 
-            if (height > 0)
-                window.Height = height;
+            // Restore last size and position if available
+            var width = Preferences.Get("WindowWidth", defaultWidth);
+            var height = Preferences.Get("WindowHeight", defaultHeight);
+            var x = Preferences.Get("WindowX", double.NaN);
+            var y = Preferences.Get("WindowY", double.NaN);
 
-            if (!double.IsNaN(x))
+            // Apply size
+            window.Width = width;
+            window.Height = height;
+
+            // Apply minimum size to keep layout usable, but do not restrict maximum size
+            window.MinimumWidth = minWidth;
+            window.MinimumHeight = minHeight;
+
+            // Only apply position if we have valid stored coordinates
+            if (!double.IsNaN(x) && !double.IsNaN(y))
+            {
                 window.X = x;
-
-            if (!double.IsNaN(y))
                 window.Y = y;
+            }
 
             // Save whenever size or position changes
             window.SizeChanged += (_, _) =>

@@ -35,7 +35,7 @@
                      2 = call queue
                      3 = filters
                      4 = theme -->
-                <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto"
+                <Grid RowDefinitions="Auto,Auto,Auto,*,Auto"
                       ColumnDefinitions="*">
 
                     <!-- HEADER CARD -->
@@ -91,121 +91,134 @@
                     <!-- CONNECTION CARD -->
                     <Border
                         Grid.Row="1"
-                        Padding="12"
+                        Padding="10"
                         BackgroundColor="{AppThemeBinding Light=#f9fafb, Dark=#020617}"
                         StrokeThickness="1"
                         StrokeShape="RoundRectangle 16"
                         Margin="0,0,0,12">
 
-                        <!-- 0=title, 1=description, 2=server entry, 3=username, 4=password, 5=buttons, 6=status -->
-                        <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto"
-                              ColumnDefinitions="*">
+                        <!-- 0=title, 1=description, 2=fields (username/password + server), 3=buttons, 4=status -->
+                        <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto"
+                              ColumnDefinitions="*"
+                              RowSpacing="6">
 
                             <!-- Title -->
                             <Label
                                 Grid.Row="0"
                                 Text="Connection"
-                                FontSize="16"
                                 FontAttributes="Bold"
-                                Margin="0,0,0,8"
-                                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                                FontSize="16"
+                                TextColor="{AppThemeBinding Light=#111827, Dark=White}" />
 
                             <!-- Description -->
-                            <VerticalStackLayout Grid.Row="1" Spacing="4">
-                                <Label
-                                    Text="Choose which server the app connects to."
-                                    FontSize="12"
-                                    TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" />
-                            </VerticalStackLayout>
+                            <Label
+                                Grid.Row="1"
+                                Margin="0,0,0,4"
+                                Text="Choose which server the app connects to."
+                                FontSize="12"
+                                TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" />
 
-                            <!-- Server URL entry -->
-                            <Grid
-                                Grid.Row="2"
-                                ColumnDefinitions="*"
-                                ColumnSpacing="8"
-                                VerticalOptions="Center">
+                            <!-- Fields: username + password (same row) and server url (row below) -->
+                            <Grid Grid.Row="2"
+                                  RowDefinitions="Auto,Auto"
+                                  ColumnDefinitions="*"
+                                  RowSpacing="4">
 
-                                <Entry
-                                    Grid.Column="0"
-                                    Text="{Binding ServerUrl}"
-                                    Placeholder="Server url (for example https://app.joesscanner.com)"
-                                    FontSize="13" />
-                            </Grid>
+                                <!-- Username + Password row -->
+                                <Grid Grid.Row="0"
+                                      ColumnDefinitions="Auto,*,Auto,*,Auto"
+                                      ColumnSpacing="6">
 
-                            <!-- Basic auth username -->
-                            <VerticalStackLayout Grid.Row="3"
-                                                 Spacing="4"
-                                                 Margin="0,8,0,0">
-                                <Label
-                                    Text="Basic auth username"
-                                    FontSize="12"
-                                    TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" />
-                                <Entry
-                                    Text="{Binding BasicAuthUsername}"
-                                    Placeholder="Username"
-                                    FontSize="13" />
-                            </VerticalStackLayout>
-
-                            <!-- Basic auth password + Show/Hide button -->
-                            <Grid
-                                Grid.Row="4"
-                                ColumnDefinitions="*,Auto"
-                                ColumnSpacing="8"
-                                Margin="0,8,0,0">
-
-                                <VerticalStackLayout Grid.Column="0" Spacing="4">
+                                    <!-- Username label -->
                                     <Label
-                                        Text="Basic auth password"
+                                        Grid.Column="0"
+                                        Text="Username"
                                         FontSize="12"
-                                        TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" />
+                                        VerticalOptions="Center"
+                                        TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+
+                                    <!-- Username entry -->
                                     <Entry
+                                        Grid.Column="1"
+                                        Text="{Binding BasicAuthUsername}"
+                                        Placeholder="Optional"
+                                        FontSize="12"
+                                        HeightRequest="30" />
+
+                                    <!-- Password label -->
+                                    <Label
+                                        Grid.Column="2"
+                                        Text="Password"
+                                        FontSize="12"
+                                        VerticalOptions="Center"
+                                        TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+
+                                    <!-- Password entry -->
+                                    <Entry
+                                        Grid.Column="3"
                                         Text="{Binding BasicAuthPassword}"
-                                        Placeholder="Password"
+                                        Placeholder="Optional"
                                         IsPassword="{Binding IsBasicAuthPasswordHidden}"
-                                        FontSize="13" />
-                                </VerticalStackLayout>
+                                        FontSize="12"
+                                        HeightRequest="30"
+                                        Margin="0,0,4,0" />
 
-                                <Button
-                                    Grid.Column="1"
-                                    Text="{Binding BasicAuthPasswordToggleText}"
-                                    Command="{Binding ToggleBasicAuthPasswordVisibilityCommand}"
-                                    VerticalOptions="End"
-                                    Style="{StaticResource SecondaryPillButtonStyle}" />
+                                    <!-- Show/Hide button -->
+                                    <Button
+                                        Grid.Column="4"
+                                        Text="{Binding BasicAuthPasswordToggleText}"
+                                        Command="{Binding ToggleBasicAuthPasswordVisibilityCommand}"
+                                        Style="{StaticResource SecondaryPillButtonStyle}"
+                                        VerticalOptions="Center" />
+
+                                </Grid>
+
+                                <!-- Server URL row with buttons on the right -->
+                                <Grid Grid.Row="1"
+                                      ColumnDefinitions="Auto,*,Auto"
+                                      ColumnSpacing="8"
+                                      VerticalOptions="Center">
+
+                                    <!-- Server label -->
+                                    <Label
+                                        Grid.Column="0"
+                                        Text="Server"
+                                        FontSize="12"
+                                        VerticalOptions="Center" />
+
+                                    <!-- Server URL entry -->
+                                    <Entry
+                                        Grid.Column="1"
+                                        Text="{Binding ServerUrl}"
+                                        Placeholder="https://app.joesscanner.com"
+                                        FontSize="12"
+                                        HeightRequest="28"
+                                        VerticalOptions="Center" />
+
+                                    <!-- Buttons to the right -->
+                                    <HorizontalStackLayout
+                                        Grid.Column="2"
+                                        Spacing="6"
+                                        VerticalOptions="Center">
+
+                                        <Button
+                                            Text="Joe's server"
+                                            Command="{Binding ResetServerCommand}"
+                                            Style="{StaticResource SecondaryPillButtonStyle}" />
+
+                                        <Button
+                                            Text="Validate"
+                                            Command="{Binding ValidateServerCommand}"
+                                            Style="{StaticResource PillButtonStyle}" />
+
+                                    </HorizontalStackLayout>
+                                </Grid>
                             </Grid>
-
-                            <!-- Buttons: Joe's server reset + Validate -->
-                            <HorizontalStackLayout
-                                Grid.Row="5"
-                                Spacing="8"
-                                Margin="0,12,0,0">
-
-                                <Button
-                                    Text="Joe's server"
-                                    Command="{Binding ResetServerCommand}"
-                                    Style="{StaticResource SecondaryPillButtonStyle}" />
-
-                                <Button
-                                    Text="Validate"
-                                    Command="{Binding ValidateServerCommand}"
-                                    Style="{StaticResource PillButtonStyle}">
-                                    <Button.Triggers>
-                                        <!-- While validating: change text and disable button -->
-                                        <DataTrigger
-                                            TargetType="Button"
-                                            Binding="{Binding IsValidatingServer}"
-                                            Value="True">
-                                            <Setter Property="Text" Value="Validating..." />
-                                            <Setter Property="IsEnabled" Value="False" />
-                                        </DataTrigger>
-                                    </Button.Triggers>
-                                </Button>
-
-                            </HorizontalStackLayout>
 
                             <!-- Inline validation status -->
                             <Label
-                                Grid.Row="6"
-                                Margin="0,8,0,0"
+                                Grid.Row="4"
+                                Margin="0,4,0,0"
                                 FontSize="11"
                                 IsVisible="{Binding HasServerValidationResult}"
                                 Text="{Binding ServerValidationMessage}">
@@ -214,22 +227,28 @@
                                     <!-- Error: red -->
                                     <DataTrigger
                                         TargetType="Label"
-                                        Binding="{Binding ServerValidationIsError}"
+                                        Binding="{Binding IsServerValidationError}"
                                         Value="True">
-                                        <Setter Property="TextColor" Value="#b91c1c" />
+                                        <Setter
+                                            Property="TextColor"
+                                            Value="#ef4444" />
                                     </DataTrigger>
-                                    <!-- Non error: green -->
+
+                                    <!-- Success: green -->
                                     <DataTrigger
                                         TargetType="Label"
-                                        Binding="{Binding ServerValidationIsError}"
+                                        Binding="{Binding IsServerValidationError}"
                                         Value="False">
-                                        <Setter Property="TextColor" Value="#15803d" />
+                                        <Setter
+                                            Property="TextColor"
+                                            Value="#22c55e" />
                                     </DataTrigger>
                                 </Label.Triggers>
                             </Label>
 
                         </Grid>
                     </Border>
+
 
                     <!-- CALL QUEUE CARD -->
                     <Border
@@ -334,8 +353,7 @@
                             <CollectionView
                                 x:Name="FiltersList"
                                 ItemsSource="{Binding FilterRules}"
-                                HeightRequest="260"
-                                VerticalOptions="Start"
+                                VerticalOptions="FillAndExpand"
                                 SelectionMode="None">
 
                                 <CollectionView.ItemsLayout>
@@ -358,56 +376,104 @@
 
                                             <!-- Mute "button" -->
                                             <Border Grid.Column="1"
-                                                Stroke="{AppThemeBinding Light=#d1d5db, Dark=#4b5563}"
-                                                StrokeThickness="1"
-                                                StrokeShape="RoundRectangle 4"
-                                                Padding="5,4,5,2"
-                                                HorizontalOptions="Center"
-                                                VerticalOptions="Center">
+                                                    Stroke="{AppThemeBinding Light=#d1d5db, Dark=#4b5563}"
+                                                    StrokeThickness="1"
+                                                    StrokeShape="RoundRectangle 4"
+                                                    Padding="5,4,5,2"
+                                                    HorizontalOptions="Center"
+                                                    VerticalOptions="Center"
+                                                    BackgroundColor="Transparent">
+
                                                 <Border.GestureRecognizers>
                                                     <TapGestureRecognizer
                                                         Tapped="OnMuteFilterTapped"
                                                         CommandParameter="{Binding}" />
                                                 </Border.GestureRecognizers>
 
-                                                <Label Text="Mute"
-                                                   FontSize="10"
-                                                   HorizontalOptions="Center"
-                                                   VerticalOptions="Center" />
+                                                <Label FontSize="10"
+                                                       HorizontalOptions="Center"
+                                                       VerticalOptions="Center">
+                                                    <Label.Triggers>
+                                                        <!-- When muted, show Unmute -->
+                                                        <DataTrigger TargetType="Label"
+                                                                     Binding="{Binding IsMuted}"
+                                                                     Value="True">
+                                                            <Setter Property="Text" Value="Unmute" />
+                                                        </DataTrigger>
+                                                        <!-- When not muted, show Mute -->
+                                                        <DataTrigger TargetType="Label"
+                                                                     Binding="{Binding IsMuted}"
+                                                                     Value="False">
+                                                            <Setter Property="Text" Value="Mute" />
+                                                        </DataTrigger>
+                                                    </Label.Triggers>
+                                                </Label>
 
                                                 <Border.Triggers>
+                                                    <!-- Muted = yellow -->
                                                     <DataTrigger TargetType="Border"
-                                                         Binding="{Binding IsMuted}"
-                                                         Value="True">
+                                                                 Binding="{Binding IsMuted}"
+                                                                 Value="True">
                                                         <Setter Property="BackgroundColor" Value="#f59e0b" />
+                                                    </DataTrigger>
+
+                                                    <!-- Not muted = clear -->
+                                                    <DataTrigger TargetType="Border"
+                                                                 Binding="{Binding IsMuted}"
+                                                                 Value="False">
+                                                        <Setter Property="BackgroundColor" Value="Transparent" />
                                                     </DataTrigger>
                                                 </Border.Triggers>
                                             </Border>
 
                                             <!-- Disable "button" -->
                                             <Border Grid.Column="2"
-                                                Stroke="{AppThemeBinding Light=#d1d5db, Dark=#4b5563}"
-                                                StrokeThickness="1"
-                                                StrokeShape="RoundRectangle 4"
-                                                Padding="5,4,5,2"
-                                                HorizontalOptions="Center"
-                                                VerticalOptions="Center">
+                                                    Stroke="{AppThemeBinding Light=#d1d5db, Dark=#4b5563}"
+                                                    StrokeThickness="1"
+                                                    StrokeShape="RoundRectangle 4"
+                                                    Padding="5,4,5,2"
+                                                    HorizontalOptions="Center"
+                                                    VerticalOptions="Center"
+                                                    BackgroundColor="Transparent">
+
                                                 <Border.GestureRecognizers>
                                                     <TapGestureRecognizer
                                                         Tapped="OnDisableFilterTapped"
                                                         CommandParameter="{Binding}" />
                                                 </Border.GestureRecognizers>
 
-                                                <Label Text="Disable"
-                                                   FontSize="10"
-                                                   HorizontalOptions="Center"
-                                                   VerticalOptions="Center" />
+                                                <Label FontSize="10"
+                                                       HorizontalOptions="Center"
+                                                       VerticalOptions="Center">
+                                                    <Label.Triggers>
+                                                        <!-- When disabled, show Enable -->
+                                                        <DataTrigger TargetType="Label"
+                                                                     Binding="{Binding IsDisabled}"
+                                                                     Value="True">
+                                                            <Setter Property="Text" Value="Enable" />
+                                                        </DataTrigger>
+                                                        <!-- When not disabled, show Disable -->
+                                                        <DataTrigger TargetType="Label"
+                                                                     Binding="{Binding IsDisabled}"
+                                                                     Value="False">
+                                                            <Setter Property="Text" Value="Disable" />
+                                                        </DataTrigger>
+                                                    </Label.Triggers>
+                                                </Label>
 
                                                 <Border.Triggers>
+                                                    <!-- Disabled = red -->
                                                     <DataTrigger TargetType="Border"
-                                                         Binding="{Binding IsDisabled}"
-                                                         Value="True">
+                                                                 Binding="{Binding IsDisabled}"
+                                                                 Value="True">
                                                         <Setter Property="BackgroundColor" Value="#ef4444" />
+                                                    </DataTrigger>
+
+                                                    <!-- Enabled = clear -->
+                                                    <DataTrigger TargetType="Border"
+                                                                 Binding="{Binding IsDisabled}"
+                                                                 Value="False">
+                                                        <Setter Property="BackgroundColor" Value="Transparent" />
                                                     </DataTrigger>
                                                 </Border.Triggers>
                                             </Border>
