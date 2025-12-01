@@ -63,7 +63,13 @@ namespace JoesScanner.Services
             // so we only show calls that arrive after the user connects.
             _seenIds.Clear();
             _idsMissingTranscription.Clear();
+
+            // We still skip the first non-empty batch so we do not backfill history.
             var skipInitialBatch = true;
+
+            // Tracks whether we have already reported a "connected but idle" heartbeat
+            // for this connection lifetime.
+            var hasReportedIdleConnection = false;
 
             while (!cancellationToken.IsCancellationRequested)
             {
@@ -138,18 +144,52 @@ namespace JoesScanner.Services
                     continue;
                 }
 
-
+                // If there are no rows, we may still want to signal "connected but idle".
                 if (rows == null || rows.Count == 0)
                 {
+                    // First successful but empty poll after starting: tell the UI that we
+                    // are connected, even though there are no calls yet.
+                    if (!hasReportedIdleConnection)
+                    {
+                        hasReportedIdleConnection = true;
+
+                        yield return new CallItem
+                        {
+                            Timestamp = DateTime.Now,
+                            Talkgroup = "HEARTBEAT",
+                            Transcription = "Connected; waiting for calls.",
+                            AudioUrl = string.Empty
+                        };
+                    }
+
                     await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
                     continue;
                 }
 
-                // For the first poll after connect, we only seed _seenIds,
-                // but we do NOT yield any calls. This prevents a backlog
-                // from populating on connect.
-                var skipYieldForThisBatch = skipInitialBatch;
-                skipInitialBatch = false;
+                // At this point we have a non-empty set of rows.
+                // Decide whether this is the initial backlog batch we want to skip.
+                bool skipYieldForThisBatch = false;
+
+                if (skipInitialBatch)
+                {
+                    // First non-empty successful poll after starting: also tell the UI
+                    // we are connected even though we are about to skip this backlog.
+                    if (!hasReportedIdleConnection)
+                    {
+                        hasReportedIdleConnection = true;
+
+                        yield return new CallItem
+                        {
+                            Timestamp = DateTime.Now,
+                            Talkgroup = "HEARTBEAT",
+                            Transcription = "Connected; waiting for calls.",
+                            AudioUrl = string.Empty
+                        };
+                    }
+
+                    skipYieldForThisBatch = true;
+                    skipInitialBatch = false;
+                }
 
                 foreach (var r in rows)
                 {
@@ -302,6 +342,7 @@ namespace JoesScanner.Services
                 await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
             }
         }
+
         private string ApplyBasicAuthToAudioUrl(string audioUrl, string baseUrl)
         {
             try

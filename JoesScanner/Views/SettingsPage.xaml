@@ -47,7 +47,7 @@
                         StrokeShape="RoundRectangle 16"
                         Margin="0,0,0,12">
 
-                        <Grid ColumnDefinitions="*,Auto,Auto"
+                        <Grid ColumnDefinitions="*,Auto,Auto,Auto"
                               VerticalOptions="Center">
 
                             <VerticalStackLayout Grid.Column="0" Spacing="2">
@@ -85,6 +85,12 @@
                                 Text="Close"
                                 Style="{StaticResource SecondaryPillButtonStyle}"
                                 Clicked="OnBackClicked" />
+                            <!-- Log button -->
+                            <Button
+                                Grid.Column="3"
+                                Text="Log"
+                                Style="{StaticResource SecondaryPillButtonStyle}"
+                                Clicked="OnLogClicked" />
                         </Grid>
                     </Border>
 

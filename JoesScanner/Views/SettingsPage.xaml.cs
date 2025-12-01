@@ -1,5 +1,6 @@
 using System;
 using JoesScanner.Models;
+using JoesScanner.Services;
 using JoesScanner.ViewModels;
 using Microsoft.Maui.Controls;
 
@@ -57,6 +58,16 @@ namespace JoesScanner.Views
                     // Ignore navigation failures.
                 }
             }
+        }
+
+        private async void OnLogClicked(object sender, EventArgs e)
+        {
+            var lines = AppLog.GetSnapshot(500);
+            var text = lines.Length == 0
+                ? "No log entries yet."
+                : string.Join(Environment.NewLine, lines);
+
+            await DisplayAlert("Log", text, "Close");
         }
 
         /// <summary>

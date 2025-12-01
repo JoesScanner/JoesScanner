@@ -336,8 +336,12 @@ namespace JoesScanner.ViewModels
 
                 _lastQueueEvent = value ?? string.Empty;
                 OnPropertyChanged();
+
+                // Also push into the circular log
+                AppLog.Add(_lastQueueEvent);
             }
         }
+
 
         // Whether the "Calls waiting" indicator should be visible in the UI.
         // Always visible whenever audio is on, regardless of the count.
@@ -802,9 +806,23 @@ namespace JoesScanner.ViewModels
                                 // Generic connectivity/server error row.
                                 SetConnectionStatus(ConnectionStatus.ServerUnreachable);
                             }
+                            else if (string.Equals(call.Talkgroup, "HEARTBEAT", StringComparison.OrdinalIgnoreCase))
+                            {
+                                // Synthetic "connected but idle" row from CallStreamService.
+                                if (_connectionStatus == ConnectionStatus.Connecting ||
+                                    _connectionStatus == ConnectionStatus.AuthFailed ||
+                                    _connectionStatus == ConnectionStatus.ServerUnreachable ||
+                                    _connectionStatus == ConnectionStatus.Error)
+                                {
+                                    SetConnectionStatus(ConnectionStatus.Connected);
+                                }
+
+                                // Do not insert this control row into the Calls collection.
+                                return;
+                            }
                             else
                             {
-                                // Any normal (non AUTH/ERROR) call means we are successfully talking
+                                // Any normal (non AUTH/ERROR/HEARTBEAT) call means we are successfully talking
                                 // to the server, so move from Connecting/Error to Connected.
                                 if (_connectionStatus == ConnectionStatus.Connecting ||
                                     _connectionStatus == ConnectionStatus.AuthFailed ||

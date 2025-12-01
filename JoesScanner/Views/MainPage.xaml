@@ -45,39 +45,6 @@
                     Padding="16,16,16,8"
                     ColumnSpacing="16">
 
-                    <!-- Connection status banners -->
-                    <Border
-                        Grid.Row="0"
-                        Grid.ColumnSpan="3"
-                        IsVisible="{Binding ConnectionStatusIsWarning}"
-                        BackgroundColor="#facc15"
-                        Padding="6"
-                        StrokeThickness="0"
-                        StrokeShape="RoundRectangle 6"
-                        Margin="0,0,0,4">
-                        <Label
-                            Text="{Binding ConnectionStatusText}"
-                            TextColor="Black"
-                            FontSize="12"
-                            HorizontalOptions="Center" />
-                    </Border>
-
-                    <Border
-                        Grid.Row="0"
-                        Grid.ColumnSpan="3"
-                        IsVisible="{Binding ConnectionStatusIsError}"
-                        BackgroundColor="#dc2626"
-                        Padding="6"
-                        StrokeThickness="0"
-                        StrokeShape="RoundRectangle 6"
-                        Margin="0,0,0,4">
-                        <Label
-                            Text="{Binding ConnectionStatusText}"
-                            TextColor="White"
-                            FontSize="12"
-                            HorizontalOptions="Center" />
-                    </Border>
-
                     <!-- Logo and title -->
                     <HorizontalStackLayout
                         Grid.Row="1"
@@ -112,43 +79,16 @@
                                         CornerRadius="4"
                                         VerticalOptions="Center" />
 
-                                    <!-- Text block with connection and queue status -->
-                                    <StackLayout
-                                        Orientation="Vertical"
-                                        Spacing="0"
-                                        VerticalOptions="Center">
-
-                                        <!-- Connection status -->
-                                        <Label
-                                            Text="{Binding ConnectionStatusText}"
-                                            FontSize="12"
-                                            VerticalOptions="Center" />
-
-                                        <!-- Queue status -->
-                                        <Label
-                                            Text="{Binding QueueStatusText}"
-                                            FontSize="10"
-                                            Opacity="0.8"
-                                            VerticalOptions="Center" />
-
-                                        <!-- Debug queue event -->
-                                        <Label
-                                            Text="{Binding LastQueueEvent}"
-                                            FontSize="9"
-                                            Opacity="0.6"
-                                            LineBreakMode="TailTruncation"
-                                            MaxLines="1"
-                                            VerticalOptions="Center" />
-                                    </StackLayout>
+                                    <!-- Connection status text only -->
+                                    <Label
+                                        Text="{Binding ConnectionStatusText}"
+                                        FontSize="12"
+                                        VerticalOptions="Center" />
                                 </StackLayout>
 
+
                                 <!-- Tagline should be 'Server: <url>' from TaglineText -->
-                                <Label
-                                    Text="{Binding TaglineText}"
-                                    FontSize="12"
-                                    Margin="0,2,0,0"
-                                    TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
-                                    LineBreakMode="CharacterWrap" />
+
                             </VerticalStackLayout>
                         </HorizontalStackLayout>
                     </HorizontalStackLayout>
