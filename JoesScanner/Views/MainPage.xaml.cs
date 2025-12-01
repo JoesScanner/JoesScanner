@@ -30,7 +30,7 @@ namespace JoesScanner.Views
         {
             try
             {
-                await Launcher.Default.OpenAsync("https://www.joesscanner.com");
+                await Launcher.Default.OpenAsync("https://www.joesscanner.com/products/one-time-donation/");
             }
             catch
             {

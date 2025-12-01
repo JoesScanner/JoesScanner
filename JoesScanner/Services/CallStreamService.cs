@@ -105,9 +105,17 @@ namespace JoesScanner.Services
                 {
                     rows = await FetchLatestAsync(callsUrl, cancellationToken);
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException ex) when (cancellationToken.IsCancellationRequested)
                 {
+                    // Caller requested cancellation (disconnect, shutdown, etc.)
+                    Debug.WriteLine("[CallStreamService] Streaming cancelled by caller.");
                     yield break;
+                }
+                catch (OperationCanceledException ex)
+                {
+                    // Most likely an HttpClient timeout or similar; treat as recoverable
+                    errorMessage = "The connection to the audio server timed out. The app will retry automatically.";
+                    Debug.WriteLine($"[CallStreamService] [Timeout] {ex}");
                 }
                 catch (CallStreamAuthException ex)
                 {
@@ -125,6 +133,7 @@ namespace JoesScanner.Services
                     errorMessage = ex.Message;
                     Debug.WriteLine($"[CallStreamService] [UnexpectedError] {ex}");
                 }
+
 
                 if (errorMessage != null)
                 {

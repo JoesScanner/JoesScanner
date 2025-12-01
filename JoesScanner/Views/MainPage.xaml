@@ -45,55 +45,66 @@
                     Padding="16,16,16,8"
                     ColumnSpacing="16">
 
-                    <!-- Logo and title -->
+                    <!-- Row 0: logo + title -->
                     <HorizontalStackLayout
-                        Grid.Row="1"
+                        Grid.Row="0"
                         Grid.Column="0"
                         Spacing="8"
                         VerticalOptions="Center">
 
-                        <HorizontalStackLayout
-                            Spacing="8"
+                        <!-- Logo to the left of title -->
+                        <Image
+                            Source="logo.png"
+                            HeightRequest="40"
+                            WidthRequest="40"
+                            VerticalOptions="Center"
+                            Aspect="AspectFit" />
+
+                        <VerticalStackLayout
+                            Spacing="0"
                             VerticalOptions="Center">
 
-                            <VerticalStackLayout
-                                Spacing="2"
-                                VerticalOptions="Center">
+                            <Label
+                                Text="JoesScanner"
+                                FontSize="25"
+                                FontAttributes="Bold"
+                                TextColor="{AppThemeBinding Light=#111827, Dark=White}" />
 
-                                <Label
-                                    Text="JoesScanner"
-                                    FontSize="22"
-                                    FontAttributes="Bold"
-                                    TextColor="{AppThemeBinding Light=#111827, Dark=White}" />
-
-                                <StackLayout
-                                    Orientation="Horizontal"
-                                    Spacing="6"
-                                    VerticalOptions="Center">
-
-                                    <!-- Connection dot -->
-                                    <BoxView
-                                        WidthRequest="8"
-                                        HeightRequest="8"
-                                        Color="{Binding ConnectionStatusColor}"
-                                        CornerRadius="4"
-                                        VerticalOptions="Center" />
-
-                                    <!-- Connection status text only -->
-                                    <Label
-                                        Text="{Binding ConnectionStatusText}"
-                                        FontSize="12"
-                                        VerticalOptions="Center" />
-                                </StackLayout>
-
-
-                                <!-- Tagline should be 'Server: <url>' from TaglineText -->
-
-                            </VerticalStackLayout>
-                        </HorizontalStackLayout>
+                            <!-- Optional: Tagline 'Server: <url>' from TaglineText -->
+                            <Label
+                                Text="Hear the Action, Know the Story!"
+                                FontSize="10"
+                                TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+                                HorizontalOptions="Start"
+                                VerticalOptions="Center" />
+                            
+                        </VerticalStackLayout>
                     </HorizontalStackLayout>
 
-                    <!-- Row 1 right side: Connect/Disconnect + Settings -->
+                    <!-- Row 1 left: connection status (dot + text) -->
+                    <StackLayout
+                        Grid.Row="1"
+                        Grid.Column="0"
+                        Orientation="Horizontal"
+                        Spacing="6"
+                        VerticalOptions="Center">
+
+                        <!-- Connection dot -->
+                        <BoxView
+                            WidthRequest="8"
+                            HeightRequest="8"
+                            Color="{Binding ConnectionStatusColor}"
+                            CornerRadius="4"
+                            VerticalOptions="Center" />
+
+                        <!-- Connection status text only -->
+                        <Label
+                            Text="{Binding ConnectionStatusText}"
+                            FontSize="12"
+                            VerticalOptions="Center" />
+                    </StackLayout>
+
+                    <!-- Row 1 right: buttons aligned to the end -->
                     <HorizontalStackLayout
                         Grid.Row="1"
                         Grid.Column="2"
@@ -134,11 +145,11 @@
                             Margin="4,0,0,0" />
                     </HorizontalStackLayout>
 
-                    <!-- Second header row: audio, speed, calls waiting -->
+                    <!-- Row 2: audio, speed, calls waiting -->
                     <HorizontalStackLayout
                         Grid.Row="2"
                         Grid.Column="0"
-                        Grid.ColumnSpan="2"
+                        Grid.ColumnSpan="3"
                         Spacing="12"
                         VerticalOptions="Center">
 
