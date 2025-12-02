@@ -1,7 +1,10 @@
 namespace JoesScanner.Services
 {
+    // Concrete implementation of ISettingsService backed by Preferences storage.
+    // Provides typed getters and setters for all user-configurable settings.
     public class SettingsService : ISettingsService
     {
+        // Preference keys.
         private const string ServerUrlKey = "ServerUrl";
         private const string BasicAuthUserKey = "BasicAuthUser";
         private const string BasicAuthPassKey = "BasicAuthPass";
@@ -12,31 +15,39 @@ namespace JoesScanner.Services
         private const string TalkgroupFilterKey = "TalkgroupFilter";
         private const string ThemeModeKey = "ThemeMode";
 
+        // Default values.
         private const string DefaultServerUrl = "https://app.joesscanner.com";
 
+        // Base URL of the Trunking Recorder or audio server.
         public string ServerUrl
         {
             get => Preferences.Get(ServerUrlKey, DefaultServerUrl);
             set => Preferences.Set(ServerUrlKey, string.IsNullOrWhiteSpace(value) ? DefaultServerUrl : value);
         }
+
+        // Optional basic auth username for the TR server.
         public string BasicAuthUsername
         {
             get => Preferences.Get(BasicAuthUserKey, string.Empty);
             set => Preferences.Set(BasicAuthUserKey, value ?? string.Empty);
         }
 
+        // Optional basic auth password for the TR server.
         public string BasicAuthPassword
         {
             get => Preferences.Get(BasicAuthPassKey, string.Empty);
             set => Preferences.Set(BasicAuthPassKey, value ?? string.Empty);
         }
 
+        // When true, calls auto-play as they arrive.
         public bool AutoPlay
         {
             get => Preferences.Get(AutoPlayKey, false);
             set => Preferences.Set(AutoPlayKey, value);
         }
 
+        // Maximum number of calls to keep in the visible queue.
+        // Value is clamped to a range of 10–50 before being stored.
         public int MaxCalls
         {
             get => Preferences.Get(MaxCallsKey, 20); // default 20
@@ -44,7 +55,7 @@ namespace JoesScanner.Services
             {
                 var v = value;
 
-                // Clamp to 10–50
+                // Clamp to 10–50.
                 if (v < 10) v = 10;
                 if (v > 50) v = 50;
 
@@ -52,6 +63,9 @@ namespace JoesScanner.Services
             }
         }
 
+        // Scroll behavior:
+        //   "Down" = newest at bottom
+        //   "Up"   = newest at top
         public string ScrollDirection
         {
             get => Preferences.Get(ScrollDirectionKey, "Down");
@@ -62,6 +76,8 @@ namespace JoesScanner.Services
             }
         }
 
+        // Optional comma-separated list of receiver names to filter on.
+        // Empty string means no receiver filtering.
         public string ReceiverFilter
         {
             get => Preferences.Get(ReceiverFilterKey, string.Empty);
@@ -72,6 +88,7 @@ namespace JoesScanner.Services
             }
         }
 
+        // Optional talkgroup filter string.
         public string TalkgroupFilter
         {
             get => Preferences.Get(TalkgroupFilterKey, string.Empty);
@@ -82,6 +99,10 @@ namespace JoesScanner.Services
             }
         }
 
+        // Theme preference:
+        //   "System" = follow device theme
+        //   "Light"  = force light mode
+        //   "Dark"   = force dark mode
         public string ThemeMode
         {
             get => Preferences.Get(ThemeModeKey, "System");

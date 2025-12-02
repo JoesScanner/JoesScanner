@@ -12,23 +12,28 @@ using AStream = Android.Media.Stream;
 
 namespace JoesScanner.Services
 {
+    // Cross-platform audio playback service used by the app to play call audio.
+    // Uses platform-specific media players on Windows and Android, with optional playback speed control.
     public class AudioPlaybackService : IAudioPlaybackService
     {
 #if WINDOWS
+        // Windows media player instance used for playback on WinUI.
         private WinMediaPlayer? _player;
 #endif
 
 #if ANDROID
+        // Android media player instance used for playback on Android devices.
         private MediaPlayer? _androidPlayer;
 #endif
 
-        // Old style calls use this: always normal speed
+        // Legacy overload that plays at normal speed (1.0x).
         public Task PlayAsync(string audioUrl, CancellationToken cancellationToken = default)
         {
             return PlayAsync(audioUrl, 1.0, cancellationToken);
         }
 
-        // New overload with playbackRate
+        // Plays the given audio URL at the specified playbackRate.
+        // playbackRate is clamped to a minimum of 1.0 if a non-positive value is provided.
         public async Task PlayAsync(string audioUrl, double playbackRate, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(audioUrl))
@@ -46,6 +51,7 @@ namespace JoesScanner.Services
 #endif
         }
 
+        // Stops any active playback and releases platform-specific media player resources.
         public Task StopAsync()
         {
 #if WINDOWS
@@ -83,6 +89,8 @@ namespace JoesScanner.Services
         }
 
 #if WINDOWS
+        // Plays the audio URL on Windows using WinUI's MediaPlayer with the specified playbackRate.
+        // The returned task completes when playback ends or is canceled.
         private Task PlayOnWindowsAsync(string audioUrl, double playbackRate, CancellationToken cancellationToken)
         {
             var tcs = new TaskCompletionSource();
@@ -105,14 +113,14 @@ namespace JoesScanner.Services
 
                 _player = player;
 
-                // Apply playback rate (1.0 = normal)
+                // Apply playback rate (1.0 = normal).
                 try
                 {
                     player.PlaybackSession.PlaybackRate = playbackRate;
                 }
                 catch
                 {
-                    // If rate cannot be set, ignore and play at normal speed
+                    // If rate cannot be set, ignore and play at normal speed.
                 }
 
                 player.MediaEnded += (sender, args) =>
@@ -164,6 +172,8 @@ namespace JoesScanner.Services
 #endif
 
 #if ANDROID
+        // Plays the audio URL on Android using MediaPlayer with the specified playbackRate.
+        // The returned task completes when playback ends, errors, or is canceled.
         private Task PlayOnAndroidAsync(string audioUrl, double playbackRate, CancellationToken cancellationToken)
         {
             var tcs = new TaskCompletionSource();
@@ -172,7 +182,7 @@ namespace JoesScanner.Services
             {
                 try
                 {
-                    // Stop any existing playback
+                    // Stop any existing playback and dispose prior player instance.
                     try
                     {
                         _androidPlayer?.Stop();
@@ -205,7 +215,7 @@ namespace JoesScanner.Services
 #pragma warning restore CS8604
                     player.Prepare();
 
-                    // Apply playback speed on Android M and above using PlaybackParams
+                    // Apply playback speed on Android M and above using PlaybackParams.
                     try
                     {
                         if (Build.VERSION.SdkInt >= BuildVersionCodes.M)
@@ -219,14 +229,14 @@ namespace JoesScanner.Services
                     }
                     catch
                     {
-                        // If speed cannot be set, fall back to normal
+                        // If speed cannot be set, fall back to normal.
                     }
 
                     player.Start();
 
                     _androidPlayer = player;
 
-                    // When playback completes, clean up and signal completion
+                    // When playback completes, clean up and signal completion.
                     player.Completion += (sender, args) =>
                     {
                         try
@@ -272,7 +282,7 @@ namespace JoesScanner.Services
                 }
                 catch
                 {
-                    // Swallow playback errors for now
+                    // Swallow playback errors for now and report completion.
                     tcs.TrySetResult();
                 }
             }, cancellationToken);

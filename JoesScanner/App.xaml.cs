@@ -10,18 +10,14 @@ namespace JoesScanner
             InitializeComponent();
         }
 
-        // Note the ? on IActivationState to match the base signature and remove the nullability warning
         protected override Window CreateWindow(IActivationState? activationState)
         {
-            // Standard MAUI window hosting your AppShell
             var window = new Window(new AppShell());
 
 #if WINDOWS
-            // Default size if we have no stored values yet
             const double defaultWidth = 1100;
             const double defaultHeight = 720;
 
-            // Minimum size so users can resize larger but not shrink to unusable
             const double minWidth = 900;
             const double minHeight = 600;
 
@@ -31,11 +27,9 @@ namespace JoesScanner
             var x = Preferences.Get("WindowX", double.NaN);
             var y = Preferences.Get("WindowY", double.NaN);
 
-            // Apply size
             window.Width = width;
             window.Height = height;
 
-            // Apply minimum size to keep layout usable, but do not restrict maximum size
             window.MinimumWidth = minWidth;
             window.MinimumHeight = minHeight;
 
@@ -46,7 +40,7 @@ namespace JoesScanner
                 window.Y = y;
             }
 
-            // Save whenever size or position changes
+            // Persist size and position on change
             window.SizeChanged += (_, _) =>
             {
                 Preferences.Set("WindowWidth", window.Width);

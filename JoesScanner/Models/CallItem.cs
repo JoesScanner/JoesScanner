@@ -1,9 +1,7 @@
 namespace JoesScanner.Models
 {
-    /// <summary>
-    /// Represents a single radio call as shown in the client UI.
-    /// All properties used in XAML bindings live here and are fed by the server API.
-    /// </summary>
+    // Represents a single radio call as shown in the client UI.
+    // All properties used in XAML bindings live here and are fed by the server API.
     public class CallItem : BindableObject
     {
         private DateTime _timestamp;
@@ -49,9 +47,7 @@ namespace JoesScanner.Models
             }
         }
 
-        /// <summary>
-        /// Timestamp of the call (local time). Comes from the server StartTime / StartTimeUTC.
-        /// </summary>
+        // Timestamp of the call (local time). Comes from the server StartTime / StartTimeUTC.
         public DateTime Timestamp
         {
             get => _timestamp;
@@ -66,9 +62,7 @@ namespace JoesScanner.Models
             }
         }
 
-        /// <summary>
-        /// Duration in seconds as reported by the server (CallDuration).
-        /// </summary>
+        // Duration in seconds as reported by the server (CallDuration).
         public double CallDurationSeconds
         {
             get => _callDurationSeconds;
@@ -83,10 +77,8 @@ namespace JoesScanner.Models
             }
         }
 
-        /// <summary>
-        /// Talkgroup display string (for example "Nampa PD 1 (1234)").
-        /// Comes from TargetLabel / TargetID.
-        /// </summary>
+        // Talkgroup display string (for example "Nampa PD 1 (1234)").
+        // Comes from TargetLabel / TargetID.
         public string Talkgroup
         {
             get => _talkgroup;
@@ -100,9 +92,7 @@ namespace JoesScanner.Models
             }
         }
 
-        /// <summary>
-        /// Source or radio ID / label for this call (SourceLabel / SourceID).
-        /// </summary>
+        // Source or radio ID / label for this call (SourceLabel / SourceID).
         public string Source
         {
             get => _source;
@@ -117,9 +107,7 @@ namespace JoesScanner.Models
             }
         }
 
-        /// <summary>
-        /// Site or system name (SiteLabel / SiteID).
-        /// </summary>
+        // Site or system name (SiteLabel / SiteID).
         public string Site
         {
             get => _site;
@@ -134,9 +122,7 @@ namespace JoesScanner.Models
             }
         }
 
-        /// <summary>
-        /// Voice receiver name (VoiceReceiver column from the server).
-        /// </summary>
+        // Voice receiver name (VoiceReceiver column from the server).
         public string VoiceReceiver
         {
             get => _voiceReceiver;
@@ -151,9 +137,7 @@ namespace JoesScanner.Models
             }
         }
 
-        /// <summary>
-        /// Transcription text as produced by the server for this call.
-        /// </summary>
+        // Transcription text as produced by the server for this call.
         public string Transcription
         {
             get => _transcription;
@@ -167,9 +151,7 @@ namespace JoesScanner.Models
             }
         }
 
-        /// <summary>
-        /// Absolute or relative audio URL for this call.
-        /// </summary>
+        // Absolute or relative audio URL for this call.
         public string AudioUrl
         {
             get => _audioUrl;
@@ -183,10 +165,8 @@ namespace JoesScanner.Models
             }
         }
 
-        /// <summary>
-        /// Debug or diagnostic information for this call, shown on a separate line.
-        /// Used for things like "No transcription from server", "No audio URL", etc.
-        /// </summary>
+        // Debug or diagnostic information for this call, shown on a separate line.
+        // Used for things like "No transcription from server", "No audio URL", etc.
         public string DebugInfo
         {
             get => _debugInfo;
@@ -201,15 +181,11 @@ namespace JoesScanner.Models
             }
         }
 
-        /// <summary>
-        /// True when there is any debug info to show.
-        /// </summary>
+        // True when there is any debug info to show.
         public bool HasDebugInfo => !string.IsNullOrWhiteSpace(DebugInfo);
 
-        /// <summary>
-        /// True for calls that have already been played and are now in history.
-        /// Used to visually de emphasize older calls in the UI.
-        /// </summary>
+        // True for calls that have already been played and are now in history.
+        // Used to visually de emphasize older calls in the UI.
         public bool IsHistory
         {
             get => _isHistory;
@@ -223,9 +199,7 @@ namespace JoesScanner.Models
             }
         }
 
-        /// <summary>
-        /// True while this call is being played back. Used for visual state only.
-        /// </summary>
+        // True while this call is being played back. Used for visual state only.
         public bool IsPlaying
         {
             get => _isPlaying;
@@ -239,34 +213,26 @@ namespace JoesScanner.Models
             }
         }
 
-        /// <summary>
-        /// Time display used in the UI. Based on the Timestamp.
-        /// </summary>
+        // Time display used in the UI, based on the Timestamp.
         public string TimeDisplay =>
             Timestamp == default
                 ? string.Empty
                 : Timestamp.ToString("h:mm:ss tt");
 
-        /// <summary>
-        /// Duration label used in the UI. Derived from CallDurationSeconds.
-        /// </summary>
+        // Duration label used in the UI, derived from CallDurationSeconds.
         public string DurationDisplay =>
             CallDurationSeconds <= 0
                 ? string.Empty
                 : $"{CallDurationSeconds:F1}s";
 
-        /// <summary>
-        /// Receiver name shown in the UI.
-        /// Prefers VoiceReceiver, falls back to Source if receiver is not set.
-        /// </summary>
+        // Receiver name shown in the UI.
+        // Prefers VoiceReceiver, falls back to Source if receiver is not set.
         public string ReceiverName =>
             string.IsNullOrWhiteSpace(VoiceReceiver)
                 ? Source
                 : VoiceReceiver;
 
-        /// <summary>
-        /// System name shown in the UI. Uses the Site value.
-        /// </summary>
+        // System name shown in the UI. Uses the Site value.
         public string SystemName => Site;
     }
 }

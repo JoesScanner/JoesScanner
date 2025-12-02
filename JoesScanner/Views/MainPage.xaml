@@ -4,7 +4,6 @@
     xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
     xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
     xmlns:vm="clr-namespace:JoesScanner.ViewModels"
-    xmlns:models="clr-namespace:JoesScanner.Models"
     x:Name="Page"
     Title="Joes Scanner"
     BackgroundColor="{AppThemeBinding Light=#f3f4f6, Dark=#020617}"
@@ -45,14 +44,13 @@
                     Padding="16,16,16,8"
                     ColumnSpacing="16">
 
-                    <!-- Row 0: logo + title -->
+                    <!-- Row 0: logo and title -->
                     <HorizontalStackLayout
                         Grid.Row="0"
                         Grid.Column="0"
                         Spacing="8"
                         VerticalOptions="Center">
 
-                        <!-- Logo to the left of title -->
                         <Image
                             Source="logo.png"
                             HeightRequest="40"
@@ -70,18 +68,16 @@
                                 FontAttributes="Bold"
                                 TextColor="{AppThemeBinding Light=#111827, Dark=White}" />
 
-                            <!-- Optional: Tagline 'Server: <url>' from TaglineText -->
                             <Label
                                 Text="Hear the Action, Know the Story!"
                                 FontSize="10"
                                 TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
                                 HorizontalOptions="Start"
                                 VerticalOptions="Center" />
-                            
                         </VerticalStackLayout>
                     </HorizontalStackLayout>
 
-                    <!-- Row 1 left: connection status (dot + text) -->
+                    <!-- Row 1 left: connection status (dot and text) -->
                     <StackLayout
                         Grid.Row="1"
                         Grid.Column="0"
@@ -89,7 +85,6 @@
                         Spacing="6"
                         VerticalOptions="Center">
 
-                        <!-- Connection dot -->
                         <BoxView
                             WidthRequest="8"
                             HeightRequest="8"
@@ -97,14 +92,13 @@
                             CornerRadius="4"
                             VerticalOptions="Center" />
 
-                        <!-- Connection status text only -->
                         <Label
                             Text="{Binding ConnectionStatusText}"
                             FontSize="12"
                             VerticalOptions="Center" />
                     </StackLayout>
 
-                    <!-- Row 1 right: buttons aligned to the end -->
+                    <!-- Row 1 right: buttons -->
                     <HorizontalStackLayout
                         Grid.Row="1"
                         Grid.Column="2"
@@ -112,14 +106,12 @@
                         VerticalOptions="Center"
                         HorizontalOptions="End">
 
-                        <!-- Jump to live button -->
                         <Button
                             Text="Jump to live"
                             Command="{Binding JumpToLiveCommand}"
                             Style="{StaticResource SecondaryPillButtonStyle}"
                             Margin="4,0,0,0" />
 
-                        <!-- Connect or Disconnect button -->
                         <Button
                             Style="{StaticResource PillButtonStyle}"
                             Margin="0,0,0,0"
@@ -137,7 +129,6 @@
                             </Button.Triggers>
                         </Button>
 
-                        <!-- Settings button -->
                         <Button
                             Text="Settings"
                             Clicked="OnSettingsTapped"
@@ -153,7 +144,7 @@
                         Spacing="12"
                         VerticalOptions="Center">
 
-                        <!-- Audio On or Off button (global audio control) -->
+                        <!-- Global audio control -->
                         <Button
                             Text="{Binding AudioButtonText}"
                             Command="{Binding ToggleAudioCommand}"
@@ -189,7 +180,7 @@
                                 TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
                         </HorizontalStackLayout>
 
-                        <!-- Calls waiting indicator to the right of the speed slider -->
+                        <!-- Calls waiting indicator -->
                         <Label
                             IsVisible="{Binding IsCallsWaitingVisible}"
                             Text="{Binding CallsWaiting, StringFormat='Calls waiting: {0}'}"
@@ -211,7 +202,6 @@
 
                     <CollectionView.ItemTemplate>
                         <DataTemplate>
-
                             <!-- Single call card -->
                             <Border
                                 Margin="0,0,0,8"
@@ -220,19 +210,16 @@
                                 StrokeThickness="1"
                                 StrokeShape="RoundRectangle 8">
 
-                                <!-- Default border stroke -->
                                 <Border.Stroke>
                                     <SolidColorBrush Color="{AppThemeBinding Light=#374151, Dark=#1f2937}" />
                                 </Border.Stroke>
 
-                                <!-- Tap anywhere on the card to replay the call -->
                                 <Border.GestureRecognizers>
                                     <TapGestureRecognizer
                                         Command="{Binding BindingContext.PlayAudioCommand, Source={x:Reference Page}}"
                                         CommandParameter="{Binding .}" />
                                 </Border.GestureRecognizers>
 
-                                <!-- Highlight / history flags -->
                                 <Border.Triggers>
                                     <DataTrigger
                                         TargetType="Border"
@@ -253,7 +240,7 @@
                                     </DataTrigger>
                                 </Border.Triggers>
 
-                                <!-- Call layout: header row + transcription + debug -->
+                                <!-- Call layout: header row, transcription, debug -->
                                 <Grid
                                     ColumnDefinitions="*,Auto"
                                     RowDefinitions="Auto,Auto,Auto">
@@ -292,15 +279,10 @@
                                         HorizontalTextAlignment="End"
                                         VerticalTextAlignment="Center"
                                         FontSize="11"
-                                        TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}">
-                                        <Label.FormattedText>
-                                            <FormattedString>
-                                                <Span Text="{Binding DurationDisplay}" />
-                                            </FormattedString>
-                                        </Label.FormattedText>
-                                    </Label>
+                                        Text="{Binding DurationDisplay}"
+                                        TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
 
-                                    <!-- Transcription row -->
+                                    <!-- Transcription -->
                                     <Label
                                         Grid.Row="1"
                                         Grid.Column="0"
@@ -309,15 +291,10 @@
                                         FontSize="12"
                                         LineBreakMode="WordWrap"
                                         TextColor="{AppThemeBinding Light=#374151, Dark=#e5e7eb}"
-                                        MaxLines="4">
-                                        <Label.FormattedText>
-                                            <FormattedString>
-                                                <Span Text="{Binding Transcription}" />
-                                            </FormattedString>
-                                        </Label.FormattedText>
-                                    </Label>
+                                        MaxLines="4"
+                                        Text="{Binding Transcription}" />
 
-                                    <!-- Debug / error info -->
+                                    <!-- Debug or error info -->
                                     <Label
                                         Grid.Row="2"
                                         Grid.Column="0"
@@ -342,19 +319,15 @@
                     RowDefinitions="Auto"
                     ColumnDefinitions="*,Auto">
 
-                    <!-- Desktop-only label -->
+                    <!-- Desktop only label -->
                     <Label
                         Grid.Row="0"
                         Grid.Column="0"
                         FontSize="11"
                         TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
                         LineBreakMode="TailTruncation"
-                        IsVisible="{OnPlatform WinUI=true, MacCatalyst=true, Android=false, iOS=false}">
-                        <Label.FormattedText>
-                            <FormattedString>
-                                <Span Text="JoesScanner desktop client" />
-                            </FormattedString>
-                        </Label.FormattedText>
+                        IsVisible="{OnPlatform WinUI=true, MacCatalyst=true, Android=false, iOS=false}"
+                        Text="JoesScanner desktop client">
                         <Label.GestureRecognizers>
                             <TapGestureRecognizer Tapped="OnSiteTapped" />
                         </Label.GestureRecognizers>

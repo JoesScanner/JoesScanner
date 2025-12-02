@@ -4,9 +4,7 @@ using Android.OS;
 
 namespace JoesScanner;
 
-/// <summary>
-/// Main Android activity for the JoesScanner MAUI app.
-/// </summary>
+// Main Android activity for the JoesScanner MAUI app.
 [Activity(
     Label = "JoesScanner",
     Theme = "@style/Maui.SplashTheme",   // Splash theme is defined in Resources/values/styles.xml
@@ -20,33 +18,28 @@ namespace JoesScanner;
         | ConfigChanges.Density)]
 public class MainActivity : MauiAppCompatActivity
 {
-    /// <summary>
-    /// Standard MAUI activity initialization.
-    /// Splash image is configured via the &lt;MauiSplashScreen&gt; entry in the .csproj.
-    /// </summary>
-    /// <param name="savedInstanceState">Saved instance state bundle.</param>
+    // Standard MAUI activity initialization.
+    // Splash image is configured via the <MauiSplashScreen> entry in the project file.
     protected override void OnCreate(Bundle? savedInstanceState)
     {
         base.OnCreate(savedInstanceState);
     }
 
-    /// <summary>
-    /// Handles the Android back button.
-    /// 
-    /// If AudioEnabled is true:
-    ///   - The activity is moved to the background
-    ///   - The process continues running so audio can keep playing
-    ///
-    /// If AudioEnabled is false:
-    ///   - Default behavior runs and the activity (and app) will close
-    ///
-    /// The AudioEnabled flag is controlled by the Audio On / Off button on the main page
-    /// and stored in Preferences under the "AudioEnabled" key.
-    /// </summary>
+    // Handles the Android back button.
+    //
+    // If AudioEnabled is true:
+    //   - The activity is moved to the background
+    //   - The process continues running so audio can keep playing
+    //
+    // If AudioEnabled is false:
+    //   - Default behavior runs and the activity (and app) will close
+    //
+    // The AudioEnabled flag is controlled by the Audio On / Off button on the main page
+    // and stored in Preferences under the "AudioEnabled" key.
     public override void OnBackPressed()
     {
         // Default value is true so that new installs behave like a radio:
-        // app keeps running in the background unless user explicitly turns audio off.
+        // app keeps running in the background unless the user explicitly turns audio off.
         var audioEnabled = Preferences.Get("AudioEnabled", true);
 
         if (audioEnabled)

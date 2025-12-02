@@ -10,8 +10,6 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-
-
 namespace JoesScanner.Services
 {
     // Polls the Trunking Recorder calljson endpoint and streams CallItem objects
@@ -22,25 +20,27 @@ namespace JoesScanner.Services
         private readonly HttpClient _httpClient;
         private readonly JsonSerializerOptions _jsonOptions;
 
-        // Mirrors DEFAULT_CONFIG["poll_batch"]
+        // Mirrors DEFAULT_CONFIG["poll_batch"] from the server.
         private const int PollBatchSize = 25;
 
-        // Track which IDs we have already shown
+        // Tracks which call IDs have already been surfaced to the UI.
         private readonly HashSet<string> _seenIds = new();
 
-        // Track call IDs that were initially missing transcription so we can
+        // Tracks call IDs that were initially missing transcription so we can
         // detect when the server later sends an updated row with text.
         private readonly HashSet<string> _idsMissingTranscription = new();
 
+        // DataTables draw counter used by the calljson endpoint.
         private int _draw = 1;
 
+        // Creates a new call stream service with an HttpClient configured for the calljson endpoint.
         public CallStreamService(ISettingsService settingsService)
         {
             _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
 
             _httpClient = new HttpClient
             {
-                // Fail fast on non-responsive servers so the UI shows an error row
+                // Fail fast on non-responsive servers so the UI shows an error row.
                 Timeout = TimeSpan.FromSeconds(5)
             };
             _httpClient.DefaultRequestHeaders.Accept.ParseAdd("application/json, text/javascript, */*; q=0.01");
@@ -56,6 +56,7 @@ namespace JoesScanner.Services
         }
 
         // Continuously polls the server and yields new calls as CallItem objects.
+        // Skips initial backlog so only new calls after connection are surfaced.
         public async IAsyncEnumerable<CallItem> GetCallStreamAsync(
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
@@ -77,12 +78,11 @@ namespace JoesScanner.Services
                 var username = _settingsService.BasicAuthUsername;
                 var usernameForLog = string.IsNullOrWhiteSpace(username) ? "(none)" : username;
 
-
                 if (string.IsNullOrWhiteSpace(baseUrl))
                 {
                     AppLog.Add("CallStream: No Server URL configured in settings. Username is not applicable.");
 
-                    // No server configured yet
+                    // No server configured yet.
                     yield return new CallItem
                     {
                         Timestamp = DateTime.Now,
@@ -107,13 +107,13 @@ namespace JoesScanner.Services
                 }
                 catch (OperationCanceledException ex) when (cancellationToken.IsCancellationRequested)
                 {
-                    // Caller requested cancellation (disconnect, shutdown, etc.)
+                    // Caller requested cancellation (disconnect, shutdown, etc.).
                     Debug.WriteLine("[CallStreamService] Streaming cancelled by caller.");
                     yield break;
                 }
                 catch (OperationCanceledException ex)
                 {
-                    // Most likely an HttpClient timeout or similar; treat as recoverable
+                    // Most likely an HttpClient timeout or similar; treat as recoverable.
                     errorMessage = "The connection to the audio server timed out. The app will retry automatically.";
                     Debug.WriteLine($"[CallStreamService] [Timeout] {ex}");
                 }
@@ -134,7 +134,7 @@ namespace JoesScanner.Services
                     Debug.WriteLine($"[CallStreamService] [UnexpectedError] {ex}");
                 }
 
-
+                // Surface any error from the poll as a synthetic CallItem row.
                 if (errorMessage != null)
                 {
                     var talkgroup = isAuthError ? "AUTH" : "ERROR";
@@ -147,7 +147,7 @@ namespace JoesScanner.Services
                     AppLog.Add(
                         $"CallStream: {talkgroup} - {transcription} [ServerUrl={callsUrl}, Username={usernameForLog}]");
 
-                    // Surface a clear error row in the UI
+                    // Clear error row for the UI.
                     yield return new CallItem
                     {
                         Timestamp = DateTime.Now,
@@ -224,7 +224,7 @@ namespace JoesScanner.Services
                     if (string.IsNullOrEmpty(rawId))
                         continue;
 
-                    // Determine whether this row is new or an update for an existing call
+                    // Determine whether this row is new or an update for an existing call.
                     var isNew = !_seenIds.Contains(rawId);
                     var wasMissingTranscription = _idsMissingTranscription.Contains(rawId);
 
@@ -233,15 +233,15 @@ namespace JoesScanner.Services
                         _seenIds.Add(rawId);
                     }
 
-                    // Start with no debug message for this call
+                    // Start with no debug message for this call.
                     var debugInfo = string.Empty;
 
-                    // Transcription text from the server, may be empty if there is no transcription
+                    // Transcription text from the server, may be empty if there is no transcription.
                     var text = r.CallText?.Trim() ?? string.Empty;
 
                     if (string.IsNullOrWhiteSpace(text))
                     {
-                        // Server did not send any transcription text for this call
+                        // Server did not send any transcription text for this call.
                         debugInfo = AppendDebug(debugInfo, "No transcription from server");
 
                         // For brand new calls with no text, remember that we are waiting
@@ -261,28 +261,28 @@ namespace JoesScanner.Services
                         }
                     }
 
-                    // Timestamp from StartTime / StartTimeUTC
+                    // Timestamp from StartTime / StartTimeUTC.
                     var timestamp = ParseTimestamp(r.StartTime, r.StartTimeUTC);
 
-                    // Talkgroup from label or ID
+                    // Talkgroup from label or ID.
                     var talkgroup = !string.IsNullOrWhiteSpace(r.TargetLabel)
                         ? r.TargetLabel
                         : r.TargetID ?? string.Empty;
 
-                    // Source radio ID / label
+                    // Source radio ID / label.
                     var source = !string.IsNullOrWhiteSpace(r.SourceLabel)
                         ? r.SourceLabel
                         : r.SourceID ?? string.Empty;
 
-                    // Site name from SiteLabel / SiteID
+                    // Site name from SiteLabel / SiteID.
                     var site = !string.IsNullOrWhiteSpace(r.SiteLabel)
                         ? r.SiteLabel
                         : r.SiteID ?? string.Empty;
 
-                    // Voice receiver name
+                    // Voice receiver name.
                     var voiceReceiver = r.VoiceReceiver?.Trim() ?? string.Empty;
 
-                    // Call duration in seconds, if the server provides CallDuration
+                    // Call duration in seconds, if the server provides CallDuration.
                     double durationSeconds = 0;
                     if (!string.IsNullOrWhiteSpace(r.CallDuration))
                     {
@@ -292,13 +292,13 @@ namespace JoesScanner.Services
                         }
                     }
 
-                    // Build audio URL from AudioFilename
+                    // Build audio URL from AudioFilename.
                     string audioUrl = string.Empty;
                     if (!string.IsNullOrWhiteSpace(r.AudioFilename))
                     {
                         var fileName = r.AudioFilename.Trim();
 
-                        // If TR returns a full URL, use it as-is
+                        // If TR returns a full URL, use it as-is.
                         if (fileName.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
                             fileName.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
                         {
@@ -306,7 +306,7 @@ namespace JoesScanner.Services
                         }
                         else
                         {
-                            // Treat AudioFilename as a relative path from the TR web root
+                            // Treat AudioFilename as a relative path from the TR web root.
                             // Example: "audio/2025-11-14/12345.wav"
                             audioUrl = $"{baseUrl}/{fileName.TrimStart('/')}";
                         }
@@ -320,7 +320,7 @@ namespace JoesScanner.Services
 
                     if (string.IsNullOrWhiteSpace(audioUrl))
                     {
-                        // No usable audio URL even though the call exists
+                        // No usable audio URL even though the call exists.
                         debugInfo = AppendDebug(debugInfo, "No audio URL from server");
 
                         var suffix = "No audio URL built from server data";
@@ -339,7 +339,7 @@ namespace JoesScanner.Services
 
                     if (!isNew && !isTranscriptionUpdate)
                     {
-                        // Nothing new for this call from the client's perspective
+                        // Nothing new for this call from the client's perspective.
                         continue;
                     }
 
@@ -347,7 +347,7 @@ namespace JoesScanner.Services
                     if (skipYieldForThisBatch && isNew)
                         continue;
 
-                    // Final CallItem consumed by the UI
+                    // Final CallItem consumed by the UI.
                     yield return new CallItem
                     {
                         BackendId = rawId,
@@ -368,6 +368,8 @@ namespace JoesScanner.Services
             }
         }
 
+        // Embeds basic auth credentials into the audio URL when basic auth is configured
+        // and the audio URL host matches the configured server.
         private string ApplyBasicAuthToAudioUrl(string audioUrl, string baseUrl)
         {
             try
@@ -419,6 +421,7 @@ namespace JoesScanner.Services
             }
         }
 
+        // Calls the calljson endpoint with the expected DataTables payload and returns parsed rows.
         private async Task<List<CallRow>> FetchLatestAsync(string callsUrl, CancellationToken cancellationToken)
         {
             var payload = BuildDataTablesPayload(_draw, PollBatchSize);
@@ -426,7 +429,7 @@ namespace JoesScanner.Services
 
             var jsonPayload = JsonSerializer.Serialize(payload, _jsonOptions);
 
-            // Ensure auth header matches current settings for this request
+            // Ensure auth header matches current settings for this request.
             UpdateAuthorizationHeader();
 
             // Python uses data=body_json with form content type.
@@ -468,7 +471,6 @@ namespace JoesScanner.Services
                 throw new HttpRequestException(message);
             }
 
-
             var json = await response.Content.ReadAsStringAsync(cancellationToken);
 
             var rows = new List<CallRow>();
@@ -493,9 +495,11 @@ namespace JoesScanner.Services
 
             return rows;
         }
+
+        // Updates the HttpClient Authorization header based on the current basic auth settings.
         private void UpdateAuthorizationHeader()
         {
-            // Clear any previous header first
+            // Clear any previous header first.
             _httpClient.DefaultRequestHeaders.Authorization = null;
 
             var username = _settingsService.BasicAuthUsername;
@@ -511,6 +515,7 @@ namespace JoesScanner.Services
                 new AuthenticationHeaderValue("Basic", base64);
         }
 
+        // Maps a JSON row from the DataTables response into a CallRow object.
         private static CallRow ParseRow(JsonElement e)
         {
             return new CallRow
@@ -531,6 +536,7 @@ namespace JoesScanner.Services
             };
         }
 
+        // Parses timestamps from either ISO 8601 or Unix seconds and converts them to local time.
         private static DateTime ParseTimestamp(string? startTime, string? startTimeUtc)
         {
             var value = !string.IsNullOrWhiteSpace(startTimeUtc) ? startTimeUtc : startTime;
@@ -540,14 +546,14 @@ namespace JoesScanner.Services
 
             try
             {
-                // ISO 8601
+                // ISO 8601.
                 if (value.Contains("T", StringComparison.Ordinal))
                 {
                     var dto = DateTimeOffset.Parse(value.Replace("Z", "+00:00"), null);
                     return dto.ToLocalTime().DateTime;
                 }
 
-                // Unix seconds
+                // Unix seconds.
                 if (double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds))
                 {
                     var dto = DateTimeOffset.FromUnixTimeSeconds((long)seconds).ToLocalTime();
@@ -561,6 +567,7 @@ namespace JoesScanner.Services
             return DateTime.Now;
         }
 
+        // Safely gets a string representation of a JSON property, handling various value kinds.
         private static string? GetString(JsonElement obj, string name)
         {
             if (!obj.TryGetProperty(name, out var prop))
@@ -576,6 +583,7 @@ namespace JoesScanner.Services
             };
         }
 
+        // Combines debug messages into a single string separated by " | ".
         private static string AppendDebug(string existing, string message)
         {
             if (string.IsNullOrWhiteSpace(message))
@@ -584,7 +592,7 @@ namespace JoesScanner.Services
             if (string.IsNullOrWhiteSpace(existing))
                 return message;
 
-            // Combine multiple debug messages in a compact way
+            // Combine multiple debug messages in a compact way.
             return existing + " | " + message;
         }
 
@@ -597,6 +605,7 @@ namespace JoesScanner.Services
             }
         }
 
+        // DataTables payload envelope for the calljson request.
         private sealed class DataTablesPayload
         {
             [JsonPropertyName("draw")]
@@ -621,6 +630,7 @@ namespace JoesScanner.Services
             public bool SmartSort { get; set; }
         }
 
+        // DataTables column descriptor used by the calljson endpoint.
         private sealed class DataTablesColumn
         {
             [JsonPropertyName("data")]
@@ -639,6 +649,7 @@ namespace JoesScanner.Services
             public DataTablesSearch Search { get; set; } = new();
         }
 
+        // DataTables ordering descriptor for a column.
         private sealed class DataTablesOrder
         {
             [JsonPropertyName("column")]
@@ -648,6 +659,7 @@ namespace JoesScanner.Services
             public string Dir { get; set; } = "desc";
         }
 
+        // DataTables search descriptor used for global and per-column search.
         private sealed class DataTablesSearch
         {
             [JsonPropertyName("value")]
@@ -657,34 +669,35 @@ namespace JoesScanner.Services
             public bool Regex { get; set; }
         }
 
+        // Builds the DataTables payload used by the calljson endpoint.
         private static DataTablesPayload BuildDataTablesPayload(int draw, int length)
         {
             var cols = new[]
             {
-                    ((object?)null, "Details"),
-                    ((object?)"Time", "Time"),
-                    ((object?)"Date", "Date"),
-                    ((object?)"TargetID", "Target"),
-                    ((object?)"TargetLabel", "TargetLabel"),
-                    ((object?)"TargetTag", "TargetTag"),
-                    ((object?)"SourceID", "Source"),
-                    ((object?)"SourceLabel", "SourceLabel"),
-                    ((object?)"SourceTag", "SourceTag"),
-                    ((object?)"CallDuration", "CallLength"),
-                    ((object?)"CallAudioType", "VoiceType"),
-                    ((object?)"CallType", "CallType"),
-                    ((object?)"SiteID", "Site"),
-                    ((object?)"SiteLabel", "SiteLabel"),
-                    ((object?)"SystemID", "System"),
-                    ((object?)"SystemLabel", "SystemLabel"),
-                    ((object?)"SystemType", "SystemType"),
-                    ((object?)"AudioStartPos", "AudioStartPos"),
-                    ((object?)"LCN", "LCN"),
-                    ((object?)"Frequency", "Frequency"),
-                    ((object?)"VoiceReceiver", "Receiver"),
-                    ((object?)"CallText", "CallText"),
-                    ((object?)"AudioFilename", "Filename"),
-                };
+                ((object?)null, "Details"),
+                ((object?)"Time", "Time"),
+                ((object?)"Date", "Date"),
+                ((object?)"TargetID", "Target"),
+                ((object?)"TargetLabel", "TargetLabel"),
+                ((object?)"TargetTag", "TargetTag"),
+                ((object?)"SourceID", "Source"),
+                ((object?)"SourceLabel", "SourceLabel"),
+                ((object?)"SourceTag", "SourceTag"),
+                ((object?)"CallDuration", "CallLength"),
+                ((object?)"CallAudioType", "VoiceType"),
+                ((object?)"CallType", "CallType"),
+                ((object?)"SiteID", "Site"),
+                ((object?)"SiteLabel", "SiteLabel"),
+                ((object?)"SystemID", "System"),
+                ((object?)"SystemLabel", "SystemLabel"),
+                ((object?)"SystemType", "SystemType"),
+                ((object?)"AudioStartPos", "AudioStartPos"),
+                ((object?)"LCN", "LCN"),
+                ((object?)"Frequency", "Frequency"),
+                ((object?)"VoiceReceiver", "Receiver"),
+                ((object?)"CallText", "CallText"),
+                ((object?)"AudioFilename", "Filename"),
+            };
 
             var payload = new DataTablesPayload
             {
@@ -710,6 +723,7 @@ namespace JoesScanner.Services
             return payload;
         }
 
+        // Internal representation of a single call row from the calljson endpoint.
         private sealed class CallRow
         {
             public string? DT_RowId { get; set; }

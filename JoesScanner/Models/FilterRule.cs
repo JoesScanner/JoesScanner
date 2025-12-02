@@ -10,10 +10,8 @@ namespace JoesScanner.Models
         Talkgroup
     }
 
-    /// <summary>
-    /// Represents a single filter row (Receiver, Site, or Talkgroup).
-    /// Level determines how the rule is applied.
-    /// </summary>
+    // Represents a single filter row (Receiver, Site, or Talkgroup).
+    // Level determines how the rule is applied.
     public class FilterRule : BindableObject
     {
         private FilterLevel _level;
@@ -24,6 +22,7 @@ namespace JoesScanner.Models
         private bool _isDisabled;
         private DateTime _lastSeenUtc;
 
+        // Filter level that determines if the rule applies at receiver, site, or talkgroup level.
         public FilterLevel Level
         {
             get => _level;
@@ -38,9 +37,7 @@ namespace JoesScanner.Models
             }
         }
 
-        /// <summary>
-        /// Receiver label (for example VoiceReceiver or Source).
-        /// </summary>
+        // Receiver label used for matching, for example VoiceReceiver or Source.
         public string Receiver
         {
             get => _receiver;
@@ -56,9 +53,7 @@ namespace JoesScanner.Models
             }
         }
 
-        /// <summary>
-        /// Site or system name.
-        /// </summary>
+        // Site or system name used for matching.
         public string Site
         {
             get => _site;
@@ -74,9 +69,7 @@ namespace JoesScanner.Models
             }
         }
 
-        /// <summary>
-        /// Talkgroup label or ID.
-        /// </summary>
+        // Talkgroup label or ID used for matching.
         public string Talkgroup
         {
             get => _talkgroup;
@@ -92,9 +85,7 @@ namespace JoesScanner.Models
             }
         }
 
-        /// <summary>
-        /// When true, audio for this rule is muted but calls may still be shown.
-        /// </summary>
+        // When true, audio for calls matching this rule is muted but calls may still be displayed.
         public bool IsMuted
         {
             get => _isMuted;
@@ -108,9 +99,7 @@ namespace JoesScanner.Models
             }
         }
 
-        /// <summary>
-        /// When true, calls that match this rule are not shown and not heard.
-        /// </summary>
+        // When true, calls that match this rule are neither shown nor heard.
         public bool IsDisabled
         {
             get => _isDisabled;
@@ -124,10 +113,8 @@ namespace JoesScanner.Models
             }
         }
 
-        /// <summary>
-        /// Last time this rule was seen in traffic (UTC).
-        /// Used mostly for info and possible future cleanup.
-        /// </summary>
+        // Last time this rule matched traffic, stored as UTC.
+        // Used for informational purposes and potential future cleanup.
         public DateTime LastSeenUtc
         {
             get => _lastSeenUtc;
@@ -141,12 +128,10 @@ namespace JoesScanner.Models
             }
         }
 
-        /// <summary>
-        /// Display text for the filters table:
-        ///   Receiver
-        ///   Receiver > Site
-        ///   Receiver > Site > Talkgroup
-        /// </summary>
+        // Display text for the filters table:
+        //   Receiver
+        //   Receiver > Site
+        //   Receiver > Site > Talkgroup
         public string DisplayKey
         {
             get

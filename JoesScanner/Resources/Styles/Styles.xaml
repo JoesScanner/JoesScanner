@@ -1,5 +1,6 @@
 ﻿<?xml version="1.0" encoding="UTF-8" ?>
 <?xaml-comp compile="true" ?>
+<!-- Global control styles and converters shared across the JoesScanner app. -->
 <ResourceDictionary 
     xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
     xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
@@ -119,7 +120,7 @@
         </Setter>
     </Style>
 
-    <!-- Secondary pill button (like Settings / Donate) -->
+    <!-- Secondary pill button style for actions like Settings and Donate -->
     <Style x:Key="SecondaryPillButtonStyle"
            TargetType="Button"
            BasedOn="{StaticResource PillButtonStyle}">

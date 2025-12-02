@@ -8,8 +8,7 @@ public partial class AppShell : Shell
     {
         InitializeComponent();
 
-        // Route used by the Settings button
+        // Route for the Settings page
         Routing.RegisterRoute("settings", typeof(SettingsPage));
     }
 }
-

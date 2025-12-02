@@ -7,17 +7,14 @@ using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
-using System.Windows.Input;
 using System.Threading.Tasks;
-
+using System.Windows.Input;
 
 namespace JoesScanner.ViewModels
 {
-    /// <summary>
-    /// View model for the Settings page.
-    /// Controls connection settings, call list behavior, theme,
-    /// and the unified filter list that is populated from live calls.
-    /// </summary>
+    // View model for the Settings page.
+    // Controls connection settings, call list behavior, theme,
+    // and the unified filter list that is populated from live calls.
     public class SettingsViewModel : BindableObject
     {
         private readonly ISettingsService _settings;
@@ -37,6 +34,9 @@ namespace JoesScanner.ViewModels
         private string _savedBasicAuthUsername = string.Empty;
         private string _savedBasicAuthPassword = string.Empty;
 
+        // Password visibility state
+        private bool _isBasicAuthPasswordVisible;
+
         // Inline server validation status
         private bool _isValidatingServer;
         private bool _hasServerValidationResult;
@@ -48,26 +48,7 @@ namespace JoesScanner.ViewModels
         private bool _savedUseDefaultConnection;
         private bool _hasChanges;
 
-
-        // True when any setting on this page differs from what was last saved.
-        // Used by the Save button to decide when to turn red.
-        public bool HasUnsavedSettings
-        {
-            get
-            {
-                // Connection changes (server URL / default connection)
-                if (HasChanges)
-                    return true;
-
-                // Call list settings
-                if (_maxCalls != _savedMaxCalls)
-                    return true;
-
-                return false;
-            }
-        }
-
-        // Saved snapshot for other settings that are only committed on Save
+        // Saved snapshot for settings that are only committed on Save
         private int _savedMaxCalls;
 
         // Call display settings
@@ -78,9 +59,9 @@ namespace JoesScanner.ViewModels
 
         // Disabled entries persisted in settings, keyed as "receiver|site|talkgroup"
         private static readonly HashSet<string> _disabledKeys =
-        new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // Track the "current" instance for static helpers
+        // Track the current instance for static helpers
         public static SettingsViewModel? Current { get; private set; }
 
         // Sort order for the filter list (shared across instances)
@@ -94,7 +75,7 @@ namespace JoesScanner.ViewModels
         public ICommand ResetServerCommand { get; }
         public ICommand ValidateServerCommand { get; }
 
-        // Filter commands
+        // Filter commands (reserved for future use in filters section)
         public ICommand ToggleReceiverFilterCommand { get; }
         public ICommand ToggleSiteFilterCommand { get; }
 
@@ -107,21 +88,19 @@ namespace JoesScanner.ViewModels
         {
             _settings = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
             _mainViewModel = mainViewModel ?? throw new ArgumentNullException(nameof(mainViewModel));
+
             _httpClient = new HttpClient
             {
                 Timeout = TimeSpan.FromSeconds(3)
             };
-
 
             Current = this;
 
             ToggleBasicAuthPasswordVisibilityCommand =
                 new Command(() => IsBasicAuthPasswordVisible = !IsBasicAuthPasswordVisible);
 
-            // Seed state from persisted settings
             InitializeFromSettings();
 
-            // Commands
             SaveCommand = new Command(SaveSettings);
             ResetServerCommand = new Command(ResetServerUrl);
             ValidateServerCommand = new Command(async () => await ValidateServerUrlAsync());
@@ -129,8 +108,13 @@ namespace JoesScanner.ViewModels
             ToggleMuteFilterCommand = new Command<FilterRule>(OnToggleMuteFilter);
             ToggleDisableFilterCommand = new Command<FilterRule>(OnToggleDisableFilter);
             ClearFilterCommand = new Command<FilterRule>(OnClearFilter);
-
         }
+
+        // True when any setting on this page differs from what was last saved.
+        // Used by the Save button to decide when to turn red.
+        public bool HasUnsavedSettings =>
+            HasChanges ||
+            _maxCalls != _savedMaxCalls;
 
         public bool IsValidatingServer
         {
@@ -184,11 +168,8 @@ namespace JoesScanner.ViewModels
             }
         }
 
-
-        /// <summary>
-        /// If true, there are unsaved connection changes.
-        /// Used by SettingsPage.xaml.cs to discard or warn when backing out.
-        /// </summary>
+        // True when there are unsaved connection or credential changes.
+        // Used by SettingsPage.xaml.cs to discard or warn when backing out.
         public bool HasChanges
         {
             get => _hasChanges;
@@ -203,9 +184,7 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        /// <summary>
-        /// Current server URL in the edit box.
-        /// </summary>
+        // Current server URL in the edit box.
         public string ServerUrl
         {
             get => _serverUrl;
@@ -218,7 +197,6 @@ namespace JoesScanner.ViewModels
                 _serverUrl = newValue;
                 OnPropertyChanged();
 
-                // Auto-track default vs custom based on the current text.
                 var defaultUrl = DefaultServerUrl;
                 var isDefault = string.Equals(_serverUrl, defaultUrl, StringComparison.OrdinalIgnoreCase);
 
@@ -231,7 +209,6 @@ namespace JoesScanner.ViewModels
                 UpdateHasChanges();
             }
         }
-
 
         // Basic auth username for the TR server
         public string BasicAuthUsername
@@ -262,8 +239,6 @@ namespace JoesScanner.ViewModels
                 UpdateHasChanges();
             }
         }
-        // Password visibility state
-        private bool _isBasicAuthPasswordVisible;
 
         // True when the password Entry should mask input
         public bool IsBasicAuthPasswordHidden => !_isBasicAuthPasswordVisible;
@@ -287,11 +262,8 @@ namespace JoesScanner.ViewModels
             }
         }
 
-
-        /// <summary>
-        /// True when "Default connection" is selected.
-        /// When true, the server URL will be reset to the default and saved.
-        /// </summary>
+        // True when "Default connection" is selected.
+        // When true, the server URL will be reset to the default and saved.
         public bool UseDefaultConnection
         {
             get => _useDefaultConnection;
@@ -306,9 +278,7 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        /// <summary>
-        /// Maximum number of calls kept in the list.
-        /// </summary>
+        // Maximum number of calls kept in the list.
         public int MaxCalls
         {
             get => _maxCalls;
@@ -317,6 +287,7 @@ namespace JoesScanner.ViewModels
                 var clamped = value;
                 if (clamped < 10) clamped = 10;
                 if (clamped > 50) clamped = 50;
+
                 if (_maxCalls == clamped)
                     return;
 
@@ -326,9 +297,7 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        /// <summary>
-        /// Theme mode string: "System", "Light", or "Dark".
-        /// </summary>
+        // Theme mode string: "System", "Light", or "Dark".
         public string ThemeMode
         {
             get => _themeMode;
@@ -342,21 +311,16 @@ namespace JoesScanner.ViewModels
                 _themeMode = normalized;
                 OnPropertyChanged();
 
-                // Keep boolean helpers in sync
                 OnPropertyChanged(nameof(IsThemeSystem));
                 OnPropertyChanged(nameof(IsThemeLight));
                 OnPropertyChanged(nameof(IsThemeDark));
 
-                // Apply theme immediately and persist to the settings service
                 _settings.ThemeMode = _themeMode;
                 ApplyTheme(_themeMode);
             }
         }
 
-        /// <summary>
-        /// Helper booleans for the three theme radio buttons.
-        /// Only the "true" assignment triggers changes.
-        /// </summary>
+        // Helper booleans for the three theme radio buttons.
         public bool IsThemeSystem
         {
             get => string.Equals(ThemeMode, "System", StringComparison.OrdinalIgnoreCase);
@@ -364,6 +328,7 @@ namespace JoesScanner.ViewModels
             {
                 if (!value)
                     return;
+
                 ThemeMode = "System";
             }
         }
@@ -375,6 +340,7 @@ namespace JoesScanner.ViewModels
             {
                 if (!value)
                     return;
+
                 ThemeMode = "Light";
             }
         }
@@ -386,13 +352,12 @@ namespace JoesScanner.ViewModels
             {
                 if (!value)
                     return;
+
                 ThemeMode = "Dark";
             }
         }
 
-        /// <summary>
-        /// Sort order flag. True for A to Z, false for Z to A.
-        /// </summary>
+        // Sort order flag. True for A to Z, false for Z to A.
         public bool SortAscending
         {
             get => _sortAscending;
@@ -422,7 +387,6 @@ namespace JoesScanner.ViewModels
             _filterService.ToggleDisable(rule);
         }
 
-        // Clear handler stays as-is
         private void OnClearFilter(FilterRule? rule)
         {
             if (rule == null)
@@ -431,10 +395,8 @@ namespace JoesScanner.ViewModels
             _filterService.ClearRule(rule);
         }
 
-        /// <summary>
-        /// Reloads view model fields from ISettingsService.
-        /// Called once from constructor.
-        /// </summary>
+        // Reloads view model fields from ISettingsService.
+        // Called once from constructor.
         private void InitializeFromSettings()
         {
             // Connection seed
@@ -455,12 +417,12 @@ namespace JoesScanner.ViewModels
             // Calls
             _maxCalls = _settings.MaxCalls;
 
-            // Theme – normalize to a safe value and push back into settings if needed
+            // Theme - normalize to a safe value and push back into settings if needed
             var rawTheme = _settings.ThemeMode;
-            if (string.IsNullOrWhiteSpace(rawTheme) ||
-                (!string.Equals(rawTheme, "System", StringComparison.OrdinalIgnoreCase) &&
-                 !string.Equals(rawTheme, "Light", StringComparison.OrdinalIgnoreCase) &&
-                 !string.Equals(rawTheme, "Dark", StringComparison.OrdinalIgnoreCase)))
+            if (string.IsNullOrWhiteSpace(rawTheme)
+                || (!string.Equals(rawTheme, "System", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(rawTheme, "Light", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(rawTheme, "Dark", StringComparison.OrdinalIgnoreCase)))
             {
                 _themeMode = "System";
                 _settings.ThemeMode = "System";
@@ -484,7 +446,7 @@ namespace JoesScanner.ViewModels
                     if (trimmed.Length == 0)
                         continue;
 
-                    // Only accept entries that look like our new format
+                    // Only accept entries that look like our current format
                     if (!trimmed.Contains('|'))
                         continue;
 
@@ -492,17 +454,16 @@ namespace JoesScanner.ViewModels
                 }
             }
 
-            // Capture snapshots used for unsaved-change detection.
+            // Capture snapshots used for unsaved change detection
             _savedServerUrl = _settings.ServerUrl;
             _savedUseDefaultConnection = UseDefaultConnection;
             _savedMaxCalls = _maxCalls;
             _savedBasicAuthUsername = _basicAuthUsername;
             _savedBasicAuthPassword = _basicAuthPassword;
 
-            // At this point everything matches the persisted state.
+            // At this point everything matches the persisted state
             HasChanges = false;
             OnPropertyChanged(nameof(HasUnsavedSettings));
-
         }
 
         private void ApplyTheme(string mode)
@@ -523,17 +484,15 @@ namespace JoesScanner.ViewModels
             }
             else
             {
-                theme = AppTheme.Unspecified; // follow system
+                theme = AppTheme.Unspecified;
             }
 
             app.UserAppTheme = theme;
         }
 
-        /// <summary>
-        /// Persists connection, call list, and theme settings,
-        /// and updates main view model mirrors where needed.
-        /// Also persists disabled filter keys.
-        /// </summary>
+        // Persists connection, call list, and theme settings,
+        // and updates main view model mirrors where needed.
+        // Also persists disabled filter keys.
         private void SaveSettings()
         {
             // Connection
@@ -556,43 +515,35 @@ namespace JoesScanner.ViewModels
             _settings.MaxCalls = MaxCalls;
             _mainViewModel.MaxCalls = MaxCalls;
 
-            // Theme (apply on save)
+            // Theme
             _settings.ThemeMode = ThemeMode;
             ApplyTheme(ThemeMode);
 
-            // Update our saved snapshots so the UI knows everything is clean.
+            // Update snapshots
             _savedServerUrl = _settings.ServerUrl;
             _savedUseDefaultConnection = UseDefaultConnection;
             _savedMaxCalls = _maxCalls;
             _savedBasicAuthUsername = _basicAuthUsername;
             _savedBasicAuthPassword = _basicAuthPassword;
 
-
-            // This will also raise HasUnsavedSettings.
             HasChanges = false;
             OnPropertyChanged(nameof(HasUnsavedSettings));
-
         }
 
-        /// <summary>
-        /// Reset server url to the canonical default and mark as default.
-        /// This only changes local fields until Save is pressed.
-        /// </summary>
+        // Reset server url to the canonical default and mark as default.
+        // This only changes local fields until Save is pressed.
         private void ResetServerUrl()
         {
             ServerUrl = DefaultServerUrl;
             UseDefaultConnection = true;
         }
 
-        /// <summary>
-        /// Very lightweight server validation. You can expand this to hit
-        /// your health endpoint later.
-        /// </summary>
+        // Lightweight server validation. You can expand this to hit
+        // a health endpoint later.
         private async Task ValidateServerUrlAsync()
         {
             var url = ServerUrl?.Trim();
 
-            // Start: inline "validating" state
             IsValidatingServer = true;
             HasServerValidationResult = true;
             ServerValidationMessage = "Validating server...";
@@ -627,7 +578,7 @@ namespace JoesScanner.ViewModels
                 var statusInt = (int)statusCode;
 
                 if (response.IsSuccessStatusCode
-                    || statusCode == HttpStatusCode.NotImplemented) // treat 501 as reachable
+                    || statusCode == HttpStatusCode.NotImplemented)
                 {
                     if (statusCode == HttpStatusCode.NotImplemented)
                     {
@@ -642,11 +593,12 @@ namespace JoesScanner.ViewModels
 
                     ServerValidationIsError = false;
                 }
-                else if (statusCode == HttpStatusCode.Unauthorized || statusCode == HttpStatusCode.Forbidden)
+                else if (statusCode == HttpStatusCode.Unauthorized
+                         || statusCode == HttpStatusCode.Forbidden)
                 {
                     ServerValidationMessage =
                         $"Authentication failed (HTTP {statusInt} {response.ReasonPhrase}). " +
-                        "Check basic auth username/password and that the server/firewall is configured to allow this client.";
+                        "Check basic auth username and password and that the server or firewall is configured to allow this client.";
                     ServerValidationIsError = true;
                 }
                 else
@@ -655,8 +607,6 @@ namespace JoesScanner.ViewModels
                         $"Server responded with HTTP {statusInt} {response.ReasonPhrase}.";
                     ServerValidationIsError = true;
                 }
-
-
             }
             catch (HttpRequestException ex)
             {
@@ -665,7 +615,6 @@ namespace JoesScanner.ViewModels
             }
             catch (TaskCanceledException)
             {
-                // This is what HttpClient throws on timeout
                 ServerValidationMessage = "Server did not respond in time (validation timed out).";
                 ServerValidationIsError = true;
             }
@@ -691,11 +640,9 @@ namespace JoesScanner.ViewModels
             HasChanges = has;
         }
 
-        /// <summary>
-        /// Used by SettingsPage.xaml.cs when closing the page
-        /// without saving. Resets the connection fields to match
-        /// the last saved values.
-        /// </summary>
+        // Used by SettingsPage.xaml.cs when closing the page
+        // without saving. Resets the connection fields to match
+        // the last saved values.
         public void DiscardConnectionChanges()
         {
             ServerUrl = _savedServerUrl;
@@ -704,10 +651,5 @@ namespace JoesScanner.ViewModels
             BasicAuthPassword = _savedBasicAuthPassword;
             HasChanges = false;
         }
-
-
-
-
-
     }
 }
