@@ -22,7 +22,7 @@
     <ApplicationTitle>JoesScanner</ApplicationTitle>
     <ApplicationId>com.companyname.joesscanner</ApplicationId>
     <ApplicationDisplayVersion>1.0.1</ApplicationDisplayVersion>
-    <ApplicationVersion>1</ApplicationVersion>
+    <ApplicationVersion>1.0.1</ApplicationVersion>
     <DefaultLanguage>en-us</DefaultLanguage>
 
     <!-- Platform minimums -->
