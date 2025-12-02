@@ -50,7 +50,7 @@ namespace JoesScanner.Services
         // Value is clamped to a range of 10–50 before being stored.
         public int MaxCalls
         {
-            get => Preferences.Get(MaxCallsKey, 20); // default 20
+            get => Preferences.Get(MaxCallsKey, 10); // default 10
             set
             {
                 var v = value;

@@ -288,7 +288,7 @@
                                     TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
 
                                 <Slider
-                                    Minimum="10"
+                                    Minimum="5"
                                     Maximum="50"
                                     Value="{Binding MaxCalls}"
                                     HorizontalOptions="FillAndExpand" />

@@ -15,11 +15,11 @@ namespace JoesScanner
             var window = new Window(new AppShell());
 
 #if WINDOWS
-            const double defaultWidth = 1100;
-            const double defaultHeight = 720;
+            const double defaultWidth = 500;
+            const double defaultHeight = 1000;
 
-            const double minWidth = 900;
-            const double minHeight = 600;
+            const double minWidth = 500;
+            const double minHeight = 500;
 
             // Restore last size and position if available
             var width = Preferences.Get("WindowWidth", defaultWidth);

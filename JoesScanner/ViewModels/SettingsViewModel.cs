@@ -285,7 +285,7 @@ namespace JoesScanner.ViewModels
             set
             {
                 var clamped = value;
-                if (clamped < 10) clamped = 10;
+                if (clamped < 5) clamped = 5;
                 if (clamped > 50) clamped = 50;
 
                 if (_maxCalls == clamped)
