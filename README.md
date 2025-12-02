@@ -25,7 +25,7 @@ The app is built for continuous, long-term listening.
 
 If you are a Joe’s Scanner subscriber, the app can connect directly to the service.
 
-Just enter the server URL and your login credentials (if required).  
+Just enter the server URL and your login credentials (required).  
 The app will automatically begin loading calls and streaming audio.
 
 ---
