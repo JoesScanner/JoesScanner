@@ -128,6 +128,10 @@ namespace JoesScanner.Services
             if (call == null)
                 return;
 
+            // Do not create filter rules for error entries
+            if (IsErrorCall(call))
+                return;
+
             var receiver = Normalize(call.ReceiverName);
             var site = Normalize(call.SystemName);
             var talkgroup = Normalize(call.Talkgroup);
@@ -183,6 +187,40 @@ namespace JoesScanner.Services
         // Normalizes string values used as keys for matching rules.
         private static string Normalize(string? value) =>
             (value ?? string.Empty).Trim();
+
+        // Returns true if this call looks like an error line rather than real traffic.
+        // We key off the fact that Receiver and Site are empty and the talkgroup text
+        // contains ERROR (for example ">> ERROR").
+        private static bool IsErrorCall(CallItem call)
+        {
+            if (call == null)
+                return false;
+
+            var receiverEmpty = string.IsNullOrWhiteSpace(call.ReceiverName);
+            var siteEmpty = string.IsNullOrWhiteSpace(call.SystemName);
+            var tgRaw = call.Talkgroup ?? string.Empty;
+            var talkgroup = tgRaw.Trim();
+
+            if (!receiverEmpty || !siteEmpty)
+                return false;
+
+            if (talkgroup.Length == 0)
+                return false;
+
+            var upper = talkgroup.ToUpperInvariant();
+
+            // Handles "ERROR", ">> ERROR", and similar variants
+            if (upper == "ERROR")
+                return true;
+
+            if (upper == ">> ERROR")
+                return true;
+
+            if (upper.Contains(" ERROR"))
+                return true;
+
+            return false;
+        }
 
         // Ensures a specific rule exists for the given receiver/site/talkgroup and level.
         // Updates LastSeenUtc for existing rules, inserts new ones in sorted order.
