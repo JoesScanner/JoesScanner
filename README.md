@@ -1,6 +1,6 @@
 # JoesScanner App
 
-JoesScanner is a cross-platform application for listening to live radio calls from the Joe’s Scanner service or any compatible Trunking Recorder server. It provides clean UI presentation, reliable audio streaming, and automatic call queue handling. The app is built for continuous, long-term monitoring on Windows, Android, iOS, and macOS.
+JoesScanner is a cross-platform application for listening to live radio calls from the Joe’s Scanner service or any compatible Trunking Recorder server. It provides clean UI presentation, reliable audio streaming, and automatic call queue handling. The app is built for continuous, long-term monitoring on Windows, Android, and iOS.
 
 ---
 
