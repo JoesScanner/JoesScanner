@@ -1,3 +1,7 @@
+using System;
+using System.Globalization;
+using Microsoft.Maui.Storage;
+
 namespace JoesScanner.Services
 {
     // Concrete implementation of ISettingsService backed by Preferences storage.
@@ -14,6 +18,86 @@ namespace JoesScanner.Services
         private const string ReceiverFilterKey = "ReceiverFilter";
         private const string TalkgroupFilterKey = "TalkgroupFilter";
         private const string ThemeModeKey = "ThemeMode";
+
+        // Subscription cache keys.
+        private const string SubscriptionLastCheckKey = "SubscriptionLastCheckUtc";
+        private const string SubscriptionLastStatusOkKey = "SubscriptionLastStatusOk";
+        private const string SubscriptionLastLevelKey = "SubscriptionLastLevel";
+        private const string SubscriptionLastMessageKey = "SubscriptionLastMessage";
+        private const string SubscriptionPriceIdKey = "SubscriptionPriceId";
+        private const string SubscriptionRenewalUtcKey = "SubscriptionRenewalUtc";
+
+        // ========= Subscription cache fields =========
+
+        // UTC time of the last subscription check, or null if never.
+        public DateTime? SubscriptionLastCheckUtc
+        {
+            get
+            {
+                var raw = Preferences.Get(SubscriptionLastCheckKey, string.Empty);
+                return DateTime.TryParse(
+                    raw,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
+                    out var dt)
+                    ? dt
+                    : null;
+            }
+            set
+            {
+                var raw = value?.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture) ?? string.Empty;
+                Preferences.Set(SubscriptionLastCheckKey, raw);
+            }
+        }
+
+        // True if the last check reported subscription ok and can be used for grace.
+        public bool SubscriptionLastStatusOk
+        {
+            get => Preferences.Get(SubscriptionLastStatusOkKey, false);
+            set => Preferences.Set(SubscriptionLastStatusOkKey, value);
+        }
+
+        // Human-readable subscription level label, for example "Joe's Scanner Monthly".
+        public string SubscriptionLastLevel
+        {
+            get => Preferences.Get(SubscriptionLastLevelKey, string.Empty);
+            set => Preferences.Set(SubscriptionLastLevelKey, value ?? string.Empty);
+        }
+
+        // Raw subscription price id from the server (for mapping and diagnostics).
+        public string SubscriptionPriceId
+        {
+            get => Preferences.Get(SubscriptionPriceIdKey, string.Empty);
+            set => Preferences.Set(SubscriptionPriceIdKey, value ?? string.Empty);
+        }
+
+        // Next renewal date/time in UTC.
+        public DateTime? SubscriptionRenewalUtc
+        {
+            get
+            {
+                var raw = Preferences.Get(SubscriptionRenewalUtcKey, string.Empty);
+                return DateTime.TryParse(
+                    raw,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
+                    out var dt)
+                    ? dt
+                    : null;
+            }
+            set
+            {
+                var raw = value?.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture) ?? string.Empty;
+                Preferences.Set(SubscriptionRenewalUtcKey, raw);
+            }
+        }
+
+        // Last human readable message from the subscription check.
+        public string SubscriptionLastMessage
+        {
+            get => Preferences.Get(SubscriptionLastMessageKey, string.Empty);
+            set => Preferences.Set(SubscriptionLastMessageKey, value ?? string.Empty);
+        }
 
         // Default values.
         private const string DefaultServerUrl = "https://app.joesscanner.com";

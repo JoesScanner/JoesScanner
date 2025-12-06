@@ -1,3 +1,5 @@
+using System;
+
 namespace JoesScanner.Services
 {
     public interface ISettingsService
@@ -32,5 +34,25 @@ namespace JoesScanner.Services
         //   "Light"  = force light mode
         //   "Dark"   = force dark mode
         string ThemeMode { get; set; }
+
+        // ========= Subscription cache fields =========
+
+        // UTC time of the last subscription check, or null if never.
+        DateTime? SubscriptionLastCheckUtc { get; set; }
+
+        // True if the last check reported subscription ok and can be used for grace.
+        bool SubscriptionLastStatusOk { get; set; }
+
+        // Human-readable subscription level label, for example "Joe's Scanner Monthly".
+        string SubscriptionLastLevel { get; set; }
+
+        // Raw subscription price id from the server (for mapping and diagnostics).
+        string SubscriptionPriceId { get; set; }
+
+        // Next renewal date in UTC (used for UI and grace-period enforcement).
+        DateTime? SubscriptionRenewalUtc { get; set; }
+
+        // Last human readable message from the subscription check.
+        string SubscriptionLastMessage { get; set; }
     }
 }

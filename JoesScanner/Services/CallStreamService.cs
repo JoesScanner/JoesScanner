@@ -23,6 +23,9 @@ namespace JoesScanner.Services
         // Mirrors DEFAULT_CONFIG["poll_batch"] from the server.
         private const int PollBatchSize = 25;
 
+        private const string ServiceAuthUsername = "secappass";
+        private const string ServiceAuthPassword = "7a65vBLeqLjdRut5bSav4eMYGUJPrmjHhgnPmEji3q3S7tZ3K5aadFZz2EZtbaE7";
+
         // Tracks which call IDs have already been surfaced to the UI.
         private readonly HashSet<string> _seenIds = new();
 
@@ -374,13 +377,6 @@ namespace JoesScanner.Services
         {
             try
             {
-                // Only do anything if a basic auth username is configured.
-                var username = _settingsService.BasicAuthUsername;
-                var password = _settingsService.BasicAuthPassword ?? string.Empty;
-
-                if (string.IsNullOrWhiteSpace(username))
-                    return audioUrl;
-
                 if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var baseUri))
                     return audioUrl;
 
@@ -392,6 +388,29 @@ namespace JoesScanner.Services
                     return audioUrl;
 
                 if (!string.Equals(baseUri.Scheme, audioUri.Scheme, StringComparison.OrdinalIgnoreCase))
+                    return audioUrl;
+
+                // Choose which credentials to use:
+                // - For Joe's Scanner hosted servers (joesscanner.com), use the hard coded service account.
+                // - For custom servers, use the user configured basic auth credentials.
+                var isJoesScannerHost = baseUri.Host.EndsWith("app.joesscanner.com", StringComparison.OrdinalIgnoreCase);
+
+                string username;
+                string password;
+
+                if (isJoesScannerHost)
+                {
+                    username = ServiceAuthUsername;
+                    password = ServiceAuthPassword;
+                }
+                else
+                {
+                    username = _settingsService.BasicAuthUsername;
+                    password = _settingsService.BasicAuthPassword ?? string.Empty;
+                }
+
+                // Only do anything if we have a username.
+                if (string.IsNullOrWhiteSpace(username))
                     return audioUrl;
 
                 var userEscaped = Uri.EscapeDataString(username);
@@ -502,11 +521,31 @@ namespace JoesScanner.Services
             // Clear any previous header first.
             _httpClient.DefaultRequestHeaders.Authorization = null;
 
-            var username = _settingsService.BasicAuthUsername;
+            var serverUrl = _settingsService.ServerUrl ?? string.Empty;
+            if (!Uri.TryCreate(serverUrl, UriKind.Absolute, out var serverUri))
+                return;
+
+            var isJoesScannerHost = serverUri.Host.EndsWith("app.joesscanner.com", StringComparison.OrdinalIgnoreCase);
+
+            string username;
+            string password;
+
+            if (isJoesScannerHost)
+            {
+                // Joe's Scanner hosted servers use the hard coded service account.
+                username = ServiceAuthUsername;
+                password = ServiceAuthPassword;
+            }
+            else
+            {
+                // Custom servers use user configured basic auth credentials, if any.
+                username = _settingsService.BasicAuthUsername;
+                password = _settingsService.BasicAuthPassword ?? string.Empty;
+            }
+
             if (string.IsNullOrWhiteSpace(username))
                 return;
 
-            var password = _settingsService.BasicAuthPassword ?? string.Empty;
             var raw = $"{username}:{password}";
             var bytes = Encoding.ASCII.GetBytes(raw);
             var base64 = Convert.ToBase64String(bytes);

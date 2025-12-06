@@ -1,3 +1,4 @@
+<?xml version="1.0" encoding="utf-8" ?>
 <ContentPage
     x:Class="JoesScanner.Views.SettingsPage"
     xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
@@ -111,20 +112,35 @@
                         <!-- 0=title, 1=description, 2=fields, 3=buttons (inline), 4=status -->
                         <Grid
                             RowDefinitions="Auto,Auto,Auto,Auto,Auto"
-                            ColumnDefinitions="*"
+                            ColumnDefinitions="*,Auto"
                             RowSpacing="6">
 
-                            <!-- Title -->
+                            <!-- Title left -->
                             <Label
                                 Grid.Row="0"
+                                Grid.Column="0"
                                 Text="Connection"
                                 FontAttributes="Bold"
                                 FontSize="16"
                                 TextColor="{AppThemeBinding Light=#111827, Dark=White}" />
 
+                            <!-- Subscription badge right (level + renewal or trial text) -->
+                            <Label
+                                Grid.Row="0"
+                                Grid.Column="1"
+                                Text="{Binding SubscriptionSummary}"
+                                IsVisible="{Binding ShowSubscriptionSummary}"
+                                FontSize="10"
+                                TextColor="{AppThemeBinding Light=#16a34a, Dark=#22c55e}"
+                                HorizontalTextAlignment="End"
+                                VerticalOptions="Center"
+                                LineBreakMode="WordWrap" />
+
                             <!-- Description -->
                             <Label
                                 Grid.Row="1"
+                                Grid.Column="0"
+                                Grid.ColumnSpan="2"
                                 Margin="0,0,0,4"
                                 Text="Choose which server the app connects to. Not all servers require user/pass."
                                 FontSize="12"
@@ -133,6 +149,8 @@
                             <!-- Fields: server on row 0, user/pass on row 1 -->
                             <Grid
                                 Grid.Row="2"
+                                Grid.Column="0"
+                                Grid.ColumnSpan="2"
                                 RowDefinitions="Auto,Auto"
                                 ColumnDefinitions="*"
                                 RowSpacing="4">
@@ -222,33 +240,6 @@
                                         VerticalOptions="Center" />
                                 </Grid>
                             </Grid>
-
-                            <!-- Inline validation status -->
-                            <Label
-                                Grid.Row="4"
-                                Margin="0,4,0,0"
-                                FontSize="11"
-                                IsVisible="{Binding HasServerValidationResult}"
-                                Text="{Binding ServerValidationMessage}">
-
-                                <Label.Triggers>
-                                    <!-- Error: red -->
-                                    <DataTrigger
-                                        TargetType="Label"
-                                        Binding="{Binding ServerValidationIsError}"
-                                        Value="True">
-                                        <Setter Property="TextColor" Value="#ef4444" />
-                                    </DataTrigger>
-
-                                    <!-- Success: green -->
-                                    <DataTrigger
-                                        TargetType="Label"
-                                        Binding="{Binding ServerValidationIsError}"
-                                        Value="False">
-                                        <Setter Property="TextColor" Value="#22c55e" />
-                                    </DataTrigger>
-                                </Label.Triggers>
-                            </Label>
                         </Grid>
                     </Border>
 

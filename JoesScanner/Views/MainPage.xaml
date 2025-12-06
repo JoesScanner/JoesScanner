@@ -136,7 +136,7 @@
                             Margin="4,0,0,0" />
                     </HorizontalStackLayout>
 
-                    <!-- Row 2: audio, speed, calls waiting -->
+                    <!-- Row 2: audio, speed, calls waiting, queue status -->
                     <HorizontalStackLayout
                         Grid.Row="2"
                         Grid.Column="0"
@@ -187,6 +187,15 @@
                             FontSize="10"
                             VerticalOptions="Center"
                             Margin="6,0,0,0"
+                            TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
+
+                        <!-- Queue status text -->
+                        <Label
+                            Text="{Binding QueueStatusText, StringFormat='Queue: {0}'}"
+                            FontSize="10"
+                            VerticalOptions="Center"
+                            Margin="6,0,0,0"
+                            LineBreakMode="TailTruncation"
                             TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
                     </HorizontalStackLayout>
                 </Grid>

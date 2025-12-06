@@ -22,6 +22,7 @@ public static class MauiProgram
         builder.Services.AddSingleton<ISettingsService, SettingsService>();
         builder.Services.AddSingleton<ICallStreamService, CallStreamService>();
         builder.Services.AddSingleton<IAudioPlaybackService, AudioPlaybackService>();
+        builder.Services.AddSingleton<ISubscriptionService, SubscriptionService>();
 
         // View models
         builder.Services.AddSingleton<MainViewModel>();

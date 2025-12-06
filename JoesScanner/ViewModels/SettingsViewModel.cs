@@ -2,11 +2,15 @@ using JoesScanner.Models;
 using JoesScanner.Services;
 using Microsoft.Maui.Controls;
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Globalization;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using System.Windows.Input;
 
@@ -33,6 +37,40 @@ namespace JoesScanner.ViewModels
         private string _basicAuthPassword = string.Empty;
         private string _savedBasicAuthUsername = string.Empty;
         private string _savedBasicAuthPassword = string.Empty;
+
+        // Subscription summary for the Settings connection box header.
+        private string _subscriptionSummary = string.Empty;
+        public string SubscriptionSummary
+        {
+            get => _subscriptionSummary;
+            private set
+            {
+                var newValue = value ?? string.Empty;
+                if (_subscriptionSummary == newValue)
+                    return;
+
+                _subscriptionSummary = newValue;
+                OnPropertyChanged();
+            }
+        }
+
+        private bool _showSubscriptionSummary;
+        public bool ShowSubscriptionSummary
+        {
+            get => _showSubscriptionSummary;
+            private set
+            {
+                if (_showSubscriptionSummary == value)
+                    return;
+
+                _showSubscriptionSummary = value;
+                OnPropertyChanged();
+            }
+        }
+
+        // True only immediately after a successful validation in this app session.
+        // On a fresh app launch it is false so the header shows only the plan info.
+        private bool _showValidationPrefix;
 
         // Password visibility state
         private bool _isBasicAuthPasswordVisible;
@@ -462,8 +500,58 @@ namespace JoesScanner.ViewModels
             _savedBasicAuthPassword = _basicAuthPassword;
 
             // At this point everything matches the persisted state
+            _showValidationPrefix = false;
             HasChanges = false;
             OnPropertyChanged(nameof(HasUnsavedSettings));
+            UpdateSubscriptionSummaryFromSettings();
+        }
+
+        private void UpdateSubscriptionSummaryFromSettings()
+        {
+            // Only show this when pointed at the hosted Joe's Scanner server
+            // and a scanner username is present.
+            var serverUrl = ServerUrl;
+            var username = BasicAuthUsername;
+
+            if (string.IsNullOrWhiteSpace(serverUrl) ||
+                !Uri.TryCreate(serverUrl, UriKind.Absolute, out var uri) ||
+                !string.Equals(uri.Host, "app.joesscanner.com", StringComparison.OrdinalIgnoreCase) ||
+                string.IsNullOrWhiteSpace(username))
+            {
+                ShowSubscriptionSummary = false;
+                SubscriptionSummary = string.Empty;
+                return;
+            }
+
+            // If the last validation failed, do not show stale info.
+            if (!_settings.SubscriptionLastStatusOk)
+            {
+                ShowSubscriptionSummary = false;
+                SubscriptionSummary = string.Empty;
+                return;
+            }
+
+            // Use exactly what we cached from the successful auth call.
+            var planSummary = _settings.SubscriptionLastMessage ?? string.Empty;
+            planSummary = planSummary.Trim();
+
+            if (string.IsNullOrEmpty(planSummary))
+            {
+                ShowSubscriptionSummary = false;
+                SubscriptionSummary = string.Empty;
+                return;
+            }
+
+            if (_showValidationPrefix)
+            {
+                SubscriptionSummary = $"Joe's Scanner account validated. {planSummary}";
+            }
+            else
+            {
+                SubscriptionSummary = planSummary;
+            }
+
+            ShowSubscriptionSummary = true;
         }
 
         private void ApplyTheme(string mode)
@@ -538,8 +626,7 @@ namespace JoesScanner.ViewModels
             UseDefaultConnection = true;
         }
 
-        // Lightweight server validation. You can expand this to hit
-        // a health endpoint later.
+        // Lightweight server validation and SureCart auth check.
         private async Task ValidateServerUrlAsync()
         {
             var url = ServerUrl?.Trim();
@@ -557,55 +644,227 @@ namespace JoesScanner.ViewModels
                 return;
             }
 
+            var isDefaultServer =
+                string.Equals(url, DefaultServerUrl, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(url.TrimEnd('/'), DefaultServerUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase);
+
             try
             {
-                using var request = new HttpRequestMessage(HttpMethod.Head, url);
-
-                // Apply basic auth using current edited values, if present
-                if (!string.IsNullOrWhiteSpace(BasicAuthUsername))
+                if (isDefaultServer)
                 {
-                    var raw = $"{BasicAuthUsername}:{BasicAuthPassword ?? string.Empty}";
-                    var bytes = Encoding.ASCII.GetBytes(raw);
-                    var base64 = Convert.ToBase64String(bytes);
+                    var accountUsername = _settings.BasicAuthUsername;
+                    var accountPassword = _settings.BasicAuthPassword;
 
-                    request.Headers.Authorization =
-                        new AuthenticationHeaderValue("Basic", base64);
-                }
-
-                using var response = await _httpClient.SendAsync(request);
-
-                var statusCode = response.StatusCode;
-                var statusInt = (int)statusCode;
-
-                if (response.IsSuccessStatusCode
-                    || statusCode == HttpStatusCode.NotImplemented)
-                {
-                    if (statusCode == HttpStatusCode.NotImplemented)
+                    if (string.IsNullOrWhiteSpace(accountUsername) || string.IsNullOrWhiteSpace(accountPassword))
                     {
                         ServerValidationMessage =
-                            "Server reachable. Connection looks good.";
+                            "Scanner account username and password are not configured. Enter them in the connection box and save first.";
+                        ServerValidationIsError = true;
+
+                        _settings.SubscriptionLastStatusOk = false;
+                        _settings.SubscriptionLastMessage = ServerValidationMessage;
+                        _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
+
+                        return;
+                    }
+
+                    var authUrl = "https://joesscanner.com/wp-json/joes-scanner/v1/auth";
+
+                    var payload = new
+                    {
+                        username = accountUsername,
+                        password = accountPassword,
+                        client = "JoesScannerApp",
+                        version = "1.0.0"
+                    };
+
+                    var json = JsonSerializer.Serialize(payload);
+                    using var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+                    using var authResponseMessage = await _httpClient.PostAsync(authUrl, content);
+                    var responseBody = await authResponseMessage.Content.ReadAsStringAsync();
+
+                    if (!authResponseMessage.IsSuccessStatusCode)
+                    {
+                        var statusInt = (int)authResponseMessage.StatusCode;
+                        ServerValidationMessage =
+                            $"Auth server responded with HTTP {statusInt} {authResponseMessage.ReasonPhrase}.";
+                        ServerValidationIsError = true;
+
+                        _settings.SubscriptionLastStatusOk = false;
+                        _settings.SubscriptionLastMessage = ServerValidationMessage;
+                        _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
+
+                        return;
+                    }
+
+                    AuthResponseDto? authResponse = null;
+                    try
+                    {
+                        authResponse = JsonSerializer.Deserialize<AuthResponseDto>(
+                            responseBody,
+                            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                    }
+                    catch
+                    {
+                    }
+
+                    if (authResponse == null)
+                    {
+                        ServerValidationMessage = "Auth server returned an unexpected response.";
+                        ServerValidationIsError = true;
+
+                        _settings.SubscriptionLastStatusOk = false;
+                        _settings.SubscriptionLastMessage = ServerValidationMessage;
+                        _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
+
+                        return;
+                    }
+
+                    if (!authResponse.Ok)
+                    {
+                        var code = authResponse.Error ?? "unknown_error";
+                        var msg = authResponse.Message ?? "Account validation failed.";
+                        ServerValidationMessage =
+                            $"Account validation failed ({code}): {msg}";
+                        ServerValidationIsError = true;
+
+                        _settings.SubscriptionLastStatusOk = false;
+                        _settings.SubscriptionLastMessage = ServerValidationMessage;
+                        _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
+
+                        return;
+                    }
+
+                    var sub = authResponse.Subscription;
+                    if (sub == null || !sub.Active)
+                    {
+                        var subStatus = sub?.Status ?? "unknown";
+                        ServerValidationMessage =
+                            $"Account validated but subscription is not active (status: {subStatus}).";
+                        ServerValidationIsError = true;
+
+                        _settings.SubscriptionLastStatusOk = false;
+                        _settings.SubscriptionLastMessage = ServerValidationMessage;
+                        _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
+
+                        return;
+                    }
+
+                    // Prefer the human label sent by the API, fall back to level (price id) if needed.
+                    var planLabelRaw = sub.LevelLabel ?? sub.Level ?? string.Empty;
+                    var periodEndRaw = sub.PeriodEndAt ?? sub.TrialEndsAt ?? string.Empty;
+                    var statusRaw = sub.Status ?? string.Empty;
+                    var priceIdRaw = sub.PriceId ?? string.Empty;
+
+                    var planLabel = planLabelRaw.Trim();
+                    var statusText = statusRaw.Trim().ToLowerInvariant();
+                    var periodEnd = periodEndRaw.Trim();
+
+                    string formattedDate = string.Empty;
+                    if (!string.IsNullOrEmpty(periodEnd))
+                    {
+                        if (DateTime.TryParse(
+                                periodEnd,
+                                CultureInfo.InvariantCulture,
+                                DateTimeStyles.RoundtripKind,
+                                out var dt)
+                            || DateTime.TryParse(periodEnd, out dt))
+                        {
+                            if (dt.Kind == DateTimeKind.Unspecified)
+                                dt = DateTime.SpecifyKind(dt, DateTimeKind.Utc);
+
+                            formattedDate = dt.ToLocalTime().ToString("yyyy-MM-dd");
+                        }
+                    }
+
+                    string dateLabel = statusText == "trialing"
+                        ? "Trial end date:"
+                        : "Renewal:";
+
+                    string planSummary;
+                    if (!string.IsNullOrEmpty(planLabel) && !string.IsNullOrEmpty(formattedDate))
+                    {
+                        planSummary = $"Plan: {planLabel} - {dateLabel} {formattedDate}";
+                    }
+                    else if (!string.IsNullOrEmpty(planLabel))
+                    {
+                        planSummary = $"Plan: {planLabel}";
+                    }
+                    else if (!string.IsNullOrEmpty(formattedDate))
+                    {
+                        planSummary = $"{dateLabel} {formattedDate}";
+                    }
+                    else
+                    {
+                        planSummary = string.Empty;
+                    }
+
+                    ServerValidationMessage = string.IsNullOrEmpty(planSummary)
+                        ? "Joe's Scanner account validated."
+                        : $"Joe's Scanner account validated. {planSummary}";
+
+                    ServerValidationIsError = false;
+
+                    var nowUtc = DateTime.UtcNow;
+                    _settings.SubscriptionLastCheckUtc = nowUtc;
+                    _settings.SubscriptionLastStatusOk = true;
+                    _settings.SubscriptionPriceId = priceIdRaw;
+                    _settings.SubscriptionLastLevel = planLabel;
+                    _settings.SubscriptionRenewalUtc = null;
+                    _settings.SubscriptionLastMessage = planSummary;
+
+                    _showValidationPrefix = true;
+                    UpdateSubscriptionSummaryFromSettings();
+                }
+                else
+                {
+                    using var request = new HttpRequestMessage(HttpMethod.Head, url);
+
+                    if (!string.IsNullOrWhiteSpace(BasicAuthUsername))
+                    {
+                        var raw = $"{BasicAuthUsername}:{BasicAuthPassword ?? string.Empty}";
+                        var bytes = Encoding.ASCII.GetBytes(raw);
+                        var base64 = Convert.ToBase64String(bytes);
+
+                        request.Headers.Authorization =
+                            new AuthenticationHeaderValue("Basic", base64);
+                    }
+
+                    using var serverResponse = await _httpClient.SendAsync(request);
+
+                    var statusCode = serverResponse.StatusCode;
+                    var statusInt = (int)statusCode;
+
+                    if (serverResponse.IsSuccessStatusCode
+                        || statusCode == HttpStatusCode.NotImplemented)
+                    {
+                        if (statusCode == HttpStatusCode.NotImplemented)
+                        {
+                            ServerValidationMessage = "Server reachable. Connection looks good.";
+                        }
+                        else
+                        {
+                            ServerValidationMessage =
+                                $"Server reachable (HTTP {statusInt} {serverResponse.ReasonPhrase}).";
+                        }
+
+                        ServerValidationIsError = false;
+                    }
+                    else if (statusCode == HttpStatusCode.Unauthorized
+                             || statusCode == HttpStatusCode.Forbidden)
+                    {
+                        ServerValidationMessage =
+                            $"Authentication failed (HTTP {statusInt} {serverResponse.ReasonPhrase}). " +
+                            "Check basic auth username and password and that the server or firewall is configured to allow this client.";
+                        ServerValidationIsError = true;
                     }
                     else
                     {
                         ServerValidationMessage =
-                            $"Server reachable (HTTP {statusInt} {response.ReasonPhrase}).";
+                            $"Server responded with HTTP {statusInt} {serverResponse.ReasonPhrase}.";
+                        ServerValidationIsError = true;
                     }
-
-                    ServerValidationIsError = false;
-                }
-                else if (statusCode == HttpStatusCode.Unauthorized
-                         || statusCode == HttpStatusCode.Forbidden)
-                {
-                    ServerValidationMessage =
-                        $"Authentication failed (HTTP {statusInt} {response.ReasonPhrase}). " +
-                        "Check basic auth username and password and that the server or firewall is configured to allow this client.";
-                    ServerValidationIsError = true;
-                }
-                else
-                {
-                    ServerValidationMessage =
-                        $"Server responded with HTTP {statusInt} {response.ReasonPhrase}.";
-                    ServerValidationIsError = true;
                 }
             }
             catch (HttpRequestException ex)
@@ -651,5 +910,48 @@ namespace JoesScanner.ViewModels
             BasicAuthPassword = _savedBasicAuthPassword;
             HasChanges = false;
         }
+
+        private sealed class AuthResponseDto
+        {
+            [JsonPropertyName("ok")]
+            public bool Ok { get; set; }
+
+            [JsonPropertyName("error")]
+            public string? Error { get; set; }
+
+            [JsonPropertyName("message")]
+            public string? Message { get; set; }
+
+            [JsonPropertyName("subscription")]
+            public AuthSubscriptionDto? Subscription { get; set; }
+        }
+
+        private sealed class AuthSubscriptionDto
+        {
+            [JsonPropertyName("active")]
+            public bool Active { get; set; }
+
+            [JsonPropertyName("status")]
+            public string? Status { get; set; }
+
+            // This is the raw price id the PHP sends as "level"
+            [JsonPropertyName("level")]
+            public string? Level { get; set; }
+
+            // This is the human label the PHP sends as "level_label"
+            [JsonPropertyName("level_label")]
+            public string? LevelLabel { get; set; }
+
+            [JsonPropertyName("price_id")]
+            public string? PriceId { get; set; }
+
+            // Keep these as strings; we already parse them manually.
+            [JsonPropertyName("period_end_at")]
+            public string? PeriodEndAt { get; set; }
+
+            [JsonPropertyName("trial_ends_at")]
+            public string? TrialEndsAt { get; set; }
+        }
+
     }
 }

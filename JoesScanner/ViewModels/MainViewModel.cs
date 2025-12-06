@@ -1,15 +1,15 @@
 using JoesScanner.Models;
 using JoesScanner.Services;
-using System.Collections.ObjectModel;
-using System.Linq;
-using System.Windows.Input;
 using System;
+using System.Collections.ObjectModel;
 using System.IO;
+using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows.Input;
 using Microsoft.Maui.Storage;
 
 namespace JoesScanner.ViewModels
@@ -23,6 +23,7 @@ namespace JoesScanner.ViewModels
         private readonly IAudioPlaybackService _audioPlaybackService;
         private readonly HttpClient _audioHttpClient;
         private readonly FilterService _filterService = FilterService.Instance;
+        private readonly ISubscriptionService _subscriptionService;
 
         private CancellationTokenSource? _cts;
         private CancellationTokenSource? _audioCts;
@@ -50,6 +51,36 @@ namespace JoesScanner.ViewModels
 
         // Optional settings view model reference. Currently not used but kept for future wiring.
         public SettingsViewModel? SettingsViewModel { get; set; }
+
+        // Subscription badge (top right of header)
+        private string _subscriptionSummary = string.Empty;
+        public string SubscriptionSummary
+        {
+            get => _subscriptionSummary;
+            private set
+            {
+                var newValue = value ?? string.Empty;
+                if (_subscriptionSummary == newValue)
+                    return;
+
+                _subscriptionSummary = newValue;
+                OnPropertyChanged();
+            }
+        }
+
+        private bool _showSubscriptionSummary;
+        public bool ShowSubscriptionSummary
+        {
+            get => _showSubscriptionSummary;
+            private set
+            {
+                if (_showSubscriptionSummary == value)
+                    return;
+
+                _showSubscriptionSummary = value;
+                OnPropertyChanged();
+            }
+        }
 
         private string _queueStatusText = "Idle";
         public string QueueStatusText
@@ -90,11 +121,13 @@ namespace JoesScanner.ViewModels
         public MainViewModel(
             ICallStreamService callStreamService,
             ISettingsService settingsService,
-            IAudioPlaybackService audioPlaybackService)
+            IAudioPlaybackService audioPlaybackService,
+            ISubscriptionService subscriptionService)
         {
             _callStreamService = callStreamService ?? throw new ArgumentNullException(nameof(callStreamService));
             _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
             _audioPlaybackService = audioPlaybackService ?? throw new ArgumentNullException(nameof(audioPlaybackService));
+            _subscriptionService = subscriptionService ?? throw new ArgumentNullException(nameof(subscriptionService));
 
             _audioHttpClient = new HttpClient
             {
@@ -152,10 +185,16 @@ namespace JoesScanner.ViewModels
 
             // React when filters change (mute / disable / clear).
             _filterService.RulesChanged += FilterServiceOnRulesChanged;
+
+            // Initialize subscription badge from any cached subscription data.
+            UpdateSubscriptionSummaryFromSettings();
         }
 
         private const string LastConnectedPreferenceKey = "LastConnectedOnExit";
         private const string PlaybackSpeedStepPreferenceKey = "PlaybackSpeedStep";
+
+        private const string ServiceAuthUsername = "secappass";
+        private const string ServiceAuthPassword = "7a65vBLeqLjdRut5bSav4eMYGUJPrmjHhgnPmEji3q3S7tZ3K5aadFZz2EZtbaE7";
 
         // True when connected to the server stream.
         public bool IsRunning
@@ -171,13 +210,10 @@ namespace JoesScanner.ViewModels
                 ((Command)StartCommand).ChangeCanExecute();
                 ((Command)StopCommand).ChangeCanExecute();
 
-                // When the stream stops, always reflect that.
                 if (!_isRunning)
                 {
                     SetConnectionStatus(ConnectionStatus.Stopped);
                 }
-                // When it becomes true, we will explicitly set Connecting or Connected
-                // from StartAsync and the stream loop, so do nothing here.
             }
         }
 
@@ -223,13 +259,13 @@ namespace JoesScanner.ViewModels
 
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(TaglineText));
+
+                // If the server changes, recompute whether we should show the subscription badge.
+                UpdateSubscriptionSummaryFromSettings();
             }
         }
 
         // Number of calls waiting in the playback queue, excluding the call at the current anchor.
-        // With newest at the top (index 0):
-        // - When no anchor is set, all calls are considered waiting.
-        // - When an anchor is set, waiting calls are those above it (lower indices).
         public int CallsWaiting
         {
             get
@@ -237,19 +273,13 @@ namespace JoesScanner.ViewModels
                 if (Calls == null || Calls.Count == 0)
                     return 0;
 
-                // Anchor is the call that is currently playing, or the last one
-                // that finished if nothing is playing.
                 var anchor = _currentPlayingCall ?? _lastPlayedCall;
 
-                // A call is playable for the queue if:
-                //   it has an audio URL
-                //   it is not hidden or muted by filters
                 bool IsPlayable(CallItem c) =>
                     !string.IsNullOrWhiteSpace(c.AudioUrl) &&
                     !_filterService.ShouldHide(c) &&
                     !_filterService.ShouldMute(c);
 
-                // If we have no anchor at all, then all playable calls are considered waiting.
                 if (anchor == null)
                 {
                     var total = 0;
@@ -264,7 +294,6 @@ namespace JoesScanner.ViewModels
 
                 var anchorIndex = Calls.IndexOf(anchor);
 
-                // If the anchor is not found (trimmed out), treat all playable calls as waiting.
                 if (anchorIndex < 0)
                 {
                     var total = 0;
@@ -277,8 +306,6 @@ namespace JoesScanner.ViewModels
                     return total;
                 }
 
-                // Newest is at index 0. Anything above the anchor (lower index)
-                // that is playable is waiting to be played.
                 if (anchorIndex <= 0)
                     return 0;
 
@@ -335,13 +362,11 @@ namespace JoesScanner.ViewModels
                 _lastQueueEvent = value ?? string.Empty;
                 OnPropertyChanged();
 
-                // Also push into the circular log.
                 AppLog.Add(_lastQueueEvent);
             }
         }
 
         // Whether the "Calls waiting" indicator should be visible in the UI.
-        // Always visible whenever audio is on, regardless of the count.
         public bool IsCallsWaitingVisible => AudioEnabled;
 
         // Represents the current connection state of the call stream.
@@ -357,8 +382,6 @@ namespace JoesScanner.ViewModels
 
         private ConnectionStatus _connectionStatus = ConnectionStatus.Stopped;
 
-        // User facing text for the current connection status.
-        // This is what we will bind the existing label to.
         private string _connectionStatusText = "Stopped";
         public string ConnectionStatusText
         {
@@ -373,8 +396,6 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // Helper flags so the UI can style the indicator without
-        // needing to know about the enum directly.
         private bool _connectionStatusIsConnected;
         public bool ConnectionStatusIsConnected
         {
@@ -417,7 +438,6 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // Color used by your existing little dot in the UI.
         private Color _connectionStatusColor = Colors.Gray;
         public Color ConnectionStatusColor
         {
@@ -435,7 +455,6 @@ namespace JoesScanner.ViewModels
         // Central helper to update the status and all derived properties in one place.
         private void SetConnectionStatus(ConnectionStatus status, string? detailMessage = null)
         {
-            // Avoid pointless churn if status and text would be identical.
             if (_connectionStatus == status && string.IsNullOrWhiteSpace(detailMessage))
                 return;
 
@@ -459,7 +478,6 @@ namespace JoesScanner.ViewModels
 
             ConnectionStatusText = text;
 
-            // Derived flags for UI styling.
             ConnectionStatusIsConnected = status == ConnectionStatus.Connected;
             ConnectionStatusIsWarning = status == ConnectionStatus.Connecting;
             ConnectionStatusIsError =
@@ -467,7 +485,6 @@ namespace JoesScanner.ViewModels
                 status == ConnectionStatus.ServerUnreachable ||
                 status == ConnectionStatus.Error;
 
-            // Map status to a color for the indicator dot.
             Color color;
             if (ConnectionStatusIsConnected)
             {
@@ -488,25 +505,104 @@ namespace JoesScanner.ViewModels
 
             ConnectionStatusColor = color;
 
-            // Log the status change to the circular log.
             AppLog.Add($"Connection status changed to {status} ({text})");
         }
 
+        // Determine whether current server is the hosted Joe's Scanner service.
+        private bool IsJoesScannerHostedServer()
+        {
+            var serverUrl = _settingsService.ServerUrl;
+            if (string.IsNullOrWhiteSpace(serverUrl))
+                return false;
+
+            if (!Uri.TryCreate(serverUrl, UriKind.Absolute, out var uri))
+                return false;
+
+            return string.Equals(uri.Host, "app.joesscanner.com", StringComparison.OrdinalIgnoreCase);
+        }
+
+        // Public hook so SettingsViewModel can refresh the header badge after a validation run.
+        public void RefreshSubscriptionSummaryFromSettings()
+        {
+            UpdateSubscriptionSummaryFromSettings();
+        }
+
+        // Build the subscription badge based on cached subscription info.
+        private void UpdateSubscriptionSummaryFromSettings()
+        {
+            // Only show for the default Joe's Scanner hosted server, and only when account auth is set.
+            if (!IsJoesScannerHostedServer() ||
+                string.IsNullOrWhiteSpace(_settingsService.BasicAuthUsername))
+            {
+                ShowSubscriptionSummary = false;
+                SubscriptionSummary = string.Empty;
+                return;
+            }
+
+            var levelLabel = _settingsService.SubscriptionLastLevel;
+            var renewalUtc = _settingsService.SubscriptionRenewalUtc;
+            var lastStatusOk = _settingsService.SubscriptionLastStatusOk;
+            var lastMessage = _settingsService.SubscriptionLastMessage;
+
+            string summary;
+
+            if (!lastStatusOk)
+            {
+                if (!string.IsNullOrWhiteSpace(lastMessage))
+                {
+                    summary = lastMessage;
+                }
+                else if (!string.IsNullOrWhiteSpace(levelLabel))
+                {
+                    summary = $"{levelLabel} • status unknown";
+                }
+                else
+                {
+                    summary = "Subscription status unknown";
+                }
+            }
+            else
+            {
+                if (renewalUtc.HasValue)
+                {
+                    var renewalLocal = DateTime.SpecifyKind(renewalUtc.Value, DateTimeKind.Utc)
+                        .ToLocalTime()
+                        .ToString("yyyy-MM-dd");
+
+                    summary = !string.IsNullOrWhiteSpace(levelLabel)
+                        ? $"{levelLabel} • renews {renewalLocal}"
+                        : $"Renews {renewalLocal}";
+                }
+                else if (!string.IsNullOrWhiteSpace(lastMessage))
+                {
+                    // Covers trial accounts where there is no concrete renewal date yet.
+                    summary = lastMessage;
+                }
+                else if (!string.IsNullOrWhiteSpace(levelLabel))
+                {
+                    summary = $"{levelLabel} • active";
+                }
+                else
+                {
+                    summary = "Subscription active";
+                }
+            }
+
+            SubscriptionSummary = summary;
+            ShowSubscriptionSummary = true;
+        }
+
         // Returns the next call to play from the backlog.
-        // Calls are stored newest at index 0, oldest at the end.
-        // Walk from oldest to newest so you hear things in order.
         private CallItem? GetNextQueuedCall()
         {
             if (Calls.Count == 0)
                 return null;
 
-            // Never start a new call while one is already playing.
             if (_currentPlayingCall != null)
                 return null;
 
             int startIndex;
 
-            // If we have never played anything, start from the oldest call.
             if (_lastPlayedCall == null)
             {
                 startIndex = Calls.Count - 1;
@@ -515,25 +611,20 @@ namespace JoesScanner.ViewModels
             {
                 var anchorIndex = Calls.IndexOf(_lastPlayedCall);
 
-                // If the anchor is gone (trimmed), restart from the oldest call.
                 if (anchorIndex < 0)
                 {
                     startIndex = Calls.Count - 1;
                 }
                 else if (anchorIndex == 0)
                 {
-                    // Anchor is already the oldest; nothing newer to play.
                     return null;
                 }
                 else
                 {
-                    // Next newer than the anchor.
                     startIndex = anchorIndex - 1;
                 }
             }
 
-            // Walk toward the newest call (index 0) and pick the first one
-            // that has audio and is not muted or disabled by filters.
             for (var i = startIndex; i >= 0; i--)
             {
                 var candidate = Calls[i];
@@ -547,11 +638,9 @@ namespace JoesScanner.ViewModels
                 return candidate;
             }
 
-            // No playable calls found.
             return null;
         }
 
-        // Reacts when filter rules change and removes hidden calls from the list.
         private async void FilterServiceOnRulesChanged(object? sender, EventArgs e)
         {
             try
@@ -560,11 +649,9 @@ namespace JoesScanner.ViewModels
             }
             catch
             {
-                // Best effort only; never crash on filter updates.
             }
         }
 
-        // Applies current filters to all existing calls and trims out hidden ones.
         private void ApplyFiltersToExistingCalls()
         {
             if (Calls == null || Calls.Count == 0)
@@ -572,7 +659,6 @@ namespace JoesScanner.ViewModels
 
             var removedCount = 0;
 
-            // Walk from bottom to top so index removal is safe.
             for (int i = Calls.Count - 1; i >= 0; i--)
             {
                 var call = Calls[i];
@@ -590,58 +676,7 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // Queue playback engine.
-        // While audio is on and we are connected, it repeatedly finds the next
-        // queued call (based on _lastPlayedCall) and plays it until we are caught up.
-        private async Task EnsureQueuePlaybackAsync()
-        {
-            if (_isQueuePlaybackRunning)
-                return;
-
-            if (!AudioEnabled || !IsRunning)
-                return;
-
-            _isQueuePlaybackRunning = true;
-            var aborted = false;
-
-            LastQueueEvent = "Queue playback started";
-
-            try
-            {
-                while (AudioEnabled && IsRunning)
-                {
-                    var next = GetNextQueuedCall();
-                    if (next == null)
-                        break;
-
-                    UpdateQueueDerivedState();
-
-                    await PlayAudioAsync(next);
-
-                    if (!AudioEnabled || !IsRunning)
-                    {
-                        aborted = true;
-                        break;
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                aborted = true;
-                System.Diagnostics.Debug.WriteLine($"Error in EnsureQueuePlaybackAsync: {ex}");
-            }
-            finally
-            {
-                _isQueuePlaybackRunning = false;
-
-                UpdateQueueDerivedState();
-
-                LastQueueEvent = aborted ? "Queue playback aborted" : "Queue playback finished";
-            }
-        }
-
         // Numbered playback speed step used by the slider on the main page.
-        // 0 = 1x, 1 = 1.5x, 2 = 2x.
         public double PlaybackSpeedStep
         {
             get => _playbackSpeedStep;
@@ -659,12 +694,10 @@ namespace JoesScanner.ViewModels
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(PlaybackSpeedLabel));
 
-                // Persist the setting so it survives app restarts.
                 Preferences.Set(PlaybackSpeedStepPreferenceKey, _playbackSpeedStep);
             }
         }
 
-        // User friendly label for the current playback speed step.
         public string PlaybackSpeedLabel =>
             _playbackSpeedStep switch
             {
@@ -673,8 +706,6 @@ namespace JoesScanner.ViewModels
                 _ => "1x"
             };
 
-        // AutoPlay is driven by AudioEnabled.
-        // When true and a new call arrives, it will be auto-played.
         public bool AutoPlay
         {
             get => _autoPlay;
@@ -689,7 +720,6 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // Maximum number of calls maintained in the Calls collection.
         public int MaxCalls
         {
             get => _maxCalls;
@@ -697,7 +727,6 @@ namespace JoesScanner.ViewModels
             {
                 var clamped = value;
 
-                // Clamp to 10-50.
                 if (clamped < 10) clamped = 10;
                 if (clamped > 50) clamped = 50;
 
@@ -712,28 +741,69 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // Tagline bound to the subtitle under the JoesScanner header.
-        // Shows the active server URL.
         public string TaglineText => $"Server: {ServerUrl}";
 
-        // Donation URL used by the footer button.
         public string DonateUrl => "https://www.joesscanner.com/products/one-time-donation/";
 
-        // Entry point used by the Connect button, wraps the async Start.
         public void Start()
         {
             AppLog.Add("User clicked Start Monitoring");
             _ = StartAsync();
         }
 
-        // Starts the streaming of calls from the server.
         private async Task StartAsync()
         {
-            // Already running, nothing to do.
             if (IsRunning)
                 return;
 
-            // Ensure any previous CTS is canceled and disposed.
+            var serverUrl = _settingsService.ServerUrl ?? string.Empty;
+            var isJoesScannerServer = false;
+
+            if (Uri.TryCreate(serverUrl, UriKind.Absolute, out var serverUri))
+            {
+                isJoesScannerServer =
+                    string.Equals(serverUri.Host, "app.joesscanner.com", StringComparison.OrdinalIgnoreCase);
+            }
+
+            var username = _settingsService.BasicAuthUsername ?? string.Empty;
+
+            if (isJoesScannerServer)
+            {
+                AppLog.Add($"Subscription check: server={serverUrl}, user={username}");
+
+                try
+                {
+                    var subResult = await _subscriptionService.EnsureSubscriptionAsync(CancellationToken.None);
+                    if (!subResult.IsAllowed)
+                    {
+                        AppLog.Add($"Subscription check failed: {subResult.ErrorCode} {subResult.Message}");
+
+                        SetConnectionStatus(ConnectionStatus.AuthFailed,
+                            subResult.Message ?? "Subscription not active");
+
+                        return;
+                    }
+
+                    AppLog.Add("Subscription check passed, starting stream.");
+
+                    // subscription service should have updated cached fields;
+                    // refresh the header badge.
+                    UpdateSubscriptionSummaryFromSettings();
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Add($"Subscription check error: {ex.Message}");
+                    SetConnectionStatus(ConnectionStatus.Error, "Subscription check error");
+                    return;
+                }
+            }
+            else
+            {
+                AppLog.Add($"Custom server detected ({serverUrl}), skipping Joe's Scanner subscription check.");
+                ShowSubscriptionSummary = false;
+                SubscriptionSummary = string.Empty;
+            }
+
             if (_cts != null)
             {
                 try
@@ -748,23 +818,18 @@ namespace JoesScanner.ViewModels
                 _cts = null;
             }
 
-            // Create a fresh CTS for this connection.
             _cts = new CancellationTokenSource();
             var token = _cts.Token;
 
-            // Remember that we were connected when the app last ran.
             Preferences.Set(LastConnectedPreferenceKey, true);
 
-            // Reset call state for this connection, but keep history in Calls.
-            // We treat everything currently in Calls as already handled so
-            // only calls that arrive after this point are considered backlog.
             SetConnectionStatus(ConnectionStatus.Connecting);
             IsRunning = true;
+
             _currentPlayingCall = null;
 
             if (Calls.Count > 0)
             {
-                // Newest call is at index 0, so this becomes our anchor.
                 _lastPlayedCall = Calls[0];
             }
             else
@@ -774,13 +839,9 @@ namespace JoesScanner.ViewModels
 
             UpdateQueueDerivedState();
 
-            // Fire and forget the background stream loop.
             _ = Task.Run(() => RunCallStreamLoopAsync(token));
         }
 
-        // Background loop that continuously pulls calls from the server
-        // and feeds them into the UI. This must never throw out of the
-        // method except for cancellation.
         private async Task RunCallStreamLoopAsync(CancellationToken token)
         {
             try
@@ -802,20 +863,16 @@ namespace JoesScanner.ViewModels
                             if (token.IsCancellationRequested)
                                 return;
 
-                            // Update connection status based on special rows from the service.
                             if (string.Equals(call.Talkgroup, "AUTH", StringComparison.OrdinalIgnoreCase))
                             {
-                                // Auth failure row from CallStreamService.
                                 SetConnectionStatus(ConnectionStatus.AuthFailed);
                             }
                             else if (string.Equals(call.Talkgroup, "ERROR", StringComparison.OrdinalIgnoreCase))
                             {
-                                // Generic connectivity or server error row.
                                 SetConnectionStatus(ConnectionStatus.ServerUnreachable);
                             }
                             else if (string.Equals(call.Talkgroup, "HEARTBEAT", StringComparison.OrdinalIgnoreCase))
                             {
-                                // Synthetic connected but idle row from CallStreamService.
                                 if (_connectionStatus == ConnectionStatus.Connecting ||
                                     _connectionStatus == ConnectionStatus.AuthFailed ||
                                     _connectionStatus == ConnectionStatus.ServerUnreachable ||
@@ -824,13 +881,10 @@ namespace JoesScanner.ViewModels
                                     SetConnectionStatus(ConnectionStatus.Connected);
                                 }
 
-                                // Do not insert this control row into the Calls collection.
                                 return;
                             }
                             else
                             {
-                                // Any normal (non AUTH or ERROR or HEARTBEAT) call means we are successfully talking
-                                // to the server, so move from Connecting or Error to Connected.
                                 if (_connectionStatus == ConnectionStatus.Connecting ||
                                     _connectionStatus == ConnectionStatus.AuthFailed ||
                                     _connectionStatus == ConnectionStatus.ServerUnreachable ||
@@ -840,7 +894,6 @@ namespace JoesScanner.ViewModels
                                 }
                             }
 
-                            // If this is a transcription update for an existing call, patch in place.
                             if (call.IsTranscriptionUpdate &&
                                 !string.IsNullOrWhiteSpace(call.BackendId))
                             {
@@ -851,21 +904,18 @@ namespace JoesScanner.ViewModels
                                     {
                                         existing.Transcription = call.Transcription;
 
-                                        // Remove the old "No transcription from server" message.
                                         if (!string.IsNullOrWhiteSpace(existing.DebugInfo))
                                         {
                                             var cleaned = existing.DebugInfo
                                                 .Replace("No transcription from server", string.Empty, StringComparison.OrdinalIgnoreCase)
                                                 .Trim();
 
-                                            // Clean up leftover separators.
                                             cleaned = cleaned.Trim(' ', '|', ';');
 
                                             existing.DebugInfo = cleaned;
                                         }
                                     }
 
-                                    // If the update itself carries any new debug info, append it.
                                     if (!string.IsNullOrWhiteSpace(call.DebugInfo))
                                     {
                                         existing.DebugInfo = string.IsNullOrWhiteSpace(existing.DebugInfo)
@@ -876,31 +926,25 @@ namespace JoesScanner.ViewModels
                                     LastQueueEvent = $"Transcription updated at {DateTime.Now:T}";
                                 }
 
-                                // Do not insert a new row or disturb the queue for updates.
                                 return;
                             }
 
-                            // Update filters based on this call (receiver, site, talkgroup).
                             _filterService.EnsureRulesForCall(call);
 
-                            // If any matching filter rule has IsDisabled, drop this call completely.
                             if (_filterService.ShouldHide(call))
                             {
                                 LastQueueEvent = $"Call dropped by filter at {DateTime.Now:T}";
                                 return;
                             }
 
-                            // Normal new call path: always show newest calls at the top (index 0).
                             Calls.Insert(0, call);
                             TotalCallsInserted++;
                             LastQueueEvent = $"Inserted call at {DateTime.Now:T}";
 
                             EnforceMaxCalls();
 
-                            // Recompute CallsWaiting, visibility, etc.
                             UpdateQueueDerivedState();
 
-                            // Kick the queue engine if audio and autoplay are enabled.
                             if (AudioEnabled && AutoPlay)
                             {
                                 _ = EnsureQueuePlaybackAsync();
@@ -956,12 +1000,10 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // Fully stops the call stream and audio playback.
         private async Task StopAsync()
         {
             AppLog.Add("User clicked Stop monitoring.");
 
-            // Stop the call stream.
             if (_cts != null)
             {
                 try
@@ -976,7 +1018,6 @@ namespace JoesScanner.ViewModels
                 _cts = null;
             }
 
-            // Stop any current audio playback via CTS.
             if (_audioCts != null)
             {
                 try
@@ -991,10 +1032,8 @@ namespace JoesScanner.ViewModels
                 _audioCts = null;
             }
 
-            // Mark as not running.
             IsRunning = false;
 
-            // Also let the audio service clean up its player.
             try
             {
                 await _audioPlaybackService.StopAsync();
@@ -1003,7 +1042,6 @@ namespace JoesScanner.ViewModels
             {
             }
 
-            // Reset queue position when fully stopped.
             foreach (var call in Calls)
             {
                 if (call.IsPlaying)
@@ -1014,15 +1052,11 @@ namespace JoesScanner.ViewModels
             _lastPlayedCall = null;
             UpdateQueueDerivedState();
 
-            // We are no longer connected, remember this for next launch.
             Preferences.Set(LastConnectedPreferenceKey, false);
         }
 
-        // Called only from the audio toggle path to stop playback.
-        // This must never cancel the call stream CTS or change IsRunning.
         public async Task StopAudioFromToggleAsync()
         {
-            // Cancel any in-flight audio playback so PlayAudioAsync can finish.
             if (_audioCts != null)
             {
                 try
@@ -1039,8 +1073,6 @@ namespace JoesScanner.ViewModels
 
             try
             {
-                // Stop the underlying audio player. Any errors here should
-                // never affect the call stream or UI.
                 await _audioPlaybackService.StopAsync();
             }
             catch (Exception ex)
@@ -1048,7 +1080,6 @@ namespace JoesScanner.ViewModels
                 System.Diagnostics.Debug.WriteLine($"Error stopping audio: {ex}");
             }
 
-            // Clear any IsPlaying flags on all calls.
             foreach (var call in Calls)
             {
                 if (call.IsPlaying)
@@ -1061,22 +1092,11 @@ namespace JoesScanner.ViewModels
             OnPropertyChanged(nameof(IsCallsWaitingVisible));
         }
 
-        // Backward compatible alias used by SettingsViewModel in older code.
         public Task StopAudioFromSettingsAsync()
         {
             return StopAudioFromToggleAsync();
         }
 
-        // Handles a user tap on a call in the list.
-        //
-        // When audio is off:
-        //   - Plays only the tapped call at normal speed (preview) and returns.
-        //
-        // When audio is on:
-        //   - Plays the tapped call using the normal queue playback path
-        //     so it becomes _lastPlayedCall.
-        //   - Then, if autoplay is enabled and we are connected,
-        //     resumes the queue from that point forward.
         private async Task OnCallTappedAsync(CallItem? item)
         {
             if (item == null)
@@ -1088,31 +1108,21 @@ namespace JoesScanner.ViewModels
 
                 if (!AudioEnabled)
                 {
-                    // Audio off: pure preview, no impact on queue anchor.
                     await PlaySingleCallWithoutQueueAsync(item);
                     return;
                 }
 
-                // Clear any existing playing flags.
                 foreach (var call in Calls)
                 {
                     if (call.IsPlaying)
                         call.IsPlaying = false;
                 }
 
-                // This call is now the one we are explicitly playing.
                 _currentPlayingCall = item;
                 UpdateQueueDerivedState();
 
-                // This will:
-                //   set item.IsPlaying = true during playback
-                //   set item.IsPlaying = false in finally
-                //   set _lastPlayedCall = item when finished
                 await PlayAudioAsync(item);
 
-                // After the tapped call finishes:
-                // If audio is still on, stream is running, autoplay is enabled,
-                // and there are calls waiting, hand control back to the queue engine.
                 if (AudioEnabled && IsRunning && AutoPlay && CallsWaiting > 0)
                 {
                     LastQueueEvent = "Tapped call finished; restarting queue";
@@ -1130,10 +1140,6 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // Skips backlog and moves playback to the newest call.
-        // If audio is on, plays the newest call once and treats older calls as already handled.
-        // If audio is off, only updates the anchor so that when audio comes on
-        // the queue will start from calls that arrive after this point.
         private async Task JumpToLiveAsync()
         {
             try
@@ -1149,7 +1155,6 @@ namespace JoesScanner.ViewModels
 
                 var newest = Calls[0];
 
-                // Clear any playing flags before we adjust the anchor.
                 foreach (var call in Calls)
                 {
                     if (call.IsPlaying)
@@ -1160,18 +1165,12 @@ namespace JoesScanner.ViewModels
 
                 if (!AudioEnabled)
                 {
-                    // Audio off: move the anchor to the newest call so everything
-                    // currently in the list is treated as handled.
                     _lastPlayedCall = newest;
                     UpdateQueueDerivedState();
                     LastQueueEvent = "Jumped to live (audio off)";
                     return;
                 }
 
-                // Audio on:
-                //   treat backlog behind this newest call as handled by
-                //   relying on PlayAudioAsync to set _lastPlayedCall to newest
-                //   play the newest call once as the manual jump
                 LastQueueEvent = "Jump to live (playing newest call)";
 
                 _currentPlayingCall = newest;
@@ -1179,10 +1178,6 @@ namespace JoesScanner.ViewModels
 
                 await PlayAudioAsync(newest);
 
-                // After the live call finishes:
-                // If audio is still on, stream is running, autoplay is enabled,
-                // and there are calls waiting (arrived while that call was playing),
-                // restart the queue engine to continue from this point forward.
                 if (AudioEnabled && IsRunning && AutoPlay && CallsWaiting > 0)
                 {
                     LastQueueEvent = "Jump to live finished; restarting queue";
@@ -1200,45 +1195,30 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // Handles the global audio on or off toggle from the UI.
-        // This only affects audio playback and autoplay.
-        // It does not touch the call stream connection state or tokens.
         private async Task OnToggleAudioAsync()
         {
             var newValue = !AudioEnabled;
 
             try
             {
-                // Flip the audio flag.
                 AudioEnabled = newValue;
 
-                // Tie AutoPlay to the audio state so we do not auto play while muted.
                 AutoPlay = newValue;
 
                 LastQueueEvent = newValue ? "Audio toggled ON" : "Audio toggled OFF";
 
                 if (!newValue)
                 {
-                    // Turning audio OFF: stop any current playback immediately,
-                    // but do not touch the call stream.
                     await StopAudioFromToggleAsync();
 
-                    // When audio is off we do not want to keep any queue anchor.
-                    // This prevents the queue from resuming from an old position
-                    // when audio is turned back on.
                     _lastPlayedCall = null;
 
                     UpdateQueueDerivedState();
                 }
                 else
                 {
-                    // Turning audio ON.
-                    // Treat everything that currently exists in the list as history
-                    // so we start from live and do not play backlog that arrived
-                    // while audio was off.
                     if (Calls.Count > 0)
                     {
-                        // Newest call is always at index 0.
                         _lastPlayedCall = Calls[0];
                     }
                     else
@@ -1247,24 +1227,64 @@ namespace JoesScanner.ViewModels
                     }
 
                     UpdateQueueDerivedState();
-
-                    // Do not kick the queue engine from here. We wait for the
-                    // next new call, or the user can jump to live explicitly.
                 }
             }
             catch (Exception ex)
             {
-                // Never let a toggle failure affect the stream.
                 System.Diagnostics.Debug.WriteLine($"Error in OnToggleAudioAsync: {ex}");
                 LastQueueEvent = "Error while toggling audio (see debug output)";
             }
         }
 
-        // Calculates the effective playback rate based on the slider step.
-        // Only speeds up playback when there are calls waiting in the queue.
+        private async Task EnsureQueuePlaybackAsync()
+        {
+            if (_isQueuePlaybackRunning)
+                return;
+
+            if (!AudioEnabled || !IsRunning)
+                return;
+
+            _isQueuePlaybackRunning = true;
+            var aborted = false;
+
+            LastQueueEvent = "Queue playback started";
+
+            try
+            {
+                while (AudioEnabled && IsRunning)
+                {
+                    var next = GetNextQueuedCall();
+                    if (next == null)
+                        break;
+
+                    UpdateQueueDerivedState();
+
+                    await PlayAudioAsync(next);
+
+                    if (!AudioEnabled || !IsRunning)
+                    {
+                        aborted = true;
+                        break;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                aborted = true;
+                System.Diagnostics.Debug.WriteLine($"Error in EnsureQueuePlaybackAsync: {ex}");
+            }
+            finally
+            {
+                _isQueuePlaybackRunning = false;
+
+                UpdateQueueDerivedState();
+
+                LastQueueEvent = aborted ? "Queue playback aborted" : "Queue playback finished";
+            }
+        }
+
         private double GetEffectivePlaybackRate(CallItem item)
         {
-            // Only speed up playback when there are calls waiting.
             var waiting = CallsWaiting;
             if (waiting <= 0)
                 return 1.0;
@@ -1280,11 +1300,9 @@ namespace JoesScanner.ViewModels
             };
         }
 
-        // Trims the Calls collection to at most MaxCalls entries.
-        // Always keeps newest calls at the top and removes the oldest from the bottom.
         private void EnforceMaxCalls()
         {
-            var max = MaxCalls; // Already clamped to 10-50.
+            var max = MaxCalls;
 
             while (Calls.Count > max)
             {
@@ -1299,15 +1317,11 @@ namespace JoesScanner.ViewModels
             UpdateQueueDerivedState();
         }
 
-        // Refreshes CallsWaiting and auto-adjusts playback speed when there is backlog.
-        // This must never touch the call stream state (IsRunning, _cts, etc.).
         private void UpdateQueueDerivedState()
         {
-            // Refresh bindings that depend on queue counts or state.
             OnPropertyChanged(nameof(CallsWaiting));
             OnPropertyChanged(nameof(IsCallsWaitingVisible));
 
-            // Derive friendly queue status text.
             string status;
             if (!IsRunning)
             {
@@ -1334,7 +1348,6 @@ namespace JoesScanner.ViewModels
 
             QueueStatusText = status;
 
-            // Update history flags on each call: anything older than the anchor is history.
             if (Calls != null && Calls.Count > 0)
             {
                 var anchor = _currentPlayingCall ?? _lastPlayedCall;
@@ -1347,7 +1360,6 @@ namespace JoesScanner.ViewModels
 
                     if (anchorIndex >= 0)
                     {
-                        // Newest at index 0; larger index means older call.
                         isHistory = i > anchorIndex;
                     }
 
@@ -1356,7 +1368,6 @@ namespace JoesScanner.ViewModels
                 }
             }
 
-            // Auto adjust playback speed when audio is on and there is backlog.
             if (!AudioEnabled)
                 return;
 
@@ -1364,8 +1375,6 @@ namespace JoesScanner.ViewModels
             if (waiting <= 0)
                 return;
 
-            // If it starts to back up more than 10 calls, automatically turn on 1.5x.
-            // If it gets to 20 calls or more, automatically move to 2x.
             if (waiting >= 20)
             {
                 if (PlaybackSpeedStep < 2)
@@ -1377,20 +1386,16 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // Plays a single call when audio is off, without affecting the queue,
-        // waiting count, or playback speed logic. Used for manual preview.
         private async Task PlaySingleCallWithoutQueueAsync(CallItem item)
         {
             if (item == null || string.IsNullOrWhiteSpace(item.AudioUrl))
                 return;
 
-            // Respect filters for preview playback as well.
             if (_filterService.ShouldMute(item) || _filterService.ShouldHide(item))
                 return;
 
             try
             {
-                // Mark only this call as playing for UI feedback.
                 foreach (var call in Calls)
                 {
                     if (call.IsPlaying)
@@ -1399,12 +1404,10 @@ namespace JoesScanner.ViewModels
 
                 item.IsPlaying = true;
 
-                // Resolve a playable URL (remote or local, depending on auth).
                 var playbackUrl = await GetPlayableAudioUrlAsync(item.AudioUrl, CancellationToken.None);
                 if (string.IsNullOrWhiteSpace(playbackUrl))
                     return;
 
-                // Always play at normal speed in this mode.
                 await _audioPlaybackService.PlayAsync(playbackUrl, 1.0);
             }
             catch (Exception ex)
@@ -1417,23 +1420,17 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // Core audio playback helper used by both autoplay and the queue engine.
-        // Respects AudioEnabled but never touches the call stream.
-        // Uses _audioCts so we can cancel in-flight playback when audio is toggled or stopped.
         private async Task PlayAudioAsync(CallItem? item)
         {
             if (item == null || string.IsNullOrWhiteSpace(item.AudioUrl))
                 return;
 
-            // Do not play audio for muted or disabled items.
             if (_filterService.ShouldMute(item) || _filterService.ShouldHide(item))
                 return;
 
-            // If audio is disabled, do not play but keep everything else updating.
             if (!AudioEnabled)
                 return;
 
-            // Cancel any existing audio operation so only one play is active at a time.
             if (_audioCts != null)
             {
                 try
@@ -1448,11 +1445,9 @@ namespace JoesScanner.ViewModels
                 _audioCts = null;
             }
 
-            // New CTS for this specific playback.
             _audioCts = new CancellationTokenSource();
             var token = _audioCts.Token;
 
-            // Clear the playing flag on all other calls.
             foreach (var call in Calls)
             {
                 if (call.IsPlaying)
@@ -1469,28 +1464,23 @@ namespace JoesScanner.ViewModels
             {
                 var rate = GetEffectivePlaybackRate(item);
 
-                // Resolve to a playable URL (remote or local) depending on auth.
                 var playbackUrl = await GetPlayableAudioUrlAsync(item.AudioUrl, token);
                 if (string.IsNullOrWhiteSpace(playbackUrl))
                     return;
 
-                // This call completes when playback ends or when token is canceled.
                 await _audioPlaybackService.PlayAsync(playbackUrl, rate, token);
             }
             catch (OperationCanceledException)
             {
-                // Expected when audio is toggled off or the stream is stopped.
             }
             catch (Exception ex)
             {
-                // Ignore playback errors so the stream and UI keep running.
                 System.Diagnostics.Debug.WriteLine($"Error in PlayAudioAsync: {ex}");
             }
             finally
             {
                 item.IsPlaying = false;
 
-                // This call is now the most recently finished (or aborted) call.
                 _lastPlayedCall = item;
 
                 if (_currentPlayingCall == item)
@@ -1501,36 +1491,48 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // Downloads an audio file with basic auth if needed and returns a local playable path.
-        // If no auth is required, returns the original URL.
         private async Task<string?> GetPlayableAudioUrlAsync(string audioUrl, CancellationToken cancellationToken)
         {
             if (string.IsNullOrWhiteSpace(audioUrl))
                 return null;
 
-            // If no basic auth is configured, just use the URL as-is.
-            var username = _settingsService.BasicAuthUsername;
+            if (!Uri.TryCreate(audioUrl, UriKind.Absolute, out var audioUri))
+                return audioUrl;
+
+            var serverUrl = _settingsService.ServerUrl;
+            if (!Uri.TryCreate(serverUrl, UriKind.Absolute, out var baseUri))
+            {
+                return audioUrl;
+            }
+
+            if (!string.Equals(audioUri.Host, baseUri.Host, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(audioUri.Scheme, baseUri.Scheme, StringComparison.OrdinalIgnoreCase))
+            {
+                return audioUrl;
+            }
+
+            var isJoesScannerHost =
+                string.Equals(baseUri.Host, "app.joesscanner.com", StringComparison.OrdinalIgnoreCase);
+
+            string username;
+            string password;
+
+            if (isJoesScannerHost)
+            {
+                username = ServiceAuthUsername;
+                password = ServiceAuthPassword;
+            }
+            else
+            {
+                username = _settingsService.BasicAuthUsername;
+                password = _settingsService.BasicAuthPassword ?? string.Empty;
+            }
+
             if (string.IsNullOrWhiteSpace(username))
                 return audioUrl;
 
-            // Try to parse both the audio URL and the configured server URL.
-            if (!Uri.TryCreate(audioUrl, UriKind.Absolute, out var audioUri))
-                return audioUrl; // Treat as local or non-HTTP path.
-
-            var serverUrl = _settingsService.ServerUrl;
-            if (Uri.TryCreate(serverUrl, UriKind.Absolute, out var baseUri))
-            {
-                // Only intercept if host and scheme match the configured server.
-                if (!string.Equals(audioUri.Host, baseUri.Host, StringComparison.OrdinalIgnoreCase) ||
-                    !string.Equals(audioUri.Scheme, baseUri.Scheme, StringComparison.OrdinalIgnoreCase))
-                {
-                    return audioUrl;
-                }
-            }
-
             try
             {
-                var password = _settingsService.BasicAuthPassword ?? string.Empty;
                 var raw = $"{username}:{password}";
                 var bytes = Encoding.ASCII.GetBytes(raw);
                 var base64 = Convert.ToBase64String(bytes);
@@ -1563,7 +1565,6 @@ namespace JoesScanner.ViewModels
             }
             catch (OperationCanceledException)
             {
-                // Bubble cancellation back up so the caller behaves the same.
                 throw;
             }
             catch (Exception ex)
@@ -1573,7 +1574,6 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // Opens the donation site in the system browser.
         private async Task OpenDonateAsync()
         {
             try
@@ -1585,24 +1585,19 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // On app start or when the main page appears, call this to reconnect
-        // automatically if we were connected when the app last exited.
         public async Task TryAutoReconnectAsync()
         {
-            // Did we leave the app while connected last time.
             var shouldReconnect = Preferences.Get(LastConnectedPreferenceKey, false);
 
             if (!shouldReconnect)
                 return;
 
-            // Already running now, nothing to do.
             if (IsRunning)
                 return;
 
             await StartAsync();
         }
 
-        // Applies a theme string (System, Light, Dark) to the MAUI app.
         private static void ApplyTheme(string? mode)
         {
             var app = Application.Current;
