@@ -1329,9 +1329,7 @@ namespace JoesScanner.ViewModels
             }
             else if (!AudioEnabled)
             {
-                status = CallsWaiting > 0
-                    ? $"Muted ({CallsWaiting} waiting)"
-                    : "Muted (no calls waiting)";
+                status = "Muted";
             }
             else if (_currentPlayingCall != null)
             {

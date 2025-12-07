@@ -505,7 +505,6 @@ namespace JoesScanner.ViewModels
             OnPropertyChanged(nameof(HasUnsavedSettings));
             UpdateSubscriptionSummaryFromSettings();
         }
-
         private void UpdateSubscriptionSummaryFromSettings()
         {
             // Only show this when pointed at the hosted Joe's Scanner server
@@ -531,7 +530,7 @@ namespace JoesScanner.ViewModels
                 return;
             }
 
-            // Use exactly what we cached from the successful auth call.
+            // Base summary that we cached from the successful auth call.
             var planSummary = _settings.SubscriptionLastMessage ?? string.Empty;
             planSummary = planSummary.Trim();
 
@@ -542,8 +541,59 @@ namespace JoesScanner.ViewModels
                 return;
             }
 
+            // New: if the summary is missing the price text but we have it in settings,
+            // inject it between the plan name and the date.
+            var priceText = _settings.SubscriptionPriceId ?? string.Empty;
+            priceText = priceText.Trim();
+
+            if (!string.IsNullOrEmpty(priceText))
+            {
+                // Heuristic: treat it as a user-friendly price string, not a GUID,
+                // when it contains a space or a dollar sign.
+                var looksLikeFriendlyPrice =
+                    priceText.Contains(" ", StringComparison.Ordinal) ||
+                    priceText.Contains("$", StringComparison.Ordinal);
+
+                if (looksLikeFriendlyPrice &&
+                    !planSummary.Contains(priceText, StringComparison.Ordinal))
+                {
+                    // Find where the date portion starts (if present).
+                    var idxTrial = planSummary.IndexOf(" - Trial end date:", StringComparison.Ordinal);
+                    var idxRenewalDate = planSummary.IndexOf(" - Renewal date:", StringComparison.Ordinal);
+                    var idxRenewal = planSummary.IndexOf(" - Renewal:", StringComparison.Ordinal);
+
+                    var idxSplit = idxTrial >= 0
+                        ? idxTrial
+                        : (idxRenewalDate >= 0
+                            ? idxRenewalDate
+                            : (idxRenewal >= 0 ? idxRenewal : -1));
+
+                    if (idxSplit >= 0)
+                    {
+                        // Insert " - {priceText}" before the date portion.
+                        var before = planSummary.Substring(0, idxSplit);
+                        var after = planSummary.Substring(idxSplit);
+                        planSummary = $"{before} - {priceText}{after}";
+                    }
+                    else
+                    {
+                        // No date portion; just append the price.
+                        planSummary = $"{planSummary} - {priceText}";
+                    }
+                }
+            }
+
+            // Split the two logical groups onto separate lines.
+            // First line: plan / price / interval
+            // Second line: trial or renewal info.
+            planSummary = planSummary
+                .Replace(" - Trial end date:", Environment.NewLine + "Trial end date:")
+                .Replace(" - Renewal date:", Environment.NewLine + "Renewal date:")
+                .Replace(" - Renewal:", Environment.NewLine + "Renewal:");
+
             if (_showValidationPrefix)
             {
+                // Keep the validation prefix on the same line as the first group.
                 SubscriptionSummary = $"Joe's Scanner account validated. {planSummary}";
             }
             else
@@ -553,7 +603,6 @@ namespace JoesScanner.ViewModels
 
             ShowSubscriptionSummary = true;
         }
-
         private void ApplyTheme(string mode)
         {
             var app = Application.Current;
@@ -751,13 +800,14 @@ namespace JoesScanner.ViewModels
                         return;
                     }
 
-                    // Prefer the human label sent by the API, fall back to level (price id) if needed.
+                    // Plan name and price text from the API.
                     var planLabelRaw = sub.LevelLabel ?? sub.Level ?? string.Empty;
                     var periodEndRaw = sub.PeriodEndAt ?? sub.TrialEndsAt ?? string.Empty;
                     var statusRaw = sub.Status ?? string.Empty;
                     var priceIdRaw = sub.PriceId ?? string.Empty;
 
                     var planLabel = planLabelRaw.Trim();
+                    var priceText = priceIdRaw.Trim();
                     var statusText = statusRaw.Trim().ToLowerInvariant();
                     var periodEnd = periodEndRaw.Trim();
 
@@ -783,7 +833,21 @@ namespace JoesScanner.ViewModels
                         : "Renewal:";
 
                     string planSummary;
-                    if (!string.IsNullOrEmpty(planLabel) && !string.IsNullOrEmpty(formattedDate))
+
+                    // Prefer: Plan + price + date, then back off as fields are missing.
+                    if (!string.IsNullOrEmpty(planLabel) &&
+                        !string.IsNullOrEmpty(priceText) &&
+                        !string.IsNullOrEmpty(formattedDate))
+                    {
+                        planSummary = $"Plan: {planLabel} - {priceText} - {dateLabel} {formattedDate}";
+                    }
+                    else if (!string.IsNullOrEmpty(planLabel) &&
+                             !string.IsNullOrEmpty(priceText))
+                    {
+                        planSummary = $"Plan: {planLabel} - {priceText}";
+                    }
+                    else if (!string.IsNullOrEmpty(planLabel) &&
+                             !string.IsNullOrEmpty(formattedDate))
                     {
                         planSummary = $"Plan: {planLabel} - {dateLabel} {formattedDate}";
                     }
@@ -934,14 +998,15 @@ namespace JoesScanner.ViewModels
             [JsonPropertyName("status")]
             public string? Status { get; set; }
 
-            // This is the raw price id the PHP sends as "level"
+            // Plan name from the API ("Subscription", "Subscription Annual", etc.)
             [JsonPropertyName("level")]
             public string? Level { get; set; }
 
-            // This is the human label the PHP sends as "level_label"
+            // Optional extra label if the API ever provides it.
             [JsonPropertyName("level_label")]
             public string? LevelLabel { get; set; }
 
+            // Human readable price text ("$6 - every month").
             [JsonPropertyName("price_id")]
             public string? PriceId { get; set; }
 

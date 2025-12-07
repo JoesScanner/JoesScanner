@@ -39,7 +39,7 @@
                 <!-- HEADER PANEL: title, server, controls -->
                 <Grid
                     Grid.Row="0"
-                    RowDefinitions="Auto,Auto,Auto"
+                    RowDefinitions="Auto,Auto,30"
                     ColumnDefinitions="Auto,*,Auto"
                     Padding="16,16,16,8"
                     ColumnSpacing="16">
@@ -166,7 +166,7 @@
 
                             <Slider
                                 IsVisible="{Binding AudioEnabled}"
-                                WidthRequest="90"
+                                WidthRequest="60"
                                 Minimum="0"
                                 Maximum="2"
                                 Value="{Binding PlaybackSpeedStep}"
@@ -187,15 +187,6 @@
                             FontSize="10"
                             VerticalOptions="Center"
                             Margin="6,0,0,0"
-                            TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
-
-                        <!-- Queue status text -->
-                        <Label
-                            Text="{Binding QueueStatusText, StringFormat='Queue: {0}'}"
-                            FontSize="10"
-                            VerticalOptions="Center"
-                            Margin="6,0,0,0"
-                            LineBreakMode="TailTruncation"
                             TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
                     </HorizontalStackLayout>
                 </Grid>

@@ -1,7 +1,9 @@
 ﻿using System;
+using System.Globalization;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -9,7 +11,9 @@ namespace JoesScanner.Services
 {
     public sealed class SubscriptionService : ISubscriptionService
     {
-        private const int SubscriptionGraceDays = 3; // change this number when you want a different window
+        // Change this number when you want a different grace window
+        private const int SubscriptionGraceDays = 3;
+
         private static readonly Uri AuthEndpoint =
             new("https://joesscanner.com/wp-json/joes-scanner/v1/auth");
 
@@ -26,7 +30,8 @@ namespace JoesScanner.Services
             };
         }
 
-        public async Task<SubscriptionCheckResult> EnsureSubscriptionAsync(CancellationToken cancellationToken)
+        public async Task<SubscriptionCheckResult> EnsureSubscriptionAsync(
+            CancellationToken cancellationToken)
         {
             var username = _settings.BasicAuthUsername;
             var password = _settings.BasicAuthPassword;
@@ -81,9 +86,9 @@ namespace JoesScanner.Services
 
                 var statusInt = (int)response.StatusCode;
 
-                // --------------------------------------------------------------------
+                // ------------------------------------------------------------
                 // 1) HTTP response received (server was contacted)
-                // --------------------------------------------------------------------
+                // ------------------------------------------------------------
 
                 // Any non-success HTTP status means: server responded, but not OK.
                 // Per your rules, there is NO grace for this case.
@@ -117,16 +122,18 @@ namespace JoesScanner.Services
                     );
                 }
 
-                // At this point HTTP is success and the payload says Ok=true.
-                var active = authResponse.Subscription?.Active == true;
+                var sub = authResponse.Subscription;
+                var active = sub?.Active == true;
 
                 _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
                 _settings.SubscriptionLastStatusOk = active;
-                _settings.SubscriptionLastLevel = authResponse.Subscription?.Level ?? string.Empty;
-                _settings.SubscriptionLastMessage = authResponse.Subscription?.Status ?? string.Empty;
 
                 if (!active)
                 {
+                    // Keep some basic info for diagnostics, but do not mark as ok.
+                    _settings.SubscriptionLastLevel = sub?.Level ?? string.Empty;
+                    _settings.SubscriptionLastMessage = sub?.Status ?? "inactive";
+
                     return new SubscriptionCheckResult(
                         isAllowed: false,
                         errorCode: "inactive_subscription",
@@ -134,14 +141,77 @@ namespace JoesScanner.Services
                     );
                 }
 
+                // ----------------------------------------------------------------
+                // Active subscription: build the same plan summary format used by
+                // SettingsViewModel.ValidateServerUrlAsync so the Settings page
+                // shows consistent plan + trial/renewal information on startup.
+                // ----------------------------------------------------------------
+
+                // Prefer the human label sent by the API, fall back to level (price id) if needed.
+                var planLabelRaw = sub?.LevelLabel ?? sub?.Level ?? string.Empty;
+                var periodEndRaw = sub?.PeriodEndAt ?? sub?.TrialEndsAt ?? string.Empty;
+                var statusRaw = sub?.Status ?? string.Empty;
+                var priceIdRaw = sub?.PriceId ?? string.Empty;
+
+                var planLabel = planLabelRaw.Trim();
+                var statusText = statusRaw.Trim().ToLowerInvariant();
+                var periodEnd = periodEndRaw.Trim();
+
+                string formattedDate = string.Empty;
+                if (!string.IsNullOrEmpty(periodEnd))
+                {
+                    if (DateTime.TryParse(
+                            periodEnd,
+                            CultureInfo.InvariantCulture,
+                            DateTimeStyles.RoundtripKind,
+                            out var dt)
+                        || DateTime.TryParse(periodEnd, out dt))
+                    {
+                        if (dt.Kind == DateTimeKind.Unspecified)
+                            dt = DateTime.SpecifyKind(dt, DateTimeKind.Utc);
+
+                        // Same display format as the Settings page
+                        formattedDate = dt.ToLocalTime().ToString("yyyy-MM-dd");
+                    }
+                }
+
+                // Keep the same labels as the Settings page logic
+                string dateLabel = statusText == "trialing"
+                    ? "Trial end date:"
+                    : "Renewal:";
+
+                string planSummary;
+                if (!string.IsNullOrEmpty(planLabel) && !string.IsNullOrEmpty(formattedDate))
+                {
+                    planSummary = $"Plan: {planLabel} - {dateLabel} {formattedDate}";
+                }
+                else if (!string.IsNullOrEmpty(planLabel))
+                {
+                    planSummary = $"Plan: {planLabel}";
+                }
+                else if (!string.IsNullOrEmpty(formattedDate))
+                {
+                    planSummary = $"{dateLabel} {formattedDate}";
+                }
+                else
+                {
+                    planSummary = string.Empty;
+                }
+
+                // Cache fields for SettingsViewModel.UpdateSubscriptionSummaryFromSettings()
+                _settings.SubscriptionPriceId = priceIdRaw;
+                _settings.SubscriptionLastLevel = planLabel;
+                _settings.SubscriptionRenewalUtc = null; // you are not currently using this for display
+                _settings.SubscriptionLastMessage = planSummary;
+
                 // Everything checks out: active subscription.
                 return new SubscriptionCheckResult(isAllowed: true);
             }
             catch (OperationCanceledException)
             {
-                // --------------------------------------------------------------------
+                // ------------------------------------------------------------
                 // 2) Auth server could NOT be contacted (timeout)
-                // --------------------------------------------------------------------
+                // ------------------------------------------------------------
                 if (withinGrace)
                 {
                     return new SubscriptionCheckResult(
@@ -159,9 +229,9 @@ namespace JoesScanner.Services
             }
             catch (Exception)
             {
-                // --------------------------------------------------------------------
+                // ------------------------------------------------------------
                 // 3) Auth server could NOT be contacted (network error, DNS, etc.)
-                // --------------------------------------------------------------------
+                // ------------------------------------------------------------
                 if (withinGrace)
                 {
                     return new SubscriptionCheckResult(
@@ -181,18 +251,44 @@ namespace JoesScanner.Services
 
         private sealed class AuthResponse
         {
+            [JsonPropertyName("ok")]
             public bool Ok { get; set; }
+
+            [JsonPropertyName("error")]
             public string? Error { get; set; }
+
+            [JsonPropertyName("message")]
             public string? Message { get; set; }
+
+            [JsonPropertyName("subscription")]
             public SubscriptionDto? Subscription { get; set; }
         }
 
         private sealed class SubscriptionDto
         {
+            [JsonPropertyName("active")]
             public bool Active { get; set; }
+
+            [JsonPropertyName("status")]
             public string? Status { get; set; }
+
+            // Raw price id the PHP sends as "level"
+            [JsonPropertyName("level")]
             public string? Level { get; set; }
-            public DateTime? Expires_At { get; set; }
+
+            // Human label the PHP sends as "level_label"
+            [JsonPropertyName("level_label")]
+            public string? LevelLabel { get; set; }
+
+            [JsonPropertyName("price_id")]
+            public string? PriceId { get; set; }
+
+            // Keep these as strings; we parse them manually.
+            [JsonPropertyName("period_end_at")]
+            public string? PeriodEndAt { get; set; }
+
+            [JsonPropertyName("trial_ends_at")]
+            public string? TrialEndsAt { get; set; }
         }
     }
 }

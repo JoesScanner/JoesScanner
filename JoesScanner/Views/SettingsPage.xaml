@@ -112,7 +112,7 @@
                         <!-- 0=title, 1=description, 2=fields, 3=buttons (inline), 4=status -->
                         <Grid
                             RowDefinitions="Auto,Auto,Auto,Auto,Auto"
-                            ColumnDefinitions="*,Auto"
+                            ColumnDefinitions="Auto,*"
                             RowSpacing="6">
 
                             <!-- Title left -->
@@ -122,6 +122,8 @@
                                 Text="Connection"
                                 FontAttributes="Bold"
                                 FontSize="16"
+                                HorizontalOptions="Start"
+                                MinimumWidthRequest="90"
                                 TextColor="{AppThemeBinding Light=#111827, Dark=White}" />
 
                             <!-- Subscription badge right (level + renewal or trial text) -->
