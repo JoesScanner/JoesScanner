@@ -260,10 +260,16 @@
 
                         <VerticalStackLayout Spacing="8">
                             <Label
-                                Text="Call Queue"
+                                Text="Queue Control"
                                 FontSize="16"
                                 FontAttributes="Bold"
-                                TextColor="{AppThemeBinding Light=#111827, Dark=White}" />
+                                TextColor="{AppThemeBinding Light=Black, Dark=White}" />
+
+                            <Label
+                                Text="Calls Displayed"
+                                FontSize="14"
+                                FontAttributes="Bold"
+                                TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
 
                             <Label
                                 Text="Control how many calls are kept in the queue."
@@ -286,6 +292,34 @@
                                     Value="{Binding MaxCalls}"
                                     HorizontalOptions="FillAndExpand" />
                             </VerticalStackLayout>
+                            <!-- Autospeed slider -->
+                            <VerticalStackLayout
+                                Spacing="8"
+                                Margin="0,10,0,0">
+
+                                <Label
+                                    Text="Autospeed"
+                                    FontAttributes="Bold"
+                                    FontSize="14"
+                                    TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
+
+                                <Label
+                                    Text="Automatically enables faster playback speed if the queue gets to far behind. This will help prevent memory issues, especially on devices with less memory."
+                                    FontSize="12"
+                                    TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" />
+
+                                <Label
+                                    Text="{Binding AutoSpeedThreshold, StringFormat='Autospeed when {0} calls are waiting'}"
+                                    FontSize="12"
+                                    TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
+
+                                <Slider
+                                    Minimum="10"
+                                    Maximum="100"
+                                    Value="{Binding AutoSpeedThreshold}"
+                                    HorizontalOptions="FillAndExpand" />
+                            </VerticalStackLayout>
+
                         </VerticalStackLayout>
                     </Border>
 

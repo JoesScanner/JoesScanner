@@ -1373,15 +1373,26 @@ namespace JoesScanner.ViewModels
             if (waiting <= 0)
                 return;
 
-            if (waiting >= 20)
+            // Use the configured autospeed threshold from settings.
+            // Clamp defensively in case older settings stored out-of-range values.
+            var threshold = _settingsService.AutoSpeedThreshold;
+            if (threshold < 10)
+                threshold = 10;
+            if (threshold > 100)
+                threshold = 100;
+
+            // When backlog reaches the threshold, bump to 1.5x.
+            // When it reaches twice the threshold, bump to 2x.
+            if (waiting >= threshold * 2)
             {
                 if (PlaybackSpeedStep < 2)
                     PlaybackSpeedStep = 2;
             }
-            else if (waiting >= 10 && PlaybackSpeedStep < 1)
+            else if (waiting >= threshold && PlaybackSpeedStep < 1)
             {
                 PlaybackSpeedStep = 1;
             }
+
         }
 
         private async Task PlaySingleCallWithoutQueueAsync(CallItem item)

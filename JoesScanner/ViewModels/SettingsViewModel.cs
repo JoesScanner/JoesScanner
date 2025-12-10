@@ -88,9 +88,11 @@ namespace JoesScanner.ViewModels
 
         // Saved snapshot for settings that are only committed on Save
         private int _savedMaxCalls;
+        private int _savedAutoSpeedThreshold;
 
         // Call display settings
         private int _maxCalls;
+        private int _autoSpeedThreshold;
 
         // Theme as a single string: "System", "Light", "Dark"
         private string _themeMode = "System";
@@ -152,7 +154,8 @@ namespace JoesScanner.ViewModels
         // Used by the Save button to decide when to turn red.
         public bool HasUnsavedSettings =>
             HasChanges ||
-            _maxCalls != _savedMaxCalls;
+            _maxCalls != _savedMaxCalls ||
+            _autoSpeedThreshold != _savedAutoSpeedThreshold;
 
         public bool IsValidatingServer
         {
@@ -335,6 +338,27 @@ namespace JoesScanner.ViewModels
             }
         }
 
+        // Threshold in calls waiting where autospeed kicks in.
+        // Controls when the app will start increasing playback speed automatically.
+        public int AutoSpeedThreshold
+        {
+            get => _autoSpeedThreshold;
+            set
+            {
+                var clamped = value;
+                if (clamped < 10) clamped = 10;
+                if (clamped > 100) clamped = 100;
+
+                if (_autoSpeedThreshold == clamped)
+                    return;
+
+                _autoSpeedThreshold = clamped;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(HasUnsavedSettings));
+            }
+        }
+
+
         // Theme mode string: "System", "Light", or "Dark".
         public string ThemeMode
         {
@@ -454,6 +478,7 @@ namespace JoesScanner.ViewModels
 
             // Calls
             _maxCalls = _settings.MaxCalls;
+            _autoSpeedThreshold = _settings.AutoSpeedThreshold;
 
             // Theme - normalize to a safe value and push back into settings if needed
             var rawTheme = _settings.ThemeMode;
@@ -496,6 +521,7 @@ namespace JoesScanner.ViewModels
             _savedServerUrl = _settings.ServerUrl;
             _savedUseDefaultConnection = UseDefaultConnection;
             _savedMaxCalls = _maxCalls;
+            _savedAutoSpeedThreshold = _autoSpeedThreshold;
             _savedBasicAuthUsername = _basicAuthUsername;
             _savedBasicAuthPassword = _basicAuthPassword;
 
@@ -652,6 +678,9 @@ namespace JoesScanner.ViewModels
             _settings.MaxCalls = MaxCalls;
             _mainViewModel.MaxCalls = MaxCalls;
 
+            // Autospeed threshold
+            _settings.AutoSpeedThreshold = AutoSpeedThreshold;
+
             // Theme
             _settings.ThemeMode = ThemeMode;
             ApplyTheme(ThemeMode);
@@ -660,8 +689,10 @@ namespace JoesScanner.ViewModels
             _savedServerUrl = _settings.ServerUrl;
             _savedUseDefaultConnection = UseDefaultConnection;
             _savedMaxCalls = _maxCalls;
+            _savedAutoSpeedThreshold = _autoSpeedThreshold;
             _savedBasicAuthUsername = _basicAuthUsername;
             _savedBasicAuthPassword = _basicAuthPassword;
+
 
             HasChanges = false;
             OnPropertyChanged(nameof(HasUnsavedSettings));
