@@ -15,9 +15,9 @@
 
     <ApplicationTitle>JoesScanner</ApplicationTitle>
     <ApplicationId>com.companyname.joesscanner</ApplicationId>
-    <ApplicationDisplayVersion>1.2.0</ApplicationDisplayVersion>
-    <ApplicationVersion>1.2.0</ApplicationVersion>
-    <PackageVersion>1.2.0</PackageVersion>
+    <ApplicationDisplayVersion>1.2.1</ApplicationDisplayVersion>
+    <ApplicationVersion>1.2.1</ApplicationVersion>
+    <PackageVersion>1.2.1</PackageVersion>
     <DefaultLanguage>en-us</DefaultLanguage>
 
     <!-- Platform minimums -->
