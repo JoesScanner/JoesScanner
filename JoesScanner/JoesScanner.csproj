@@ -4,6 +4,9 @@
     <!-- Multi target: Android, iOS, MacCatalyst, Windows (on .NET 10) -->
     <TargetFrameworks>net10.0-android;net10.0-ios;net10.0-maccatalyst;net10.0-windows10.0.19041.0</TargetFrameworks>
 
+    <!-- Keep Windows App SDK deployment auto-init OFF (matches where we left it) -->
+    <WindowsAppSdkDeploymentManagerInitialize>false</WindowsAppSdkDeploymentManagerInitialize>
+
     <UseMaui>true</UseMaui>
     <SingleProject>true</SingleProject>
     <OutputType>Exe</OutputType>
@@ -15,9 +18,16 @@
 
     <ApplicationTitle>JoesScanner</ApplicationTitle>
     <ApplicationId>com.companyname.joesscanner</ApplicationId>
+
+    <!-- Display version is semantic -->
     <ApplicationDisplayVersion>1.2.1</ApplicationDisplayVersion>
-    <ApplicationVersion>1.2.1</ApplicationVersion>
+
+    <!-- ApplicationVersion must be an integer and should only ever go up -->
+    <ApplicationVersion>121</ApplicationVersion>
+
+    <!-- NuGet package version -->
     <PackageVersion>1.2.1</PackageVersion>
+
     <DefaultLanguage>en-us</DefaultLanguage>
 
     <!-- Platform minimums -->
@@ -27,19 +37,17 @@
     <SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">10.0.17763.0</SupportedOSPlatformVersion>
     <TargetPlatformMinVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">10.0.17763.0</TargetPlatformMinVersion>
 
-    <!-- No MSIX packaging for now; pure app deployment -->
-    <WindowsPackageType>None</WindowsPackageType>
+    <!-- Packaged Windows builds -->
+    <WindowsPackageType>MSIX</WindowsPackageType>
+
+    <!-- Keep x64 available for packaged debug -->
+    <Platforms>AnyCPU;x64</Platforms>
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Core MAUI UI package (required on .NET 8+ / MAUI 10) -->
-    <PackageReference Include="Microsoft.Maui.Controls" Version="10.0.11" />
-
-    <!-- Other dependencies -->
     <PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="10.0.0" />
     <PackageReference Include="Plugin.Maui.Audio" Version="4.0.0" />
   </ItemGroup>
-
 
   <ItemGroup>
     <MauiIcon Include="Resources\AppIcon\appicon.png" />

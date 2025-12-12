@@ -1,11 +1,8 @@
 {
   "profiles": {
-    "WSL": {
-      "commandName": "WSL2",
-      "distributionName": ""
-    },
-    "JoesScanner": {
-      "commandName": "Project"
+    "Windows Packaged": {
+      "commandName": "MsixPackage",
+      "nativeDebugging": true
     }
   }
 }
