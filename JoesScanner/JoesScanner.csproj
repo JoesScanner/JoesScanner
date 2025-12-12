@@ -58,6 +58,15 @@
   </ItemGroup>
 
   <ItemGroup>
+    <AndroidResource Remove="Installer\**" />
+    <Compile Remove="Installer\**" />
+    <EmbeddedResource Remove="Installer\**" />
+    <MauiCss Remove="Installer\**" />
+    <MauiXaml Remove="Installer\**" />
+    <None Remove="Installer\**" />
+  </ItemGroup>
+
+  <ItemGroup>
     <MauiXaml Update="Views\MainPage.xaml">
       <Generator>MSBuild:Compile</Generator>
     </MauiXaml>
