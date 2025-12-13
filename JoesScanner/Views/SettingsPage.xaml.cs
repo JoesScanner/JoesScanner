@@ -85,7 +85,7 @@ namespace JoesScanner.Views
             }
 
             // Show the log body in the popup and ask if user wants to download
-            var download = await DisplayAlert("Log", bodyText, "Download", "Close");
+            var download = await DisplayAlertAsync("Log", bodyText, "Download", "Close");
             if (!download)
                 return;
 
@@ -145,11 +145,11 @@ namespace JoesScanner.Views
 
                 File.WriteAllText(fullPath, fileContent, Encoding.UTF8);
 
-                await DisplayAlert("Log saved", $"Log saved to:\n{fullPath}", "Close");
+                await DisplayAlertAsync("Log saved", $"Log saved to:\n{fullPath}", "Close");
             }
             catch (Exception ex)
             {
-                await DisplayAlert("Error saving log",
+                await DisplayAlertAsync("Error saving log",
                     $"Could not save the log file:\n{ex.Message}",
                     "Close");
             }

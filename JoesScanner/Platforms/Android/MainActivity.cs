@@ -1,12 +1,13 @@
-﻿using Android.App;
+using Android.App;
 using Android.Content.PM;
 using Android.OS;
+using AndroidX.Activity;
 
 namespace JoesScanner;
 
 // Main Android activity for the JoesScanner MAUI app.
 [Activity(
-    Label = "JoesScanner",
+    Label = "@string/app_name",
     Theme = "@style/Maui.SplashTheme",   // Splash theme is defined in Resources/values/styles.xml
     MainLauncher = true,
     ConfigurationChanges =
@@ -18,40 +19,41 @@ namespace JoesScanner;
         | ConfigChanges.Density)]
 public class MainActivity : MauiAppCompatActivity
 {
-    // Standard MAUI activity initialization.
-    // Splash image is configured via the <MauiSplashScreen> entry in the project file.
+    // Handles the Android back button without using the deprecated OnBackPressed override.
+    // If AudioEnabled is true, the task is moved to the background so audio can continue.
+    // If AudioEnabled is false, normal back behavior runs (closes the activity and app).
+    private sealed class AudioBackPressedCallback : OnBackPressedCallback
+    {
+        private readonly MainActivity _activity;
+
+        public AudioBackPressedCallback(MainActivity activity)
+            : base(true)
+        {
+            _activity = activity;
+        }
+
+        public override void HandleOnBackPressed()
+        {
+            var audioEnabled = Preferences.Get("AudioEnabled", true);
+
+            if (audioEnabled)
+            {
+                _activity.MoveTaskToBack(true);
+                return;
+            }
+
+            // Temporarily disable this callback so the dispatcher can perform the default behavior.
+            Enabled = false;
+            _activity.OnBackPressedDispatcher.OnBackPressed();
+            Enabled = true;
+        }
+    }
+
     protected override void OnCreate(Bundle? savedInstanceState)
     {
         base.OnCreate(savedInstanceState);
-    }
 
-    // Handles the Android back button.
-    //
-    // If AudioEnabled is true:
-    //   - The activity is moved to the background
-    //   - The process continues running so audio can keep playing
-    //
-    // If AudioEnabled is false:
-    //   - Default behavior runs and the activity (and app) will close
-    //
-    // The AudioEnabled flag is controlled by the Audio On / Off button on the main page
-    // and stored in Preferences under the "AudioEnabled" key.
-    public override void OnBackPressed()
-    {
-        // Default value is true so that new installs behave like a radio:
-        // app keeps running in the background unless the user explicitly turns audio off.
-        var audioEnabled = Preferences.Get("AudioEnabled", true);
-
-        if (audioEnabled)
-        {
-            // Keep the app process alive and send the task to the background.
-            // This allows audio playback to continue while the user uses other apps.
-            MoveTaskToBack(true);
-        }
-        else
-        {
-            // Normal behavior: allow the back press to close the activity and the app.
-            base.OnBackPressed();
-        }
+        // Register a back handler via AndroidX (works across Android versions and avoids deprecated APIs).
+        OnBackPressedDispatcher.AddCallback(this, new AudioBackPressedCallback(this));
     }
 }

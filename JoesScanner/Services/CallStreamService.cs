@@ -108,7 +108,7 @@ namespace JoesScanner.Services
                 {
                     rows = await FetchLatestAsync(callsUrl, cancellationToken);
                 }
-                catch (OperationCanceledException ex) when (cancellationToken.IsCancellationRequested)
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
                     // Caller requested cancellation (disconnect, shutdown, etc.).
                     Debug.WriteLine("[CallStreamService] Streaming cancelled by caller.");

@@ -114,11 +114,6 @@ namespace JoesScanner.ViewModels
         public ICommand SaveCommand { get; }
         public ICommand ResetServerCommand { get; }
         public ICommand ValidateServerCommand { get; }
-
-        // Filter commands (reserved for future use in filters section)
-        public ICommand ToggleReceiverFilterCommand { get; }
-        public ICommand ToggleSiteFilterCommand { get; }
-
         // Password visibility command
         public ICommand ToggleBasicAuthPasswordVisibilityCommand { get; }
 
@@ -518,7 +513,7 @@ namespace JoesScanner.ViewModels
             }
 
             // Capture snapshots used for unsaved change detection
-            _savedServerUrl = _settings.ServerUrl;
+            _savedServerUrl = _settings.ServerUrl ?? string.Empty;
             _savedUseDefaultConnection = UseDefaultConnection;
             _savedMaxCalls = _maxCalls;
             _savedAutoSpeedThreshold = _autoSpeedThreshold;
@@ -686,7 +681,7 @@ namespace JoesScanner.ViewModels
             ApplyTheme(ThemeMode);
 
             // Update snapshots
-            _savedServerUrl = _settings.ServerUrl;
+            _savedServerUrl = _settings.ServerUrl ?? string.Empty;
             _savedUseDefaultConnection = UseDefaultConnection;
             _savedMaxCalls = _maxCalls;
             _savedAutoSpeedThreshold = _autoSpeedThreshold;
