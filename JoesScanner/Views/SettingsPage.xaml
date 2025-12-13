@@ -318,6 +318,35 @@
                                     Maximum="100"
                                     Value="{Binding AutoSpeedThreshold}"
                                     HorizontalOptions="FillAndExpand" />
+
+<!-- Accessibility -->
+<VerticalStackLayout
+    Spacing="6"
+    Margin="0,12,0,0">
+    <Label
+        x:Name="AnnounceNewCallsLabel"
+        Text="Announce new calls"
+        FontAttributes="Bold"
+        FontSize="14"
+        TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
+    <Label
+        Text="When a screen reader is enabled, new calls will be spoken as they arrive."
+        FontSize="12"
+        TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" />
+    <HorizontalStackLayout Spacing="12">
+        <Switch
+            IsToggled="{Binding AnnounceNewCalls}"
+            AutomationProperties.LabeledBy="{x:Reference AnnounceNewCallsLabel}"
+            TabIndex="30" />
+        <Label
+            Text="{Binding AnnounceNewCalls, StringFormat='Enabled: {0}'}"
+            FontSize="12"
+            VerticalTextAlignment="Center"
+            TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}"
+            IsTabStop="False" />
+    </HorizontalStackLayout>
+</VerticalStackLayout>
+
                             </VerticalStackLayout>
 
                         </VerticalStackLayout>

@@ -13,6 +13,7 @@ namespace JoesScanner.Services
         private const string BasicAuthUserKey = "BasicAuthUser";
         private const string BasicAuthPassKey = "BasicAuthPass";
         private const string AutoPlayKey = "AutoPlay";
+        private const string AnnounceNewCallsKey = "AnnounceNewCalls";
         private const string MaxCallsKey = "MaxCalls";
         private const string AutoSpeedThresholdKey = "AutoSpeedThreshold";
         private const string ScrollDirectionKey = "ScrollDirection";
@@ -131,8 +132,16 @@ namespace JoesScanner.Services
             set => Preferences.Set(AutoPlayKey, value);
         }
 
+        // When true, announce new calls via the platform screen reader.
+        public bool AnnounceNewCalls
+        {
+            get => Preferences.Get(AnnounceNewCallsKey, true);
+            set => Preferences.Set(AnnounceNewCallsKey, value);
+        }
+
+
         // Maximum number of calls to keep in the visible queue.
-        // Value is clamped to a range of 10–50 before being stored.
+        // Value is clamped to a range of 10â€“50 before being stored.
         public int MaxCalls
         {
             get => Preferences.Get(MaxCallsKey, 10); // default 10
@@ -140,7 +149,7 @@ namespace JoesScanner.Services
             {
                 var v = value;
 
-                // Clamp to 10–50.
+                // Clamp to 10â€“50.
                 if (v < 10) v = 10;
                 if (v > 50) v = 50;
 
@@ -149,7 +158,7 @@ namespace JoesScanner.Services
         }
 
         // Autospeed threshold in calls waiting for automatic playback speed increases.
-        // Value is clamped to 10–100 before being stored.
+        // Value is clamped to 10â€“100 before being stored.
         public int AutoSpeedThreshold
         {
             get

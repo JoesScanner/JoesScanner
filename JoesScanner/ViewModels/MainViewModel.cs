@@ -10,6 +10,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Input;
+using Microsoft.Maui.Accessibility;
 using Microsoft.Maui.Storage;
 
 namespace JoesScanner.ViewModels
@@ -554,7 +555,7 @@ namespace JoesScanner.ViewModels
                 }
                 else if (!string.IsNullOrWhiteSpace(levelLabel))
                 {
-                    summary = $"{levelLabel} • status unknown";
+                    summary = $"{levelLabel} â€¢ status unknown";
                 }
                 else
                 {
@@ -570,7 +571,7 @@ namespace JoesScanner.ViewModels
                         .ToString("yyyy-MM-dd");
 
                     summary = !string.IsNullOrWhiteSpace(levelLabel)
-                        ? $"{levelLabel} • renews {renewalLocal}"
+                        ? $"{levelLabel} â€¢ renews {renewalLocal}"
                         : $"Renews {renewalLocal}";
                 }
                 else if (!string.IsNullOrWhiteSpace(lastMessage))
@@ -580,7 +581,7 @@ namespace JoesScanner.ViewModels
                 }
                 else if (!string.IsNullOrWhiteSpace(levelLabel))
                 {
-                    summary = $"{levelLabel} • active";
+                    summary = $"{levelLabel} â€¢ active";
                 }
                 else
                 {
@@ -938,6 +939,24 @@ namespace JoesScanner.ViewModels
                             }
 
                             Calls.Insert(0, call);
+
+                            // Accessibility: announce new calls when a screen reader is enabled.
+                            if (_settingsService.AnnounceNewCalls)
+                            {
+                                var announcement = string.IsNullOrWhiteSpace(call.AccessibilityAnnouncement)
+                                    ? call.AccessibilitySummary
+                                    : call.AccessibilityAnnouncement;
+
+                                try
+                                {
+                                    SemanticScreenReader.Default.Announce(announcement);
+                                }
+                                catch
+                                {
+                                    // Ignore announce failures. App functionality should not depend on accessibility APIs.
+                                }
+                            }
+
                             TotalCallsInserted++;
                             LastQueueEvent = $"Inserted call at {DateTime.Now:T}";
 
@@ -1392,7 +1411,6 @@ namespace JoesScanner.ViewModels
             {
                 PlaybackSpeedStep = 1;
             }
-
         }
 
         private async Task PlaySingleCallWithoutQueueAsync(CallItem item)

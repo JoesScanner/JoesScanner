@@ -89,10 +89,12 @@ namespace JoesScanner.ViewModels
         // Saved snapshot for settings that are only committed on Save
         private int _savedMaxCalls;
         private int _savedAutoSpeedThreshold;
+        private bool _savedAnnounceNewCalls;
 
         // Call display settings
         private int _maxCalls;
         private int _autoSpeedThreshold;
+        private bool _announceNewCalls;
 
         // Theme as a single string: "System", "Light", "Dark"
         private string _themeMode = "System";
@@ -351,7 +353,22 @@ namespace JoesScanner.ViewModels
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(HasUnsavedSettings));
             }
-        }
+		}
+
+		// When true, new incoming calls will be announced via the platform screen reader.
+		public bool AnnounceNewCalls
+		{
+			get => _announceNewCalls;
+			set
+			{
+				if (_announceNewCalls == value)
+					return;
+
+				_announceNewCalls = value;
+				OnPropertyChanged();
+				OnPropertyChanged(nameof(HasUnsavedSettings));
+			}
+		}
 
 
         // Theme mode string: "System", "Light", or "Dark".
@@ -474,6 +491,7 @@ namespace JoesScanner.ViewModels
             // Calls
             _maxCalls = _settings.MaxCalls;
             _autoSpeedThreshold = _settings.AutoSpeedThreshold;
+            _announceNewCalls = _settings.AnnounceNewCalls;
 
             // Theme - normalize to a safe value and push back into settings if needed
             var rawTheme = _settings.ThemeMode;
@@ -517,6 +535,7 @@ namespace JoesScanner.ViewModels
             _savedUseDefaultConnection = UseDefaultConnection;
             _savedMaxCalls = _maxCalls;
             _savedAutoSpeedThreshold = _autoSpeedThreshold;
+            _savedAnnounceNewCalls = _announceNewCalls;
             _savedBasicAuthUsername = _basicAuthUsername;
             _savedBasicAuthPassword = _basicAuthPassword;
 
@@ -685,6 +704,7 @@ namespace JoesScanner.ViewModels
             _savedUseDefaultConnection = UseDefaultConnection;
             _savedMaxCalls = _maxCalls;
             _savedAutoSpeedThreshold = _autoSpeedThreshold;
+            _savedAnnounceNewCalls = _announceNewCalls;
             _savedBasicAuthUsername = _basicAuthUsername;
             _savedBasicAuthPassword = _basicAuthPassword;
 

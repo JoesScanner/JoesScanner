@@ -14,6 +14,9 @@ namespace JoesScanner.Services
         // When true, calls auto-play as they arrive.
         bool AutoPlay { get; set; }
 
+        // When true, announce new calls via the platform screen reader.
+        bool AnnounceNewCalls { get; set; }
+
         // Maximum number of calls to keep in the visible queue.
         int MaxCalls { get; set; }
 

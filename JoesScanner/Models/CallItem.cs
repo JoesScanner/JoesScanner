@@ -29,6 +29,8 @@ namespace JoesScanner.Models
 
                 _backendId = value ?? string.Empty;
                 OnPropertyChanged();
+                OnPropertyChanged(nameof(AccessibilitySummary));
+                OnPropertyChanged(nameof(AccessibilityAnnouncement));
             }
         }
 
@@ -59,6 +61,8 @@ namespace JoesScanner.Models
                 _timestamp = value;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(TimeDisplay));
+				OnPropertyChanged(nameof(AccessibilitySummary));
+				OnPropertyChanged(nameof(AccessibilityAnnouncement));
             }
         }
 
@@ -71,9 +75,11 @@ namespace JoesScanner.Models
                 if (Math.Abs(_callDurationSeconds - value) < 0.001)
                     return;
 
-                _callDurationSeconds = value;
-                OnPropertyChanged();
-                OnPropertyChanged(nameof(DurationDisplay));
+				_callDurationSeconds = value;
+				OnPropertyChanged();
+				OnPropertyChanged(nameof(DurationDisplay));
+				OnPropertyChanged(nameof(AccessibilitySummary));
+				OnPropertyChanged(nameof(AccessibilityAnnouncement));
             }
         }
 
@@ -89,6 +95,8 @@ namespace JoesScanner.Models
 
                 _talkgroup = value ?? string.Empty;
                 OnPropertyChanged();
+				OnPropertyChanged(nameof(AccessibilitySummary));
+				OnPropertyChanged(nameof(AccessibilityAnnouncement));
             }
         }
 
@@ -103,7 +111,9 @@ namespace JoesScanner.Models
 
                 _source = value ?? string.Empty;
                 OnPropertyChanged();
-                OnPropertyChanged(nameof(ReceiverName));
+				OnPropertyChanged(nameof(ReceiverName));
+				OnPropertyChanged(nameof(AccessibilitySummary));
+				OnPropertyChanged(nameof(AccessibilityAnnouncement));
             }
         }
 
@@ -119,6 +129,8 @@ namespace JoesScanner.Models
                 _site = value ?? string.Empty;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(SystemName));
+				OnPropertyChanged(nameof(AccessibilitySummary));
+				OnPropertyChanged(nameof(AccessibilityAnnouncement));
             }
         }
 
@@ -133,7 +145,9 @@ namespace JoesScanner.Models
 
                 _voiceReceiver = value ?? string.Empty;
                 OnPropertyChanged();
-                OnPropertyChanged(nameof(ReceiverName));
+				OnPropertyChanged(nameof(ReceiverName));
+				OnPropertyChanged(nameof(AccessibilitySummary));
+				OnPropertyChanged(nameof(AccessibilityAnnouncement));
             }
         }
 
@@ -148,6 +162,8 @@ namespace JoesScanner.Models
 
                 _transcription = value ?? string.Empty;
                 OnPropertyChanged();
+				OnPropertyChanged(nameof(AccessibilitySummary));
+				OnPropertyChanged(nameof(AccessibilityAnnouncement));
             }
         }
 
@@ -209,7 +225,9 @@ namespace JoesScanner.Models
                     return;
 
                 _isPlaying = value;
-                OnPropertyChanged();
+				OnPropertyChanged();
+				OnPropertyChanged(nameof(AccessibilitySummary));
+				OnPropertyChanged(nameof(AccessibilityAnnouncement));
             }
         }
 
@@ -232,7 +250,69 @@ namespace JoesScanner.Models
                 ? Source
                 : VoiceReceiver;
 
-        // System name shown in the UI. Uses the Site value.
-        public string SystemName => Site;
-    }
+		// System name shown in the UI. Uses the Site value.
+		public string SystemName => Site;
+
+		// One-line summary used by screen readers.
+		public string AccessibilitySummary
+		{
+			get
+			{
+				var time = TimeDisplay;
+				var site = SystemName;
+				var tg = string.IsNullOrWhiteSpace(Talkgroup) ? "Unknown talkgroup" : Talkgroup;
+				var rx = string.IsNullOrWhiteSpace(ReceiverName) ? "Unknown receiver" : ReceiverName;
+				var dur = DurationDisplay;
+
+				var parts = new System.Collections.Generic.List<string>();
+
+				if (!string.IsNullOrWhiteSpace(time)) parts.Add(time);
+				parts.Add(tg);
+				if (!string.IsNullOrWhiteSpace(site)) parts.Add(site);
+				if (!string.IsNullOrWhiteSpace(rx)) parts.Add(rx);
+				if (!string.IsNullOrWhiteSpace(dur)) parts.Add(dur);
+
+				// Include transcription if present, but keep it short.
+				if (!string.IsNullOrWhiteSpace(Transcription))
+				{
+					parts.Add(TruncateForAccessibility(Transcription, 140));
+				}
+
+				// Add a short playing cue if applicable.
+				if (IsPlaying)
+				{
+					parts.Add("Playing");
+				}
+
+				return string.Join(". ", parts);
+			}
+		}
+
+		// Shorter text used when announcing a brand-new incoming call.
+		public string AccessibilityAnnouncement
+		{
+			get
+			{
+				var tg = string.IsNullOrWhiteSpace(Talkgroup) ? "Unknown talkgroup" : Talkgroup;
+				var site = string.IsNullOrWhiteSpace(SystemName) ? string.Empty : SystemName;
+
+				if (string.IsNullOrWhiteSpace(site))
+					return $"New call. {tg}.";
+
+				return $"New call. {tg}. {site}.";
+			}
+		}
+
+		private static string TruncateForAccessibility(string text, int maxLen)
+		{
+			if (string.IsNullOrWhiteSpace(text))
+				return string.Empty;
+
+			var t = text.Trim();
+			if (t.Length <= maxLen)
+				return t;
+
+			return t.Substring(0, maxLen).TrimEnd() + "...";
+		}
+	}
 }
