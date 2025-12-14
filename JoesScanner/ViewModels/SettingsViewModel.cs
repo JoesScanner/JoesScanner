@@ -140,7 +140,7 @@ namespace JoesScanner.ViewModels
 
             SaveCommand = new Command(SaveSettings);
             ResetServerCommand = new Command(ResetServerUrl);
-            ValidateServerCommand = new Command(async () => await ValidateServerUrlAsync());
+            ValidateServerCommand = new Command(async () => await SaveThenValidateServerUrlAsync());
 
             ToggleMuteFilterCommand = new Command<FilterRule>(OnToggleMuteFilter);
             ToggleDisableFilterCommand = new Command<FilterRule>(OnToggleDisableFilter);
@@ -331,6 +331,12 @@ namespace JoesScanner.ViewModels
 
                 _maxCalls = clamped;
                 OnPropertyChanged();
+
+                // Persist immediately so there is no need for a Save button.
+                _settings.MaxCalls = _maxCalls;
+                _mainViewModel.MaxCalls = _maxCalls;
+                _savedMaxCalls = _maxCalls;
+
                 OnPropertyChanged(nameof(HasUnsavedSettings));
             }
         }
@@ -351,24 +357,34 @@ namespace JoesScanner.ViewModels
 
                 _autoSpeedThreshold = clamped;
                 OnPropertyChanged();
+
+                // Persist immediately so there is no need for a Save button.
+                _settings.AutoSpeedThreshold = _autoSpeedThreshold;
+                _savedAutoSpeedThreshold = _autoSpeedThreshold;
+
                 OnPropertyChanged(nameof(HasUnsavedSettings));
             }
-		}
+        }
 
-		// When true, new incoming calls will be announced via the platform screen reader.
-		public bool AnnounceNewCalls
-		{
-			get => _announceNewCalls;
-			set
-			{
-				if (_announceNewCalls == value)
-					return;
+        // When true, new incoming calls will be announced via the platform screen reader.
+        public bool AnnounceNewCalls
+        {
+            get => _announceNewCalls;
+            set
+            {
+                if (_announceNewCalls == value)
+                    return;
 
-				_announceNewCalls = value;
-				OnPropertyChanged();
-				OnPropertyChanged(nameof(HasUnsavedSettings));
-			}
-		}
+                _announceNewCalls = value;
+                OnPropertyChanged();
+
+                // Persist immediately so there is no need for a Save button.
+                _settings.AnnounceNewCalls = _announceNewCalls;
+                _savedAnnounceNewCalls = _announceNewCalls;
+
+                OnPropertyChanged(nameof(HasUnsavedSettings));
+            }
+        }
 
 
         // Theme mode string: "System", "Light", or "Dark".
@@ -695,6 +711,9 @@ namespace JoesScanner.ViewModels
             // Autospeed threshold
             _settings.AutoSpeedThreshold = AutoSpeedThreshold;
 
+            // Accessibility
+            _settings.AnnounceNewCalls = AnnounceNewCalls;
+
             // Theme
             _settings.ThemeMode = ThemeMode;
             ApplyTheme(ThemeMode);
@@ -719,6 +738,15 @@ namespace JoesScanner.ViewModels
         {
             ServerUrl = DefaultServerUrl;
             UseDefaultConnection = true;
+        }
+
+
+        // Saves current settings (same as the old Save button) and then runs validation.
+        // This ensures validation always uses the latest values from the UI.
+        private async Task SaveThenValidateServerUrlAsync()
+        {
+            SaveSettings();
+            await ValidateServerUrlAsync();
         }
 
         // Lightweight server validation and SureCart auth check.
@@ -753,7 +781,7 @@ namespace JoesScanner.ViewModels
                     if (string.IsNullOrWhiteSpace(accountUsername) || string.IsNullOrWhiteSpace(accountPassword))
                     {
                         ServerValidationMessage =
-                            "Scanner account username and password are not configured. Enter them in the connection box and save first.";
+                            "Scanner account username and password are not configured. Enter them in the connection box first.";
                         ServerValidationIsError = true;
 
                         _settings.SubscriptionLastStatusOk = false;

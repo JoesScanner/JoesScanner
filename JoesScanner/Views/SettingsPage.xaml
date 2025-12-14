@@ -68,22 +68,6 @@
                                 Spacing="10"
                                 HorizontalOptions="End">
 
-                                <!-- Save button (turns red when HasUnsavedSettings is true) -->
-                                <Button
-                                    Text="Save"
-                                    Command="{Binding SaveCommand}"
-                                    Style="{StaticResource PillButtonStyle}">
-                                    <Button.Triggers>
-                                        <DataTrigger
-                                            TargetType="Button"
-                                            Binding="{Binding HasUnsavedSettings}"
-                                            Value="True">
-                                            <Setter Property="BackgroundColor" Value="#b91c1c" />
-                                            <Setter Property="TextColor" Value="White" />
-                                        </DataTrigger>
-                                    </Button.Triggers>
-                                </Button>
-
                                 <!-- Close button -->
                                 <Button
                                     Text="Close"
@@ -319,33 +303,33 @@
                                     Value="{Binding AutoSpeedThreshold}"
                                     HorizontalOptions="FillAndExpand" />
 
-<!-- Accessibility -->
-<VerticalStackLayout
-    Spacing="6"
-    Margin="0,12,0,0">
-    <Label
-        x:Name="AnnounceNewCallsLabel"
-        Text="Announce new calls"
-        FontAttributes="Bold"
-        FontSize="14"
-        TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
-    <Label
-        Text="When a screen reader is enabled, new calls will be spoken as they arrive."
-        FontSize="12"
-        TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" />
-    <HorizontalStackLayout Spacing="12">
-        <Switch
-            IsToggled="{Binding AnnounceNewCalls}"
-            AutomationProperties.LabeledBy="{x:Reference AnnounceNewCallsLabel}"
-            TabIndex="30" />
-        <Label
-            Text="{Binding AnnounceNewCalls, StringFormat='Enabled: {0}'}"
-            FontSize="12"
-            VerticalTextAlignment="Center"
-            TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}"
-            IsTabStop="False" />
-    </HorizontalStackLayout>
-</VerticalStackLayout>
+                                <!-- Accessibility -->
+                                <VerticalStackLayout
+                                    Spacing="6"
+                                    Margin="0,12,0,0">
+                                    <Label
+                                        x:Name="AnnounceNewCallsLabel"
+                                        Text="Announce new calls"
+                                        FontAttributes="Bold"
+                                        FontSize="14"
+                                        TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
+                                    <Label
+                                        Text="When a screen reader is enabled, new calls will be spoken as they arrive."
+                                        FontSize="12"
+                                        TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" />
+                                    <HorizontalStackLayout Spacing="12">
+                                        <Switch
+                                            IsToggled="{Binding AnnounceNewCalls}"
+                                            AutomationProperties.LabeledBy="{x:Reference AnnounceNewCallsLabel}"
+                                             />
+                                        <Label
+                                            Text="{Binding AnnounceNewCalls, StringFormat='Enabled: {0}'}"
+                                            FontSize="12"
+                                            VerticalTextAlignment="Center"
+                                            TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}"
+                                             />
+                                    </HorizontalStackLayout>
+                                </VerticalStackLayout>
 
                             </VerticalStackLayout>
 
@@ -552,7 +536,7 @@
                                                         <Setter Property="BackgroundColor" Value="#ef4444" />
                                                     </DataTrigger>
 
-                                                    <!-- Enabled = clear -->
+                                                    <!-- Not disabled = clear -->
                                                     <DataTrigger
                                                         TargetType="Border"
                                                         Binding="{Binding IsDisabled}"
@@ -570,7 +554,8 @@
                                                 StrokeShape="RoundRectangle 4"
                                                 Padding="5,4,5,2"
                                                 HorizontalOptions="Center"
-                                                VerticalOptions="Center">
+                                                VerticalOptions="Center"
+                                                BackgroundColor="Transparent">
 
                                                 <Border.GestureRecognizers>
                                                     <TapGestureRecognizer
@@ -579,8 +564,8 @@
                                                 </Border.GestureRecognizers>
 
                                                 <Label
-                                                    Text="Clear"
                                                     FontSize="10"
+                                                    Text="Clear"
                                                     HorizontalOptions="Center"
                                                     VerticalOptions="Center" />
                                             </Border>
@@ -589,55 +574,47 @@
                                 </CollectionView.ItemTemplate>
                             </CollectionView>
 
-                            <Label
-                                Text="Filters are created automatically as calls arrive. Clearing a row removes it until new traffic recreates it."
-                                FontSize="10"
-                                Opacity="0.6"
-                                LineBreakMode="WordWrap" />
                         </VerticalStackLayout>
                     </Border>
 
                     <!-- THEME CARD -->
                     <Border
                         Grid.Row="4"
-                        Padding="12"
-                        BackgroundColor="{AppThemeBinding Light=#f9fafb, Dark=#020617}"
+                        Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
                         StrokeThickness="1"
-                        StrokeShape="RoundRectangle 16">
+                        Padding="12"
+                        BackgroundColor="{AppThemeBinding Light=#ffffff, Dark=#111827}"
+                        StrokeShape="RoundRectangle 8">
 
-                        <Grid
-                            RowDefinitions="Auto,Auto"
-                            ColumnDefinitions="*">
-
+                        <VerticalStackLayout Spacing="10">
                             <Label
-                                Grid.Row="0"
                                 Text="Theme"
                                 FontSize="16"
                                 FontAttributes="Bold"
-                                Margin="0,0,0,8"
                                 TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
 
-                            <HorizontalStackLayout
-                                Grid.Row="1"
-                                Spacing="12">
+                            <Label
+                                Text="Choose System, Light, or Dark."
+                                FontSize="12"
+                                Opacity="0.8"
+                                TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
 
-                                <RadioButton
-                                    Content="System"
-                                    GroupName="ThemeMode"
-                                    IsChecked="{Binding IsThemeSystem}" />
-
-                                <RadioButton
-                                    Content="Light"
-                                    GroupName="ThemeMode"
-                                    IsChecked="{Binding IsThemeLight}" />
-
-                                <RadioButton
-                                    Content="Dark"
-                                    GroupName="ThemeMode"
-                                    IsChecked="{Binding IsThemeDark}" />
-                            </HorizontalStackLayout>
-                        </Grid>
+                            <VerticalStackLayout Spacing="6">
+                                <HorizontalStackLayout Spacing="10">
+                                    <RadioButton
+                                        Content="System"
+                                        IsChecked="{Binding IsThemeSystem}" />
+                                    <RadioButton
+                                        Content="Light"
+                                        IsChecked="{Binding IsThemeLight}" />
+                                    <RadioButton
+                                        Content="Dark"
+                                        IsChecked="{Binding IsThemeDark}" />
+                                </HorizontalStackLayout>
+                            </VerticalStackLayout>
+                        </VerticalStackLayout>
                     </Border>
+
                 </Grid>
             </Border>
         </Grid>
