@@ -1,6 +1,7 @@
 using JoesScanner.Models;
 using JoesScanner.Services;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
@@ -12,6 +13,13 @@ using System.Threading.Tasks;
 using System.Windows.Input;
 using Microsoft.Maui.Accessibility;
 using Microsoft.Maui.Storage;
+
+#if ANDROID
+using Android.Content;
+using Android.OS;
+using AndroidX.Core.Content;
+using JoesScanner.Platforms.Android.Services;
+#endif
 
 namespace JoesScanner.ViewModels
 {
@@ -49,6 +57,12 @@ namespace JoesScanner.ViewModels
 
         // True while we are playing through the backlog.
         private bool _isQueuePlaybackRunning;
+
+        private readonly ConcurrentQueue<CallItem> _bgPlayQueue = new();
+        private readonly SemaphoreSlim _bgPlaySignal = new(0);
+        private CancellationTokenSource? _bgPlayCts;
+        private Task? _bgPlayTask;
+        private readonly SemaphoreSlim _playbackMutex = new(1, 1);
 
         // Optional settings view model reference. Currently not used but kept for future wiring.
         public SettingsViewModel? SettingsViewModel { get; set; }
@@ -827,6 +841,12 @@ namespace JoesScanner.ViewModels
             SetConnectionStatus(ConnectionStatus.Connecting);
             IsRunning = true;
 
+#if ANDROID
+            StartAndroidForegroundPlaybackService();
+#endif
+
+            EnsureBackgroundPlaybackWorkerStarted();
+
             _currentPlayingCall = null;
 
             if (Calls.Count > 0)
@@ -855,11 +875,31 @@ namespace JoesScanner.ViewModels
                     if (call == null)
                         continue;
 
-                    TotalCallsReceived++;
+                    Interlocked.Increment(ref _totalCallsReceived);
+                    MainThread.BeginInvokeOnMainThread(() => OnPropertyChanged(nameof(TotalCallsReceived)));
 
                     try
                     {
-                        await MainThread.InvokeOnMainThreadAsync(() =>
+                        // Prepare filter rules off the UI thread.
+                        _filterService.EnsureRulesForCall(call);
+
+                        // Decide if this call should be queued for background playback.
+                        var isPlayableForAudio =
+                            AudioEnabled &&
+                            AutoPlay &&
+                            !string.IsNullOrWhiteSpace(call.AudioUrl) &&
+                            !_filterService.ShouldHide(call) &&
+                            !_filterService.ShouldMute(call) &&
+                            !call.IsTranscriptionUpdate;
+
+                        if (isPlayableForAudio)
+                        {
+                            EnsureBackgroundPlaybackWorkerStarted();
+                            EnqueueForBackgroundPlayback(call);
+                        }
+
+                        // Post UI updates without awaiting the UI thread.
+                        MainThread.BeginInvokeOnMainThread(() =>
                         {
                             if (token.IsCancellationRequested)
                                 return;
@@ -867,12 +907,16 @@ namespace JoesScanner.ViewModels
                             if (string.Equals(call.Talkgroup, "AUTH", StringComparison.OrdinalIgnoreCase))
                             {
                                 SetConnectionStatus(ConnectionStatus.AuthFailed);
+                                return;
                             }
-                            else if (string.Equals(call.Talkgroup, "ERROR", StringComparison.OrdinalIgnoreCase))
+
+                            if (string.Equals(call.Talkgroup, "ERROR", StringComparison.OrdinalIgnoreCase))
                             {
                                 SetConnectionStatus(ConnectionStatus.ServerUnreachable);
+                                return;
                             }
-                            else if (string.Equals(call.Talkgroup, "HEARTBEAT", StringComparison.OrdinalIgnoreCase))
+
+                            if (string.Equals(call.Talkgroup, "HEARTBEAT", StringComparison.OrdinalIgnoreCase))
                             {
                                 if (_connectionStatus == ConnectionStatus.Connecting ||
                                     _connectionStatus == ConnectionStatus.AuthFailed ||
@@ -884,19 +928,16 @@ namespace JoesScanner.ViewModels
 
                                 return;
                             }
-                            else
+
+                            if (_connectionStatus == ConnectionStatus.Connecting ||
+                                _connectionStatus == ConnectionStatus.AuthFailed ||
+                                _connectionStatus == ConnectionStatus.ServerUnreachable ||
+                                _connectionStatus == ConnectionStatus.Error)
                             {
-                                if (_connectionStatus == ConnectionStatus.Connecting ||
-                                    _connectionStatus == ConnectionStatus.AuthFailed ||
-                                    _connectionStatus == ConnectionStatus.ServerUnreachable ||
-                                    _connectionStatus == ConnectionStatus.Error)
-                                {
-                                    SetConnectionStatus(ConnectionStatus.Connected);
-                                }
+                                SetConnectionStatus(ConnectionStatus.Connected);
                             }
 
-                            if (call.IsTranscriptionUpdate &&
-                                !string.IsNullOrWhiteSpace(call.BackendId))
+                            if (call.IsTranscriptionUpdate && !string.IsNullOrWhiteSpace(call.BackendId))
                             {
                                 var existing = Calls.FirstOrDefault(c => c.BackendId == call.BackendId);
                                 if (existing != null)
@@ -912,7 +953,6 @@ namespace JoesScanner.ViewModels
                                                 .Trim();
 
                                             cleaned = cleaned.Trim(' ', '|', ';');
-
                                             existing.DebugInfo = cleaned;
                                         }
                                     }
@@ -930,8 +970,6 @@ namespace JoesScanner.ViewModels
                                 return;
                             }
 
-                            _filterService.EnsureRulesForCall(call);
-
                             if (_filterService.ShouldHide(call))
                             {
                                 LastQueueEvent = $"Call dropped by filter at {DateTime.Now:T}";
@@ -940,7 +978,6 @@ namespace JoesScanner.ViewModels
 
                             Calls.Insert(0, call);
 
-                            // Accessibility: announce new calls when a screen reader is enabled.
                             if (_settingsService.AnnounceNewCalls)
                             {
                                 var announcement = string.IsNullOrWhiteSpace(call.AccessibilityAnnouncement)
@@ -953,7 +990,6 @@ namespace JoesScanner.ViewModels
                                 }
                                 catch
                                 {
-                                    // Ignore announce failures. App functionality should not depend on accessibility APIs.
                                 }
                             }
 
@@ -961,22 +997,16 @@ namespace JoesScanner.ViewModels
                             LastQueueEvent = $"Inserted call at {DateTime.Now:T}";
 
                             EnforceMaxCalls();
-
                             UpdateQueueDerivedState();
-
-                            if (AudioEnabled && AutoPlay)
-                            {
-                                _ = EnsureQueuePlaybackAsync();
-                            }
                         });
                     }
                     catch (Exception ex)
                     {
-                        System.Diagnostics.Debug.WriteLine($"Error updating UI for call: {ex}");
+                        System.Diagnostics.Debug.WriteLine($"Error processing call: {ex}");
                     }
                 }
             }
-            catch (OperationCanceledException)
+            catch (System.OperationCanceledException)
             {
             }
             catch (Exception ex)
@@ -1015,6 +1045,13 @@ namespace JoesScanner.ViewModels
                     _currentPlayingCall = null;
                     _lastPlayedCall = null;
                     UpdateQueueDerivedState();
+
+#if ANDROID
+                    StopAndroidForegroundPlaybackService();
+#endif
+
+                    StopBackgroundPlaybackWorker();
+                    ClearBackgroundPlaybackQueue();
                 });
             }
         }
@@ -1069,7 +1106,15 @@ namespace JoesScanner.ViewModels
 
             _currentPlayingCall = null;
             _lastPlayedCall = null;
+
             UpdateQueueDerivedState();
+
+#if ANDROID
+            StopAndroidForegroundPlaybackService();
+#endif
+
+            StopBackgroundPlaybackWorker();
+            ClearBackgroundPlaybackQueue();
 
             Preferences.Set(LastConnectedPreferenceKey, false);
         }
@@ -1131,26 +1176,38 @@ namespace JoesScanner.ViewModels
                     return;
                 }
 
-                foreach (var call in Calls)
+                ClearBackgroundPlaybackQueue();
+
+                await _playbackMutex.WaitAsync();
+                try
                 {
-                    if (call.IsPlaying)
-                        call.IsPlaying = false;
+                    _currentPlayingCall = item;
+
+                    try
+                    {
+                        MainThread.BeginInvokeOnMainThread(() =>
+                        {
+                            foreach (var call in Calls)
+                            {
+                                if (call.IsPlaying)
+                                    call.IsPlaying = false;
+                            }
+
+                            UpdateQueueDerivedState();
+                        });
+                    }
+                    catch
+                    {
+                    }
+
+                    await PlayAudioAsync(item);
+                }
+                finally
+                {
+                    try { _playbackMutex.Release(); } catch { }
                 }
 
-                _currentPlayingCall = item;
-                UpdateQueueDerivedState();
-
-                await PlayAudioAsync(item);
-
-                if (AudioEnabled && IsRunning && AutoPlay && CallsWaiting > 0)
-                {
-                    LastQueueEvent = "Tapped call finished; restarting queue";
-                    _ = EnsureQueuePlaybackAsync();
-                }
-                else
-                {
-                    LastQueueEvent = "Tapped call finished";
-                }
+                LastQueueEvent = "Tapped call finished";
             }
             catch (Exception ex)
             {
@@ -1192,20 +1249,22 @@ namespace JoesScanner.ViewModels
 
                 LastQueueEvent = "Jump to live (playing newest call)";
 
-                _currentPlayingCall = newest;
-                UpdateQueueDerivedState();
+                ClearBackgroundPlaybackQueue();
 
-                await PlayAudioAsync(newest);
+                await _playbackMutex.WaitAsync();
+                try
+                {
+                    _currentPlayingCall = newest;
+                    UpdateQueueDerivedState();
 
-                if (AudioEnabled && IsRunning && AutoPlay && CallsWaiting > 0)
-                {
-                    LastQueueEvent = "Jump to live finished; restarting queue";
-                    _ = EnsureQueuePlaybackAsync();
+                    await PlayAudioAsync(newest);
                 }
-                else
+                finally
                 {
-                    LastQueueEvent = "Jump to live finished";
+                    try { _playbackMutex.Release(); } catch { }
                 }
+
+                LastQueueEvent = "Jump to live finished";
             }
             catch (Exception ex)
             {
@@ -1228,6 +1287,7 @@ namespace JoesScanner.ViewModels
 
                 if (!newValue)
                 {
+                    ClearBackgroundPlaybackQueue();
                     await StopAudioFromToggleAsync();
 
                     _lastPlayedCall = null;
@@ -1236,6 +1296,8 @@ namespace JoesScanner.ViewModels
                 }
                 else
                 {
+                    EnsureBackgroundPlaybackWorkerStarted();
+
                     if (Calls.Count > 0)
                     {
                         _lastPlayedCall = Calls[0];
@@ -1252,6 +1314,110 @@ namespace JoesScanner.ViewModels
             {
                 System.Diagnostics.Debug.WriteLine($"Error in OnToggleAudioAsync: {ex}");
                 LastQueueEvent = "Error while toggling audio (see debug output)";
+            }
+        }
+
+        private void EnsureBackgroundPlaybackWorkerStarted()
+        {
+            if (_bgPlayTask != null && !_bgPlayTask.IsCompleted)
+                return;
+
+            _bgPlayCts?.Cancel();
+            _bgPlayCts?.Dispose();
+            _bgPlayCts = new CancellationTokenSource();
+
+            var token = _bgPlayCts.Token;
+
+            _bgPlayTask = Task.Run(async () =>
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await _bgPlaySignal.WaitAsync(token);
+                    }
+                    catch (System.OperationCanceledException)
+                    {
+                        break;
+                    }
+
+                    if (token.IsCancellationRequested)
+                        break;
+
+                    if (!IsRunning || !AudioEnabled || !AutoPlay)
+                        continue;
+
+                    if (!_bgPlayQueue.TryDequeue(out var next))
+                        continue;
+
+                    if (next == null)
+                        continue;
+
+                    if (string.IsNullOrWhiteSpace(next.AudioUrl))
+                        continue;
+
+                    if (_filterService.ShouldHide(next) || _filterService.ShouldMute(next))
+                        continue;
+
+                    try
+                    {
+                        await _playbackMutex.WaitAsync(token);
+
+                        if (!IsRunning || !AudioEnabled || !AutoPlay)
+                            continue;
+
+                        await PlayAudioAsync(next);
+                    }
+                    catch
+                    {
+                    }
+                    finally
+                    {
+                        try { _playbackMutex.Release(); } catch { }
+                    }
+                }
+            }, token);
+        }
+
+        private void StopBackgroundPlaybackWorker()
+        {
+            try
+            {
+                _bgPlayCts?.Cancel();
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                _bgPlaySignal.Release();
+            }
+            catch
+            {
+            }
+        }
+
+        private void ClearBackgroundPlaybackQueue()
+        {
+            while (_bgPlayQueue.TryDequeue(out _))
+            {
+            }
+        }
+
+        private void EnqueueForBackgroundPlayback(CallItem call)
+        {
+            if (call == null)
+                return;
+
+            _bgPlayQueue.Enqueue(call);
+
+            try
+            {
+                _bgPlaySignal.Release();
+            }
+            catch
+            {
             }
         }
 
@@ -1328,7 +1494,6 @@ namespace JoesScanner.ViewModels
                 var lastIndex = Calls.Count - 1;
                 if (lastIndex >= 0)
                 {
-                    var removed = Calls[lastIndex];
                     Calls.RemoveAt(lastIndex);
                 }
             }
@@ -1475,20 +1640,31 @@ namespace JoesScanner.ViewModels
             _audioCts = new CancellationTokenSource();
             var token = _audioCts.Token;
 
-            foreach (var call in Calls)
-            {
-                if (call.IsPlaying)
-                    call.IsPlaying = false;
-            }
-
-            item.IsPlaying = true;
             _currentPlayingCall = item;
-
-            OnPropertyChanged(nameof(CallsWaiting));
-            OnPropertyChanged(nameof(IsCallsWaitingVisible));
 
             try
             {
+                try
+                {
+                    MainThread.BeginInvokeOnMainThread(() =>
+                    {
+                        foreach (var call in Calls)
+                        {
+                            if (call.IsPlaying)
+                                call.IsPlaying = false;
+                        }
+
+                        item.IsPlaying = true;
+
+                        OnPropertyChanged(nameof(CallsWaiting));
+                        OnPropertyChanged(nameof(IsCallsWaitingVisible));
+                        UpdateQueueDerivedState();
+                    });
+                }
+                catch
+                {
+                }
+
                 var rate = GetEffectivePlaybackRate(item);
 
                 var playbackUrl = await GetPlayableAudioUrlAsync(item.AudioUrl, token);
@@ -1497,7 +1673,7 @@ namespace JoesScanner.ViewModels
 
                 await _audioPlaybackService.PlayAsync(playbackUrl, rate, token);
             }
-            catch (OperationCanceledException)
+            catch (System.OperationCanceledException)
             {
             }
             catch (Exception ex)
@@ -1506,15 +1682,24 @@ namespace JoesScanner.ViewModels
             }
             finally
             {
-                item.IsPlaying = false;
-
                 _lastPlayedCall = item;
 
                 if (_currentPlayingCall == item)
                     _currentPlayingCall = null;
 
-                OnPropertyChanged(nameof(CallsWaiting));
-                OnPropertyChanged(nameof(IsCallsWaitingVisible));
+                try
+                {
+                    MainThread.BeginInvokeOnMainThread(() =>
+                    {
+                        item.IsPlaying = false;
+                        OnPropertyChanged(nameof(CallsWaiting));
+                        OnPropertyChanged(nameof(IsCallsWaitingVisible));
+                        UpdateQueueDerivedState();
+                    });
+                }
+                catch
+                {
+                }
             }
         }
 
@@ -1590,7 +1775,7 @@ namespace JoesScanner.ViewModels
 
                 return localPath;
             }
-            catch (OperationCanceledException)
+            catch (System.OperationCanceledException)
             {
                 throw;
             }
@@ -1625,9 +1810,41 @@ namespace JoesScanner.ViewModels
             await StartAsync();
         }
 
+#if ANDROID
+        private void StartAndroidForegroundPlaybackService()
+        {
+            try
+            {
+                var ctx = Android.App.Application.Context;
+                var intent = new Intent(ctx, typeof(AudioForegroundService));
+
+                if (Build.VERSION.SdkInt >= BuildVersionCodes.O)
+                    ContextCompat.StartForegroundService(ctx, intent);
+                else
+                    ctx.StartService(intent);
+            }
+            catch
+            {
+            }
+        }
+
+        private void StopAndroidForegroundPlaybackService()
+        {
+            try
+            {
+                var ctx = Android.App.Application.Context;
+                var intent = new Intent(ctx, typeof(AudioForegroundService));
+                ctx.StopService(intent);
+            }
+            catch
+            {
+            }
+        }
+#endif
+
         private static void ApplyTheme(string? mode)
         {
-            var app = Application.Current;
+            var app = Microsoft.Maui.Controls.Application.Current;
             if (app == null)
                 return;
 
