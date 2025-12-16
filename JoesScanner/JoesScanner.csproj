@@ -21,16 +21,16 @@
     <ApplicationTitle>Joes Scanner</ApplicationTitle>
 
     <!-- Reverse-DNS app identifier (Android package name, iOS bundle id, etc.) -->
-    <ApplicationId>app.joesscanner.com</ApplicationId>
+    <ApplicationId>com.joesscanner.app</ApplicationId>
 
     <!-- Display version is semantic -->
-    <ApplicationDisplayVersion>1.2.1</ApplicationDisplayVersion>
+    <ApplicationDisplayVersion>1.2.9</ApplicationDisplayVersion>
 
     <!-- ApplicationVersion must be an integer and should only ever go up -->
-    <ApplicationVersion>121</ApplicationVersion>
+    <ApplicationVersion>129</ApplicationVersion>
 
     <!-- NuGet package version -->
-    <PackageVersion>1.2.1</PackageVersion>
+    <PackageVersion>1.2.9</PackageVersion>
 
     <DefaultLanguage>en-us</DefaultLanguage>
 
