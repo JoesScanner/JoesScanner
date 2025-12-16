@@ -72,6 +72,19 @@ namespace JoesScanner.ViewModels
         // On a fresh app launch it is false so the header shows only the plan info.
         private bool _showValidationPrefix;
 
+        // Shown in the page header to the left of the Close and Log buttons.
+        // Only appears after a successful validation in this app session.
+        public bool ShowValidationHeader => _showValidationPrefix && ShowSubscriptionSummary;
+
+        private void SetShowValidationPrefix(bool value)
+        {
+            if (_showValidationPrefix == value)
+                return;
+
+            _showValidationPrefix = value;
+            OnPropertyChanged(nameof(ShowValidationHeader));
+        }
+
         // Password visibility state
         private bool _isBasicAuthPasswordVisible;
 
@@ -116,6 +129,7 @@ namespace JoesScanner.ViewModels
         public ICommand SaveCommand { get; }
         public ICommand ResetServerCommand { get; }
         public ICommand ValidateServerCommand { get; }
+
         // Password visibility command
         public ICommand ToggleBasicAuthPasswordVisibilityCommand { get; }
 
@@ -140,6 +154,8 @@ namespace JoesScanner.ViewModels
 
             SaveCommand = new Command(SaveSettings);
             ResetServerCommand = new Command(ResetServerUrl);
+
+            // Validate always saves first, then validates.
             ValidateServerCommand = new Command(async () => await SaveThenValidateServerUrlAsync());
 
             ToggleMuteFilterCommand = new Command<FilterRule>(OnToggleMuteFilter);
@@ -153,6 +169,38 @@ namespace JoesScanner.ViewModels
             HasChanges ||
             _maxCalls != _savedMaxCalls ||
             _autoSpeedThreshold != _savedAutoSpeedThreshold;
+
+        // True when there are unsaved connection or credential changes.
+        // Used by SettingsPage.xaml.cs to discard or warn when backing out.
+        public bool HasChanges
+        {
+            get => _hasChanges;
+            private set
+            {
+                if (_hasChanges == value)
+                    return;
+
+                _hasChanges = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(HasUnsavedSettings));
+
+                // This is what the Validate button should bind to for red vs blue.
+                OnPropertyChanged(nameof(ConnectionNeedsValidation));
+
+                // While connection is dirty, do not show stale validated header info.
+                if (_hasChanges)
+                {
+                    ClearValidationUiForDirtyConnection();
+                }
+
+                UpdateSubscriptionSummaryFromSettings();
+            }
+        }
+
+        // Bind your Validate button "red needs action" state to this.
+        // Requirement: when connection box settings change, button turns red.
+        // When tapped, SaveSettings runs first and flips this back to false immediately.
+        public bool ConnectionNeedsValidation => HasChanges;
 
         public bool IsValidatingServer
         {
@@ -203,22 +251,6 @@ namespace JoesScanner.ViewModels
 
                 _serverValidationIsError = value;
                 OnPropertyChanged();
-            }
-        }
-
-        // True when there are unsaved connection or credential changes.
-        // Used by SettingsPage.xaml.cs to discard or warn when backing out.
-        public bool HasChanges
-        {
-            get => _hasChanges;
-            private set
-            {
-                if (_hasChanges == value)
-                    return;
-
-                _hasChanges = value;
-                OnPropertyChanged();
-                OnPropertyChanged(nameof(HasUnsavedSettings));
             }
         }
 
@@ -386,7 +418,6 @@ namespace JoesScanner.ViewModels
             }
         }
 
-
         // Theme mode string: "System", "Light", or "Dark".
         public string ThemeMode
         {
@@ -509,7 +540,7 @@ namespace JoesScanner.ViewModels
             _autoSpeedThreshold = _settings.AutoSpeedThreshold;
             _announceNewCalls = _settings.AnnounceNewCalls;
 
-            // Theme - normalize to a safe value and push back into settings if needed
+            // Theme
             var rawTheme = _settings.ThemeMode;
             if (string.IsNullOrWhiteSpace(rawTheme)
                 || (!string.Equals(rawTheme, "System", StringComparison.OrdinalIgnoreCase)
@@ -538,7 +569,6 @@ namespace JoesScanner.ViewModels
                     if (trimmed.Length == 0)
                         continue;
 
-                    // Only accept entries that look like our current format
                     if (!trimmed.Contains('|'))
                         continue;
 
@@ -555,14 +585,40 @@ namespace JoesScanner.ViewModels
             _savedBasicAuthUsername = _basicAuthUsername;
             _savedBasicAuthPassword = _basicAuthPassword;
 
-            // At this point everything matches the persisted state
             _showValidationPrefix = false;
             HasChanges = false;
+
             OnPropertyChanged(nameof(HasUnsavedSettings));
+            OnPropertyChanged(nameof(ConnectionNeedsValidation));
+
             UpdateSubscriptionSummaryFromSettings();
         }
+
+        private void ClearValidationUiForDirtyConnection()
+        {
+            // Any displayed validation result is now stale.
+            HasServerValidationResult = false;
+            ServerValidationMessage = string.Empty;
+            ServerValidationIsError = false;
+
+            // Also do not show a "validated" prefix while edits are pending.
+            SetShowValidationPrefix(false);
+
+            // Hide subscription summary until next successful validation.
+            ShowSubscriptionSummary = false;
+            SubscriptionSummary = string.Empty;
+        }
+
         private void UpdateSubscriptionSummaryFromSettings()
         {
+            // If the connection is currently dirty, never show cached data as current.
+            if (HasChanges)
+            {
+                ShowSubscriptionSummary = false;
+                SubscriptionSummary = string.Empty;
+                return;
+            }
+
             // Only show this when pointed at the hosted Joe's Scanner server
             // and a scanner username is present.
             var serverUrl = ServerUrl;
@@ -586,7 +642,6 @@ namespace JoesScanner.ViewModels
                 return;
             }
 
-            // Base summary that we cached from the successful auth call.
             var planSummary = _settings.SubscriptionLastMessage ?? string.Empty;
             planSummary = planSummary.Trim();
 
@@ -597,15 +652,11 @@ namespace JoesScanner.ViewModels
                 return;
             }
 
-            // New: if the summary is missing the price text but we have it in settings,
-            // inject it between the plan name and the date.
             var priceText = _settings.SubscriptionPriceId ?? string.Empty;
             priceText = priceText.Trim();
 
             if (!string.IsNullOrEmpty(priceText))
             {
-                // Heuristic: treat it as a user-friendly price string, not a GUID,
-                // when it contains a space or a dollar sign.
                 var looksLikeFriendlyPrice =
                     priceText.Contains(" ", StringComparison.Ordinal) ||
                     priceText.Contains("$", StringComparison.Ordinal);
@@ -613,7 +664,6 @@ namespace JoesScanner.ViewModels
                 if (looksLikeFriendlyPrice &&
                     !planSummary.Contains(priceText, StringComparison.Ordinal))
                 {
-                    // Find where the date portion starts (if present).
                     var idxTrial = planSummary.IndexOf(" - Trial end date:", StringComparison.Ordinal);
                     var idxRenewalDate = planSummary.IndexOf(" - Renewal date:", StringComparison.Ordinal);
                     var idxRenewal = planSummary.IndexOf(" - Renewal:", StringComparison.Ordinal);
@@ -626,39 +676,27 @@ namespace JoesScanner.ViewModels
 
                     if (idxSplit >= 0)
                     {
-                        // Insert " - {priceText}" before the date portion.
                         var before = planSummary.Substring(0, idxSplit);
                         var after = planSummary.Substring(idxSplit);
                         planSummary = $"{before} - {priceText}{after}";
                     }
                     else
                     {
-                        // No date portion; just append the price.
                         planSummary = $"{planSummary} - {priceText}";
                     }
                 }
             }
 
-            // Split the two logical groups onto separate lines.
-            // First line: plan / price / interval
-            // Second line: trial or renewal info.
             planSummary = planSummary
                 .Replace(" - Trial end date:", Environment.NewLine + "Trial end date:")
                 .Replace(" - Renewal date:", Environment.NewLine + "Renewal date:")
                 .Replace(" - Renewal:", Environment.NewLine + "Renewal:");
 
-            if (_showValidationPrefix)
-            {
-                // Keep the validation prefix on the same line as the first group.
-                SubscriptionSummary = $"Joe's Scanner account validated. {planSummary}";
-            }
-            else
-            {
-                SubscriptionSummary = planSummary;
-            }
+            SubscriptionSummary = planSummary;
 
             ShowSubscriptionSummary = true;
         }
+
         private void ApplyTheme(string mode)
         {
             var app = Application.Current;
@@ -727,9 +765,14 @@ namespace JoesScanner.ViewModels
             _savedBasicAuthUsername = _basicAuthUsername;
             _savedBasicAuthPassword = _basicAuthPassword;
 
-
             HasChanges = false;
+
             OnPropertyChanged(nameof(HasUnsavedSettings));
+            OnPropertyChanged(nameof(ConnectionNeedsValidation));
+
+            // If we hid the summary while editing, allow it to show again
+            // based on cached status (and without the validation prefix).
+            UpdateSubscriptionSummaryFromSettings();
         }
 
         // Reset server url to the canonical default and mark as default.
@@ -740,11 +783,11 @@ namespace JoesScanner.ViewModels
             UseDefaultConnection = true;
         }
 
-
         // Saves current settings (same as the old Save button) and then runs validation.
         // This ensures validation always uses the latest values from the UI.
         private async Task SaveThenValidateServerUrlAsync()
         {
+            // This flips ConnectionNeedsValidation back to false immediately.
             SaveSettings();
             await ValidateServerUrlAsync();
         }
@@ -788,6 +831,7 @@ namespace JoesScanner.ViewModels
                         _settings.SubscriptionLastMessage = ServerValidationMessage;
                         _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
 
+                        UpdateSubscriptionSummaryFromSettings();
                         return;
                     }
 
@@ -818,6 +862,7 @@ namespace JoesScanner.ViewModels
                         _settings.SubscriptionLastMessage = ServerValidationMessage;
                         _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
 
+                        UpdateSubscriptionSummaryFromSettings();
                         return;
                     }
 
@@ -841,6 +886,7 @@ namespace JoesScanner.ViewModels
                         _settings.SubscriptionLastMessage = ServerValidationMessage;
                         _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
 
+                        UpdateSubscriptionSummaryFromSettings();
                         return;
                     }
 
@@ -856,6 +902,7 @@ namespace JoesScanner.ViewModels
                         _settings.SubscriptionLastMessage = ServerValidationMessage;
                         _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
 
+                        UpdateSubscriptionSummaryFromSettings();
                         return;
                     }
 
@@ -871,10 +918,10 @@ namespace JoesScanner.ViewModels
                         _settings.SubscriptionLastMessage = ServerValidationMessage;
                         _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
 
+                        UpdateSubscriptionSummaryFromSettings();
                         return;
                     }
 
-                    // Plan name and price text from the API.
                     var planLabelRaw = sub.LevelLabel ?? sub.Level ?? string.Empty;
                     var periodEndRaw = sub.PeriodEndAt ?? sub.TrialEndsAt ?? string.Empty;
                     var statusRaw = sub.Status ?? string.Empty;
@@ -908,7 +955,6 @@ namespace JoesScanner.ViewModels
 
                     string planSummary;
 
-                    // Prefer: Plan + price + date, then back off as fields are missing.
                     if (!string.IsNullOrEmpty(planLabel) &&
                         !string.IsNullOrEmpty(priceText) &&
                         !string.IsNullOrEmpty(formattedDate))
@@ -952,7 +998,7 @@ namespace JoesScanner.ViewModels
                     _settings.SubscriptionRenewalUtc = null;
                     _settings.SubscriptionLastMessage = planSummary;
 
-                    _showValidationPrefix = true;
+                    SetShowValidationPrefix(true);
                     UpdateSubscriptionSummaryFromSettings();
                 }
                 else
@@ -1091,6 +1137,5 @@ namespace JoesScanner.ViewModels
             [JsonPropertyName("trial_ends_at")]
             public string? TrialEndsAt { get; set; }
         }
-
     }
 }

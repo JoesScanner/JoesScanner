@@ -51,35 +51,70 @@
                         <VerticalStackLayout Spacing="10">
 
                             <!-- Title and tagline -->
-                            <VerticalStackLayout Spacing="2">
-                                <Label
-                                    Text="Settings"
-                                    FontSize="20"
-                                    FontAttributes="Bold"
-                                    TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
-                                <Label
-                                    Text="Adjust connection, call list behavior, filters and theme"
-                                    FontSize="12"
-                                    TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" />
-                            </VerticalStackLayout>
+                            <Grid RowDefinitions="Auto,Auto"
+                                    ColumnDefinitions="*,Auto">
 
-                            <!-- Header buttons -->
+                                <!-- Row 0: Title (left) + Version (right) -->
+                                <Label Grid.Row="0"
+                                        Grid.Column="0"
+                                        Text="Settings"
+                                        FontSize="24"
+                                        FontAttributes="Bold"
+                                        VerticalOptions="Center" />
+
+                                <Label x:Name="AppVersionLabel"
+                                        Grid.Row="0"
+                                        Grid.Column="1"
+                                        Text=""
+                                        FontSize="12"
+                                        Opacity="0.8"
+                                        VerticalOptions="Center"
+                                        HorizontalOptions="End"
+                                        Margin="12,0,0,0" />
+
+                                <!-- Row 1: Subtitle (spans both columns) -->
+                                <Label Grid.Row="1"
+                                        Grid.ColumnSpan="2"
+                                        Text="Adjust connection, call list behavior, filters and theme"
+                                        FontSize="12"
+                                        Opacity="0.8"
+                                        Margin="0,2,0,0" />
+                            </Grid>
+
+                        <!-- Header buttons -->
+                        <Grid
+                            ColumnDefinitions="*,Auto"
+                            ColumnSpacing="12"
+                            HorizontalOptions="Fill">
+
+                            <Label
+                                Grid.Column="0"
+                                Text="Joe's Scanner account validated."
+                                IsVisible="{Binding ShowValidationHeader}"
+                                FontSize="14"
+                                TextColor="{AppThemeBinding Light=#16a34a, Dark=#22c55e}"
+                                VerticalOptions="Center"
+                                HorizontalOptions="Start"
+                                LineBreakMode="TailTruncation" />
+
                             <HorizontalStackLayout
+                                Grid.Column="1"
                                 Spacing="10"
-                                HorizontalOptions="End">
+                                HorizontalOptions="End"
+                                VerticalOptions="Center">
 
-                                <!-- Close button -->
                                 <Button
                                     Text="Close"
                                     Style="{StaticResource SecondaryPillButtonStyle}"
                                     Clicked="OnBackClicked" />
 
-                                <!-- Log button -->
                                 <Button
                                     Text="Log"
                                     Style="{StaticResource SecondaryPillButtonStyle}"
                                     Clicked="OnLogClicked" />
                             </HorizontalStackLayout>
+
+                        </Grid>
 
                         </VerticalStackLayout>
                     </Border>
@@ -175,7 +210,18 @@
                                         <Button
                                             Text="Validate"
                                             Command="{Binding ValidateServerCommand}"
-                                            Style="{StaticResource PillButtonStyle}" />
+                                            Style="{StaticResource PillButtonStyle}">
+
+                                            <Button.Triggers>
+                                                <DataTrigger TargetType="Button"
+                                                             Binding="{Binding ConnectionNeedsValidation}"
+                                                             Value="True">
+                                                    <Setter Property="BackgroundColor" Value="Red" />
+                                                    <Setter Property="TextColor" Value="White" />
+                                                </DataTrigger>
+                                            </Button.Triggers>
+                                        </Button>
+
                                     </HorizontalStackLayout>
                                 </Grid>
 
@@ -196,7 +242,7 @@
                                     <Entry
                                         Grid.Column="1"
                                         Text="{Binding BasicAuthUsername}"
-                                        Placeholder="Optional"
+                                        Placeholder="username for restricted servers"
                                         FontSize="12"
                                         HeightRequest="30" />
 
@@ -211,7 +257,7 @@
                                     <Entry
                                         Grid.Column="3"
                                         Text="{Binding BasicAuthPassword}"
-                                        Placeholder="Optional"
+                                        Placeholder="password for restricted servers"
                                         IsPassword="{Binding IsBasicAuthPasswordHidden}"
                                         FontSize="12"
                                         HeightRequest="30"
@@ -274,7 +320,7 @@
                                     Minimum="5"
                                     Maximum="50"
                                     Value="{Binding MaxCalls}"
-                                    HorizontalOptions="FillAndExpand" />
+                                    HorizontalOptions="Fill" />
                             </VerticalStackLayout>
                             <!-- Autospeed slider -->
                             <VerticalStackLayout
@@ -301,7 +347,7 @@
                                     Minimum="10"
                                     Maximum="100"
                                     Value="{Binding AutoSpeedThreshold}"
-                                    HorizontalOptions="FillAndExpand" />
+                                    HorizontalOptions="Fill" />
 
                                 <!-- Accessibility -->
                                 <VerticalStackLayout
@@ -320,8 +366,7 @@
                                     <HorizontalStackLayout Spacing="12">
                                         <Switch
                                             IsToggled="{Binding AnnounceNewCalls}"
-                                            AutomationProperties.LabeledBy="{x:Reference AnnounceNewCallsLabel}"
-                                             />
+                                            AutomationProperties.LabeledBy="{x:Reference AnnounceNewCallsLabel}" />
                                         <Label
                                             Text="{Binding AnnounceNewCalls, StringFormat='Enabled: {0}'}"
                                             FontSize="12"
@@ -406,7 +451,7 @@
                             <CollectionView
                                 x:Name="FiltersList"
                                 ItemsSource="{Binding FilterRules}"
-                                VerticalOptions="FillAndExpand"
+                                VerticalOptions="Fill"
                                 SelectionMode="None">
 
                                 <CollectionView.ItemsLayout>

@@ -14,37 +14,36 @@ using Microsoft.Maui.Storage;
 
 namespace JoesScanner.Views
 {
-    /// <summary>
-    /// Settings page code behind.
-    /// Responsible for wiring up navigation and discarding unsaved
-    /// connection changes when the user leaves the page.
-    /// Also provides handlers for filter tap gestures.
-    /// </summary>
+    // Settings page code behind.
+    // Responsible for wiring up navigation and discarding unsaved
+    // connection changes when the user leaves the page.
+    // Also provides handlers for filter tap gestures.
     public partial class SettingsPage : ContentPage
     {
-        /// <summary>
-        /// Default constructor used by XAML.
-        /// BindingContext is expected to be supplied by DI / Shell.
-        /// </summary>
+        // Default constructor used by XAML.
+        // BindingContext is expected to be supplied by DI / Shell.
         public SettingsPage()
         {
             InitializeComponent();
+            SetAppVersionText();
         }
 
-        /// <summary>
-        /// Optional constructor if you ever want to inject the view model.
-        /// </summary>
-        /// <param name="viewModel">Settings view model instance.</param>
+        // Optional constructor if you ever want to inject the view model.
         public SettingsPage(SettingsViewModel viewModel)
         {
             InitializeComponent();
             BindingContext = viewModel;
+            SetAppVersionText();
         }
 
-        /// <summary>
-        /// Handler for the Close button in the header.
-        /// Discards unsaved connection changes and then navigates back.
-        /// </summary>
+        private void SetAppVersionText()
+        {
+            // Displays: v1.2.3
+            AppVersionLabel.Text = $"v{AppInfo.Current.VersionString}";
+        }
+
+        // Handler for the Close button in the header.
+        // Discards unsaved connection changes and then navigates back.
         private async void OnBackClicked(object sender, EventArgs e)
         {
             if (BindingContext is SettingsViewModel vm)
@@ -105,7 +104,7 @@ namespace JoesScanner.Views
                 var snapshotTime = DateTime.Now;
                 var fileContent = BuildLogFileContent(snapshotTime, bodyText, serverUrl, username);
 
-                // Build filename prefix with date and time (24-hour, no seconds)
+                // Build filename prefix with date and time (24 hour, no seconds)
                 var stamp = snapshotTime.ToString("yyyy-MM-dd_HH-mm");
                 var fileName = $"{stamp}_JoesScannerLog.txt";
 
@@ -117,7 +116,8 @@ namespace JoesScanner.Views
             }
             catch (Exception ex)
             {
-                await DisplayAlertAsync("Error saving log",
+                await DisplayAlertAsync(
+                    "Error saving log",
                     $"Could not save the log file:\n{ex.Message}",
                     "Close");
             }
@@ -128,15 +128,21 @@ namespace JoesScanner.Views
             var platform = DeviceInfo.Current.Platform.ToString();
             var osVersion = DeviceInfo.Current.VersionString;
 
+            var appVersion = AppInfo.Current.VersionString;
+            var appBuild = AppInfo.Current.BuildString;
+            var appId = AppInfo.Current.PackageName;
+
             var headerLines = new[]
             {
-                $"Snapshot taken at: {snapshotTime:yyyy-MM-dd HH:mm} (local)",
-                $"Server URL: {serverUrl}",
-                $"Username: {username}",
-                $"Platform: {platform} {osVersion}",
-                $"Max log file size: 1 MB",
-                string.Empty
-            };
+        $"Snapshot taken at: {snapshotTime:yyyy-MM-dd HH:mm} (local)",
+        $"App: v{appVersion} ({appBuild})",
+        $"Package: {appId}",
+        $"Server URL: {serverUrl}",
+        $"Username: {username}",
+        $"Platform: {platform} {osVersion}",
+        "Max log file size: 1 MB",
+        string.Empty
+    };
 
             var headerText = string.Join(Environment.NewLine, headerLines);
 
@@ -325,11 +331,11 @@ namespace JoesScanner.Views
                 var buttonRow = new Grid
                 {
                     ColumnDefinitions =
-            {
-                new ColumnDefinition { Width = GridLength.Star },
-                new ColumnDefinition { Width = GridLength.Star },
-                new ColumnDefinition { Width = GridLength.Star }
-            },
+                    {
+                        new ColumnDefinition { Width = GridLength.Star },
+                        new ColumnDefinition { Width = GridLength.Star },
+                        new ColumnDefinition { Width = GridLength.Star }
+                    },
                     ColumnSpacing = 10
                 };
 
@@ -345,16 +351,16 @@ namespace JoesScanner.Views
                 {
                     Padding = new Thickness(12),
                     RowDefinitions =
-            {
-                new RowDefinition { Height = GridLength.Star },
-                new RowDefinition { Height = GridLength.Auto }
-            },
+                    {
+                        new RowDefinition { Height = GridLength.Star },
+                        new RowDefinition { Height = GridLength.Auto }
+                    },
                     RowSpacing = 10,
                     Children =
-            {
-                _editor,
-                buttonRow
-            }
+                    {
+                        _editor,
+                        buttonRow
+                    }
                 };
 
                 Grid.SetRow(_editor, 0);
@@ -362,12 +368,9 @@ namespace JoesScanner.Views
             }
         }
 
-
-        /// <summary>
-        /// If the user leaves the page (back, tab change, etc.)
-        /// discard any unsaved connection changes to avoid
-        /// half-applied states.
-        /// </summary>
+        // If the user leaves the page (back, tab change, etc.)
+        // discard any unsaved connection changes to avoid
+        // half applied states.
         protected override void OnDisappearing()
         {
             base.OnDisappearing();
@@ -381,10 +384,8 @@ namespace JoesScanner.Views
             }
         }
 
-        /// <summary>
-        /// Tap handler for the Mute (M) cell in the Filters grid.
-        /// Invokes SettingsViewModel.ToggleMuteFilterCommand with the FilterRule.
-        /// </summary>
+        // Tap handler for the Mute (M) cell in the Filters grid.
+        // Invokes SettingsViewModel.ToggleMuteFilterCommand with the FilterRule.
         private void OnMuteFilterTapped(object sender, TappedEventArgs e)
         {
             var rule = e.Parameter as FilterRule ?? (sender as BindableObject)?.BindingContext as FilterRule;
@@ -399,10 +400,8 @@ namespace JoesScanner.Views
             }
         }
 
-        /// <summary>
-        /// Tap handler for the Disable (X) cell in the Filters grid.
-        /// Invokes SettingsViewModel.ToggleDisableFilterCommand with the FilterRule.
-        /// </summary>
+        // Tap handler for the Disable (X) cell in the Filters grid.
+        // Invokes SettingsViewModel.ToggleDisableFilterCommand with the FilterRule.
         private void OnDisableFilterTapped(object sender, TappedEventArgs e)
         {
             var rule = e.Parameter as FilterRule ?? (sender as BindableObject)?.BindingContext as FilterRule;
@@ -417,10 +416,8 @@ namespace JoesScanner.Views
             }
         }
 
-        /// <summary>
-        /// Tap handler for the Clear (Clr) cell in the Filters grid.
-        /// Invokes SettingsViewModel.ClearFilterCommand with the FilterRule.
-        /// </summary>
+        // Tap handler for the Clear (Clr) cell in the Filters grid.
+        // Invokes SettingsViewModel.ClearFilterCommand with the FilterRule.
         private void OnClearFilterTapped(object sender, TappedEventArgs e)
         {
             var rule = e.Parameter as FilterRule ?? (sender as BindableObject)?.BindingContext as FilterRule;
