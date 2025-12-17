@@ -84,4 +84,4 @@ secrets.json
 # Your private folder you mentioned
 # =========================
 # If API_Plugin is not meant to be in GitHub:
-JoesScanner/API_Plugin/
+/JoesScanner/API_Plugin/
