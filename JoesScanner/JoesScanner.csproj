@@ -72,18 +72,12 @@
   </ItemGroup>
 
   <ItemGroup>
-    <AndroidResource Remove="API_Plugin\**" />
-    <AndroidResource Remove="Installer\**" />
-    <Compile Remove="API_Plugin\**" />
-    <Compile Remove="Installer\**" />
-    <EmbeddedResource Remove="API_Plugin\**" />
-    <EmbeddedResource Remove="Installer\**" />
-    <MauiCss Remove="API_Plugin\**" />
-    <MauiCss Remove="Installer\**" />
-    <MauiXaml Remove="API_Plugin\**" />
-    <MauiXaml Remove="Installer\**" />
-    <None Remove="API_Plugin\**" />
-    <None Remove="Installer\**" />
+    <AndroidResource Remove="bin\**" />
+    <Compile Remove="bin\**" />
+    <EmbeddedResource Remove="bin\**" />
+    <MauiCss Remove="bin\**" />
+    <MauiXaml Remove="bin\**" />
+    <None Remove="bin\**" />
   </ItemGroup>
 
   <ItemGroup>
