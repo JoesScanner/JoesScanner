@@ -38,8 +38,17 @@ namespace JoesScanner.Views
 
         private void SetAppVersionText()
         {
-            // Displays: v1.2.3
-            AppVersionLabel.Text = $"v{AppInfo.Current.VersionString}";
+            // UI should show only Major.Minor.Patch, even if the platform reports 4 parts.
+            var raw = AppInfo.Current.VersionString ?? string.Empty;
+
+            var parts = raw.Split('.', StringSplitOptions.RemoveEmptyEntries);
+
+            var display =
+                parts.Length >= 3
+                    ? $"{parts[0]}.{parts[1]}.{parts[2]}"
+                    : raw;
+
+            AppVersionLabel.Text = $"v{display}";
         }
 
         // Handler for the Close button in the header.

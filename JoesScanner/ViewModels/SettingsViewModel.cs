@@ -67,6 +67,9 @@ namespace JoesScanner.ViewModels
 
                 _showSubscriptionSummary = value;
                 OnPropertyChanged();
+
+                // ShowValidationHeader depends on this
+                OnPropertyChanged(nameof(ShowValidationHeader));
             }
         }
 
@@ -74,9 +77,29 @@ namespace JoesScanner.ViewModels
         // On a fresh app launch it is false so the header shows only the plan info.
         private bool _showValidationPrefix;
 
+        // Tracks whether the last validation attempt was Joe's hosted server account validation.
+        // Used to decide what short success text to show in the top header.
+        private bool _lastValidationWasAccountValidation;
+
         // Shown in the page header to the left of the Close and Log buttons.
         // Only appears after a successful validation in this app session.
         public bool ShowValidationHeader => _showValidationPrefix && ShowSubscriptionSummary;
+
+        // Header status text controls.
+        // Success shows only a short confirmation message.
+        // Failure shows the detailed error text.
+        public bool ShowServerValidationProgressHeader => IsValidatingServer;
+
+        public bool ShowServerValidationSuccessHeader =>
+            HasServerValidationResult && !IsValidatingServer && !ServerValidationIsError;
+
+        public bool ShowServerValidationErrorHeader =>
+            HasServerValidationResult && !IsValidatingServer && ServerValidationIsError;
+
+        // Short success message for the top header.
+        // Never includes plan details.
+        public string ValidationSuccessHeaderText =>
+            _lastValidationWasAccountValidation ? "Joe's Scanner account validated." : "Server validated.";
 
         private void SetShowValidationPrefix(bool value)
         {
@@ -166,14 +189,12 @@ namespace JoesScanner.ViewModels
         }
 
         // True when any setting on this page differs from what was last saved.
-        // Used by the Save button to decide when to turn red.
         public bool HasUnsavedSettings =>
             HasChanges ||
             _maxCalls != _savedMaxCalls ||
             _autoSpeedThreshold != _savedAutoSpeedThreshold;
 
         // True when there are unsaved connection or credential changes.
-        // Used by SettingsPage.xaml.cs to discard or warn when backing out.
         public bool HasChanges
         {
             get => _hasChanges;
@@ -185,8 +206,6 @@ namespace JoesScanner.ViewModels
                 _hasChanges = value;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(HasUnsavedSettings));
-
-                // This is what the Validate button should bind to for red vs blue.
                 OnPropertyChanged(nameof(ConnectionNeedsValidation));
 
                 // While connection is dirty, do not show stale validated header info.
@@ -199,9 +218,6 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // Bind your Validate button "red needs action" state to this.
-        // Requirement: when connection box settings change, button turns red.
-        // When tapped, SaveSettings runs first and flips this back to false immediately.
         public bool ConnectionNeedsValidation => HasChanges;
 
         public bool IsValidatingServer
@@ -214,6 +230,11 @@ namespace JoesScanner.ViewModels
 
                 _isValidatingServer = value;
                 OnPropertyChanged();
+
+                // Header state depends on this
+                OnPropertyChanged(nameof(ShowServerValidationProgressHeader));
+                OnPropertyChanged(nameof(ShowServerValidationSuccessHeader));
+                OnPropertyChanged(nameof(ShowServerValidationErrorHeader));
             }
         }
 
@@ -227,6 +248,10 @@ namespace JoesScanner.ViewModels
 
                 _hasServerValidationResult = value;
                 OnPropertyChanged();
+
+                // Header state depends on this
+                OnPropertyChanged(nameof(ShowServerValidationSuccessHeader));
+                OnPropertyChanged(nameof(ShowServerValidationErrorHeader));
             }
         }
 
@@ -253,6 +278,10 @@ namespace JoesScanner.ViewModels
 
                 _serverValidationIsError = value;
                 OnPropertyChanged();
+
+                // Header state depends on this
+                OnPropertyChanged(nameof(ShowServerValidationSuccessHeader));
+                OnPropertyChanged(nameof(ShowServerValidationErrorHeader));
             }
         }
 
@@ -282,7 +311,6 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // Basic auth username for the TR server
         public string BasicAuthUsername
         {
             get => _basicAuthUsername;
@@ -297,7 +325,6 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // Basic auth password for the TR server
         public string BasicAuthPassword
         {
             get => _basicAuthPassword;
@@ -312,10 +339,8 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // True when the password Entry should mask input
         public bool IsBasicAuthPasswordHidden => !_isBasicAuthPasswordVisible;
 
-        // Button text
         public string BasicAuthPasswordToggleText =>
             _isBasicAuthPasswordVisible ? "Hide" : "Show";
 
@@ -334,8 +359,6 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // True when "Default connection" is selected.
-        // When true, the server URL will be reset to the default and saved.
         public bool UseDefaultConnection
         {
             get => _useDefaultConnection;
@@ -350,7 +373,6 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // Maximum number of calls kept in the list.
         public int MaxCalls
         {
             get => _maxCalls;
@@ -366,7 +388,6 @@ namespace JoesScanner.ViewModels
                 _maxCalls = clamped;
                 OnPropertyChanged();
 
-                // Persist immediately so there is no need for a Save button.
                 _settings.MaxCalls = _maxCalls;
                 _mainViewModel.MaxCalls = _maxCalls;
                 _savedMaxCalls = _maxCalls;
@@ -375,8 +396,6 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // Threshold in calls waiting where autospeed kicks in.
-        // Controls when the app will start increasing playback speed automatically.
         public int AutoSpeedThreshold
         {
             get => _autoSpeedThreshold;
@@ -392,7 +411,6 @@ namespace JoesScanner.ViewModels
                 _autoSpeedThreshold = clamped;
                 OnPropertyChanged();
 
-                // Persist immediately so there is no need for a Save button.
                 _settings.AutoSpeedThreshold = _autoSpeedThreshold;
                 _savedAutoSpeedThreshold = _autoSpeedThreshold;
 
@@ -400,7 +418,6 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // When true, new incoming calls will be announced via the platform screen reader.
         public bool AnnounceNewCalls
         {
             get => _announceNewCalls;
@@ -412,7 +429,6 @@ namespace JoesScanner.ViewModels
                 _announceNewCalls = value;
                 OnPropertyChanged();
 
-                // Persist immediately so there is no need for a Save button.
                 _settings.AnnounceNewCalls = _announceNewCalls;
                 _savedAnnounceNewCalls = _announceNewCalls;
 
@@ -420,7 +436,6 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // Theme mode string: "System", "Light", or "Dark".
         public string ThemeMode
         {
             get => _themeMode;
@@ -443,7 +458,6 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // Helper booleans for the three theme radio buttons.
         public bool IsThemeSystem
         {
             get => string.Equals(ThemeMode, "System", StringComparison.OrdinalIgnoreCase);
@@ -480,7 +494,6 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // Sort order flag. True for A to Z, false for Z to A.
         public bool SortAscending
         {
             get => _sortAscending;
@@ -518,31 +531,24 @@ namespace JoesScanner.ViewModels
             _filterService.ClearRule(rule);
         }
 
-        // Reloads view model fields from ISettingsService.
-        // Called once from constructor.
         private void InitializeFromSettings()
         {
-            // Connection seed
             _serverUrl = _settings.ServerUrl ?? string.Empty;
             _savedServerUrl = _serverUrl;
 
-            // Basic auth seed
             _basicAuthUsername = _settings.BasicAuthUsername ?? string.Empty;
             _basicAuthPassword = _settings.BasicAuthPassword ?? string.Empty;
             _savedBasicAuthUsername = _basicAuthUsername;
             _savedBasicAuthPassword = _basicAuthPassword;
 
-            // Default connection flag
             var defaultUrl = DefaultServerUrl;
             _useDefaultConnection = string.Equals(_serverUrl, defaultUrl, StringComparison.OrdinalIgnoreCase);
             _savedUseDefaultConnection = _useDefaultConnection;
 
-            // Calls
             _maxCalls = _settings.MaxCalls;
             _autoSpeedThreshold = _settings.AutoSpeedThreshold;
             _announceNewCalls = _settings.AnnounceNewCalls;
 
-            // Theme
             var rawTheme = _settings.ThemeMode;
             if (string.IsNullOrWhiteSpace(rawTheme)
                 || (!string.Equals(rawTheme, "System", StringComparison.OrdinalIgnoreCase)
@@ -557,9 +563,6 @@ namespace JoesScanner.ViewModels
                 _themeMode = rawTheme;
             }
 
-            // Load disabled keys from settings. We reuse ReceiverFilter
-            // as "Disabled filter entries" stored as:
-            //   receiver|site|talkgroup;receiver2|site2|talkgroup2
             _disabledKeys.Clear();
             var rawDisabled = _settings.ReceiverFilter ?? string.Empty;
             if (!string.IsNullOrWhiteSpace(rawDisabled))
@@ -578,7 +581,6 @@ namespace JoesScanner.ViewModels
                 }
             }
 
-            // Capture snapshots used for unsaved change detection
             _savedServerUrl = _settings.ServerUrl ?? string.Empty;
             _savedUseDefaultConnection = UseDefaultConnection;
             _savedMaxCalls = _maxCalls;
@@ -588,32 +590,33 @@ namespace JoesScanner.ViewModels
             _savedBasicAuthPassword = _basicAuthPassword;
 
             _showValidationPrefix = false;
+            _lastValidationWasAccountValidation = false;
             HasChanges = false;
 
             OnPropertyChanged(nameof(HasUnsavedSettings));
             OnPropertyChanged(nameof(ConnectionNeedsValidation));
+            OnPropertyChanged(nameof(ValidationSuccessHeaderText));
 
             UpdateSubscriptionSummaryFromSettings();
         }
 
         private void ClearValidationUiForDirtyConnection()
         {
-            // Any displayed validation result is now stale.
             HasServerValidationResult = false;
             ServerValidationMessage = string.Empty;
             ServerValidationIsError = false;
 
-            // Also do not show a "validated" prefix while edits are pending.
             SetShowValidationPrefix(false);
 
-            // Hide subscription summary until next successful validation.
             ShowSubscriptionSummary = false;
             SubscriptionSummary = string.Empty;
+
+            _lastValidationWasAccountValidation = false;
+            OnPropertyChanged(nameof(ValidationSuccessHeaderText));
         }
 
         private void UpdateSubscriptionSummaryFromSettings()
         {
-            // If the connection is currently dirty, never show cached data as current.
             if (HasChanges)
             {
                 ShowSubscriptionSummary = false;
@@ -621,8 +624,6 @@ namespace JoesScanner.ViewModels
                 return;
             }
 
-            // Only show this when pointed at the hosted Joe's Scanner server
-            // and a scanner username is present.
             var serverUrl = ServerUrl;
             var username = BasicAuthUsername;
 
@@ -636,7 +637,6 @@ namespace JoesScanner.ViewModels
                 return;
             }
 
-            // If the last validation failed, do not show stale info.
             if (!_settings.SubscriptionLastStatusOk)
             {
                 ShowSubscriptionSummary = false;
@@ -695,7 +695,6 @@ namespace JoesScanner.ViewModels
                 .Replace(" - Renewal:", Environment.NewLine + "Renewal:");
 
             SubscriptionSummary = planSummary;
-
             ShowSubscriptionSummary = true;
         }
 
@@ -723,12 +722,8 @@ namespace JoesScanner.ViewModels
             app.UserAppTheme = theme;
         }
 
-        // Persists connection, call list, and theme settings,
-        // and updates main view model mirrors where needed.
-        // Also persists disabled filter keys.
         private void SaveSettings()
         {
-            // Connection
             if (UseDefaultConnection)
             {
                 _settings.ServerUrl = DefaultServerUrl;
@@ -740,25 +735,19 @@ namespace JoesScanner.ViewModels
                 _mainViewModel.ServerUrl = ServerUrl;
             }
 
-            // Basic auth
             _settings.BasicAuthUsername = BasicAuthUsername;
             _settings.BasicAuthPassword = BasicAuthPassword;
 
-            // Max calls
             _settings.MaxCalls = MaxCalls;
             _mainViewModel.MaxCalls = MaxCalls;
 
-            // Autospeed threshold
             _settings.AutoSpeedThreshold = AutoSpeedThreshold;
 
-            // Accessibility
             _settings.AnnounceNewCalls = AnnounceNewCalls;
 
-            // Theme
             _settings.ThemeMode = ThemeMode;
             ApplyTheme(ThemeMode);
 
-            // Update snapshots
             _savedServerUrl = _settings.ServerUrl ?? string.Empty;
             _savedUseDefaultConnection = UseDefaultConnection;
             _savedMaxCalls = _maxCalls;
@@ -772,32 +761,39 @@ namespace JoesScanner.ViewModels
             OnPropertyChanged(nameof(HasUnsavedSettings));
             OnPropertyChanged(nameof(ConnectionNeedsValidation));
 
-            // If we hid the summary while editing, allow it to show again
-            // based on cached status (and without the validation prefix).
             UpdateSubscriptionSummaryFromSettings();
         }
 
-        // Reset server url to the canonical default and mark as default.
-        // This only changes local fields until Save is pressed.
         private void ResetServerUrl()
         {
             ServerUrl = DefaultServerUrl;
             UseDefaultConnection = true;
         }
 
-        // Saves current settings (same as the old Save button) and then runs validation.
-        // This ensures validation always uses the latest values from the UI.
         private async Task SaveThenValidateServerUrlAsync()
         {
-            // This flips ConnectionNeedsValidation back to false immediately.
             SaveSettings();
             await ValidateServerUrlAsync();
         }
 
-        // Lightweight server validation and SureCart auth check.
         private async Task ValidateServerUrlAsync()
         {
             var url = ServerUrl?.Trim();
+
+            if (!string.IsNullOrEmpty(url))
+            {
+                var isDefaultServerForHeader =
+                    string.Equals(url, DefaultServerUrl, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(url.TrimEnd('/'), DefaultServerUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase);
+
+                _lastValidationWasAccountValidation = isDefaultServerForHeader;
+                OnPropertyChanged(nameof(ValidationSuccessHeaderText));
+            }
+            else
+            {
+                _lastValidationWasAccountValidation = false;
+                OnPropertyChanged(nameof(ValidationSuccessHeaderText));
+            }
 
             IsValidatingServer = true;
             HasServerValidationResult = true;
@@ -853,11 +849,9 @@ namespace JoesScanner.ViewModels
                         username = accountUsername,
                         password = accountPassword,
 
-                        // Backwards compatible fields
                         client = "JoesScannerApp",
                         version = appVersion,
 
-                        // Session reporting fields (names the plugin expects)
                         device_platform = platform,
                         device_type = type,
                         device_model = model,
@@ -866,10 +860,8 @@ namespace JoesScanner.ViewModels
                         os_version = osVersion,
                         device_id = _settings.DeviceInstallId,
 
-                        // Optional if you want reuse on next auth
                         session_token = _settings.AuthSessionToken
                     };
-
 
                     var json = JsonSerializer.Serialize(payload);
                     using var content = new StringContent(json, Encoding.UTF8, "application/json");
@@ -1014,10 +1006,8 @@ namespace JoesScanner.ViewModels
                         planSummary = string.Empty;
                     }
 
-                    ServerValidationMessage = string.IsNullOrEmpty(planSummary)
-                        ? "Joe's Scanner account validated."
-                        : $"Joe's Scanner account validated. {planSummary}";
-
+                    // IMPORTANT: top header must not show plan details.
+                    ServerValidationMessage = "Joe's Scanner account validated.";
                     ServerValidationIsError = false;
 
                     var nowUtc = DateTime.UtcNow;
@@ -1026,11 +1016,12 @@ namespace JoesScanner.ViewModels
                     _settings.SubscriptionPriceId = priceIdRaw;
                     _settings.SubscriptionLastLevel = planLabel;
                     _settings.SubscriptionRenewalUtc = null;
+
+                    // Plan details are stored for the connection box summary only.
                     _settings.SubscriptionLastMessage = planSummary;
 
                     _settings.AuthSessionToken = authResponse.SessionToken ?? string.Empty;
                     await TrySendSessionPingAsync(authResponse.SessionToken);
-
 
                     SetShowValidationPrefix(true);
                     UpdateSubscriptionSummaryFromSettings();
@@ -1117,9 +1108,6 @@ namespace JoesScanner.ViewModels
             HasChanges = has;
         }
 
-        // Used by SettingsPage.xaml.cs when closing the page
-        // without saving. Resets the connection fields to match
-        // the last saved values.
         public void DiscardConnectionChanges()
         {
             ServerUrl = _savedServerUrl;
@@ -1128,6 +1116,7 @@ namespace JoesScanner.ViewModels
             BasicAuthPassword = _savedBasicAuthPassword;
             HasChanges = false;
         }
+
         private static string CombineDeviceModel(string manufacturer, string model)
         {
             var mfg = (manufacturer ?? string.Empty).Trim();
@@ -1186,7 +1175,7 @@ namespace JoesScanner.ViewModels
             }
         }
 
-class AuthResponseDto
+        class AuthResponseDto
         {
             [JsonPropertyName("ok")]
             public bool Ok { get; set; }
@@ -1212,19 +1201,15 @@ class AuthResponseDto
             [JsonPropertyName("status")]
             public string? Status { get; set; }
 
-            // Plan name from the API ("Subscription", "Subscription Annual", etc.)
             [JsonPropertyName("level")]
             public string? Level { get; set; }
 
-            // Optional extra label if the API ever provides it.
             [JsonPropertyName("level_label")]
             public string? LevelLabel { get; set; }
 
-            // Human readable price text ("$6 - every month").
             [JsonPropertyName("price_id")]
             public string? PriceId { get; set; }
 
-            // Keep these as strings; we already parse them manually.
             [JsonPropertyName("period_end_at")]
             public string? PeriodEndAt { get; set; }
 

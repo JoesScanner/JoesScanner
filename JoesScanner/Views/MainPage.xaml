@@ -80,12 +80,14 @@
                     </HorizontalStackLayout>
 
                     <!-- Row 1 left: connection status (dot and text) -->
-                    <StackLayout
+                    <Grid
                         Grid.Row="1"
                         Grid.Column="0"
-                        Orientation="Horizontal"
-                        Spacing="6"
-                        VerticalOptions="Center">
+                        Grid.ColumnSpan="2"
+                        ColumnDefinitions="Auto,*"
+                        ColumnSpacing="6"
+                        VerticalOptions="Center"
+                        HorizontalOptions="Fill">
 
                         <BoxView
                             WidthRequest="8"
@@ -95,10 +97,16 @@
                             VerticalOptions="Center" />
 
                         <Label
+                            Grid.Column="1"
                             Text="{Binding ConnectionStatusText}"
                             FontSize="12"
-                            VerticalOptions="Center" />
-                    </StackLayout>
+                            LineBreakMode="WordWrap"
+                            MaxLines="2"
+                            HorizontalOptions="Fill"
+                            VerticalOptions="Center"
+                            TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                    </Grid>
+
 
                     <!-- Row 1 right: buttons -->
                     <HorizontalStackLayout

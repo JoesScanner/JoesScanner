@@ -87,15 +87,40 @@
                             ColumnSpacing="12"
                             HorizontalOptions="Fill">
 
-                            <Label
+                            <VerticalStackLayout
                                 Grid.Column="0"
-                                Text="Joe's Scanner account validated."
-                                IsVisible="{Binding ShowValidationHeader}"
-                                FontSize="14"
-                                TextColor="{AppThemeBinding Light=#16a34a, Dark=#22c55e}"
-                                VerticalOptions="Center"
-                                HorizontalOptions="Start"
-                                LineBreakMode="TailTruncation" />
+                                Spacing="0"
+                                HorizontalOptions="FillAndExpand"
+                                VerticalOptions="Center">
+
+                                <Label
+                                    Text="Validating server..."
+                                    IsVisible="{Binding ShowServerValidationProgressHeader}"
+                                    FontSize="14"
+                                    TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}"
+                                    HorizontalOptions="FillAndExpand"
+                                    LineBreakMode="WordWrap"
+                                    MaxLines="2" />
+
+                                <Label
+                                    Text="{Binding ValidationSuccessHeaderText}"
+                                    IsVisible="{Binding ShowServerValidationSuccessHeader}"
+                                    FontSize="14"
+                                    TextColor="{AppThemeBinding Light=#16a34a, Dark=#22c55e}"
+                                    HorizontalOptions="FillAndExpand"
+                                    LineBreakMode="WordWrap"
+                                    MaxLines="2" />
+
+                                <Label
+                                    Text="{Binding ServerValidationMessage}"
+                                    IsVisible="{Binding ShowServerValidationErrorHeader}"
+                                    FontSize="14"
+                                    TextColor="{AppThemeBinding Light=#dc2626, Dark=#f87171}"
+                                    HorizontalOptions="FillAndExpand"
+                                    LineBreakMode="WordWrap"
+                                    MaxLines="3" />
+
+                            </VerticalStackLayout>
 
                             <HorizontalStackLayout
                                 Grid.Column="1"
