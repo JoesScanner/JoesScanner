@@ -1,87 +1,37 @@
-# =========================
-# Visual Studio and user state
-# =========================
 .vs/
 *.user
 *.rsuser
 *.suo
 *.userosscache
 *.sln.docstates
-
-# If you have a csproj.user, ignore it
 **/*.csproj.user
-
-# =========================
-# Build output
-# =========================
 **/bin/
 **/obj/
 **/Debug/
 **/Release/
-
-# MSBuild logs
 msbuild.binlog
-
-# =========================
-# .NET / NuGet
-# =========================
 **/packages/
 *.nupkg
 *.snupkg
 .nuget/
-# If you use a local packages cache folder in repo
-# .packages/
-
-# =========================
-# MAUI and platform generated artifacts
-# =========================
-# Android / Java / Gradle artifacts
 **/.gradle/
 **/build/
 **/*.apk
 **/*.aab
-
-# iOS / Mac build artifacts (if you ever build them)
 **/*.xcarchive
 **/*.app
 **/*.dSYM/
 **/*.ipa
-
-# =========================
-# Windows packaging artifacts
-# =========================
-# AppPackages is produced by MSIX packaging
 **/AppPackages/
-
-# Store association sometimes is environment specific.
-# If you want others to build without your Store identity, ignore it.
 JoesScanner/Package.StoreAssociation.xml
-
-# =========================
-# Publish outputs and installers
-# =========================
-# Common publish folders
 **/publish/
 **/Publish/
-
-# If your Installer folder contains only build outputs, ignore it
-# If it contains scripts (.iss/.cmd) you want to share, do NOT ignore the whole folder.
-# Instead ignore only output subfolders:
 JoesScanner/Installer/
-
-# =========================
-# Local tools and secrets
-# =========================
-# Local env files if you ever add them
 .env
 .env.*
 secrets.json
 *.pfx
 *.p12
 *.key
-
-# =========================
-# Your private folder you mentioned
-# =========================
-# If API_Plugin is not meant to be in GitHub:
 /JoesScanner/API_Plugin/
+*.sln
