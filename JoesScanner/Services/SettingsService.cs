@@ -29,6 +29,10 @@ namespace JoesScanner.Services
         private const string SubscriptionPriceIdKey = "SubscriptionPriceId";
         private const string SubscriptionRenewalUtcKey = "SubscriptionRenewalUtc";
 
+        // Device and session tracking keys.
+        private const string DeviceInstallIdKey = "DeviceInstallId";
+        private const string AuthSessionTokenKey = "AuthSessionToken";
+
         // ========= Subscription cache fields =========
 
         // UTC time of the last subscription check, or null if never.
@@ -225,6 +229,33 @@ namespace JoesScanner.Services
                 var v = string.IsNullOrWhiteSpace(value) ? "System" : value;
                 Preferences.Set(ThemeModeKey, v);
             }
+        }
+
+        // Stable per-install identifier. Used by the auth API for session reporting.
+        public string DeviceInstallId
+        {
+            get
+            {
+                var v = Preferences.Get(DeviceInstallIdKey, string.Empty);
+                if (!string.IsNullOrWhiteSpace(v))
+                    return v;
+
+                v = Guid.NewGuid().ToString("N");
+                Preferences.Set(DeviceInstallIdKey, v);
+                return v;
+            }
+            set
+            {
+                var v = string.IsNullOrWhiteSpace(value) ? string.Empty : value.Trim();
+                Preferences.Set(DeviceInstallIdKey, v);
+            }
+        }
+
+        // Optional session token returned by the auth API. Used for heartbeat pings.
+        public string AuthSessionToken
+        {
+            get => Preferences.Get(AuthSessionTokenKey, string.Empty);
+            set => Preferences.Set(AuthSessionTokenKey, value ?? string.Empty);
         }
     }
 }

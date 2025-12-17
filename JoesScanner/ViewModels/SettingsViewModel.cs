@@ -1,6 +1,8 @@
 using JoesScanner.Models;
 using JoesScanner.Services;
 using Microsoft.Maui.Controls;
+using Microsoft.Maui.ApplicationModel;
+using Microsoft.Maui.Devices;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
@@ -828,6 +830,7 @@ namespace JoesScanner.ViewModels
                         ServerValidationIsError = true;
 
                         _settings.SubscriptionLastStatusOk = false;
+                        _settings.AuthSessionToken = string.Empty;
                         _settings.SubscriptionLastMessage = ServerValidationMessage;
                         _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
 
@@ -837,13 +840,36 @@ namespace JoesScanner.ViewModels
 
                     var authUrl = "https://joesscanner.com/wp-json/joes-scanner/v1/auth";
 
+                    var appVersion = AppInfo.Current.VersionString ?? string.Empty;
+                    var appBuild = AppInfo.Current.BuildString ?? string.Empty;
+
+                    var platform = DeviceInfo.Platform.ToString();
+                    var type = DeviceInfo.Idiom.ToString();
+                    var model = CombineDeviceModel(DeviceInfo.Manufacturer, DeviceInfo.Model);
+                    var osVersion = DeviceInfo.VersionString ?? string.Empty;
+
                     var payload = new
                     {
                         username = accountUsername,
                         password = accountPassword,
+
+                        // Backwards compatible fields
                         client = "JoesScannerApp",
-                        version = "1.0.0"
+                        version = appVersion,
+
+                        // Session reporting fields (names the plugin expects)
+                        device_platform = platform,
+                        device_type = type,
+                        device_model = model,
+                        app_version = appVersion,
+                        app_build = appBuild,
+                        os_version = osVersion,
+                        device_id = _settings.DeviceInstallId,
+
+                        // Optional if you want reuse on next auth
+                        session_token = _settings.AuthSessionToken
                     };
+
 
                     var json = JsonSerializer.Serialize(payload);
                     using var content = new StringContent(json, Encoding.UTF8, "application/json");
@@ -859,6 +885,7 @@ namespace JoesScanner.ViewModels
                         ServerValidationIsError = true;
 
                         _settings.SubscriptionLastStatusOk = false;
+                        _settings.AuthSessionToken = string.Empty;
                         _settings.SubscriptionLastMessage = ServerValidationMessage;
                         _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
 
@@ -883,6 +910,7 @@ namespace JoesScanner.ViewModels
                         ServerValidationIsError = true;
 
                         _settings.SubscriptionLastStatusOk = false;
+                        _settings.AuthSessionToken = string.Empty;
                         _settings.SubscriptionLastMessage = ServerValidationMessage;
                         _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
 
@@ -899,6 +927,7 @@ namespace JoesScanner.ViewModels
                         ServerValidationIsError = true;
 
                         _settings.SubscriptionLastStatusOk = false;
+                        _settings.AuthSessionToken = string.Empty;
                         _settings.SubscriptionLastMessage = ServerValidationMessage;
                         _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
 
@@ -915,6 +944,7 @@ namespace JoesScanner.ViewModels
                         ServerValidationIsError = true;
 
                         _settings.SubscriptionLastStatusOk = false;
+                        _settings.AuthSessionToken = string.Empty;
                         _settings.SubscriptionLastMessage = ServerValidationMessage;
                         _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
 
@@ -997,6 +1027,10 @@ namespace JoesScanner.ViewModels
                     _settings.SubscriptionLastLevel = planLabel;
                     _settings.SubscriptionRenewalUtc = null;
                     _settings.SubscriptionLastMessage = planSummary;
+
+                    _settings.AuthSessionToken = authResponse.SessionToken ?? string.Empty;
+                    await TrySendSessionPingAsync(authResponse.SessionToken);
+
 
                     SetShowValidationPrefix(true);
                     UpdateSubscriptionSummaryFromSettings();
@@ -1094,8 +1128,65 @@ namespace JoesScanner.ViewModels
             BasicAuthPassword = _savedBasicAuthPassword;
             HasChanges = false;
         }
+        private static string CombineDeviceModel(string manufacturer, string model)
+        {
+            var mfg = (manufacturer ?? string.Empty).Trim();
+            var mdl = (model ?? string.Empty).Trim();
 
-        private sealed class AuthResponseDto
+            if (string.IsNullOrWhiteSpace(mfg))
+                return mdl;
+
+            if (string.IsNullOrWhiteSpace(mdl))
+                return mfg;
+
+            return mfg + " " + mdl;
+        }
+
+        private async Task TrySendSessionPingAsync(string? sessionToken)
+        {
+            sessionToken = (sessionToken ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(sessionToken))
+                return;
+
+            try
+            {
+                var pingUrl = "https://joesscanner.com/wp-json/joes-scanner/v1/ping";
+
+                var appVersion = AppInfo.Current.VersionString ?? string.Empty;
+                var appBuild = AppInfo.Current.BuildString ?? string.Empty;
+
+                var platform = DeviceInfo.Platform.ToString();
+                var type = DeviceInfo.Idiom.ToString();
+                var model = CombineDeviceModel(DeviceInfo.Manufacturer, DeviceInfo.Model);
+                var osVersion = DeviceInfo.VersionString ?? string.Empty;
+
+                var payload = new
+                {
+                    session_token = sessionToken,
+                    device_id = _settings.DeviceInstallId,
+
+                    device_platform = platform,
+                    device_type = type,
+                    device_model = model,
+
+                    app_version = appVersion,
+                    app_build = appBuild,
+                    os_version = osVersion
+                };
+
+                var json = JsonSerializer.Serialize(payload);
+                using var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+                using var response = await _httpClient.PostAsync(pingUrl, content);
+
+                _ = response.IsSuccessStatusCode;
+            }
+            catch
+            {
+            }
+        }
+
+class AuthResponseDto
         {
             [JsonPropertyName("ok")]
             public bool Ok { get; set; }
@@ -1105,6 +1196,9 @@ namespace JoesScanner.ViewModels
 
             [JsonPropertyName("message")]
             public string? Message { get; set; }
+
+            [JsonPropertyName("session_token")]
+            public string? SessionToken { get; set; }
 
             [JsonPropertyName("subscription")]
             public AuthSubscriptionDto? Subscription { get; set; }

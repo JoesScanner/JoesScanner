@@ -62,5 +62,13 @@ namespace JoesScanner.Services
 
         // Last human readable message from the subscription check.
         string SubscriptionLastMessage { get; set; }
+
+        // ========= Device and session tracking =========
+
+        // Stable per-install identifier. Used by the auth API for session reporting.
+        string DeviceInstallId { get; set; }
+
+        // Optional session token returned by the auth API. Used for heartbeat pings.
+        string AuthSessionToken { get; set; }
     }
 }

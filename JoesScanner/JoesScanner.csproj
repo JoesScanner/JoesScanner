@@ -24,13 +24,13 @@
     <ApplicationId>com.joesscanner.app</ApplicationId>
 
     <!-- Display version is semantic -->
-    <ApplicationDisplayVersion>1.2.9</ApplicationDisplayVersion>
+    <ApplicationDisplayVersion>1.3.0</ApplicationDisplayVersion>
 
     <!-- ApplicationVersion must be an integer and should only ever go up -->
-    <ApplicationVersion>129</ApplicationVersion>
+    <ApplicationVersion>130</ApplicationVersion>
 
     <!-- NuGet package version -->
-    <PackageVersion>1.2.9</PackageVersion>
+    <PackageVersion>1.3.0</PackageVersion>
 
     <DefaultLanguage>en-us</DefaultLanguage>
 
@@ -72,12 +72,24 @@
   </ItemGroup>
 
   <ItemGroup>
+    <AndroidResource Remove="API_Plugin\**" />
     <AndroidResource Remove="bin\**" />
+    <AndroidResource Remove="Installer\**" />
+    <Compile Remove="API_Plugin\**" />
     <Compile Remove="bin\**" />
+    <Compile Remove="Installer\**" />
+    <EmbeddedResource Remove="API_Plugin\**" />
     <EmbeddedResource Remove="bin\**" />
+    <EmbeddedResource Remove="Installer\**" />
+    <MauiCss Remove="API_Plugin\**" />
     <MauiCss Remove="bin\**" />
+    <MauiCss Remove="Installer\**" />
+    <MauiXaml Remove="API_Plugin\**" />
     <MauiXaml Remove="bin\**" />
+    <MauiXaml Remove="Installer\**" />
+    <None Remove="API_Plugin\**" />
     <None Remove="bin\**" />
+    <None Remove="Installer\**" />
   </ItemGroup>
 
   <ItemGroup>

@@ -6,6 +6,8 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Maui.ApplicationModel;
+using Microsoft.Maui.Devices;
 
 namespace JoesScanner.Services
 {
@@ -16,6 +18,15 @@ namespace JoesScanner.Services
 
         private static readonly Uri AuthEndpoint =
             new("https://joesscanner.com/wp-json/joes-scanner/v1/auth");
+
+        private static readonly Uri PingEndpoint =
+            new("https://joesscanner.com/wp-json/joes-scanner/v1/ping");
+
+        private readonly object _heartbeatGate = new();
+        private CancellationTokenSource? _heartbeatCts;
+        private Task? _heartbeatTask;
+        private bool _pingDisabled;
+
 
         private readonly ISettingsService _settings;
         private readonly HttpClient _httpClient;
@@ -57,12 +68,34 @@ namespace JoesScanner.Services
 
             try
             {
+                var appVersion = AppInfo.Current.VersionString ?? string.Empty;
+                var appBuild = AppInfo.Current.BuildString ?? string.Empty;
+
+                var platform = DeviceInfo.Platform.ToString();
+                var type = DeviceInfo.Idiom.ToString();
+                var model = CombineDeviceModel(DeviceInfo.Manufacturer, DeviceInfo.Model);
+                var osVersion = DeviceInfo.VersionString ?? string.Empty;
+
                 var payload = new
                 {
                     username,
                     password,
+
+                    // Backwards compatible fields
                     client = "JoesScannerApp",
-                    version = "1.0.0"
+                    version = appVersion,
+
+                    // Fields the WordPress plugin expects for reporting
+                    device_platform = platform,
+                    device_type = type,
+                    device_model = model,
+                    app_version = appVersion,
+                    app_build = appBuild,
+                    os_version = osVersion,
+                    device_id = _settings.DeviceInstallId,
+
+                    // Optional but recommended so the server can correlate the same session
+                    session_token = _settings.AuthSessionToken
                 };
 
                 var json = JsonSerializer.Serialize(payload);
@@ -100,6 +133,8 @@ namespace JoesScanner.Services
                     _settings.SubscriptionLastMessage =
                         authResponse?.Message ?? response.ReasonPhrase ?? "Denied";
 
+                    SetSessionToken(null);
+
                     return new SubscriptionCheckResult(
                         isAllowed: false,
                         errorCode: authResponse?.Error ?? "auth_http_error",
@@ -114,6 +149,8 @@ namespace JoesScanner.Services
                     _settings.SubscriptionLastStatusOk = false;
                     _settings.SubscriptionLastLevel = authResponse?.Subscription?.Level ?? string.Empty;
                     _settings.SubscriptionLastMessage = authResponse?.Message ?? "Denied";
+
+                    SetSessionToken(null);
 
                     return new SubscriptionCheckResult(
                         isAllowed: false,
@@ -133,6 +170,8 @@ namespace JoesScanner.Services
                     // Keep some basic info for diagnostics, but do not mark as ok.
                     _settings.SubscriptionLastLevel = sub?.Level ?? string.Empty;
                     _settings.SubscriptionLastMessage = sub?.Status ?? "inactive";
+
+                    SetSessionToken(null);
 
                     return new SubscriptionCheckResult(
                         isAllowed: false,
@@ -204,6 +243,9 @@ namespace JoesScanner.Services
                 _settings.SubscriptionRenewalUtc = null; // you are not currently using this for display
                 _settings.SubscriptionLastMessage = planSummary;
 
+
+                SetSessionToken(authResponse.SessionToken);
+
                 // Everything checks out: active subscription.
                 return new SubscriptionCheckResult(isAllowed: true);
             }
@@ -249,6 +291,133 @@ namespace JoesScanner.Services
             }
         }
 
+
+        private static string CombineDeviceModel(string manufacturer, string model)
+        {
+            var mfg = (manufacturer ?? string.Empty).Trim();
+            var mdl = (model ?? string.Empty).Trim();
+
+            if (string.IsNullOrWhiteSpace(mfg))
+                return mdl;
+
+            if (string.IsNullOrWhiteSpace(mdl))
+                return mfg;
+
+            return mfg + " " + mdl;
+        }
+
+        private void SetSessionToken(string? token)
+        {
+            token = (token ?? string.Empty).Trim();
+            _settings.AuthSessionToken = token;
+
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                StopHeartbeat();
+                return;
+            }
+
+            EnsureHeartbeatRunning();
+        }
+
+        private void EnsureHeartbeatRunning()
+        {
+            lock (_heartbeatGate)
+            {
+                if (_pingDisabled)
+                    return;
+
+                if (_heartbeatTask != null && !_heartbeatTask.IsCompleted)
+                    return;
+
+                if (string.IsNullOrWhiteSpace(_settings.AuthSessionToken))
+                    return;
+
+                _heartbeatCts = new CancellationTokenSource();
+                var token = _heartbeatCts.Token;
+
+                _heartbeatTask = Task.Run(async () =>
+                {
+                    while (!token.IsCancellationRequested)
+                    {
+                        var ok = await TrySendPingAsync(token);
+                        if (!ok)
+                        {
+                            _pingDisabled = true;
+                            break;
+                        }
+
+                        try
+                        {
+                            await Task.Delay(TimeSpan.FromMinutes(1), token);
+                        }
+                        catch (TaskCanceledException)
+                        {
+                            break;
+                        }
+                    }
+                }, token);
+            }
+        }
+
+        private void StopHeartbeat()
+        {
+            lock (_heartbeatGate)
+            {
+                try
+                {
+                    _heartbeatCts?.Cancel();
+                }
+                catch
+                {
+                }
+                finally
+                {
+                    _heartbeatCts = null;
+                    _heartbeatTask = null;
+                }
+            }
+        }
+
+        private async Task<bool> TrySendPingAsync(CancellationToken cancellationToken)
+        {
+            var sessionToken = (_settings.AuthSessionToken ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(sessionToken))
+                return true;
+
+            var appVersion = AppInfo.Current.VersionString ?? string.Empty;
+            var appBuild = AppInfo.Current.BuildString ?? string.Empty;
+
+            var platform = DeviceInfo.Platform.ToString();
+            var type = DeviceInfo.Idiom.ToString();
+            var model = CombineDeviceModel(DeviceInfo.Manufacturer, DeviceInfo.Model);
+            var osVersion = DeviceInfo.VersionString ?? string.Empty;
+
+            var payload = new
+            {
+                session_token = sessionToken,
+                device_id = _settings.DeviceInstallId,
+
+                device_platform = platform,
+                device_type = type,
+                device_model = model,
+
+                app_version = appVersion,
+                app_build = appBuild,
+                os_version = osVersion
+            };
+
+            var json = JsonSerializer.Serialize(payload);
+            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            using var response = await _httpClient.PostAsync(PingEndpoint, content, cancellationToken);
+
+            if ((int)response.StatusCode == 404 || (int)response.StatusCode == 405)
+                return false;
+
+            return true;
+        }
+
         private sealed class AuthResponse
         {
             [JsonPropertyName("ok")]
@@ -259,6 +428,10 @@ namespace JoesScanner.Services
 
             [JsonPropertyName("message")]
             public string? Message { get; set; }
+
+            [JsonPropertyName("session_token")]
+            public string? SessionToken { get; set; }
+
 
             [JsonPropertyName("subscription")]
             public SubscriptionDto? Subscription { get; set; }
