@@ -1,3 +1,4 @@
+using JoesScanner.Models;
 using JoesScanner.ViewModels;
 
 namespace JoesScanner.Views
@@ -24,6 +25,17 @@ namespace JoesScanner.Views
             {
                 // Swallow navigation errors for now
             }
+        }
+        private void OnCallTapped(object sender, TappedEventArgs e)
+        {
+            if (sender is not TapGestureRecognizer tap)
+                return;
+
+            if (tap.BindingContext is not CallItem item)
+                return;
+
+            if (_viewModel.PlayAudioCommand?.CanExecute(item) == true)
+                _viewModel.PlayAudioCommand.Execute(item);
         }
 
         private async void OnSiteTapped(object sender, EventArgs e)

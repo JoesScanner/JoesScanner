@@ -5,6 +5,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
     xmlns:vm="clr-namespace:JoesScanner.ViewModels"
     xmlns:models="clr-namespace:JoesScanner.Models"
+    xmlns:views="clr-namespace:JoesScanner.Views"
     x:Name="Page"
     x:DataType="vm:MainViewModel"
     Title="Joes Scanner"
@@ -225,10 +226,7 @@
                                 </Border.Stroke>
 
                                 <Border.GestureRecognizers>
-                                    <TapGestureRecognizer
-                                        x:DataType="models:CallItem"
-                                        Command="{Binding Source={x:Reference Page}, Path=BindingContext.PlayAudioCommand}"
-                                        CommandParameter="{Binding .}" />
+                                    <TapGestureRecognizer Tapped="OnCallTapped" />
                                 </Border.GestureRecognizers>
 
                                 <Border.Triggers>
