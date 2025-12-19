@@ -1,6 +1,4 @@
-using System;
 using System.Globalization;
-using Microsoft.Maui.Storage;
 
 namespace JoesScanner.Services
 {

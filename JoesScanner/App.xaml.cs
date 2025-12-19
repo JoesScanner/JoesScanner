@@ -1,7 +1,4 @@
-﻿using Microsoft.Maui.Controls;
-using Microsoft.Maui.Storage;
-
-namespace JoesScanner
+﻿namespace JoesScanner
 {
     public partial class App : Application
     {

@@ -1,5 +1,3 @@
-using System;
-
 namespace JoesScanner.Services
 {
     public interface ISettingsService

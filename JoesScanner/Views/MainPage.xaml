@@ -226,7 +226,7 @@
 
                                 <Border.GestureRecognizers>
                                     <TapGestureRecognizer
-                                        x:DataType="{x:Null}"
+                                        x:DataType="models:CallItem"
                                         Command="{Binding Source={x:Reference Page}, Path=BindingContext.PlayAudioCommand}"
                                         CommandParameter="{Binding .}" />
                                 </Border.GestureRecognizers>

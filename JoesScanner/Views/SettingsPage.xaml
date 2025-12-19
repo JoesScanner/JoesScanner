@@ -391,7 +391,7 @@
                                     <HorizontalStackLayout Spacing="12">
                                         <Switch
                                             IsToggled="{Binding AnnounceNewCalls}"
-                                            AutomationProperties.LabeledBy="{x:Reference AnnounceNewCallsLabel}" />
+                                            SemanticProperties.Description="{Binding Source={x:Reference AnnounceNewCallsLabel}, Path=Text}" />
                                         <Label
                                             Text="{Binding AnnounceNewCalls, StringFormat='Enabled: {0}'}"
                                             FontSize="12"

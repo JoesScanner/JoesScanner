@@ -1,7 +1,4 @@
-﻿using Microsoft.Maui.Controls;
-using System;
-
-namespace JoesScanner.Models
+﻿namespace JoesScanner.Models
 {
     public enum FilterLevel
     {

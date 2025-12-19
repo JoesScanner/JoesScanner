@@ -1,8 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-
-namespace JoesScanner.Services
+﻿namespace JoesScanner.Services
 {
     // Simple in-memory, thread-safe application log with a fixed maximum number of entries.
     public static class AppLog

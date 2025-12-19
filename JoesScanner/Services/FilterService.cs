@@ -1,12 +1,7 @@
 ﻿using JoesScanner.Models;
-using Microsoft.Maui.Storage;
-using System;
-using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
-using System.Linq;
 using System.Text.Json;
-using System.Threading;
 
 namespace JoesScanner.Services
 {

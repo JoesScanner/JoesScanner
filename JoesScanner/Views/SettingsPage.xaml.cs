@@ -1,16 +1,8 @@
-using System;
-using System.IO;
-using System.Text;
-using System.Threading.Tasks;
-using System.Runtime.InteropServices;
 using JoesScanner.Models;
 using JoesScanner.Services;
 using JoesScanner.ViewModels;
-using Microsoft.Maui.ApplicationModel;
-using Microsoft.Maui.ApplicationModel.DataTransfer;
-using Microsoft.Maui.Controls;
-using Microsoft.Maui.Devices;
-using Microsoft.Maui.Storage;
+using System.Runtime.InteropServices;
+using System.Text;
 
 namespace JoesScanner.Views
 {

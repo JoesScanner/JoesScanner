@@ -1,103 +1,86 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
-  <PropertyGroup>
-    <!-- Multi target: Android, iOS, MacCatalyst, Windows (on .NET 10) -->
-    <TargetFrameworks>net10.0-android;net10.0-ios;net10.0-maccatalyst;net10.0-windows10.0.19041.0</TargetFrameworks>
+	<PropertyGroup>
+		<!-- Multi target: Android, iOS, MacCatalyst, Windows (on .NET 10) -->
+		<TargetFrameworks>net10.0-android;net10.0-ios;net10.0-maccatalyst;net10.0-windows10.0.19041.0</TargetFrameworks>
 
-    <!-- Keep Windows App SDK deployment auto-init OFF (matches where we left it) -->
-    <WindowsAppSdkDeploymentManagerInitialize>false</WindowsAppSdkDeploymentManagerInitialize>
+		<!-- Keep Windows App SDK deployment auto-init OFF (matches where we left it) -->
+		<WindowsAppSdkDeploymentManagerInitialize>false</WindowsAppSdkDeploymentManagerInitialize>
 
-    <UseMaui>true</UseMaui>
-    <SingleProject>true</SingleProject>
-    <OutputType>Exe</OutputType>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
-	<SkipValidateMauiImplicitPackageReferences>true</SkipValidateMauiImplicitPackageReferences>
+		<UseMaui>true</UseMaui>
+		<SingleProject>true</SingleProject>
+		<OutputType>Exe</OutputType>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<SkipValidateMauiImplicitPackageReferences>true</SkipValidateMauiImplicitPackageReferences>
 
-	  <MauiEnableXamlCBindingWithSourceCompilation>true</MauiEnableXamlCBindingWithSourceCompilation>
-    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_BREAK_ON_UNHANDLED_EXCEPTION</DefineConstants>
+		<MauiEnableXamlCBindingWithSourceCompilation>true</MauiEnableXamlCBindingWithSourceCompilation>
+		<DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_BREAK_ON_UNHANDLED_EXCEPTION</DefineConstants>
 
-    <!-- Display name shown in app lists/stores -->
-    <ApplicationTitle>Joes Scanner</ApplicationTitle>
+		<!-- Display name shown in app lists/stores -->
+		<ApplicationTitle>Joes Scanner</ApplicationTitle>
 
-    <!-- Reverse-DNS app identifier (Android package name, iOS bundle id, etc.) -->
-    <ApplicationId>com.joesscanner.app</ApplicationId>
+		<!-- Reverse-DNS app identifier (Android package name, iOS bundle id, etc.) -->
+		<ApplicationId>app.joesscanner.com</ApplicationId>
 
-    <!-- Display version is semantic -->
-    <ApplicationDisplayVersion>1.3.1</ApplicationDisplayVersion>
+		<!-- Display version is semantic -->
+		<ApplicationDisplayVersion>1.3.4</ApplicationDisplayVersion>
 
-    <!-- ApplicationVersion must be an integer and should only ever go up -->
-    <ApplicationVersion>131</ApplicationVersion>
+		<!-- ApplicationVersion must be an integer and should only ever go up -->
+		<ApplicationVersion>134</ApplicationVersion>
 
-    <DefaultLanguage>en-us</DefaultLanguage>
+		<DefaultLanguage>en-us</DefaultLanguage>
 
-    <!-- Platform minimums -->
-    <SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">21.0</SupportedOSPlatformVersion>
-    <SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">15.0</SupportedOSPlatformVersion>
-    <SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'maccatalyst'">15.0</SupportedOSPlatformVersion>
-    <SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">10.0.19041.0</SupportedOSPlatformVersion>
-    <TargetPlatformMinVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">10.0.19041.0</TargetPlatformMinVersion>
+		<!-- Platform minimums -->
+		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">21.0</SupportedOSPlatformVersion>
+		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'ios'">15.0</SupportedOSPlatformVersion>
+		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'maccatalyst'">15.0</SupportedOSPlatformVersion>
+		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">10.0.19041.0</SupportedOSPlatformVersion>
+		<TargetPlatformMinVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">10.0.19041.0</TargetPlatformMinVersion>
 
-    <!-- Packaged Windows builds -->
-    <WindowsPackageType>MSIX</WindowsPackageType>
+		<!-- Packaged Windows builds -->
+		<WindowsPackageType>MSIX</WindowsPackageType>
 
-    <!-- Keep x64 available for packaged debug -->
-    <Platforms>AnyCPU;x64</Platforms>
-    <GenerateAppInstallerFile>False</GenerateAppInstallerFile>
-    <AppxPackageSigningEnabled>False</AppxPackageSigningEnabled>
-    <AppxPackageSigningTimestampDigestAlgorithm>SHA256</AppxPackageSigningTimestampDigestAlgorithm>
-    <AppxAutoIncrementPackageRevision>False</AppxAutoIncrementPackageRevision>
-    <AppxSymbolPackageEnabled>True</AppxSymbolPackageEnabled>
-    <GenerateTestArtifacts>True</GenerateTestArtifacts>
-    <GenerateTemporaryStoreCertificate>True</GenerateTemporaryStoreCertificate>
-    <HoursBetweenUpdateChecks>0</HoursBetweenUpdateChecks>
-  </PropertyGroup>
-
-
-<PropertyGroup Condition="'$(Configuration)|$(TargetFramework)'=='Release|net10.0-android'">
-	<AndroidGenerateNativeDebugSymbols>true</AndroidGenerateNativeDebugSymbols>
-</PropertyGroup>
+		<!-- Keep x64 available for packaged debug -->
+		<Platforms>AnyCPU;x64</Platforms>
+		<GenerateAppInstallerFile>False</GenerateAppInstallerFile>
+		<AppxPackageSigningEnabled>False</AppxPackageSigningEnabled>
+		<AppxPackageSigningTimestampDigestAlgorithm>SHA256</AppxPackageSigningTimestampDigestAlgorithm>
+		<AppxAutoIncrementPackageRevision>False</AppxAutoIncrementPackageRevision>
+		<AppxSymbolPackageEnabled>True</AppxSymbolPackageEnabled>
+		<GenerateTestArtifacts>True</GenerateTestArtifacts>
+		<GenerateTemporaryStoreCertificate>True</GenerateTemporaryStoreCertificate>
+		<HoursBetweenUpdateChecks>0</HoursBetweenUpdateChecks>
+	</PropertyGroup>
 
 	<ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="10.0.0" />
-    <!-- Explicit MAUI Controls reference to satisfy MA002 and keep package graph stable -->
-    <PackageReference Include="Microsoft.Maui.Controls" Version="10.0.1" />
-    <PackageReference Include="Plugin.Maui.Audio" Version="4.0.0" />
-  </ItemGroup>
+		<PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="10.0.0" />
+		<!-- Explicit MAUI Controls reference to satisfy MA002 and keep package graph stable -->
+		<PackageReference Include="Microsoft.Maui.Controls" Version="10.0.1" />
+		<PackageReference Include="Plugin.Maui.Audio" Version="4.0.0" />
+	</ItemGroup>
 
-  <ItemGroup>
-    <MauiIcon Include="Resources\AppIcon\appicon.png" />
-    <MauiSplashScreen Include="Resources\Splash\joesscanner_splash.png" Color="#000000" />
-    <MauiImage Include="Resources\Images\*" />
-    <MauiFont Include="Resources\Fonts\*" />
-    <MauiAsset Include="Resources\Raw\**" LogicalName="%(RecursiveDir)%(Filename)%(Extension)" />
-  </ItemGroup>
+	<ItemGroup>
+		<MauiIcon Include="Resources\AppIcon\appicon.png" />
+		<MauiSplashScreen Include="Resources\Splash\joesscanner_splash.png" Color="#000000" />
+		<MauiImage Include="Resources\Images\*" />
+		<MauiFont Include="Resources\Fonts\*" />
+		<MauiAsset Include="Resources\Raw\**" LogicalName="%(RecursiveDir)%(Filename)%(Extension)" />
+	</ItemGroup>
 
-  <ItemGroup>
-    <AndroidResource Remove="API_Plugin\**" />
-    <AndroidResource Remove="bin\**" />
-    <AndroidResource Remove="Installer\**" />
-    <Compile Remove="API_Plugin\**" />
-    <Compile Remove="bin\**" />
-    <Compile Remove="Installer\**" />
-    <EmbeddedResource Remove="API_Plugin\**" />
-    <EmbeddedResource Remove="bin\**" />
-    <EmbeddedResource Remove="Installer\**" />
-    <MauiCss Remove="API_Plugin\**" />
-    <MauiCss Remove="bin\**" />
-    <MauiCss Remove="Installer\**" />
-    <MauiXaml Remove="API_Plugin\**" />
-    <MauiXaml Remove="bin\**" />
-    <MauiXaml Remove="Installer\**" />
-    <None Remove="API_Plugin\**" />
-    <None Remove="bin\**" />
-    <None Remove="Installer\**" />
-  </ItemGroup>
+	<ItemGroup>
+		<AndroidResource Remove="Installer\**" />
+		<Compile Remove="Installer\**" />
+		<EmbeddedResource Remove="Installer\**" />
+		<MauiCss Remove="Installer\**" />
+		<MauiXaml Remove="Installer\**" />
+		<None Remove="Installer\**" />
+	</ItemGroup>
 
-  <ItemGroup>
-    <MauiXaml Update="Views\MainPage.xaml">
-      <Generator>MSBuild:Compile</Generator>
-    </MauiXaml>
-  </ItemGroup>
+	<ItemGroup>
+		<MauiXaml Update="Views\MainPage.xaml">
+			<Generator>MSBuild:Compile</Generator>
+		</MauiXaml>
+	</ItemGroup>
 
 </Project>

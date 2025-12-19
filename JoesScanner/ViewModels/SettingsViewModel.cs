@@ -1,19 +1,12 @@
 using JoesScanner.Models;
 using JoesScanner.Services;
-using Microsoft.Maui.Controls;
-using Microsoft.Maui.ApplicationModel;
-using Microsoft.Maui.Devices;
-using System;
-using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Net;
-using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Threading.Tasks;
 using System.Windows.Input;
 
 namespace JoesScanner.ViewModels
