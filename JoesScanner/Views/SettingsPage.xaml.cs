@@ -147,29 +147,53 @@ namespace JoesScanner.Views
 
             var headerText = string.Join(Environment.NewLine, headerLines);
 
-            // Compose full file content
-            var fileContent = headerText + (bodyText ?? string.Empty);
+            // Compose full file content.
+            // bodyText is expected to be ordered from newest to oldest.
+            var body = bodyText ?? string.Empty;
+            var fileContent = headerText + body;
 
-            // Enforce a max file size of 1 MB (in UTF-8 bytes)
+            // Enforce a max file size of 1 MB (in UTF-8 bytes).
             const int maxBytes = 1024 * 1024;
-            var bytes = Encoding.UTF8.GetBytes(fileContent);
 
-            if (bytes.Length <= maxBytes)
+            if (Encoding.UTF8.GetByteCount(fileContent) <= maxBytes)
                 return fileContent;
 
-            // If too large, keep the tail portion and mark as truncated
-            const string marker = "[Log truncated to fit 1 MB limit]\r\n\r\n";
+            // If too large, keep the newest portion (top of bodyText) and mark as truncated.
+            var marker = "[Log truncated to fit 1 MB limit]" + Environment.NewLine + Environment.NewLine;
 
-            // Rough estimate of how many characters to keep
-            var ratio = (double)maxBytes / bytes.Length;
-            var keepChars = Math.Max(0, (int)(fileContent.Length * ratio));
+            var headerBytes = Encoding.UTF8.GetByteCount(headerText);
+            var markerBytes = Encoding.UTF8.GetByteCount(marker);
 
-            // Keep the last 'keepChars' characters (most recent entries)
-            var trimmed = fileContent.Length > keepChars
-                ? fileContent.Substring(fileContent.Length - keepChars)
-                : fileContent;
+            var bodyBudget = maxBytes - headerBytes - markerBytes;
+            if (bodyBudget <= 0)
+                return headerText + marker;
 
-            return marker + trimmed;
+            if (Encoding.UTF8.GetByteCount(body) <= bodyBudget)
+                return headerText + body;
+
+            // Binary search the largest prefix of body that fits in the remaining byte budget.
+            var low = 0;
+            var high = body.Length;
+
+            while (low < high)
+            {
+                var mid = low + ((high - low + 1) / 2);
+                var candidate = body.Substring(0, mid);
+
+                if (Encoding.UTF8.GetByteCount(candidate) <= bodyBudget)
+                    low = mid;
+                else
+                    high = mid - 1;
+            }
+
+            var kept = low > 0 ? body.Substring(0, low) : string.Empty;
+
+            // Avoid cutting a line in half if possible.
+            var lastNewline = kept.LastIndexOf('\n');
+            if (lastNewline > 0)
+                kept = kept.Substring(0, lastNewline + 1);
+
+            return headerText + marker + kept;
         }
 
         private readonly struct SaveTextResult

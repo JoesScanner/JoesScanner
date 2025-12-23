@@ -33,7 +33,7 @@
         }
 
         // Returns a snapshot of up to maxLines log entries as an array.
-        // The result is ordered from oldest to newest.
+        // The result is ordered from newest to oldest.
         public static string[] GetSnapshot(int maxLines)
         {
             lock (Sync)
@@ -41,7 +41,6 @@
                 return Buffer
                     .Reverse()              // newest first
                     .Take(maxLines)
-                    .Reverse()              // back to oldest first
                     .ToArray();
             }
         }
