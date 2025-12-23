@@ -11,9 +11,6 @@ namespace JoesScanner.Services
         private const string BasicAuthUserKey = "BasicAuthUser";
         private const string BasicAuthPassKey = "BasicAuthPass";
         private const string AutoPlayKey = "AutoPlay";
-        private const string AnnounceNewCallsKey = "AnnounceNewCalls";
-        private const string MaxCallsKey = "MaxCalls";
-        private const string AutoSpeedThresholdKey = "AutoSpeedThreshold";
         private const string ScrollDirectionKey = "ScrollDirection";
         private const string ReceiverFilterKey = "ReceiverFilter";
         private const string TalkgroupFilterKey = "TalkgroupFilter";
@@ -135,49 +132,13 @@ namespace JoesScanner.Services
         }
 
         // When true, announce new calls via the platform screen reader.
-        public bool AnnounceNewCalls
-        {
-            get => Preferences.Get(AnnounceNewCallsKey, true);
-            set => Preferences.Set(AnnounceNewCallsKey, value);
-        }
 
 
         // Maximum number of calls to keep in the visible queue.
         // Value is clamped to a range of 10–50 before being stored.
-        public int MaxCalls
-        {
-            get => Preferences.Get(MaxCallsKey, 10); // default 10
-            set
-            {
-                var v = value;
-
-                // Clamp to 10–50.
-                if (v < 10) v = 10;
-                if (v > 50) v = 50;
-
-                Preferences.Set(MaxCallsKey, v);
-            }
-        }
 
         // Autospeed threshold in calls waiting for automatic playback speed increases.
         // Value is clamped to 10–100 before being stored.
-        public int AutoSpeedThreshold
-        {
-            get
-            {
-                var v = Preferences.Get(AutoSpeedThresholdKey, 10);
-                if (v < 10) v = 10;
-                if (v > 100) v = 100;
-                return v;
-            }
-            set
-            {
-                var v = value;
-                if (v < 10) v = 10;
-                if (v > 100) v = 100;
-                Preferences.Set(AutoSpeedThresholdKey, v);
-            }
-        }
 
         // Scroll behavior:
         //   "Down" = newest at bottom

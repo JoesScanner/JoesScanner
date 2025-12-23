@@ -32,11 +32,10 @@
                 <!-- Rows:
                      0 = header
                      1 = connection
-                     2 = call queue
-                     3 = filters
-                     4 = theme -->
+                     2 = filters
+                     3 = theme -->
                 <Grid
-                    RowDefinitions="Auto,Auto,Auto,*,Auto"
+                    RowDefinitions="Auto,Auto,*,Auto"
                     ColumnDefinitions="*">
 
                     <!-- HEADER CARD -->
@@ -81,19 +80,19 @@
                                         Margin="0,2,0,0" />
                             </Grid>
 
-                            <!-- Header buttons -->
-                            <Grid
+                        <!-- Header buttons -->
+                        <Grid
                             ColumnDefinitions="*,Auto"
                             ColumnSpacing="12"
                             HorizontalOptions="Fill">
 
-                                <VerticalStackLayout
+                            <VerticalStackLayout
                                 Grid.Column="0"
                                 Spacing="0"
                                 HorizontalOptions="FillAndExpand"
                                 VerticalOptions="Center">
 
-                                    <Label
+                                <Label
                                     Text="Validating server..."
                                     IsVisible="{Binding ShowServerValidationProgressHeader}"
                                     FontSize="14"
@@ -102,7 +101,7 @@
                                     LineBreakMode="WordWrap"
                                     MaxLines="2" />
 
-                                    <Label
+                                <Label
                                     Text="{Binding ValidationSuccessHeaderText}"
                                     IsVisible="{Binding ShowServerValidationSuccessHeader}"
                                     FontSize="14"
@@ -111,7 +110,7 @@
                                     LineBreakMode="WordWrap"
                                     MaxLines="2" />
 
-                                    <Label
+                                <Label
                                     Text="{Binding ServerValidationMessage}"
                                     IsVisible="{Binding ShowServerValidationErrorHeader}"
                                     FontSize="14"
@@ -120,26 +119,26 @@
                                     LineBreakMode="WordWrap"
                                     MaxLines="3" />
 
-                                </VerticalStackLayout>
+                            </VerticalStackLayout>
 
-                                <HorizontalStackLayout
+                            <HorizontalStackLayout
                                 Grid.Column="1"
                                 Spacing="10"
                                 HorizontalOptions="End"
                                 VerticalOptions="Center">
 
-                                    <Button
+                                <Button
                                     Text="Close"
                                     Style="{StaticResource SecondaryPillButtonStyle}"
                                     Clicked="OnBackClicked" />
 
-                                    <Button
+                                <Button
                                     Text="Log"
                                     Style="{StaticResource SecondaryPillButtonStyle}"
                                     Clicked="OnLogClicked" />
-                                </HorizontalStackLayout>
+                            </HorizontalStackLayout>
 
-                            </Grid>
+                        </Grid>
 
                         </VerticalStackLayout>
                     </Border>
@@ -301,114 +300,10 @@
                     </Border>
 
                     <!-- CALL QUEUE CARD -->
-                    <Border
-                        Grid.Row="2"
-                        Padding="16"
-                        Margin="0,0,0,12"
-                        BackgroundColor="{AppThemeBinding Light=White, Dark=#111827}"
-                        StrokeThickness="1"
-                        StrokeShape="RoundRectangle 16">
-
-                        <Border.Stroke>
-                            <SolidColorBrush Color="{AppThemeBinding Light=#e5e7eb, Dark=#1f2937}" />
-                        </Border.Stroke>
-
-                        <VerticalStackLayout Spacing="8">
-                            <Label
-                                Text="Queue Control"
-                                FontSize="16"
-                                FontAttributes="Bold"
-                                TextColor="{AppThemeBinding Light=Black, Dark=White}" />
-
-                            <Label
-                                Text="Calls Displayed"
-                                FontSize="14"
-                                FontAttributes="Bold"
-                                TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
-
-                            <Label
-                                Text="Control how many calls are kept in the queue."
-                                FontSize="12"
-                                TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" />
-
-                            <!-- Call list size slider -->
-                            <VerticalStackLayout
-                                Spacing="4"
-                                Margin="0,10,0,0">
-
-                                <Label
-                                    Text="{Binding MaxCalls, StringFormat='Keep {0} recent calls'}"
-                                    FontSize="12"
-                                    TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
-
-                                <Slider
-                                    Minimum="5"
-                                    Maximum="50"
-                                    Value="{Binding MaxCalls}"
-                                    HorizontalOptions="Fill" />
-                            </VerticalStackLayout>
-                            <!-- Autospeed slider -->
-                            <VerticalStackLayout
-                                Spacing="8"
-                                Margin="0,10,0,0">
-
-                                <Label
-                                    Text="Autospeed"
-                                    FontAttributes="Bold"
-                                    FontSize="14"
-                                    TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
-
-                                <Label
-                                    Text="Automatically enables faster playback speed if the queue gets to far behind. This will help prevent memory issues, especially on devices with less memory."
-                                    FontSize="12"
-                                    TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" />
-
-                                <Label
-                                    Text="{Binding AutoSpeedThreshold, StringFormat='Autospeed when {0} calls are waiting'}"
-                                    FontSize="12"
-                                    TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
-
-                                <Slider
-                                    Minimum="10"
-                                    Maximum="100"
-                                    Value="{Binding AutoSpeedThreshold}"
-                                    HorizontalOptions="Fill" />
-
-                                <!-- Accessibility -->
-                                <VerticalStackLayout
-                                    Spacing="6"
-                                    Margin="0,12,0,0">
-                                    <Label
-                                        x:Name="AnnounceNewCallsLabel"
-                                        Text="Announce new calls"
-                                        FontAttributes="Bold"
-                                        FontSize="14"
-                                        TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
-                                    <Label
-                                        Text="When a screen reader is enabled, new calls will be spoken as they arrive."
-                                        FontSize="12"
-                                        TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" />
-                                    <HorizontalStackLayout Spacing="12">
-                                        <Switch
-                                            IsToggled="{Binding AnnounceNewCalls}"
-                                            SemanticProperties.Description="Announce new calls" />
-                                        <Label
-                                            Text="{Binding AnnounceNewCalls, StringFormat='Enabled: {0}'}"
-                                            FontSize="12"
-                                            VerticalTextAlignment="Center"
-                                            TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}"
-                                             />
-                                    </HorizontalStackLayout>
-                                </VerticalStackLayout>
-
-                            </VerticalStackLayout>
-
-                        </VerticalStackLayout>
-                    </Border>
 
                     <!-- FILTERS CARD -->
                     <Border
-                        Grid.Row="3"
+                        Grid.Row="2"
                         Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
                         StrokeThickness="1"
                         Padding="12"
@@ -649,7 +544,7 @@
 
                     <!-- THEME CARD -->
                     <Border
-                        Grid.Row="4"
+                        Grid.Row="3"
                         Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
                         StrokeThickness="1"
                         Padding="12"

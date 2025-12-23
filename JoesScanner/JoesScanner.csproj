@@ -24,10 +24,10 @@
 		<ApplicationId>app.joesscanner.com</ApplicationId>
 
 		<!-- Display version is semantic -->
-		<ApplicationDisplayVersion>1.3.4</ApplicationDisplayVersion>
+		<ApplicationDisplayVersion>1.3.5</ApplicationDisplayVersion>
 
 		<!-- ApplicationVersion must be an integer and should only ever go up -->
-		<ApplicationVersion>134</ApplicationVersion>
+		<ApplicationVersion>135</ApplicationVersion>
 
 		<DefaultLanguage>en-us</DefaultLanguage>
 

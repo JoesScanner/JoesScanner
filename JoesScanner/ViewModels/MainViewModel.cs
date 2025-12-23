@@ -1,18 +1,16 @@
 using JoesScanner.Models;
 using JoesScanner.Services;
-using System.Collections.Concurrent;
+using Microsoft.Maui.Storage;
+using System;
 using System.Collections.ObjectModel;
+using System.IO;
+using System.Linq;
+using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Input;
-
-#if ANDROID
-using Android.Content;
-using Android.OS;
-using AndroidX.Core.Content;
-using JoesScanner.Platforms.Android.Services;
-#endif
-
 namespace JoesScanner.ViewModels
 {
     // Main view model for the primary JoesScanner client screen.
@@ -32,7 +30,7 @@ namespace JoesScanner.ViewModels
         private bool _isRunning;
         private string _serverUrl = string.Empty;
         private bool _autoPlay;
-        private int _maxCalls = 20;
+        private const int MaxCallsToKeep = 100;
         private bool _audioEnabled;
         private int _totalCallsReceived;
         private int _totalCallsInserted;
@@ -49,12 +47,6 @@ namespace JoesScanner.ViewModels
 
         // True while we are playing through the backlog.
         private bool _isQueuePlaybackRunning;
-
-        private readonly ConcurrentQueue<CallItem> _bgPlayQueue = new();
-        private readonly SemaphoreSlim _bgPlaySignal = new(0);
-        private CancellationTokenSource? _bgPlayCts;
-        private Task? _bgPlayTask;
-        private readonly SemaphoreSlim _playbackMutex = new(1, 1);
 
         // Optional settings view model reference. Currently not used but kept for future wiring.
         public SettingsViewModel? SettingsViewModel { get; set; }
@@ -157,18 +149,8 @@ namespace JoesScanner.ViewModels
 
             // AutoPlay is tied to AudioEnabled.
             _autoPlay = _audioEnabled;
-            _settingsService.AutoPlay = _autoPlay;
-
-            // Other persisted settings.
-            // Repair any out-of-range stored values and enforce 10-50 with a default of 20.
-            var storedMax = _settingsService.MaxCalls;
-            if (storedMax < 10 || storedMax > 50)
-            {
-                storedMax = 20;
-                _settingsService.MaxCalls = storedMax;
-            }
-            _maxCalls = storedMax;
-
+            _settingsService.AutoPlay = _autoPlay;            // Call retention is now fixed after removing queue call control settings.
+            // MaxCallsToKeep is enforced when calls are inserted.
             // Restore playback speed step (0 = 1x, 1 = 1.5x, 2 = 2x).
             var savedSpeed = Preferences.Get(PlaybackSpeedStepPreferenceKey, 0.0);
             PlaybackSpeedStep = savedSpeed;
@@ -726,28 +708,6 @@ namespace JoesScanner.ViewModels
                 OnPropertyChanged();
             }
         }
-
-        public int MaxCalls
-        {
-            get => _maxCalls;
-            set
-            {
-                var clamped = value;
-
-                if (clamped < 10) clamped = 10;
-                if (clamped > 50) clamped = 50;
-
-                if (_maxCalls == clamped)
-                    return;
-
-                _maxCalls = clamped;
-                _settingsService.MaxCalls = clamped;
-                OnPropertyChanged();
-
-                EnforceMaxCalls();
-            }
-        }
-
         public string TaglineText => $"Server: {ServerUrl}";
 
         public string DonateUrl => "https://www.joesscanner.com/products/one-time-donation/";
@@ -833,12 +793,6 @@ namespace JoesScanner.ViewModels
             SetConnectionStatus(ConnectionStatus.Connecting);
             IsRunning = true;
 
-#if ANDROID
-            StartAndroidForegroundPlaybackService();
-#endif
-
-            EnsureBackgroundPlaybackWorkerStarted();
-
             _currentPlayingCall = null;
 
             if (Calls.Count > 0)
@@ -854,7 +808,6 @@ namespace JoesScanner.ViewModels
 
             _ = Task.Run(() => RunCallStreamLoopAsync(token));
         }
-
         private async Task RunCallStreamLoopAsync(CancellationToken token)
         {
             try
@@ -867,35 +820,16 @@ namespace JoesScanner.ViewModels
                     if (call == null)
                         continue;
 
-                    Interlocked.Increment(ref _totalCallsReceived);
-                    MainThread.BeginInvokeOnMainThread(() => OnPropertyChanged(nameof(TotalCallsReceived)));
+                    TotalCallsReceived++;
 
                     try
                     {
-                        // Prepare filter rules off the UI thread.
-                        _filterService.EnsureRulesForCall(call);
-
-                        // Decide if this call should be queued for background playback.
-                        var isPlayableForAudio =
-                            AudioEnabled &&
-                            AutoPlay &&
-                            !string.IsNullOrWhiteSpace(call.AudioUrl) &&
-                            !_filterService.ShouldHide(call) &&
-                            !_filterService.ShouldMute(call) &&
-                            !call.IsTranscriptionUpdate;
-
-                        if (isPlayableForAudio)
-                        {
-                            EnsureBackgroundPlaybackWorkerStarted();
-                            EnqueueForBackgroundPlayback(call);
-                        }
-
-                        // Post UI updates without awaiting the UI thread.
-                        MainThread.BeginInvokeOnMainThread(() =>
+                        await MainThread.InvokeOnMainThreadAsync(() =>
                         {
                             if (token.IsCancellationRequested)
                                 return;
 
+                            // Status sentinel messages
                             if (string.Equals(call.Talkgroup, "AUTH", StringComparison.OrdinalIgnoreCase))
                             {
                                 SetConnectionStatus(ConnectionStatus.AuthFailed);
@@ -929,6 +863,7 @@ namespace JoesScanner.ViewModels
                                 SetConnectionStatus(ConnectionStatus.Connected);
                             }
 
+                            // Transcription update for an existing call
                             if (call.IsTranscriptionUpdate && !string.IsNullOrWhiteSpace(call.BackendId))
                             {
                                 var existing = Calls.FirstOrDefault(c => c.BackendId == call.BackendId);
@@ -945,6 +880,7 @@ namespace JoesScanner.ViewModels
                                                 .Trim();
 
                                             cleaned = cleaned.Trim(' ', '|', ';');
+
                                             existing.DebugInfo = cleaned;
                                         }
                                     }
@@ -962,6 +898,9 @@ namespace JoesScanner.ViewModels
                                 return;
                             }
 
+                            // Ensure filter rules exist and apply filters
+                            _filterService.EnsureRulesForCall(call);
+
                             if (_filterService.ShouldHide(call))
                             {
                                 LastQueueEvent = $"Call dropped by filter at {DateTime.Now:T}";
@@ -969,82 +908,81 @@ namespace JoesScanner.ViewModels
                             }
 
                             Calls.Insert(0, call);
-
-                            if (_settingsService.AnnounceNewCalls)
-                            {
-                                var announcement = string.IsNullOrWhiteSpace(call.AccessibilityAnnouncement)
-                                    ? call.AccessibilitySummary
-                                    : call.AccessibilityAnnouncement;
-
-                                try
-                                {
-                                    SemanticScreenReader.Default.Announce(announcement);
-                                }
-                                catch
-                                {
-                                }
-                            }
-
                             TotalCallsInserted++;
+
                             LastQueueEvent = $"Inserted call at {DateTime.Now:T}";
 
                             EnforceMaxCalls();
                             UpdateQueueDerivedState();
+
+                            // If audio is enabled and autoplay is enabled, keep playback running
+                            if (AudioEnabled && AutoPlay)
+                            {
+                                _ = EnsureQueuePlaybackAsync();
+                            }
                         });
                     }
                     catch (Exception ex)
                     {
-                        System.Diagnostics.Debug.WriteLine($"Error processing call: {ex}");
+                        System.Diagnostics.Debug.WriteLine($"Error updating UI for call: {ex}");
                     }
                 }
             }
-            catch (System.OperationCanceledException)
+            catch (OperationCanceledException)
             {
+                // Expected during shutdown
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"Error in call stream loop: {ex}");
 
-                await MainThread.InvokeOnMainThreadAsync(() =>
+                try
                 {
-                    SetConnectionStatus(ConnectionStatus.Error, ex.Message);
-                });
+                    await MainThread.InvokeOnMainThreadAsync(() =>
+                    {
+                        SetConnectionStatus(ConnectionStatus.Error, ex.Message);
+                    });
+                }
+                catch
+                {
+                    // Swallow any cross thread failures on shutdown
+                }
             }
             finally
             {
-                await MainThread.InvokeOnMainThreadAsync(async () =>
+                try
                 {
-                    if (_cts == null || _cts.Token != token)
-                        return;
-
-                    IsRunning = false;
-                    Preferences.Set(LastConnectedPreferenceKey, false);
-
-                    try
+                    await MainThread.InvokeOnMainThreadAsync(async () =>
                     {
-                        await _audioPlaybackService.StopAsync();
-                    }
-                    catch
-                    {
-                    }
+                        // Only stop if this is still the active run
+                        if (_cts == null || _cts.Token != token)
+                            return;
 
-                    foreach (var c in Calls)
-                    {
-                        if (c.IsPlaying)
-                            c.IsPlaying = false;
-                    }
+                        IsRunning = false;
+                        Preferences.Default.Set(LastConnectedPreferenceKey, false);
 
-                    _currentPlayingCall = null;
-                    _lastPlayedCall = null;
-                    UpdateQueueDerivedState();
+                        if (_audioPlaybackService != null)
+                        {
+                            try
+                            {
+                                await _audioPlaybackService.StopAsync();
+                            }
+                            catch
+                            {
+                                // Ignore audio stop failures
+                            }
+                        }
 
-#if ANDROID
-                    StopAndroidForegroundPlaybackService();
-#endif
+                        _currentPlayingCall = null;
+                        _lastPlayedCall = null;
 
-                    StopBackgroundPlaybackWorker();
-                    ClearBackgroundPlaybackQueue();
-                });
+                        UpdateQueueDerivedState();
+                    });
+                }
+                catch
+                {
+                    // Ignore shutdown failures
+                }
             }
         }
 
@@ -1098,15 +1036,7 @@ namespace JoesScanner.ViewModels
 
             _currentPlayingCall = null;
             _lastPlayedCall = null;
-
             UpdateQueueDerivedState();
-
-#if ANDROID
-            StopAndroidForegroundPlaybackService();
-#endif
-
-            StopBackgroundPlaybackWorker();
-            ClearBackgroundPlaybackQueue();
 
             Preferences.Set(LastConnectedPreferenceKey, false);
         }
@@ -1168,38 +1098,26 @@ namespace JoesScanner.ViewModels
                     return;
                 }
 
-                ClearBackgroundPlaybackQueue();
-
-                await _playbackMutex.WaitAsync();
-                try
+                foreach (var call in Calls)
                 {
-                    _currentPlayingCall = item;
-
-                    try
-                    {
-                        MainThread.BeginInvokeOnMainThread(() =>
-                        {
-                            foreach (var call in Calls)
-                            {
-                                if (call.IsPlaying)
-                                    call.IsPlaying = false;
-                            }
-
-                            UpdateQueueDerivedState();
-                        });
-                    }
-                    catch
-                    {
-                    }
-
-                    await PlayAudioAsync(item);
-                }
-                finally
-                {
-                    try { _playbackMutex.Release(); } catch { }
+                    if (call.IsPlaying)
+                        call.IsPlaying = false;
                 }
 
-                LastQueueEvent = "Tapped call finished";
+                _currentPlayingCall = item;
+                UpdateQueueDerivedState();
+
+                await PlayAudioAsync(item);
+
+                if (AudioEnabled && IsRunning && AutoPlay && CallsWaiting > 0)
+                {
+                    LastQueueEvent = "Tapped call finished; restarting queue";
+                    _ = EnsureQueuePlaybackAsync();
+                }
+                else
+                {
+                    LastQueueEvent = "Tapped call finished";
+                }
             }
             catch (Exception ex)
             {
@@ -1241,22 +1159,20 @@ namespace JoesScanner.ViewModels
 
                 LastQueueEvent = "Jump to live (playing newest call)";
 
-                ClearBackgroundPlaybackQueue();
+                _currentPlayingCall = newest;
+                UpdateQueueDerivedState();
 
-                await _playbackMutex.WaitAsync();
-                try
+                await PlayAudioAsync(newest);
+
+                if (AudioEnabled && IsRunning && AutoPlay && CallsWaiting > 0)
                 {
-                    _currentPlayingCall = newest;
-                    UpdateQueueDerivedState();
-
-                    await PlayAudioAsync(newest);
+                    LastQueueEvent = "Jump to live finished; restarting queue";
+                    _ = EnsureQueuePlaybackAsync();
                 }
-                finally
+                else
                 {
-                    try { _playbackMutex.Release(); } catch { }
+                    LastQueueEvent = "Jump to live finished";
                 }
-
-                LastQueueEvent = "Jump to live finished";
             }
             catch (Exception ex)
             {
@@ -1279,7 +1195,6 @@ namespace JoesScanner.ViewModels
 
                 if (!newValue)
                 {
-                    ClearBackgroundPlaybackQueue();
                     await StopAudioFromToggleAsync();
 
                     _lastPlayedCall = null;
@@ -1288,8 +1203,6 @@ namespace JoesScanner.ViewModels
                 }
                 else
                 {
-                    EnsureBackgroundPlaybackWorkerStarted();
-
                     if (Calls.Count > 0)
                     {
                         _lastPlayedCall = Calls[0];
@@ -1306,110 +1219,6 @@ namespace JoesScanner.ViewModels
             {
                 System.Diagnostics.Debug.WriteLine($"Error in OnToggleAudioAsync: {ex}");
                 LastQueueEvent = "Error while toggling audio (see debug output)";
-            }
-        }
-
-        private void EnsureBackgroundPlaybackWorkerStarted()
-        {
-            if (_bgPlayTask != null && !_bgPlayTask.IsCompleted)
-                return;
-
-            _bgPlayCts?.Cancel();
-            _bgPlayCts?.Dispose();
-            _bgPlayCts = new CancellationTokenSource();
-
-            var token = _bgPlayCts.Token;
-
-            _bgPlayTask = Task.Run(async () =>
-            {
-                while (!token.IsCancellationRequested)
-                {
-                    try
-                    {
-                        await _bgPlaySignal.WaitAsync(token);
-                    }
-                    catch (System.OperationCanceledException)
-                    {
-                        break;
-                    }
-
-                    if (token.IsCancellationRequested)
-                        break;
-
-                    if (!IsRunning || !AudioEnabled || !AutoPlay)
-                        continue;
-
-                    if (!_bgPlayQueue.TryDequeue(out var next))
-                        continue;
-
-                    if (next == null)
-                        continue;
-
-                    if (string.IsNullOrWhiteSpace(next.AudioUrl))
-                        continue;
-
-                    if (_filterService.ShouldHide(next) || _filterService.ShouldMute(next))
-                        continue;
-
-                    try
-                    {
-                        await _playbackMutex.WaitAsync(token);
-
-                        if (!IsRunning || !AudioEnabled || !AutoPlay)
-                            continue;
-
-                        await PlayAudioAsync(next);
-                    }
-                    catch
-                    {
-                    }
-                    finally
-                    {
-                        try { _playbackMutex.Release(); } catch { }
-                    }
-                }
-            }, token);
-        }
-
-        private void StopBackgroundPlaybackWorker()
-        {
-            try
-            {
-                _bgPlayCts?.Cancel();
-            }
-            catch
-            {
-            }
-
-            try
-            {
-                _bgPlaySignal.Release();
-            }
-            catch
-            {
-            }
-        }
-
-        private void ClearBackgroundPlaybackQueue()
-        {
-            while (_bgPlayQueue.TryDequeue(out _))
-            {
-            }
-        }
-
-        private void EnqueueForBackgroundPlayback(CallItem call)
-        {
-            if (call == null)
-                return;
-
-            _bgPlayQueue.Enqueue(call);
-
-            try
-            {
-                _bgPlaySignal.Release();
-            }
-            catch
-            {
             }
         }
 
@@ -1479,13 +1288,13 @@ namespace JoesScanner.ViewModels
 
         private void EnforceMaxCalls()
         {
-            var max = MaxCalls;
-
+            var max = MaxCallsToKeep;
             while (Calls.Count > max)
             {
                 var lastIndex = Calls.Count - 1;
                 if (lastIndex >= 0)
                 {
+                    var removed = Calls[lastIndex];
                     Calls.RemoveAt(lastIndex);
                 }
             }
@@ -1542,32 +1351,7 @@ namespace JoesScanner.ViewModels
                 }
             }
 
-            if (!AudioEnabled)
-                return;
 
-            var waiting = CallsWaiting;
-            if (waiting <= 0)
-                return;
-
-            // Use the configured autospeed threshold from settings.
-            // Clamp defensively in case older settings stored out-of-range values.
-            var threshold = _settingsService.AutoSpeedThreshold;
-            if (threshold < 10)
-                threshold = 10;
-            if (threshold > 100)
-                threshold = 100;
-
-            // When backlog reaches the threshold, bump to 1.5x.
-            // When it reaches twice the threshold, bump to 2x.
-            if (waiting >= threshold * 2)
-            {
-                if (PlaybackSpeedStep < 2)
-                    PlaybackSpeedStep = 2;
-            }
-            else if (waiting >= threshold && PlaybackSpeedStep < 1)
-            {
-                PlaybackSpeedStep = 1;
-            }
         }
 
         private async Task PlaySingleCallWithoutQueueAsync(CallItem item)
@@ -1615,85 +1399,78 @@ namespace JoesScanner.ViewModels
             if (!AudioEnabled)
                 return;
 
-            if (_audioCts != null)
-            {
-                try
-                {
-                    _audioCts.Cancel();
-                }
-                catch
-                {
-                }
-
-                _audioCts.Dispose();
-                _audioCts = null;
-            }
-
-            _audioCts = new CancellationTokenSource();
-            var token = _audioCts.Token;
-
-            _currentPlayingCall = item;
+            // Create a CTS for this playback attempt and atomically swap it in.
+            // Cancel the previous CTS but do NOT dispose it here (it may still be in use by an in-flight playback).
+            var thisCts = new CancellationTokenSource();
+            var previousCts = Interlocked.Exchange(ref _audioCts, thisCts);
 
             try
             {
                 try
                 {
-                    MainThread.BeginInvokeOnMainThread(() =>
-                    {
-                        foreach (var call in Calls)
-                        {
-                            if (call.IsPlaying)
-                                call.IsPlaying = false;
-                        }
-
-                        item.IsPlaying = true;
-
-                        OnPropertyChanged(nameof(CallsWaiting));
-                        OnPropertyChanged(nameof(IsCallsWaitingVisible));
-                        UpdateQueueDerivedState();
-                    });
+                    previousCts?.Cancel();
                 }
                 catch
                 {
                 }
 
-                var rate = GetEffectivePlaybackRate(item);
+                var token = thisCts.Token;
 
-                var playbackUrl = await GetPlayableAudioUrlAsync(item.AudioUrl, token);
-                if (string.IsNullOrWhiteSpace(playbackUrl))
-                    return;
+                foreach (var call in Calls)
+                {
+                    if (call.IsPlaying)
+                        call.IsPlaying = false;
+                }
 
-                await _audioPlaybackService.PlayAsync(playbackUrl, rate, token);
-            }
-            catch (System.OperationCanceledException)
-            {
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"Error in PlayAudioAsync: {ex}");
+                item.IsPlaying = true;
+                _currentPlayingCall = item;
+
+                OnPropertyChanged(nameof(CallsWaiting));
+                OnPropertyChanged(nameof(IsCallsWaitingVisible));
+
+                try
+                {
+                    var rate = GetEffectivePlaybackRate(item);
+
+                    var playbackUrl = await GetPlayableAudioUrlAsync(item.AudioUrl, token);
+                    if (string.IsNullOrWhiteSpace(playbackUrl))
+                        return;
+
+                    await _audioPlaybackService.PlayAsync(playbackUrl, rate, token);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Error in PlayAudioAsync: {ex}");
+                }
             }
             finally
             {
+                // Only clear the shared CTS reference if we are still the current playback owner.
+                Interlocked.CompareExchange(ref _audioCts, null, thisCts);
+
+                try
+                {
+                    thisCts.Dispose();
+                }
+                catch
+                {
+                }
+
+                item.IsPlaying = false;
+
                 _lastPlayedCall = item;
 
                 if (_currentPlayingCall == item)
                     _currentPlayingCall = null;
 
-                try
-                {
-                    MainThread.BeginInvokeOnMainThread(() =>
-                    {
-                        item.IsPlaying = false;
-                        OnPropertyChanged(nameof(CallsWaiting));
-                        OnPropertyChanged(nameof(IsCallsWaitingVisible));
-                        UpdateQueueDerivedState();
-                    });
-                }
-                catch
-                {
-                }
+                OnPropertyChanged(nameof(CallsWaiting));
+                OnPropertyChanged(nameof(IsCallsWaitingVisible));
             }
         }
+
 
         private async Task<string?> GetPlayableAudioUrlAsync(string audioUrl, CancellationToken cancellationToken)
         {
@@ -1767,7 +1544,7 @@ namespace JoesScanner.ViewModels
 
                 return localPath;
             }
-            catch (System.OperationCanceledException)
+            catch (OperationCanceledException)
             {
                 throw;
             }
@@ -1802,41 +1579,9 @@ namespace JoesScanner.ViewModels
             await StartAsync();
         }
 
-#if ANDROID
-        private void StartAndroidForegroundPlaybackService()
-        {
-            try
-            {
-                var ctx = Android.App.Application.Context;
-                var intent = new Intent(ctx, typeof(AudioForegroundService));
-
-                if (Build.VERSION.SdkInt >= BuildVersionCodes.O)
-                    ContextCompat.StartForegroundService(ctx, intent);
-                else
-                    ctx.StartService(intent);
-            }
-            catch
-            {
-            }
-        }
-
-        private void StopAndroidForegroundPlaybackService()
-        {
-            try
-            {
-                var ctx = Android.App.Application.Context;
-                var intent = new Intent(ctx, typeof(AudioForegroundService));
-                ctx.StopService(intent);
-            }
-            catch
-            {
-            }
-        }
-#endif
-
         private static void ApplyTheme(string? mode)
         {
-            var app = Microsoft.Maui.Controls.Application.Current;
+            var app = Application.Current;
             if (app == null)
                 return;
 

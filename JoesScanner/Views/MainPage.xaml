@@ -4,10 +4,7 @@
     xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
     xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
     xmlns:vm="clr-namespace:JoesScanner.ViewModels"
-    xmlns:models="clr-namespace:JoesScanner.Models"
-    xmlns:views="clr-namespace:JoesScanner.Views"
     x:Name="Page"
-    x:DataType="vm:MainViewModel"
     Title="Joes Scanner"
     BackgroundColor="{AppThemeBinding Light=#f3f4f6, Dark=#020617}"
     Shell.NavBarIsVisible="False">
@@ -23,8 +20,8 @@
             StrokeThickness="0"
             BackgroundColor="{AppThemeBinding Light=White, Dark=#020617}"
             StrokeShape="RoundRectangle 24"
-            VerticalOptions="Fill"
-            HorizontalOptions="Fill">
+            VerticalOptions="FillAndExpand"
+            HorizontalOptions="FillAndExpand">
 
             <Border.Shadow>
                 <Shadow
@@ -81,14 +78,12 @@
                     </HorizontalStackLayout>
 
                     <!-- Row 1 left: connection status (dot and text) -->
-                    <Grid
+                    <StackLayout
                         Grid.Row="1"
                         Grid.Column="0"
-                        Grid.ColumnSpan="2"
-                        ColumnDefinitions="Auto,*"
-                        ColumnSpacing="6"
-                        VerticalOptions="Center"
-                        HorizontalOptions="Fill">
+                        Orientation="Horizontal"
+                        Spacing="6"
+                        VerticalOptions="Center">
 
                         <BoxView
                             WidthRequest="8"
@@ -98,16 +93,10 @@
                             VerticalOptions="Center" />
 
                         <Label
-                            Grid.Column="1"
                             Text="{Binding ConnectionStatusText}"
                             FontSize="12"
-                            LineBreakMode="WordWrap"
-                            MaxLines="2"
-                            HorizontalOptions="Fill"
-                            VerticalOptions="Center"
-                            TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
-                    </Grid>
-
+                            VerticalOptions="Center" />
+                    </StackLayout>
 
                     <!-- Row 1 right: buttons -->
                     <HorizontalStackLayout
@@ -209,10 +198,10 @@
                     ItemsSource="{Binding Calls}"
                     ItemsUpdatingScrollMode="KeepScrollOffset"
                     ItemsLayout="VerticalList"
-                    VerticalOptions="Fill">
+                    VerticalOptions="FillAndExpand">
 
                     <CollectionView.ItemTemplate>
-                        <DataTemplate x:DataType="models:CallItem">
+                        <DataTemplate>
                             <!-- Single call card -->
                             <Border
                                 Margin="0,0,0,8"
@@ -226,7 +215,9 @@
                                 </Border.Stroke>
 
                                 <Border.GestureRecognizers>
-                                    <TapGestureRecognizer Tapped="OnCallTapped" />
+                                    <TapGestureRecognizer
+                                        Command="{Binding BindingContext.PlayAudioCommand, Source={x:Reference Page}}"
+                                        CommandParameter="{Binding .}" />
                                 </Border.GestureRecognizers>
 
                                 <Border.Triggers>

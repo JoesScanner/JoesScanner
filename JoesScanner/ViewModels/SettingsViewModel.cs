@@ -118,14 +118,8 @@ namespace JoesScanner.ViewModels
         private bool _hasChanges;
 
         // Saved snapshot for settings that are only committed on Save
-        private int _savedMaxCalls;
-        private int _savedAutoSpeedThreshold;
-        private bool _savedAnnounceNewCalls;
 
         // Call display settings
-        private int _maxCalls;
-        private int _autoSpeedThreshold;
-        private bool _announceNewCalls;
 
         // Theme as a single string: "System", "Light", "Dark"
         private string _themeMode = "System";
@@ -182,10 +176,7 @@ namespace JoesScanner.ViewModels
         }
 
         // True when any setting on this page differs from what was last saved.
-        public bool HasUnsavedSettings =>
-            HasChanges ||
-            _maxCalls != _savedMaxCalls ||
-            _autoSpeedThreshold != _savedAutoSpeedThreshold;
+        public bool HasUnsavedSettings => HasChanges;
 
         // True when there are unsaved connection or credential changes.
         public bool HasChanges
@@ -366,68 +357,8 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        public int MaxCalls
-        {
-            get => _maxCalls;
-            set
-            {
-                var clamped = value;
-                if (clamped < 5) clamped = 5;
-                if (clamped > 50) clamped = 50;
 
-                if (_maxCalls == clamped)
-                    return;
 
-                _maxCalls = clamped;
-                OnPropertyChanged();
-
-                _settings.MaxCalls = _maxCalls;
-                _mainViewModel.MaxCalls = _maxCalls;
-                _savedMaxCalls = _maxCalls;
-
-                OnPropertyChanged(nameof(HasUnsavedSettings));
-            }
-        }
-
-        public int AutoSpeedThreshold
-        {
-            get => _autoSpeedThreshold;
-            set
-            {
-                var clamped = value;
-                if (clamped < 10) clamped = 10;
-                if (clamped > 100) clamped = 100;
-
-                if (_autoSpeedThreshold == clamped)
-                    return;
-
-                _autoSpeedThreshold = clamped;
-                OnPropertyChanged();
-
-                _settings.AutoSpeedThreshold = _autoSpeedThreshold;
-                _savedAutoSpeedThreshold = _autoSpeedThreshold;
-
-                OnPropertyChanged(nameof(HasUnsavedSettings));
-            }
-        }
-
-        public bool AnnounceNewCalls
-        {
-            get => _announceNewCalls;
-            set
-            {
-                if (_announceNewCalls == value)
-                    return;
-
-                _announceNewCalls = value;
-                OnPropertyChanged();
-
-                _settings.AnnounceNewCalls = _announceNewCalls;
-                _savedAnnounceNewCalls = _announceNewCalls;
-
-                OnPropertyChanged(nameof(HasUnsavedSettings));
-            }
-        }
 
         public string ThemeMode
         {
@@ -538,9 +469,6 @@ namespace JoesScanner.ViewModels
             _useDefaultConnection = string.Equals(_serverUrl, defaultUrl, StringComparison.OrdinalIgnoreCase);
             _savedUseDefaultConnection = _useDefaultConnection;
 
-            _maxCalls = _settings.MaxCalls;
-            _autoSpeedThreshold = _settings.AutoSpeedThreshold;
-            _announceNewCalls = _settings.AnnounceNewCalls;
 
             var rawTheme = _settings.ThemeMode;
             if (string.IsNullOrWhiteSpace(rawTheme)
@@ -576,9 +504,6 @@ namespace JoesScanner.ViewModels
 
             _savedServerUrl = _settings.ServerUrl ?? string.Empty;
             _savedUseDefaultConnection = UseDefaultConnection;
-            _savedMaxCalls = _maxCalls;
-            _savedAutoSpeedThreshold = _autoSpeedThreshold;
-            _savedAnnounceNewCalls = _announceNewCalls;
             _savedBasicAuthUsername = _basicAuthUsername;
             _savedBasicAuthPassword = _basicAuthPassword;
 
@@ -731,21 +656,14 @@ namespace JoesScanner.ViewModels
             _settings.BasicAuthUsername = BasicAuthUsername;
             _settings.BasicAuthPassword = BasicAuthPassword;
 
-            _settings.MaxCalls = MaxCalls;
-            _mainViewModel.MaxCalls = MaxCalls;
 
-            _settings.AutoSpeedThreshold = AutoSpeedThreshold;
 
-            _settings.AnnounceNewCalls = AnnounceNewCalls;
 
             _settings.ThemeMode = ThemeMode;
             ApplyTheme(ThemeMode);
 
             _savedServerUrl = _settings.ServerUrl ?? string.Empty;
             _savedUseDefaultConnection = UseDefaultConnection;
-            _savedMaxCalls = _maxCalls;
-            _savedAutoSpeedThreshold = _autoSpeedThreshold;
-            _savedAnnounceNewCalls = _announceNewCalls;
             _savedBasicAuthUsername = _basicAuthUsername;
             _savedBasicAuthPassword = _basicAuthPassword;
 

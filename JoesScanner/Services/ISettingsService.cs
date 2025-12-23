@@ -13,15 +13,12 @@ namespace JoesScanner.Services
         bool AutoPlay { get; set; }
 
         // When true, announce new calls via the platform screen reader.
-        bool AnnounceNewCalls { get; set; }
 
         // Maximum number of calls to keep in the visible queue.
-        int MaxCalls { get; set; }
 
         // Threshold (in calls waiting) where automatic playback speed increases begin.
         // When the number of waiting calls reaches this value or higher, the app may
         // temporarily increase playback speed to help clear the backlog.
-        int AutoSpeedThreshold { get; set; }
 
         // Scroll behavior:
         //   "Down" = newest at bottom
