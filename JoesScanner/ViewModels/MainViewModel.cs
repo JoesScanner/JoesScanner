@@ -1399,66 +1399,54 @@ namespace JoesScanner.ViewModels
             if (!AudioEnabled)
                 return;
 
-            // Create a CTS for this playback attempt and atomically swap it in.
-            // Cancel the previous CTS but do NOT dispose it here (it may still be in use by an in-flight playback).
-            var thisCts = new CancellationTokenSource();
-            var previousCts = Interlocked.Exchange(ref _audioCts, thisCts);
+            if (_audioCts != null)
+            {
+                try
+                {
+                    _audioCts.Cancel();
+                }
+                catch
+                {
+                }
+
+                _audioCts.Dispose();
+                _audioCts = null;
+            }
+
+            _audioCts = new CancellationTokenSource();
+            var token = _audioCts.Token;
+
+            foreach (var call in Calls)
+            {
+                if (call.IsPlaying)
+                    call.IsPlaying = false;
+            }
+
+            item.IsPlaying = true;
+            _currentPlayingCall = item;
+
+            OnPropertyChanged(nameof(CallsWaiting));
+            OnPropertyChanged(nameof(IsCallsWaitingVisible));
 
             try
             {
-                try
-                {
-                    previousCts?.Cancel();
-                }
-                catch
-                {
-                }
+                var rate = GetEffectivePlaybackRate(item);
 
-                var token = thisCts.Token;
+                var playbackUrl = await GetPlayableAudioUrlAsync(item.AudioUrl, token);
+                if (string.IsNullOrWhiteSpace(playbackUrl))
+                    return;
 
-                foreach (var call in Calls)
-                {
-                    if (call.IsPlaying)
-                        call.IsPlaying = false;
-                }
-
-                item.IsPlaying = true;
-                _currentPlayingCall = item;
-
-                OnPropertyChanged(nameof(CallsWaiting));
-                OnPropertyChanged(nameof(IsCallsWaitingVisible));
-
-                try
-                {
-                    var rate = GetEffectivePlaybackRate(item);
-
-                    var playbackUrl = await GetPlayableAudioUrlAsync(item.AudioUrl, token);
-                    if (string.IsNullOrWhiteSpace(playbackUrl))
-                        return;
-
-                    await _audioPlaybackService.PlayAsync(playbackUrl, rate, token);
-                }
-                catch (OperationCanceledException)
-                {
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"Error in PlayAudioAsync: {ex}");
-                }
+                await _audioPlaybackService.PlayAsync(playbackUrl, rate, token);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error in PlayAudioAsync: {ex}");
             }
             finally
             {
-                // Only clear the shared CTS reference if we are still the current playback owner.
-                Interlocked.CompareExchange(ref _audioCts, null, thisCts);
-
-                try
-                {
-                    thisCts.Dispose();
-                }
-                catch
-                {
-                }
-
                 item.IsPlaying = false;
 
                 _lastPlayedCall = item;
@@ -1470,7 +1458,6 @@ namespace JoesScanner.ViewModels
                 OnPropertyChanged(nameof(IsCallsWaitingVisible));
             }
         }
-
 
         private async Task<string?> GetPlayableAudioUrlAsync(string audioUrl, CancellationToken cancellationToken)
         {

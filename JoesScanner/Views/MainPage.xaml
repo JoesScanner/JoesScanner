@@ -4,9 +4,7 @@
     xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
     xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
     xmlns:vm="clr-namespace:JoesScanner.ViewModels"
-    xmlns:models="clr-namespace:JoesScanner.Models"
     x:Name="Page"
-    x:DataType="vm:MainViewModel"
     Title="Joes Scanner"
     BackgroundColor="{AppThemeBinding Light=#f3f4f6, Dark=#020617}"
     Shell.NavBarIsVisible="False">
@@ -203,8 +201,8 @@
                     VerticalOptions="FillAndExpand">
 
                     <CollectionView.ItemTemplate>
-                        <DataTemplate x:DataType="models:CallItem">
-<!-- Single call card -->
+                        <DataTemplate>
+                            <!-- Single call card -->
                             <Border
                                 Margin="0,0,0,8"
                                 Padding="6"
@@ -218,7 +216,7 @@
 
                                 <Border.GestureRecognizers>
                                     <TapGestureRecognizer
-                                        Command="{Binding PlayAudioCommand, Source={x:Reference Page}}"
+                                        Command="{Binding BindingContext.PlayAudioCommand, Source={x:Reference Page}}"
                                         CommandParameter="{Binding .}" />
                                 </Border.GestureRecognizers>
 

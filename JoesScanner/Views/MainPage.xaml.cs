@@ -1,4 +1,3 @@
-using System.Windows.Input;
 using JoesScanner.ViewModels;
 
 namespace JoesScanner.Views
@@ -6,8 +5,6 @@ namespace JoesScanner.Views
     public partial class MainPage : ContentPage
     {
         private readonly MainViewModel _viewModel;
-
-        public ICommand PlayAudioCommand => _viewModel.PlayAudioCommand;
 
         public MainPage(MainViewModel viewModel)
         {

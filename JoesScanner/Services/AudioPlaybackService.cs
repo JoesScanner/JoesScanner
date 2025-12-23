@@ -89,108 +89,87 @@ namespace JoesScanner.Services
         }
 
 #if WINDOWS
-// Plays the audio URL on Windows using WinUI's MediaPlayer with the specified playbackRate.
-// The returned task completes when playback ends or is canceled.
-private Task PlayOnWindowsAsync(string audioUrl, double playbackRate, CancellationToken cancellationToken)
-{
-    var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
-    MainThread.BeginInvokeOnMainThread(() =>
-    {
-        try
+        // Plays the audio URL on Windows using WinUI's MediaPlayer with the specified playbackRate.
+        // The returned task completes when playback ends or is canceled.
+        private Task PlayOnWindowsAsync(string audioUrl, double playbackRate, CancellationToken cancellationToken)
         {
-            try
-            {
-                _player?.Pause();
-                _player?.Dispose();
-            }
-            catch
-            {
-            }
-            finally
-            {
-                _player = null;
-            }
+            var tcs = new TaskCompletionSource();
 
-            var player = new WinMediaPlayer
-            {
-                Source = MediaSource.CreateFromUri(new Uri(audioUrl))
-            };
-
-            _player = player;
-
-            try
-            {
-                player.PlaybackSession.PlaybackRate = playbackRate;
-            }
-            catch
-            {
-            }
-
-            void CleanupPlayer()
+            MainThread.BeginInvokeOnMainThread(() =>
             {
                 try
                 {
-                    player.Pause();
+                    _player?.Pause();
+                    _player?.Dispose();
                 }
                 catch
                 {
                 }
 
+                var player = new WinMediaPlayer
+                {
+                    Source = MediaSource.CreateFromUri(new Uri(audioUrl))
+                };
+
+                _player = player;
+
+                // Apply playback rate (1.0 = normal).
                 try
                 {
-                    player.Dispose();
+                    player.PlaybackSession.PlaybackRate = playbackRate;
                 }
                 catch
                 {
+                    // If rate cannot be set, ignore and play at normal speed.
                 }
 
-                if (_player == player)
-                    _player = null;
-            }
-
-            player.MediaEnded += (sender, args) =>
-            {
-                MainThread.BeginInvokeOnMainThread(() =>
+                player.MediaEnded += (sender, args) =>
                 {
-                    CleanupPlayer();
+                    try
+                    {
+                        player.Pause();
+                        player.Dispose();
+                    }
+                    catch
+                    {
+                    }
+                    finally
+                    {
+                        if (_player == player)
+                            _player = null;
+                    }
+
                     tcs.TrySetResult();
-                });
-            };
+                };
 
-            if (cancellationToken.CanBeCanceled)
-            {
-                try
+                if (cancellationToken.CanBeCanceled)
                 {
                     cancellationToken.Register(() =>
                     {
-                        MainThread.BeginInvokeOnMainThread(() =>
+                        try
                         {
-                            CleanupPlayer();
-                            tcs.TrySetCanceled(cancellationToken);
-                        });
+                            player.Pause();
+                            player.Dispose();
+                        }
+                        catch
+                        {
+                        }
+                        finally
+                        {
+                            if (_player == player)
+                                _player = null;
+                        }
+
+                        tcs.TrySetCanceled(cancellationToken);
                     });
                 }
-                catch (Exception ex)
-                {
-                    // If registration fails for any reason, do not hang the awaiter.
-                    System.Diagnostics.Debug.WriteLine($"PlayOnWindowsAsync cancellation registration failed: {ex}");
-                }
-            }
 
-            player.Play();
-        }
-        catch (Exception ex)
-        {
-            // Ensure callers do not hang waiting for a completion that never comes.
-            tcs.TrySetException(ex);
-        }
-    });
+                player.Play();
+            });
 
-    return tcs.Task;
-}
+            return tcs.Task;
+        }
 #endif
-
 
 #if ANDROID
         // Plays the audio URL on Android using MediaPlayer with the specified playbackRate.
