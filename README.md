@@ -48,8 +48,8 @@ Enter these on the Settings screen and use “Test Connection.” When the conne
 
 - Windows  
 - Android  
-- iOS  
-- macOS  
+- iOS (coming soon)
+- macOS (coming soon)
 
 The application runs on desktops, laptops, tablets, and mobile devices.
 
