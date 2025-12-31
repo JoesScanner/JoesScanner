@@ -80,19 +80,19 @@
                                         Margin="0,2,0,0" />
                             </Grid>
 
-                        <!-- Header buttons -->
-                        <Grid
+                            <!-- Header buttons -->
+                            <Grid
                             ColumnDefinitions="*,Auto"
                             ColumnSpacing="12"
                             HorizontalOptions="Fill">
 
-                            <VerticalStackLayout
+                                <VerticalStackLayout
                                 Grid.Column="0"
                                 Spacing="0"
                                 HorizontalOptions="FillAndExpand"
                                 VerticalOptions="Center">
 
-                                <Label
+                                    <Label
                                     Text="Validating server..."
                                     IsVisible="{Binding ShowServerValidationProgressHeader}"
                                     FontSize="14"
@@ -101,7 +101,7 @@
                                     LineBreakMode="WordWrap"
                                     MaxLines="2" />
 
-                                <Label
+                                    <Label
                                     Text="{Binding ValidationSuccessHeaderText}"
                                     IsVisible="{Binding ShowServerValidationSuccessHeader}"
                                     FontSize="14"
@@ -110,7 +110,7 @@
                                     LineBreakMode="WordWrap"
                                     MaxLines="2" />
 
-                                <Label
+                                    <Label
                                     Text="{Binding ServerValidationMessage}"
                                     IsVisible="{Binding ShowServerValidationErrorHeader}"
                                     FontSize="14"
@@ -119,26 +119,26 @@
                                     LineBreakMode="WordWrap"
                                     MaxLines="3" />
 
-                            </VerticalStackLayout>
+                                </VerticalStackLayout>
 
-                            <HorizontalStackLayout
+                                <HorizontalStackLayout
                                 Grid.Column="1"
                                 Spacing="10"
                                 HorizontalOptions="End"
                                 VerticalOptions="Center">
 
-                                <Button
+                                    <Button
                                     Text="Close"
                                     Style="{StaticResource SecondaryPillButtonStyle}"
                                     Clicked="OnBackClicked" />
 
-                                <Button
+                                    <Button
                                     Text="Log"
                                     Style="{StaticResource SecondaryPillButtonStyle}"
                                     Clicked="OnLogClicked" />
-                            </HorizontalStackLayout>
+                                </HorizontalStackLayout>
 
-                        </Grid>
+                            </Grid>
 
                         </VerticalStackLayout>
                     </Border>
@@ -248,12 +248,12 @@
 
                                     </HorizontalStackLayout>
                                 </Grid>
-
-                                <!-- Username and password row -->
+<!-- Username and password row -->
                                 <Grid
                                     Grid.Row="1"
                                     ColumnDefinitions="Auto,*,Auto,*,Auto"
-                                    ColumnSpacing="6">
+                                    ColumnSpacing="6"
+                                    Margin="0,6,0,0">
 
                                     <!-- Username -->
                                     <Label

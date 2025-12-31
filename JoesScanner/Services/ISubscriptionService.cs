@@ -1,4 +1,7 @@
-﻿namespace JoesScanner.Services
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace JoesScanner.Services
 {
     public sealed class SubscriptionCheckResult
     {

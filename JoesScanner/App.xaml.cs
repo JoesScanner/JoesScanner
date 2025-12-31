@@ -1,10 +1,40 @@
-﻿namespace JoesScanner
+using System;
+using JoesScanner.Services;
+using Microsoft.Maui.Storage;
+
+namespace JoesScanner
 {
     public partial class App : Application
     {
-        public App()
+        private readonly ISettingsService _settings;
+        private readonly ITelemetryService _telemetryService;
+
+        public App(ISettingsService settings, ITelemetryService telemetryService)
         {
+            _settings = settings ?? throw new ArgumentNullException(nameof(settings));
+            _telemetryService = telemetryService ?? throw new ArgumentNullException(nameof(telemetryService));
+
             InitializeComponent();
+
+            // Always create a new session token for each process start.
+            // This guarantees the first ping after startup uses the new token.
+            _settings.AuthSessionToken = Guid.NewGuid().ToString();
+
+            // Touch DeviceInstallId so it is created early if settings lazily generates it.
+            _ = _settings.DeviceInstallId;
+
+            _telemetryService.TrackAppStarted();
+
+            AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+            {
+                try
+                {
+                    _telemetryService.TrackAppStopping();
+                }
+                catch
+                {
+                }
+            };
         }
 
         protected override Window CreateWindow(IActivationState? activationState)
@@ -18,7 +48,6 @@
             const double minWidth = 500;
             const double minHeight = 500;
 
-            // Restore last size and position if available
             var width = Preferences.Get("WindowWidth", defaultWidth);
             var height = Preferences.Get("WindowHeight", defaultHeight);
             var x = Preferences.Get("WindowX", double.NaN);
@@ -30,14 +59,12 @@
             window.MinimumWidth = minWidth;
             window.MinimumHeight = minHeight;
 
-            // Only apply position if we have valid stored coordinates
             if (!double.IsNaN(x) && !double.IsNaN(y))
             {
                 window.X = x;
                 window.Y = y;
             }
 
-            // Persist size and position on change
             window.SizeChanged += (_, _) =>
             {
                 Preferences.Set("WindowWidth", window.Width);

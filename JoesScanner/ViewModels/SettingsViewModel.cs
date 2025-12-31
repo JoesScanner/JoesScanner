@@ -7,6 +7,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading;
 using System.Windows.Input;
 
 namespace JoesScanner.ViewModels
@@ -18,6 +19,7 @@ namespace JoesScanner.ViewModels
     {
         private readonly ISettingsService _settings;
         private readonly MainViewModel _mainViewModel;
+        private readonly ITelemetryService _telemetryService;
         private readonly HttpClient _httpClient;
         private readonly FilterService _filterService = FilterService.Instance;
 
@@ -25,6 +27,7 @@ namespace JoesScanner.ViewModels
 
         // Connection fields
         private string _serverUrl = string.Empty;
+        private string _authServerBaseUrl = string.Empty;
         private bool _useDefaultConnection;
 
         // Basic auth credentials for the TR server
@@ -114,6 +117,7 @@ namespace JoesScanner.ViewModels
 
         // Saved snapshot to detect connection changes
         private string _savedServerUrl = string.Empty;
+        private string _savedAuthServerBaseUrl = string.Empty;
         private bool _savedUseDefaultConnection;
         private bool _hasChanges;
 
@@ -147,10 +151,11 @@ namespace JoesScanner.ViewModels
 
         public const string DefaultServerUrl = "https://app.joesscanner.com";
 
-        public SettingsViewModel(ISettingsService settingsService, MainViewModel mainViewModel)
+        public SettingsViewModel(ISettingsService settingsService, MainViewModel mainViewModel, ITelemetryService telemetryService)
         {
             _settings = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
             _mainViewModel = mainViewModel ?? throw new ArgumentNullException(nameof(mainViewModel));
+            _telemetryService = telemetryService ?? throw new ArgumentNullException(nameof(telemetryService));
 
             _httpClient = new HttpClient
             {
@@ -164,7 +169,7 @@ namespace JoesScanner.ViewModels
 
             InitializeFromSettings();
 
-            SaveCommand = new Command(SaveSettings);
+            SaveCommand = new Command(async () => await SaveSettingsAsync());
             ResetServerCommand = new Command(ResetServerUrl);
 
             // Validate always saves first, then validates.
@@ -291,6 +296,22 @@ namespace JoesScanner.ViewModels
                     OnPropertyChanged(nameof(UseDefaultConnection));
                 }
 
+                UpdateHasChanges();
+            }
+        }
+
+
+        public string AuthServerBaseUrl
+        {
+            get => _authServerBaseUrl;
+            set
+            {
+                var newValue = value ?? string.Empty;
+                if (string.Equals(_authServerBaseUrl, newValue, StringComparison.Ordinal))
+                    return;
+
+                _authServerBaseUrl = newValue;
+                OnPropertyChanged();
                 UpdateHasChanges();
             }
         }
@@ -460,6 +481,9 @@ namespace JoesScanner.ViewModels
             _serverUrl = _settings.ServerUrl ?? string.Empty;
             _savedServerUrl = _serverUrl;
 
+            _authServerBaseUrl = _settings.AuthServerBaseUrl ?? string.Empty;
+            _savedAuthServerBaseUrl = _authServerBaseUrl;
+
             _basicAuthUsername = _settings.BasicAuthUsername ?? string.Empty;
             _basicAuthPassword = _settings.BasicAuthPassword ?? string.Empty;
             _savedBasicAuthUsername = _basicAuthUsername;
@@ -503,6 +527,7 @@ namespace JoesScanner.ViewModels
             }
 
             _savedServerUrl = _settings.ServerUrl ?? string.Empty;
+            _savedAuthServerBaseUrl = _settings.AuthServerBaseUrl ?? string.Empty;
             _savedUseDefaultConnection = UseDefaultConnection;
             _savedBasicAuthUsername = _basicAuthUsername;
             _savedBasicAuthPassword = _basicAuthPassword;
@@ -640,7 +665,7 @@ namespace JoesScanner.ViewModels
             app.UserAppTheme = theme;
         }
 
-        private void SaveSettings()
+        private async Task SaveSettingsAsync()
         {
             if (UseDefaultConnection)
             {
@@ -653,8 +678,38 @@ namespace JoesScanner.ViewModels
                 _mainViewModel.ServerUrl = ServerUrl;
             }
 
-            _settings.BasicAuthUsername = BasicAuthUsername;
-            _settings.BasicAuthPassword = BasicAuthPassword;
+            var priorUser = (_settings.BasicAuthUsername ?? string.Empty).Trim();
+            var priorPass = (_settings.BasicAuthPassword ?? string.Empty).Trim();
+            var priorSessionToken = (_settings.AuthSessionToken ?? string.Empty).Trim();
+
+            var newUser = (BasicAuthUsername ?? string.Empty).Trim();
+            var newPass = (BasicAuthPassword ?? string.Empty).Trim();
+
+            var credentialsChanged =
+                !string.Equals(priorUser, newUser, StringComparison.Ordinal) ||
+                !string.Equals(priorPass, newPass, StringComparison.Ordinal);
+
+            _settings.BasicAuthUsername = newUser;
+            _settings.BasicAuthPassword = newPass;
+
+            if (credentialsChanged)
+            {
+                try
+                {
+                    await _telemetryService.ResetSessionAsync("credentials_changed", CancellationToken.None);
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    await _mainViewModel.RestartMonitoringIfRunningAsync();
+                }
+                catch
+                {
+                }
+            }
 
 
 
@@ -663,6 +718,7 @@ namespace JoesScanner.ViewModels
             ApplyTheme(ThemeMode);
 
             _savedServerUrl = _settings.ServerUrl ?? string.Empty;
+            _savedAuthServerBaseUrl = _settings.AuthServerBaseUrl ?? string.Empty;
             _savedUseDefaultConnection = UseDefaultConnection;
             _savedBasicAuthUsername = _basicAuthUsername;
             _savedBasicAuthPassword = _basicAuthPassword;
@@ -683,7 +739,7 @@ namespace JoesScanner.ViewModels
 
         private async Task SaveThenValidateServerUrlAsync()
         {
-            SaveSettings();
+            await SaveSettingsAsync();
             await ValidateServerUrlAsync();
         }
 
@@ -745,7 +801,7 @@ namespace JoesScanner.ViewModels
                         return;
                     }
 
-                    var authUrl = "https://joesscanner.com/wp-json/joes-scanner/v1/auth";
+                    var authUrl = BuildAuthServerUrl("/wp-json/joes-scanner/v1/auth");
 
                     var appVersion = AppInfo.Current.VersionString ?? string.Empty;
                     var appBuild = AppInfo.Current.BuildString ?? string.Empty;
@@ -932,7 +988,7 @@ namespace JoesScanner.ViewModels
                     _settings.SubscriptionLastMessage = planSummary;
 
                     _settings.AuthSessionToken = authResponse.SessionToken ?? string.Empty;
-                    await TrySendSessionPingAsync(authResponse.SessionToken);
+                    await _telemetryService.AdoptSessionTokenAsync(authResponse.SessionToken ?? string.Empty, "settings_validate_auth_success", CancellationToken.None);
 
                     SetShowValidationPrefix(true);
                     UpdateSubscriptionSummaryFromSettings();
@@ -1012,6 +1068,7 @@ namespace JoesScanner.ViewModels
         {
             var has =
                 !string.Equals(_serverUrl, _savedServerUrl, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(_authServerBaseUrl, _savedAuthServerBaseUrl, StringComparison.Ordinal)
                 || _useDefaultConnection != _savedUseDefaultConnection
                 || !string.Equals(_basicAuthUsername, _savedBasicAuthUsername, StringComparison.Ordinal)
                 || !string.Equals(_basicAuthPassword, _savedBasicAuthPassword, StringComparison.Ordinal);
@@ -1022,10 +1079,28 @@ namespace JoesScanner.ViewModels
         public void DiscardConnectionChanges()
         {
             ServerUrl = _savedServerUrl;
+            AuthServerBaseUrl = _savedAuthServerBaseUrl;
             UseDefaultConnection = _savedUseDefaultConnection;
             BasicAuthUsername = _savedBasicAuthUsername;
             BasicAuthPassword = _savedBasicAuthPassword;
             HasChanges = false;
+        }
+
+
+        private string BuildAuthServerUrl(string path)
+        {
+            var baseUrl = (AuthServerBaseUrl ?? string.Empty).Trim();
+
+            if (string.IsNullOrWhiteSpace(baseUrl))
+                baseUrl = "https://joesscanner.com";
+
+            baseUrl = baseUrl.TrimEnd('/');
+
+            var cleanPath = (path ?? string.Empty).Trim();
+            if (!cleanPath.StartsWith("/", StringComparison.Ordinal))
+                cleanPath = "/" + cleanPath;
+
+            return baseUrl + cleanPath;
         }
 
         private static string CombineDeviceModel(string manufacturer, string model)
@@ -1040,50 +1115,6 @@ namespace JoesScanner.ViewModels
                 return mfg;
 
             return mfg + " " + mdl;
-        }
-
-        private async Task TrySendSessionPingAsync(string? sessionToken)
-        {
-            sessionToken = (sessionToken ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(sessionToken))
-                return;
-
-            try
-            {
-                var pingUrl = "https://joesscanner.com/wp-json/joes-scanner/v1/ping";
-
-                var appVersion = AppInfo.Current.VersionString ?? string.Empty;
-                var appBuild = AppInfo.Current.BuildString ?? string.Empty;
-
-                var platform = DeviceInfo.Platform.ToString();
-                var type = DeviceInfo.Idiom.ToString();
-                var model = CombineDeviceModel(DeviceInfo.Manufacturer, DeviceInfo.Model);
-                var osVersion = DeviceInfo.VersionString ?? string.Empty;
-
-                var payload = new
-                {
-                    session_token = sessionToken,
-                    device_id = _settings.DeviceInstallId,
-
-                    device_platform = platform,
-                    device_type = type,
-                    device_model = model,
-
-                    app_version = appVersion,
-                    app_build = appBuild,
-                    os_version = osVersion
-                };
-
-                var json = JsonSerializer.Serialize(payload);
-                using var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-                using var response = await _httpClient.PostAsync(pingUrl, content);
-
-                _ = response.IsSuccessStatusCode;
-            }
-            catch
-            {
-            }
         }
 
         class AuthResponseDto

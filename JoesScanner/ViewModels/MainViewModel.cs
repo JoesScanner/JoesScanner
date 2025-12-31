@@ -23,6 +23,7 @@ namespace JoesScanner.ViewModels
         private readonly HttpClient _audioHttpClient;
         private readonly FilterService _filterService = FilterService.Instance;
         private readonly ISubscriptionService _subscriptionService;
+        private readonly ITelemetryService _telemetryService;
 
         private CancellationTokenSource? _cts;
         private CancellationTokenSource? _audioCts;
@@ -121,12 +122,13 @@ namespace JoesScanner.ViewModels
             ICallStreamService callStreamService,
             ISettingsService settingsService,
             IAudioPlaybackService audioPlaybackService,
-            ISubscriptionService subscriptionService)
+            ISubscriptionService subscriptionService, ITelemetryService telemetryService)
         {
             _callStreamService = callStreamService ?? throw new ArgumentNullException(nameof(callStreamService));
             _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
             _audioPlaybackService = audioPlaybackService ?? throw new ArgumentNullException(nameof(audioPlaybackService));
             _subscriptionService = subscriptionService ?? throw new ArgumentNullException(nameof(subscriptionService));
+            _telemetryService = telemetryService ?? throw new ArgumentNullException(nameof(telemetryService));
 
             _audioHttpClient = new HttpClient
             {
@@ -166,7 +168,7 @@ namespace JoesScanner.ViewModels
 
             // Commands.
             StartCommand = new Command(Start, () => !IsRunning);
-            StopCommand = new Command(async () => await StopAsync(), () => IsRunning);
+            StopCommand = new Command(async () => await StopMonitoringAsync(), () => IsRunning);
             OpenDonateCommand = new Command(async () => await OpenDonateAsync());
             ToggleAudioCommand = new Command(async () => await OnToggleAudioAsync());
             PlayAudioCommand = new Command<CallItem>(async item => await OnCallTappedAsync(item));
@@ -715,10 +717,10 @@ namespace JoesScanner.ViewModels
         public void Start()
         {
             AppLog.Add("User clicked Start Monitoring");
-            _ = StartAsync();
+            _ = StartMonitoringAsync();
         }
 
-        private async Task StartAsync()
+        public async Task StartMonitoringAsync()
         {
             if (IsRunning)
                 return;
@@ -731,6 +733,8 @@ namespace JoesScanner.ViewModels
                 isJoesScannerServer =
                     string.Equals(serverUri.Host, "app.joesscanner.com", StringComparison.OrdinalIgnoreCase);
             }
+
+            _telemetryService.TrackConnectionAttempt(serverUrl, isJoesScannerServer);
 
             var username = _settingsService.BasicAuthUsername ?? string.Empty;
 
@@ -986,7 +990,7 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        private async Task StopAsync()
+        public async Task StopMonitoringAsync()
         {
             AppLog.Add("User clicked Stop monitoring.");
 
@@ -1040,6 +1044,16 @@ namespace JoesScanner.ViewModels
 
             Preferences.Set(LastConnectedPreferenceKey, false);
         }
+
+        public async Task RestartMonitoringIfRunningAsync()
+        {
+            if (!IsRunning)
+                return;
+
+            await StopMonitoringAsync();
+            await StartMonitoringAsync();
+        }
+
 
         public async Task StopAudioFromToggleAsync()
         {
@@ -1563,7 +1577,7 @@ namespace JoesScanner.ViewModels
             if (IsRunning)
                 return;
 
-            await StartAsync();
+            await StartMonitoringAsync();
         }
 
         private static void ApplyTheme(string? mode)
