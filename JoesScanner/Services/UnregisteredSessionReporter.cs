@@ -1,8 +1,4 @@
-﻿using System;
-using System.Text;
-using Microsoft.Maui.ApplicationModel;
-using Microsoft.Maui.Devices;
-using Microsoft.Maui.Storage;
+﻿using System.Text;
 using System.Text.Json;
 
 namespace JoesScanner.Services

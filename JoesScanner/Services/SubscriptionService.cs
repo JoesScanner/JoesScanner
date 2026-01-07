@@ -1,13 +1,7 @@
-using System;
 using System.Globalization;
-using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Threading;
-using System.Threading.Tasks;
-using Microsoft.Maui.ApplicationModel;
-using Microsoft.Maui.Devices;
 
 namespace JoesScanner.Services
 {
@@ -91,10 +85,10 @@ namespace JoesScanner.Services
                 using var response = await _httpClient.PostAsync(GetAuthEndpoint(), content, cancellationToken).ConfigureAwait(false);
                 var responseBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
-                AuthResponse? authResponse = null;
+                AuthResponseDto? authResponse = null;
                 try
                 {
-                    authResponse = JsonSerializer.Deserialize<AuthResponse>(
+                    authResponse = JsonSerializer.Deserialize<AuthResponseDto>(
                         responseBody,
                         new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
                 }
@@ -103,23 +97,32 @@ namespace JoesScanner.Services
                 }
 
                 var statusInt = (int)response.StatusCode;
+                var nowUtc = DateTime.UtcNow;
 
                 // Any HTTP response counts as "server contacted", so there is no grace window on a denial.
                 if (!response.IsSuccessStatusCode)
                 {
-                    _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
+                    _settings.SubscriptionLastCheckUtc = nowUtc;
                     _settings.SubscriptionLastStatusOk = false;
-                    _settings.SubscriptionLastLevel = authResponse?.SubscriptionLevel ?? string.Empty;
-                    _settings.SubscriptionExpiresUtc = authResponse?.ExpiresUtc;
-                    _settings.SubscriptionRenewalUtc = authResponse?.RenewalUtc;
-                    _settings.SubscriptionLastMessage = authResponse?.Message ?? response.ReasonPhrase ?? "Denied";
+
+                    var sub = authResponse?.Subscription;
+                    var planLabel = (sub?.LevelLabel ?? sub?.Level ?? string.Empty).Trim();
+                    var priceText = (sub?.PriceId ?? string.Empty).Trim();
+
+                    _settings.SubscriptionLastLevel = planLabel;
+                    _settings.SubscriptionPriceId = priceText;
+
+                    _settings.SubscriptionExpiresUtc = TryParseUtc(sub?.ExpiresAt);
+                    _settings.SubscriptionRenewalUtc = null;
+
+                    _settings.SubscriptionLastMessage = (authResponse?.Message ?? response.ReasonPhrase ?? "Denied").Trim();
 
                     return new SubscriptionCheckResult(false, "http_" + statusInt.ToString(CultureInfo.InvariantCulture), _settings.SubscriptionLastMessage);
                 }
 
                 if (authResponse == null)
                 {
-                    _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
+                    _settings.SubscriptionLastCheckUtc = nowUtc;
                     _settings.SubscriptionLastStatusOk = false;
                     _settings.SubscriptionLastLevel = string.Empty;
                     _settings.SubscriptionExpiresUtc = null;
@@ -131,24 +134,84 @@ namespace JoesScanner.Services
 
                 if (!authResponse.Ok)
                 {
-                    _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
+                    _settings.SubscriptionLastCheckUtc = nowUtc;
                     _settings.SubscriptionLastStatusOk = false;
-                    _settings.SubscriptionLastLevel = authResponse.SubscriptionLevel ?? string.Empty;
-                    _settings.SubscriptionExpiresUtc = authResponse.ExpiresUtc;
-                    _settings.SubscriptionRenewalUtc = authResponse.RenewalUtc;
-                    _settings.SubscriptionLastMessage = authResponse.Message ?? "Denied";
+
+                    var sub = authResponse.Subscription;
+                    var planLabel = (sub?.LevelLabel ?? sub?.Level ?? string.Empty).Trim();
+                    var priceText = (sub?.PriceId ?? string.Empty).Trim();
+
+                    _settings.SubscriptionLastLevel = planLabel;
+                    _settings.SubscriptionPriceId = priceText;
+
+                    _settings.SubscriptionExpiresUtc = TryParseUtc(sub?.ExpiresAt);
+                    _settings.SubscriptionRenewalUtc = null;
+
+                    _settings.SubscriptionLastMessage = (authResponse.Message ?? "Denied").Trim();
 
                     return new SubscriptionCheckResult(false, authResponse.Error ?? "denied", _settings.SubscriptionLastMessage);
                 }
 
-                // Success
-                _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
-                _settings.SubscriptionLastStatusOk = true;
-                _settings.SubscriptionLastLevel = authResponse.SubscriptionLevel ?? string.Empty;
-                _settings.SubscriptionExpiresUtc = authResponse.ExpiresUtc;
-                _settings.SubscriptionRenewalUtc = authResponse.RenewalUtc;
+                var subscription = authResponse.Subscription;
 
-                var planSummary = authResponse.Message ?? "OK";
+                // Some failures can still be HTTP 200, but the subscription is inactive.
+                if (subscription != null && !subscription.Active)
+                {
+                    _settings.SubscriptionLastCheckUtc = nowUtc;
+                    _settings.SubscriptionLastStatusOk = false;
+
+                    var planLabel = (subscription.LevelLabel ?? subscription.Level ?? string.Empty).Trim();
+                    var priceText = (subscription.PriceId ?? string.Empty).Trim();
+
+                    _settings.SubscriptionLastLevel = planLabel;
+                    _settings.SubscriptionPriceId = priceText;
+
+                    _settings.SubscriptionExpiresUtc = TryParseUtc(subscription.ExpiresAt);
+                    _settings.SubscriptionRenewalUtc = null;
+
+                    _settings.SubscriptionLastMessage = (authResponse.Message ?? "No active subscription").Trim();
+
+                    return new SubscriptionCheckResult(false, authResponse.Error ?? "no_active_subscription", _settings.SubscriptionLastMessage);
+                }
+
+                // Success
+                _settings.SubscriptionLastCheckUtc = nowUtc;
+                _settings.SubscriptionLastStatusOk = true;
+
+                var level = (subscription?.LevelLabel ?? subscription?.Level ?? string.Empty).Trim();
+                var price = (subscription?.PriceId ?? string.Empty).Trim();
+
+                _settings.SubscriptionLastLevel = level;
+                _settings.SubscriptionPriceId = price;
+
+                _settings.SubscriptionExpiresUtc = TryParseUtc(subscription?.ExpiresAt);
+
+                var statusText = (subscription?.Status ?? string.Empty).Trim().ToLowerInvariant();
+                var renewalRaw = statusText == "trialing"
+                    ? (subscription?.TrialEndsAt ?? subscription?.PeriodEndAt ?? subscription?.ExpiresAt)
+                    : (subscription?.PeriodEndAt ?? subscription?.ExpiresAt ?? subscription?.TrialEndsAt);
+
+                var renewalUtc = TryParseUtc(renewalRaw);
+
+                // For trialing subscriptions, treat renewal as unknown and rely on the message summary instead.
+                _settings.SubscriptionRenewalUtc = statusText == "trialing" ? null : renewalUtc;
+
+                var planSummary = BuildPlanSummary(subscription);
+
+                if (string.IsNullOrWhiteSpace(planSummary))
+                    planSummary = (authResponse.Message ?? string.Empty).Trim();
+
+                // If we already had richer cached text, do not downgrade it to OK.
+                if (string.IsNullOrWhiteSpace(planSummary))
+                {
+                    var prior = (_settings.SubscriptionLastMessage ?? string.Empty).Trim();
+                    if (!string.IsNullOrWhiteSpace(prior) && !string.Equals(prior, "OK", StringComparison.OrdinalIgnoreCase))
+                        planSummary = prior;
+                }
+
+                if (string.IsNullOrWhiteSpace(planSummary))
+                    planSummary = "OK";
+
                 _settings.SubscriptionLastMessage = planSummary;
 
                 // If the server issued a session token, adopt it so telemetry uses the same mechanism for all devices.
@@ -185,6 +248,84 @@ namespace JoesScanner.Services
             }
         }
 
+        private static string BuildPlanSummary(AuthSubscriptionDto? sub)
+        {
+            if (sub == null)
+                return string.Empty;
+
+            var planLabel = (sub.LevelLabel ?? sub.Level ?? string.Empty).Trim();
+            var priceText = (sub.PriceId ?? string.Empty).Trim();
+            var statusText = (sub.Status ?? string.Empty).Trim().ToLowerInvariant();
+
+            var periodRaw = statusText == "trialing"
+                ? (sub.TrialEndsAt ?? sub.PeriodEndAt ?? sub.ExpiresAt ?? string.Empty)
+                : (sub.PeriodEndAt ?? sub.ExpiresAt ?? sub.TrialEndsAt ?? string.Empty);
+
+            var dtUtc = TryParseUtc(periodRaw);
+            var formattedDate = dtUtc.HasValue
+                ? DateTime.SpecifyKind(dtUtc.Value, DateTimeKind.Utc).ToLocalTime().ToString("yyyy-MM-dd")
+                : string.Empty;
+
+            var dateLabel = statusText == "trialing"
+                ? "Trial end date:"
+                : "Renewal:";
+
+            if (!string.IsNullOrEmpty(planLabel) &&
+                !string.IsNullOrEmpty(priceText) &&
+                !string.IsNullOrEmpty(formattedDate))
+            {
+                return $"Plan: {planLabel} - {priceText} - {dateLabel} {formattedDate}";
+            }
+
+            if (!string.IsNullOrEmpty(planLabel) &&
+                !string.IsNullOrEmpty(priceText))
+            {
+                return $"Plan: {planLabel} - {priceText}";
+            }
+
+            if (!string.IsNullOrEmpty(planLabel) &&
+                !string.IsNullOrEmpty(formattedDate))
+            {
+                return $"Plan: {planLabel} - {dateLabel} {formattedDate}";
+            }
+
+            if (!string.IsNullOrEmpty(planLabel))
+            {
+                return $"Plan: {planLabel}";
+            }
+
+            if (!string.IsNullOrEmpty(formattedDate))
+            {
+                return $"{dateLabel} {formattedDate}";
+            }
+
+            return string.Empty;
+        }
+
+        private static DateTime? TryParseUtc(string? raw)
+        {
+            var s = (raw ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(s))
+                return null;
+
+            if (DateTimeOffset.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var dto) ||
+                DateTimeOffset.TryParse(s, out dto))
+            {
+                return dto.UtcDateTime;
+            }
+
+            if (DateTime.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var dt) ||
+                DateTime.TryParse(s, out dt))
+            {
+                if (dt.Kind == DateTimeKind.Unspecified)
+                    dt = DateTime.SpecifyKind(dt, DateTimeKind.Utc);
+
+                return dt.ToUniversalTime();
+            }
+
+            return null;
+        }
+
         private static string CombineDeviceModel(string? manufacturer, string? model)
         {
             var mfg = (manufacturer ?? string.Empty).Trim();
@@ -199,7 +340,7 @@ namespace JoesScanner.Services
             return mfg + " " + mdl;
         }
 
-        private sealed class AuthResponse
+        private sealed class AuthResponseDto
         {
             [JsonPropertyName("ok")]
             public bool Ok { get; set; }
@@ -213,14 +354,35 @@ namespace JoesScanner.Services
             [JsonPropertyName("session_token")]
             public string? SessionToken { get; set; }
 
-            [JsonPropertyName("subscription_level")]
-            public string? SubscriptionLevel { get; set; }
+            [JsonPropertyName("subscription")]
+            public AuthSubscriptionDto? Subscription { get; set; }
+        }
 
-            [JsonPropertyName("expires_utc")]
-            public DateTime? ExpiresUtc { get; set; }
+        private sealed class AuthSubscriptionDto
+        {
+            [JsonPropertyName("active")]
+            public bool Active { get; set; }
 
-            [JsonPropertyName("renewal_utc")]
-            public DateTime? RenewalUtc { get; set; }
+            [JsonPropertyName("status")]
+            public string? Status { get; set; }
+
+            [JsonPropertyName("level")]
+            public string? Level { get; set; }
+
+            [JsonPropertyName("level_label")]
+            public string? LevelLabel { get; set; }
+
+            [JsonPropertyName("price_id")]
+            public string? PriceId { get; set; }
+
+            [JsonPropertyName("period_end_at")]
+            public string? PeriodEndAt { get; set; }
+
+            [JsonPropertyName("trial_ends_at")]
+            public string? TrialEndsAt { get; set; }
+
+            [JsonPropertyName("expires_at")]
+            public string? ExpiresAt { get; set; }
         }
     }
 }

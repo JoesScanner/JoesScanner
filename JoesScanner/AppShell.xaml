@@ -3,10 +3,56 @@
     x:Class="JoesScanner.AppShell"
     xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
     xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
-    xmlns:views="clr-namespace:JoesScanner.Views">
+    xmlns:views="clr-namespace:JoesScanner.Views"
+    BackgroundColor="{StaticResource TabStripNavy}">
 
-    <!-- Single main item that hosts the MainPage -->
-    <ShellContent
-        Route="main"
-        ContentTemplate="{DataTemplate views:MainPage}" />
+    <TabBar
+    Shell.TabBarBackgroundColor="{StaticResource TabStripNavy}"
+    Shell.TabBarForegroundColor="White"
+    Shell.TabBarUnselectedColor="White">
+
+
+        <Tab Title="" Icon="logo.png">
+            <ShellContent
+                Route="main"
+                ContentTemplate="{DataTemplate views:MainPage}" />
+        </Tab>
+
+        <Tab Title="" Icon="mc_history.png">
+            <ShellContent
+                Route="history"
+                ContentTemplate="{DataTemplate views:HistoryPage}" />
+        </Tab>
+
+        <Tab Title="" Icon="mc_archive.png">
+            <ShellContent
+                Route="archive"
+                ContentTemplate="{DataTemplate views:ArchivePage}" />
+        </Tab>
+
+        <Tab Title="" Icon="mc_stats.png">
+            <ShellContent
+                Route="stats"
+                ContentTemplate="{DataTemplate views:StatsPage}" />
+        </Tab>
+
+        <Tab Title="" Icon="mc_communications.png">
+            <ShellContent
+                Route="communications"
+                ContentTemplate="{DataTemplate views:CommunicationsPage}" />
+        </Tab>
+
+        <Tab Title="" Icon="mc_log.png">
+            <ShellContent
+                Route="log"
+                ContentTemplate="{DataTemplate views:LogPage}" />
+        </Tab>
+
+        <Tab Title="" Icon="mc_settings.png">
+            <ShellContent
+                Route="settings"
+                ContentTemplate="{DataTemplate views:SettingsPage}" />
+        </Tab>
+
+    </TabBar>
 </Shell>

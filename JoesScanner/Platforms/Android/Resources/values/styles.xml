@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<resources>
+
+	<!-- Main application theme -->
+	<style name="Maui.MainTheme" parent="Theme.Material3.DayNight.NoActionBar">
+		<item name="colorPrimary">@color/colorPrimary</item>
+		<item name="colorPrimaryDark">@color/colorPrimaryDark</item>
+		<item name="colorAccent">@color/colorAccent</item>
+
+		<item name="bottomNavigationStyle">@style/JoesScanner_BottomNavigationViewStyle</item>
+	</style>
+
+	<!-- Splash theme used by MainActivity -->
+	<style name="Maui.SplashTheme" parent="Theme.Material3.DayNight.NoActionBar">
+		<item name="android:windowBackground">@drawable/maui_splash</item>
+	</style>
+
+	<style name="JoesScanner_BottomNavigationViewStyle" parent="Widget.Material3.BottomNavigationView">
+		<item name="android:background">#091F4B</item>
+		<item name="labelVisibilityMode">unlabeled</item>
+		<item name="itemHorizontalTranslationEnabled">false</item>
+		<item name="itemIconSize">48dp</item>
+	</style>
+
+</resources>

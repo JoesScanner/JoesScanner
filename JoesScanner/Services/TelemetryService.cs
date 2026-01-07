@@ -56,15 +56,13 @@ namespace JoesScanner.Services
                 BeginNewAppStartSessionToken();
             }
 
-            StartHeartbeat();
-
+            // Do not start the heartbeat on app start. Heartbeats must be driven by
+            // monitoring state so background playback does not create multi-hour sessions.
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    await SendPingAsync(_settings.AuthSessionToken, "session_start_app_start", CancellationToken.None).ConfigureAwait(false);
                     await SendAppEventAsync("app_started", null, CancellationToken.None).ConfigureAwait(false);
-                    await SendAppEventAsync("session_start", BuildSessionStartPayload("app_start"), CancellationToken.None).ConfigureAwait(false);
                     await TryFlushQueueAsync(CancellationToken.None).ConfigureAwait(false);
                 }
                 catch
@@ -75,6 +73,8 @@ namespace JoesScanner.Services
 
         public void TrackAppStopping()
         {
+            StopHeartbeat();
+
             // Session end is inferred by absence of heartbeat pings.
             _ = Task.Run(async () =>
             {
@@ -150,6 +150,58 @@ namespace JoesScanner.Services
                 }
             });
         }
+
+        
+        public void StartMonitoringHeartbeat(string streamServerUrl)
+        {
+            EnsureAppStartSessionInitialized();
+
+            // Treat each monitoring run as its own session on the server.
+            BeginNewMonitoringSessionToken();
+
+            StartHeartbeat();
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await SendPingAsync(_settings.AuthSessionToken, "monitoring_start", CancellationToken.None).ConfigureAwait(false);
+                    await SendAppEventAsync("session_start", BuildSessionStartPayload("monitoring_start"), CancellationToken.None).ConfigureAwait(false);
+                    await SendAppEventAsync("monitoring_start", new
+                    {
+                        stream_server_url = streamServerUrl ?? string.Empty
+                    }, CancellationToken.None).ConfigureAwait(false);
+
+                    await TryFlushQueueAsync(CancellationToken.None).ConfigureAwait(false);
+                }
+                catch
+                {
+                }
+            });
+        }
+
+        public void StopMonitoringHeartbeat(string reason)
+        {
+            StopHeartbeat();
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await SendAppEventAsync("monitoring_stop", new
+                    {
+                        reason = reason ?? string.Empty
+                    }, CancellationToken.None).ConfigureAwait(false);
+
+                    await SendAppEventAsync("session_end", BuildSessionEndPayload(_settings.AuthSessionToken), CancellationToken.None).ConfigureAwait(false);
+                    await TryFlushQueueAsync(CancellationToken.None).ConfigureAwait(false);
+                }
+                catch
+                {
+                }
+            });
+        }
+
 
         public async Task ResetSessionAsync(string reason, CancellationToken cancellationToken)
         {
@@ -255,6 +307,21 @@ namespace JoesScanner.Services
             }, null, HeartbeatInterval, HeartbeatInterval);
         }
 
+        private void StopHeartbeat()
+        {
+            var timer = Interlocked.Exchange(ref _heartbeatTimer, null);
+            if (timer == null)
+                return;
+
+            try
+            {
+                timer.Dispose();
+            }
+            catch
+            {
+            }
+        }
+
         private void BeginNewAppStartSessionToken()
         {
             var newToken = Guid.NewGuid().ToString();
@@ -264,6 +331,18 @@ namespace JoesScanner.Services
             Preferences.Set(LastSessionTokenKey, newToken);
             Preferences.Set(SessionStartUtcKey, DateTime.UtcNow.ToString("o"));
         }
+
+
+        private void BeginNewMonitoringSessionToken()
+        {
+            var newToken = Guid.NewGuid().ToString();
+
+            _settings.AuthSessionToken = newToken;
+
+            Preferences.Set(LastSessionTokenKey, newToken);
+            Preferences.Set(SessionStartUtcKey, DateTime.UtcNow.ToString("o"));
+        }
+
 
         private void EnsureAppStartSessionInitialized()
         {

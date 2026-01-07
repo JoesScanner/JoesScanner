@@ -83,8 +83,4 @@
 		</MauiXaml>
 	</ItemGroup>
 
-	<ItemGroup>
-	  <Folder Include="Resources\Raw\" />
-	</ItemGroup>
-
 </Project>

@@ -1,3 +1,4 @@
+using System.Net.Http;
 using JoesScanner.Services;
 using JoesScanner.ViewModels;
 using JoesScanner.Views;
@@ -15,7 +16,6 @@ public static class MauiProgram
             .ConfigureFonts(fonts =>
             {
                 // Add custom fonts here if needed.
-                // fonts.AddFont("OpenSans-Regular.ttf", "OpenSansRegular");
             });
 
         // Services
@@ -23,7 +23,6 @@ public static class MauiProgram
         builder.Services.AddSingleton<ICallStreamService, CallStreamService>();
         builder.Services.AddSingleton<IAudioPlaybackService, AudioPlaybackService>();
         builder.Services.AddSingleton<ISubscriptionService, SubscriptionService>();
-
         builder.Services.AddSingleton<ITelemetryService, TelemetryService>();
 
         builder.Services.AddSingleton(sp => new HttpClient());
@@ -35,6 +34,11 @@ public static class MauiProgram
 
         // Pages
         builder.Services.AddTransient<MainPage>();
+        builder.Services.AddTransient<HistoryPage>();
+        builder.Services.AddTransient<ArchivePage>();
+        builder.Services.AddTransient<StatsPage>();
+        builder.Services.AddTransient<CommunicationsPage>();
+        builder.Services.AddTransient<LogPage>();
         builder.Services.AddTransient<SettingsPage>();
 
         return builder.Build();

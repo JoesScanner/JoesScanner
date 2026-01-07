@@ -11,6 +11,11 @@
                 <ResourceDictionary Source="Resources/Styles/Styles.xaml" />
             </ResourceDictionary.MergedDictionaries>
 
+            <!-- Default page background so the outer shell around cards uses the navy theme color. -->
+            <Style TargetType="ContentPage">
+                <Setter Property="BackgroundColor" Value="{StaticResource TabStripNavy}" />
+            </Style>
+
             <!-- Global compact Entry style -->
             <Style TargetType="Entry">
                 <!-- Shared look -->

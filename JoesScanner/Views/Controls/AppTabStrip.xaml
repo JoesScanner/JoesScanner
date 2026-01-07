@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentView
+    x:Class="JoesScanner.Views.Controls.AppTabStrip"
+    xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    x:Name="Root">
+
+    <ContentView.Resources>
+        <Style x:Key="TabButtonStyle" TargetType="ImageButton">
+            <Setter Property="Aspect" Value="AspectFit" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Margin" Value="0" />
+            <Setter Property="BackgroundColor" Value="Transparent" />
+            <Setter Property="Opacity" Value="1" />
+            <Setter Property="ToolTipProperties.Text" Value="{Binding Source={RelativeSource Self}, Path=AutomationId}" />
+        </Style>
+    </ContentView.Resources>
+
+    <Border
+        BackgroundColor="{StaticResource TabStripNavy}"
+        StrokeThickness="0"
+        Padding="0"
+        Margin="0">
+
+        <Border.StrokeShape>
+            <RoundRectangle CornerRadius="0" />
+        </Border.StrokeShape>
+
+        <Grid
+            RowDefinitions="Auto,Auto"
+            RowSpacing="0"
+            Padding="0"
+            Margin="0">
+
+            <ScrollView
+                Grid.Row="0"
+                Orientation="Horizontal"
+                HeightRequest="{Binding TabStripHeight, Source={x:Reference Root}}"
+                HorizontalScrollBarVisibility="Never"
+                VerticalScrollBarVisibility="Never"
+                VerticalOptions="End"
+                Padding="0,5,0,0">
+
+                <HorizontalStackLayout
+                    Spacing="0"
+                    Padding="0"
+                    VerticalOptions="End"
+                    HorizontalOptions="Center"
+                    HeightRequest="{Binding TabStripHeight, Source={x:Reference Root}}">
+
+                    <!-- Main tab, logo removed by swapping icon -->
+                    <ImageButton
+                        Style="{StaticResource TabButtonStyle}"
+                        Source="logo_button.png"
+                        HeightRequest="{Binding TabIconSize, Source={x:Reference Root}}"
+                        WidthRequest="{Binding TabIconSize, Source={x:Reference Root}}"
+                        Clicked="OnMainClicked"
+                        AutomationId="TabMain"
+                        AutomationProperties.Name="Main"
+                        ToolTipProperties.Text="Main" />
+
+                    <ImageButton
+                        Style="{StaticResource TabButtonStyle}"
+                        Source="mc_history.png"
+                        HeightRequest="{Binding TabIconSize, Source={x:Reference Root}}"
+                        WidthRequest="{Binding TabIconSize, Source={x:Reference Root}}"
+                        Clicked="OnHistoryClicked"
+                        AutomationId="TabHistory"
+                        AutomationProperties.Name="History"
+                        ToolTipProperties.Text="History" />
+
+                    <ImageButton
+                        Style="{StaticResource TabButtonStyle}"
+                        Source="mc_archive.png"
+                        HeightRequest="{Binding TabIconSize, Source={x:Reference Root}}"
+                        WidthRequest="{Binding TabIconSize, Source={x:Reference Root}}"
+                        Clicked="OnArchiveClicked"
+                        AutomationId="TabArchive"
+                        AutomationProperties.Name="Archive"
+                        ToolTipProperties.Text="Archive" />
+
+                    <ImageButton
+                        Style="{StaticResource TabButtonStyle}"
+                        Source="mc_stats.png"
+                        HeightRequest="{Binding TabIconSize, Source={x:Reference Root}}"
+                        WidthRequest="{Binding TabIconSize, Source={x:Reference Root}}"
+                        Clicked="OnStatsClicked"
+                        AutomationId="TabStats"
+                        AutomationProperties.Name="Stats"
+                        ToolTipProperties.Text="Stats" />
+
+                    <ImageButton
+                        Style="{StaticResource TabButtonStyle}"
+                        Source="mc_communications.png"
+                        HeightRequest="{Binding TabIconSize, Source={x:Reference Root}}"
+                        WidthRequest="{Binding TabIconSize, Source={x:Reference Root}}"
+                        Clicked="OnCommunicationsClicked"
+                        AutomationId="TabCommunications"
+                        AutomationProperties.Name="Communications"
+                        ToolTipProperties.Text="Communications" />
+
+                    <ImageButton
+                        Style="{StaticResource TabButtonStyle}"
+                        Source="mc_log.png"
+                        HeightRequest="{Binding TabIconSize, Source={x:Reference Root}}"
+                        WidthRequest="{Binding TabIconSize, Source={x:Reference Root}}"
+                        Clicked="OnLogClicked"
+                        AutomationId="TabLog"
+                        AutomationProperties.Name="Log"
+                        ToolTipProperties.Text="Log" />
+
+                    <ImageButton
+                        Style="{StaticResource TabButtonStyle}"
+                        Source="mc_settings.png"
+                        HeightRequest="{Binding TabIconSize, Source={x:Reference Root}}"
+                        WidthRequest="{Binding TabIconSize, Source={x:Reference Root}}"
+                        Clicked="OnSettingsClicked"
+                        AutomationId="TabSettings"
+                        AutomationProperties.Name="Settings"
+                        ToolTipProperties.Text="Settings"/>
+
+                </HorizontalStackLayout>
+            </ScrollView>
+
+            <Image
+                Grid.Row="1"
+                Source="banner.png"
+                Aspect="AspectFit"
+                HorizontalOptions="Center"
+                VerticalOptions="End"
+                WidthRequest="300"
+                
+                Margin="0,6,0,4" />
+        </Grid>
+    </Border>
+</ContentView>

@@ -21,6 +21,10 @@
     <Color x:Key="MidnightBlue">#190649</Color>
     <Color x:Key="OffBlack">#1f1f1f</Color>
 
+    <!-- UI surfaces used for the top and bottom tab strip background. -->
+    <!-- Picked to match the dark navy in the mc_* button art. -->
+    <Color x:Key="TabStripNavy">#091F4B</Color>
+
     <!-- Gray scale used for borders, backgrounds, and text. -->
     <Color x:Key="Gray100">#E1E1E1</Color>
     <Color x:Key="Gray200">#C8C8C8</Color>

@@ -1,7 +1,4 @@
 ﻿// Services/IJoesScannerApiClient.cs
-using System.Threading;
-using System.Threading.Tasks;
-
 namespace JoesScanner.Services
 {
     public interface IJoesScannerApiClient

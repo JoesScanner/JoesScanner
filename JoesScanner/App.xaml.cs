@@ -1,6 +1,4 @@
-using System;
 using JoesScanner.Services;
-using Microsoft.Maui.Storage;
 
 namespace JoesScanner
 {
@@ -42,10 +40,10 @@ namespace JoesScanner
             var window = new Window(new AppShell());
 
 #if WINDOWS
-            const double defaultWidth = 500;
+            const double defaultWidth = 430;
             const double defaultHeight = 1000;
 
-            const double minWidth = 500;
+            const double minWidth = 430;
             const double minHeight = 500;
 
             var width = Preferences.Get("WindowWidth", defaultWidth);

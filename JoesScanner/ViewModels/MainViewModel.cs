@@ -1,15 +1,8 @@
 using JoesScanner.Models;
 using JoesScanner.Services;
-using Microsoft.Maui.Storage;
-using System;
 using System.Collections.ObjectModel;
-using System.IO;
-using System.Linq;
-using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
 using System.Windows.Input;
 namespace JoesScanner.ViewModels
 {
@@ -118,6 +111,23 @@ namespace JoesScanner.ViewModels
         // Command to skip backlog and jump playback to the newest call.
         public ICommand JumpToLiveCommand { get; }
 
+
+        // Command bound to the premium media play or stop button.
+        // When not running, starts monitoring. When running, stops monitoring.
+        public ICommand ToggleConnectionCommand { get; }
+
+        // Command bound to the premium media speed down button.
+        public ICommand PlaybackSpeedDownCommand { get; }
+
+        // Command bound to the premium media speed up button.
+        public ICommand PlaybackSpeedUpCommand { get; }
+
+        // Command bound to the premium media previous call button.
+        public ICommand PreviousCallCommand { get; }
+
+        // Command bound to the premium media next call button.
+        public ICommand NextCallCommand { get; }
+
         public MainViewModel(
             ICallStreamService callStreamService,
             ISettingsService settingsService,
@@ -174,6 +184,12 @@ namespace JoesScanner.ViewModels
             PlayAudioCommand = new Command<CallItem>(async item => await OnCallTappedAsync(item));
             JumpToLiveCommand = new Command(async () => await JumpToLiveAsync());
 
+            ToggleConnectionCommand = new Command(async () => await ToggleConnectionAsync());
+            PlaybackSpeedDownCommand = new Command(DecreasePlaybackSpeedStep);
+            PlaybackSpeedUpCommand = new Command(IncreasePlaybackSpeedStep);
+            PreviousCallCommand = new Command(async () => await NavigateToAdjacentCallAsync(1));
+            NextCallCommand = new Command(async () => await NavigateToAdjacentCallAsync(-1));
+
             // React when filters change (mute / disable / clear).
             _filterService.RulesChanged += FilterServiceOnRulesChanged;
 
@@ -198,6 +214,7 @@ namespace JoesScanner.ViewModels
 
                 _isRunning = value;
                 OnPropertyChanged();
+                OnPropertyChanged(nameof(MediaPlayStopIcon));
                 ((Command)StartCommand).ChangeCanExecute();
                 ((Command)StopCommand).ChangeCanExecute();
 
@@ -235,6 +252,11 @@ namespace JoesScanner.ViewModels
         // Background color of the main page audio button.
         // Blue when audio is enabled, gray when muted.
         public Color AudioButtonBackground => AudioEnabled ? Colors.Blue : Colors.LightGray;
+
+
+        // Icon for the premium media play/stop button.
+        // Shows play when disconnected, stop when connected.
+        public string MediaPlayStopIcon => IsRunning ? "mc_stop.png" : "mc_play.png";
 
         // Base server URL used for all API calls and displayed in the UI.
         public string ServerUrl
@@ -797,6 +819,8 @@ namespace JoesScanner.ViewModels
             SetConnectionStatus(ConnectionStatus.Connecting);
             IsRunning = true;
 
+            _telemetryService.StartMonitoringHeartbeat(serverUrl);
+
             _currentPlayingCall = null;
 
             if (Calls.Count > 0)
@@ -962,6 +986,8 @@ namespace JoesScanner.ViewModels
                         if (_cts == null || _cts.Token != token)
                             return;
 
+                        _telemetryService.StopMonitoringHeartbeat("stream_loop_end");
+
                         IsRunning = false;
                         Preferences.Default.Set(LastConnectedPreferenceKey, false);
 
@@ -993,6 +1019,7 @@ namespace JoesScanner.ViewModels
         public async Task StopMonitoringAsync()
         {
             AppLog.Add("User clicked Stop monitoring.");
+            _telemetryService.StopMonitoringHeartbeat("user_stop");
 
             if (_cts != null)
             {
@@ -1578,6 +1605,71 @@ namespace JoesScanner.ViewModels
                 return;
 
             await StartMonitoringAsync();
+        }
+        private async Task ToggleConnectionAsync()
+        {
+            if (IsRunning)
+            {
+                await StopMonitoringAsync();
+            }
+            else
+            {
+                await StartMonitoringAsync();
+            }
+        }
+
+        private void DecreasePlaybackSpeedStep()
+        {
+            if (PlaybackSpeedStep <= 0)
+                return;
+
+            PlaybackSpeedStep = PlaybackSpeedStep - 1;
+            LastQueueEvent = $"Speed down to {PlaybackSpeedLabel}";
+        }
+
+        private void IncreasePlaybackSpeedStep()
+        {
+            if (PlaybackSpeedStep >= 2)
+                return;
+
+            PlaybackSpeedStep = PlaybackSpeedStep + 1;
+            LastQueueEvent = $"Speed up to {PlaybackSpeedLabel}";
+        }
+
+        private async Task NavigateToAdjacentCallAsync(int direction)
+        {
+            if (Calls == null || Calls.Count == 0)
+                return;
+
+            if (direction != 1 && direction != -1)
+                return;
+
+            bool IsPlayable(CallItem c) =>
+                c != null &&
+                !string.IsNullOrWhiteSpace(c.AudioUrl) &&
+                !_filterService.ShouldHide(c) &&
+                !_filterService.ShouldMute(c);
+
+            var anchor = _currentPlayingCall ?? _lastPlayedCall;
+            var anchorIndex = anchor != null ? Calls.IndexOf(anchor) : -1;
+
+            if (anchorIndex < 0)
+                anchorIndex = 0;
+
+            var startIndex = anchorIndex + direction;
+
+            for (var i = startIndex; i >= 0 && i < Calls.Count; i += direction)
+            {
+                var candidate = Calls[i];
+                if (!IsPlayable(candidate))
+                    continue;
+
+                LastQueueEvent = direction == 1 ? "Previous call" : "Next call";
+                await OnCallTappedAsync(candidate);
+                return;
+            }
+
+            LastQueueEvent = direction == 1 ? "No previous call available" : "No next call available";
         }
 
         private static void ApplyTheme(string? mode)

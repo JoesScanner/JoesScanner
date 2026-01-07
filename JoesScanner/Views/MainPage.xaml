@@ -4,192 +4,206 @@
     xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
     xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
     xmlns:vm="clr-namespace:JoesScanner.ViewModels"
+    xmlns:controls="clr-namespace:JoesScanner.Views.Controls"
+    xmlns:models="clr-namespace:JoesScanner.Models"
     x:Name="Page"
     Title="Joes Scanner"
-    BackgroundColor="{AppThemeBinding Light=#f3f4f6, Dark=#020617}"
-    Shell.NavBarIsVisible="False">
+    BackgroundColor="{StaticResource TabStripNavy}"
+    Shell.NavBarIsVisible="False"
+    Shell.TabBarIsVisible="False">
 
     <!-- Root grid fills the window -->
-    <Grid Padding="16">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="*" />
-        </Grid.RowDefinitions>
+    <Grid 
+        Padding="5,0,5,5" 
+        RowDefinitions="Auto,*" 
+        RowSpacing="0">
+
+        <controls:AppTabStrip
+            Grid.Row="0"
+            SelectedTab="{x:Static models:AppTab.Main}" />
 
         <!-- Outer card that fills the available area -->
         <Border
+            Grid.Row="1"
             StrokeThickness="0"
             BackgroundColor="{AppThemeBinding Light=White, Dark=#020617}"
-            StrokeShape="RoundRectangle 24"
             VerticalOptions="FillAndExpand"
-            HorizontalOptions="FillAndExpand">
+            HorizontalOptions="FillAndExpand"
+            WidthRequest="403">
 
-            <Border.Shadow>
-                <Shadow
-                    Brush="#000000"
-                    Offset="0,1"
-                    Radius="8"
-                    Opacity="0.10" />
-            </Border.Shadow>
+            <Border.StrokeShape>
+                <RoundRectangle CornerRadius="15" />
+            </Border.StrokeShape>
+
 
             <!-- Inner grid: header, calls, footer -->
             <Grid
                 RowDefinitions="Auto,*,Auto"
-                ColumnDefinitions="*">
+                ColumnDefinitions="*"
+                ColumnSpacing="0"
+                WidthRequest="400">
 
-                <!-- HEADER PANEL: title, server, controls -->
-                <Grid
+                <!-- HEADER PANEL: single merged box (buttons + indicators) -->
+                <Border
                     Grid.Row="0"
-                    RowDefinitions="Auto,Auto,30"
-                    ColumnDefinitions="Auto,*,Auto"
-                    Padding="16,16,16,8"
-                    ColumnSpacing="16">
+                    HeightRequest="50"
+                    StrokeThickness="1"
+                    Stroke="#0D0D28"
+                    BackgroundColor="#0D0D28"
+                    Padding="2,0"
+                    VerticalOptions="Center"
+                    HorizontalOptions="Center">
 
-                    <!-- Row 0: logo and title -->
-                    <HorizontalStackLayout
-                        Grid.Row="0"
-                        Grid.Column="0"
-                        Spacing="8"
-                        VerticalOptions="Center">
+                    <Border.StrokeShape>
+                        <RoundRectangle CornerRadius="10" />
+                    </Border.StrokeShape>
 
-                        <Image
-                            Source="logo.png"
-                            HeightRequest="40"
-                            WidthRequest="40"
-                            VerticalOptions="Center"
-                            Aspect="AspectFit" />
-
-                        <VerticalStackLayout
-                            Spacing="0"
-                            VerticalOptions="Center">
-
-                            <Label
-                                Text="JoesScanner"
-                                FontSize="25"
-                                FontAttributes="Bold"
-                                TextColor="{AppThemeBinding Light=#111827, Dark=White}" />
-
-                            <Label
-                                Text="Hear the Action, Know the Story!"
-                                FontSize="10"
-                                TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
-                                HorizontalOptions="Start"
-                                VerticalOptions="Center" />
-                        </VerticalStackLayout>
-                    </HorizontalStackLayout>
-
-                    <!-- Row 1 left: connection status (dot and text) -->
-                    <StackLayout
-                        Grid.Row="1"
-                        Grid.Column="0"
-                        Orientation="Horizontal"
-                        Spacing="6"
-                        VerticalOptions="Center">
-
-                        <BoxView
-                            WidthRequest="8"
-                            HeightRequest="8"
-                            Color="{Binding ConnectionStatusColor}"
-                            CornerRadius="4"
-                            VerticalOptions="Center" />
-
-                        <Label
-                            Text="{Binding ConnectionStatusText}"
-                            FontSize="12"
-                            VerticalOptions="Center" />
-                    </StackLayout>
-
-                    <!-- Row 1 right: buttons -->
-                    <HorizontalStackLayout
-                        Grid.Row="1"
-                        Grid.Column="2"
-                        Spacing="4"
+                    <Grid
+                        ColumnDefinitions="Auto,80"
+                        ColumnSpacing="0"
+                        Padding="2"
                         VerticalOptions="Center"
-                        HorizontalOptions="End">
+                        HorizontalOptions="Center">
 
-                        <Button
-                            Text="Jump to live"
-                            Command="{Binding JumpToLiveCommand}"
-                            Style="{StaticResource SecondaryPillButtonStyle}"
-                            Margin="4,0,0,0" />
+                        <!-- Media buttons strip -->
+                        <ScrollView
+                            Grid.Column="0"
+                            Orientation="Horizontal"
+                            HorizontalScrollBarVisibility="Never"
+                            VerticalScrollBarVisibility="Never"
+                            Padding="0"
+                            Margin="0">
 
-                        <Button
-                            Style="{StaticResource PillButtonStyle}"
-                            Margin="0,0,0,0"
-                            Text="Connect"
-                            Command="{Binding StartCommand}">
-                            <Button.Triggers>
-                                <DataTrigger
-                                    TargetType="Button"
-                                    Binding="{Binding IsRunning}"
-                                    Value="True">
-                                    <Setter Property="Text" Value="Disconnect" />
-                                    <Setter Property="BackgroundColor" Value="{AppThemeBinding Light=#16a34a, Dark=#15803d}" />
-                                    <Setter Property="Command" Value="{Binding StopCommand}" />
-                                </DataTrigger>
-                            </Button.Triggers>
-                        </Button>
+                            <HorizontalStackLayout
+                                Spacing="0"
+                                HorizontalOptions="Start"
+                                VerticalOptions="Center">
 
-                        <Button
-                            Text="Settings"
-                            Clicked="OnSettingsTapped"
-                            Style="{StaticResource SecondaryPillButtonStyle}"
-                            Margin="4,0,0,0" />
-                    </HorizontalStackLayout>
+                                <ImageButton
+                                    Source="mc_rewind_double.png"
+                                    Command="{Binding PlaybackSpeedDownCommand}"
+                                    BackgroundColor="Transparent"
+                                    HeightRequest="38"
+                                    WidthRequest="38"
+                                    Padding="0"
+                                    AutomationId="MediaRewindDouble"
+                                    AutomationProperties.Name="Speed down"
+                                    ToolTipProperties.Text="Speed down" />
 
-                    <!-- Row 2: audio, speed, calls waiting, queue status -->
-                    <HorizontalStackLayout
-                        Grid.Row="2"
-                        Grid.Column="0"
-                        Grid.ColumnSpan="3"
-                        Spacing="12"
-                        VerticalOptions="Center">
+                                <ImageButton
+                                    Source="mc_previous.png"
+                                    Command="{Binding PreviousCallCommand}"
+                                    BackgroundColor="Transparent"
+                                    HeightRequest="38"
+                                    WidthRequest="38"
+                                    Padding="0"
+                                    AutomationId="MediaPrevious"
+                                    AutomationProperties.Name="Previous call"
+                                    ToolTipProperties.Text="Previous call" />
 
-                        <!-- Global audio control -->
-                        <Button
-                            Text="{Binding AudioButtonText}"
-                            Command="{Binding ToggleAudioCommand}"
-                            Style="{StaticResource SecondaryPillButtonStyle}"
-                            BackgroundColor="{Binding AudioButtonBackground}"
-                            VerticalOptions="Center" />
+                                <ImageButton
+                                    Source="{Binding MediaPlayStopIcon}"
+                                    Command="{Binding ToggleConnectionCommand}"
+                                    BackgroundColor="Transparent"
+                                    HeightRequest="38"
+                                    WidthRequest="38"
+                                    Padding="0"
+                                    AutomationId="MediaPlayStop"
+                                    AutomationProperties.Name="Connect or disconnect"
+                                    ToolTipProperties.Text="Connect or disconnect" />
 
-                        <!-- Playback speed slider and label -->
-                        <HorizontalStackLayout
-                            Spacing="4"
-                            VerticalOptions="Center">
+                                <ImageButton
+                                    Source="mc_next.png"
+                                    Command="{Binding NextCallCommand}"
+                                    BackgroundColor="Transparent"
+                                    HeightRequest="38"
+                                    WidthRequest="38"
+                                    Padding="0"
+                                    AutomationId="MediaNext"
+                                    AutomationProperties.Name="Next call"
+                                    ToolTipProperties.Text="Next call" />
 
-                            <Label
-                                IsVisible="{Binding AudioEnabled}"
-                                Text="Speed"
-                                FontSize="11"
-                                VerticalOptions="Center"
-                                TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
+                                <ImageButton
+                                    Source="mc_fastforward_double.png"
+                                    Command="{Binding PlaybackSpeedUpCommand}"
+                                    BackgroundColor="Transparent"
+                                    HeightRequest="38"
+                                    WidthRequest="38"
+                                    Padding="0"
+                                    AutomationId="MediaFastForwardDouble"
+                                    AutomationProperties.Name="Speed up"
+                                    ToolTipProperties.Text="Speed up" />
 
-                            <Slider
-                                IsVisible="{Binding AudioEnabled}"
-                                WidthRequest="60"
-                                Minimum="0"
-                                Maximum="2"
-                                Value="{Binding PlaybackSpeedStep}"
-                                VerticalOptions="Center" />
+                                <ImageButton
+                                    Source="mc_jump_to_live.png"
+                                    Command="{Binding JumpToLiveCommand}"
+                                    BackgroundColor="Transparent"
+                                    HeightRequest="38"
+                                    WidthRequest="38"
+                                    Padding="0"
+                                    AutomationId="MediaJumpToLive"
+                                    AutomationProperties.Name="Jump to live"
+                                    ToolTipProperties.Text="Jump to live" />
 
-                            <Label
-                                IsVisible="{Binding AudioEnabled}"
-                                Text="{Binding PlaybackSpeedLabel}"
-                                FontSize="11"
-                                VerticalOptions="Center"
-                                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
-                        </HorizontalStackLayout>
+                                <ImageButton
+                                    Source="mc_volume.png"
+                                    Command="{Binding ToggleAudioCommand}"
+                                    BackgroundColor="Transparent"
+                                    HeightRequest="38"
+                                    WidthRequest="38"
+                                    Padding="0"
+                                    AutomationId="MediaVolume"
+                                    AutomationProperties.Name="Toggle audio"
+                                    ToolTipProperties.Text="Toggle audio" />
 
-                        <!-- Calls waiting indicator -->
-                        <Label
-                            IsVisible="{Binding IsCallsWaitingVisible}"
-                            Text="{Binding CallsWaiting, StringFormat='Calls waiting: {0}'}"
-                            FontSize="10"
+                            </HorizontalStackLayout>
+                        </ScrollView>
+
+                        <!-- Indicators area (fixed width) -->
+                        <Grid
+                            Grid.Column="1"
+                            Padding="0"
+                            RowDefinitions="Auto,Auto,Auto"
+                            ColumnDefinitions="*"
                             VerticalOptions="Center"
-                            Margin="6,0,0,0"
-                            TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
-                    </HorizontalStackLayout>
-                </Grid>
+                            HorizontalOptions="Fill">
+
+                            <Border
+                                WidthRequest="60"
+                                HeightRequest="8"
+                                
+                                BackgroundColor="{Binding ConnectionStatusColor}"
+                                StrokeThickness="0"
+                                HorizontalOptions="Center"
+                                Padding="0">
+                                <Border.StrokeShape>
+                                    <RoundRectangle CornerRadius="4" />
+                                </Border.StrokeShape>
+                            </Border>
+
+                            <Label
+                                Grid.Row="1"
+                                IsVisible="{Binding IsCallsWaitingVisible}"
+                                Text="{Binding PlaybackSpeedLabel, StringFormat='Speed: {0}'}"
+                                FontSize="9"
+                                Margin="0,2"
+                                LineBreakMode="NoWrap"
+                                HorizontalTextAlignment="Center"
+                                TextColor="White" />
+
+                            <Label
+                                Grid.Row="2"
+                                IsVisible="{Binding IsCallsWaitingVisible}"
+                                Text="{Binding CallsWaiting, StringFormat='Calls waiting: {0}'}"
+                                FontSize="9"
+                                LineBreakMode="NoWrap"
+                                HorizontalTextAlignment="Center"
+                                TextColor="White" />
+                        </Grid>
+
+                    </Grid>
+                </Border>
+
 
                 <!-- CALL LIST -->
                 <CollectionView
@@ -248,7 +262,8 @@
                                     <!-- Header row: time > receiver > site > talkgroup -->
                                     <Label
                                         Grid.Row="0"
-                                        Grid.Column="0">
+                                        Grid.Column="0"
+                                        FontSize="12">
                                         <Label.FormattedText>
                                             <FormattedString>
                                                 <Span
@@ -278,7 +293,7 @@
                                         Grid.Column="1"
                                         HorizontalTextAlignment="End"
                                         VerticalTextAlignment="Center"
-                                        FontSize="11"
+                                        FontSize="10"
                                         Text="{Binding DurationDisplay}"
                                         TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
 
@@ -315,7 +330,7 @@
                 <!-- FOOTER: client info and donate button -->
                 <Grid
                     Grid.Row="2"
-                    Padding="16,8,16,16"
+                    Padding="20,5,20,5"
                     RowDefinitions="Auto"
                     ColumnDefinitions="*,Auto">
 
@@ -324,6 +339,7 @@
                         Grid.Row="0"
                         Grid.Column="0"
                         FontSize="11"
+                        VerticalOptions="End"
                         TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
                         LineBreakMode="TailTruncation"
                         IsVisible="{OnPlatform WinUI=true, MacCatalyst=true, Android=false, iOS=false}"
@@ -341,6 +357,7 @@
                         FontSize="10"
                         Command="{Binding OpenDonateCommand}" />
                 </Grid>
+
             </Grid>
         </Border>
     </Grid>

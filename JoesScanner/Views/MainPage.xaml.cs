@@ -1,3 +1,4 @@
+using JoesScanner.Services;
 using JoesScanner.ViewModels;
 
 namespace JoesScanner.Views
@@ -22,7 +23,131 @@ namespace JoesScanner.Views
             }
             catch
             {
-                // Swallow navigation errors for now
+            }
+        }
+
+        private async void OnLogTapped(object sender, EventArgs e)
+        {
+            try
+            {
+                var lines = AppLog.GetSnapshot(600);
+                var text = (lines == null || lines.Length == 0)
+                    ? "No log entries yet."
+                    : string.Join(Environment.NewLine, lines);
+
+                var editor = new Editor
+                {
+                    Text = text,
+                    IsReadOnly = true,
+                    AutoSize = EditorAutoSizeOption.Disabled,
+                    FontSize = 12,
+                    HorizontalOptions = LayoutOptions.Fill,
+                    VerticalOptions = LayoutOptions.Fill
+                };
+
+                var copyButton = new Button { Text = "Copy" };
+                copyButton.Clicked += async (_, __) =>
+                {
+                    try
+                    {
+                        await Clipboard.Default.SetTextAsync(text);
+                    }
+                    catch
+                    {
+                    }
+                };
+
+#if WINDOWS
+                var shareButton = new Button { Text = "Close" };
+#else
+                var shareButton = new Button { Text = "Share" };
+#endif
+
+                var closeButton = new Button { Text = "Close" };
+
+#if WINDOWS
+                shareButton.Clicked += async (_, __) =>
+                {
+                    try
+                    {
+                        await Shell.Current.Navigation.PopModalAsync();
+                    }
+                    catch
+                    {
+                    }
+                };
+#else
+                shareButton.Clicked += async (_, __) =>
+                {
+                    try
+                    {
+                        await Share.Default.RequestAsync(new ShareTextRequest
+                        {
+                            Text = text,
+                            Title = "Share log"
+                        });
+                    }
+                    catch
+                    {
+                    }
+                };
+#endif
+
+                closeButton.Clicked += async (_, __) =>
+                {
+                    try
+                    {
+                        await Shell.Current.Navigation.PopModalAsync();
+                    }
+                    catch
+                    {
+                    }
+                };
+
+                var buttonBar = new Grid
+                {
+                    ColumnDefinitions =
+                    {
+                        new ColumnDefinition { Width = GridLength.Star },
+                        new ColumnDefinition { Width = GridLength.Star },
+                        new ColumnDefinition { Width = GridLength.Star }
+                    },
+                    ColumnSpacing = 8
+                };
+
+                buttonBar.Add(copyButton, 0, 0);
+                buttonBar.Add(shareButton, 1, 0);
+                buttonBar.Add(closeButton, 2, 0);
+
+                var root = new Grid
+                {
+                    Padding = new Thickness(12),
+                    RowDefinitions =
+                    {
+                        new RowDefinition { Height = GridLength.Star },
+                        new RowDefinition { Height = GridLength.Auto }
+                    },
+                    RowSpacing = 10
+                };
+
+                var scroll = new ScrollView { Content = editor };
+
+                root.Add(scroll);
+                Grid.SetRow(scroll, 0);
+
+                root.Add(buttonBar);
+                Grid.SetRow(buttonBar, 1);
+
+                var page = new ContentPage
+                {
+                    Title = "Log",
+                    Content = root
+                };
+
+                await Shell.Current.Navigation.PushModalAsync(new NavigationPage(page));
+            }
+            catch
+            {
             }
         }
 
@@ -34,9 +159,9 @@ namespace JoesScanner.Views
             }
             catch
             {
-                // Swallow browser launch errors for now
             }
         }
+
         protected override async void OnAppearing()
         {
             base.OnAppearing();
@@ -46,6 +171,5 @@ namespace JoesScanner.Views
                 await vm.TryAutoReconnectAsync();
             }
         }
-
     }
 }

@@ -5,138 +5,125 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
     xmlns:vm="clr-namespace:JoesScanner.ViewModels"
     xmlns:models="clr-namespace:JoesScanner.Models"
+    xmlns:controls="clr-namespace:JoesScanner.Views.Controls"
     x:Name="SettingsPageRoot"
     x:DataType="vm:SettingsViewModel"
     Shell.NavBarIsVisible="False"
-    BackgroundColor="{AppThemeBinding Light=#f3f4f6, Dark=#020617}">
+    Shell.TabBarIsVisible="False"
+    BackgroundColor="{StaticResource TabStripNavy}">
 
     <!-- Scroll so content works on phone and desktop -->
-    <ScrollView>
-        <Grid Padding="16">
+    <Grid Padding="5,0,5,5" RowDefinitions="Auto,*" RowSpacing="6">
 
-            <!-- Outer card -->
+        <controls:AppTabStrip
+        Grid.Row="0"
+        SelectedTab="{x:Static models:AppTab.Settings}" />
+
+        <ScrollView Grid.Row="1">
             <Border
-                Padding="16"
-                BackgroundColor="{AppThemeBinding Light=White, Dark=#020617}"
-                Stroke="#111827"
-                StrokeShape="RoundRectangle 24">
+                        Padding="16"
+                        BackgroundColor="{AppThemeBinding Light=White, Dark=#020617}"
+                        Stroke="#111827"
+                        >
+
+                <Border.StrokeShape>
+                    <RoundRectangle CornerRadius="0,0,24,24" />
+                </Border.StrokeShape>
 
                 <Border.Shadow>
                     <Shadow
-                        Brush="#000000"
-                        Offset="0,1"
-                        Radius="8"
-                        Opacity="0.10" />
+                                Brush="#000000"
+                                Offset="0,1"
+                                Radius="8"
+                                Opacity="0.10" />
                 </Border.Shadow>
 
                 <!-- Rows:
-                     0 = header
-                     1 = connection
-                     2 = filters
-                     3 = theme -->
+                             0 = header
+                             1 = connection
+                             2 = filters
+                             3 = theme -->
                 <Grid
-                    RowDefinitions="Auto,Auto,*,Auto"
-                    ColumnDefinitions="*">
+                            RowDefinitions="Auto,Auto,*,Auto"
+                            ColumnDefinitions="*">
 
                     <!-- HEADER CARD -->
                     <Border
-                        Grid.Row="0"
-                        Padding="12"
-                        BackgroundColor="{AppThemeBinding Light=#f9fafb, Dark=#020617}"
-                        StrokeThickness="0"
-                        StrokeShape="RoundRectangle 16"
-                        Margin="0,0,0,12">
+                                Grid.Row="0"
+                                Padding="15,0,15,0"
+                                BackgroundColor="{AppThemeBinding Light=#f9fafb, Dark=#020617}"
+                                StrokeThickness="0"
+                                StrokeShape="RoundRectangle 16"
+                                Margin="0,0,0,10">
 
-                        <VerticalStackLayout Spacing="10">
+                        <VerticalStackLayout 
+                            Spacing="0"
+                            VerticalOptions="Center">
 
                             <!-- Title and tagline -->
                             <Grid RowDefinitions="Auto,Auto"
-                                    ColumnDefinitions="*,Auto">
+                                ColumnDefinitions="*,Auto">
 
                                 <!-- Row 0: Title (left) + Version (right) -->
-                                <Label Grid.Row="0"
-                                        Grid.Column="0"
-                                        Text="Settings"
-                                        FontSize="24"
-                                        FontAttributes="Bold"
-                                        VerticalOptions="Center" />
+                                <Label 
+                                    Grid.Row="0"
+                                    Grid.Column="0"
+                                    Text="Adjust connection, call list behavior, filters and theme"
+                                    FontSize="12"
+                                    Opacity="0.8"
+                                    Margin="0,0,0,0"
+                                    LineBreakMode="WordWrap"/>
+                                <Label 
+                                    x:Name="AppVersionLabel"
+                                    Grid.Row="0"
+                                    Grid.Column="1"
+                                    Text=""
+                                    FontSize="12"
+                                    Opacity="0.8"
+                                    VerticalOptions="Center"
+                                    HorizontalOptions="Center"/>
 
-                                <Label x:Name="AppVersionLabel"
-                                        Grid.Row="0"
-                                        Grid.Column="1"
-                                        Text=""
-                                        FontSize="12"
-                                        Opacity="0.8"
-                                        VerticalOptions="Center"
-                                        HorizontalOptions="End"
-                                        Margin="12,0,0,0" />
-
-                                <!-- Row 1: Subtitle (spans both columns) -->
-                                <Label Grid.Row="1"
-                                        Grid.ColumnSpan="2"
-                                        Text="Adjust connection, call list behavior, filters and theme"
-                                        FontSize="12"
-                                        Opacity="0.8"
-                                        Margin="0,2,0,0" />
                             </Grid>
 
-                            <!-- Header buttons -->
+                            <!-- Header status -->
                             <Grid
-                            ColumnDefinitions="*,Auto"
-                            ColumnSpacing="12"
-                            HorizontalOptions="Fill">
+                                        ColumnDefinitions="*"
+                                        HorizontalOptions="Fill"
+                                        Padding="0,0,0,0">
 
                                 <VerticalStackLayout
-                                Grid.Column="0"
-                                Spacing="0"
-                                HorizontalOptions="FillAndExpand"
-                                VerticalOptions="Center">
+                                            Spacing="0"
+                                            HorizontalOptions="FillAndExpand"
+                                            VerticalOptions="Center">
 
                                     <Label
-                                    Text="Validating server..."
-                                    IsVisible="{Binding ShowServerValidationProgressHeader}"
-                                    FontSize="14"
-                                    TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}"
-                                    HorizontalOptions="FillAndExpand"
-                                    LineBreakMode="WordWrap"
-                                    MaxLines="2" />
+                                                Text="Validating server..."
+                                                IsVisible="{Binding ShowServerValidationProgressHeader}"
+                                                FontSize="14"
+                                                TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}"
+                                                HorizontalOptions="FillAndExpand"
+                                                LineBreakMode="WordWrap"
+                                                MaxLines="2" />
 
                                     <Label
-                                    Text="{Binding ValidationSuccessHeaderText}"
-                                    IsVisible="{Binding ShowServerValidationSuccessHeader}"
-                                    FontSize="14"
-                                    TextColor="{AppThemeBinding Light=#16a34a, Dark=#22c55e}"
-                                    HorizontalOptions="FillAndExpand"
-                                    LineBreakMode="WordWrap"
-                                    MaxLines="2" />
+                                                Text="{Binding ValidationSuccessHeaderText}"
+                                                IsVisible="{Binding ShowServerValidationSuccessHeader}"
+                                                FontSize="14"
+                                                TextColor="{AppThemeBinding Light=#16a34a, Dark=#22c55e}"
+                                                HorizontalOptions="FillAndExpand"
+                                                LineBreakMode="WordWrap"
+                                                MaxLines="2" />
 
                                     <Label
-                                    Text="{Binding ServerValidationMessage}"
-                                    IsVisible="{Binding ShowServerValidationErrorHeader}"
-                                    FontSize="14"
-                                    TextColor="{AppThemeBinding Light=#dc2626, Dark=#f87171}"
-                                    HorizontalOptions="FillAndExpand"
-                                    LineBreakMode="WordWrap"
-                                    MaxLines="3" />
+                                                Text="{Binding ServerValidationMessage}"
+                                                IsVisible="{Binding ShowServerValidationErrorHeader}"
+                                                FontSize="14"
+                                                TextColor="{AppThemeBinding Light=#dc2626, Dark=#f87171}"
+                                                HorizontalOptions="FillAndExpand"
+                                                LineBreakMode="WordWrap"
+                                                MaxLines="3" />
 
                                 </VerticalStackLayout>
-
-                                <HorizontalStackLayout
-                                Grid.Column="1"
-                                Spacing="10"
-                                HorizontalOptions="End"
-                                VerticalOptions="Center">
-
-                                    <Button
-                                    Text="Close"
-                                    Style="{StaticResource SecondaryPillButtonStyle}"
-                                    Clicked="OnBackClicked" />
-
-                                    <Button
-                                    Text="Log"
-                                    Style="{StaticResource SecondaryPillButtonStyle}"
-                                    Clicked="OnLogClicked" />
-                                </HorizontalStackLayout>
 
                             </Grid>
 
@@ -145,101 +132,103 @@
 
                     <!-- CONNECTION CARD -->
                     <Border
-                        Grid.Row="1"
-                        Padding="10"
-                        BackgroundColor="{AppThemeBinding Light=#f9fafb, Dark=#020617}"
-                        StrokeThickness="1"
-                        StrokeShape="RoundRectangle 16"
-                        Margin="0,0,0,12">
+    Grid.Row="1"
+    Padding="10"
+    BackgroundColor="{AppThemeBinding Light=#f9fafb, Dark=#020617}"
+    StrokeThickness="1"
+    StrokeShape="RoundRectangle 16"
+    Margin="0,0,0,12">
 
-                        <!-- 0=title, 1=description, 2=fields, 3=buttons (inline), 4=status -->
                         <Grid
-                            RowDefinitions="Auto,Auto,Auto,Auto,Auto"
-                            ColumnDefinitions="Auto,*"
-                            RowSpacing="6">
+        RowDefinitions="Auto,Auto,Auto"
+        ColumnDefinitions="*,Auto"
+        RowSpacing="6"
+        ColumnSpacing="12">
 
-                            <!-- Title left -->
+                            <!-- Row 0: Title left -->
                             <Label
-                                Grid.Row="0"
-                                Grid.Column="0"
-                                Text="Connection"
-                                FontAttributes="Bold"
-                                FontSize="16"
-                                HorizontalOptions="Start"
-                                MinimumWidthRequest="90"
-                                TextColor="{AppThemeBinding Light=#111827, Dark=White}" />
+            Grid.Row="0"
+            Grid.Column="0"
+            Text="Connection"
+            FontAttributes="Bold"
+            FontSize="16"
+            HorizontalOptions="Start"
+            TextColor="{AppThemeBinding Light=#111827, Dark=White}" />
 
-                            <!-- Subscription badge right (level + renewal or trial text) -->
+                            <!-- Row 0: Subscription right -->
                             <Label
-                                Grid.Row="0"
-                                Grid.Column="1"
-                                Text="{Binding SubscriptionSummary}"
-                                IsVisible="{Binding ShowSubscriptionSummary}"
-                                FontSize="10"
-                                TextColor="{AppThemeBinding Light=#16a34a, Dark=#22c55e}"
-                                HorizontalTextAlignment="End"
-                                VerticalOptions="Center"
-                                LineBreakMode="WordWrap" />
+            Grid.Row="0"
+            Grid.Column="1"
+            Text="{Binding SubscriptionSummary}"
+            IsVisible="{Binding ShowSubscriptionSummary}"
+            FontSize="10"
+            TextColor="{AppThemeBinding Light=#16a34a, Dark=#22c55e}"
+            HorizontalTextAlignment="End"
+            VerticalOptions="Center"
+            LineBreakMode="WordWrap"
+            MaxLines="2" />
 
-                            <!-- Description -->
+                            <!-- Row 1: Description spans both columns -->
                             <Label
-                                Grid.Row="1"
-                                Grid.Column="0"
-                                Grid.ColumnSpan="2"
-                                Margin="0,0,0,4"
-                                Text="Choose which server the app connects to. Not all servers require user/pass."
-                                FontSize="12"
-                                TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" />
+            Grid.Row="1"
+            Grid.Column="0"
+            Grid.ColumnSpan="2"
+            Margin="0,0,0,4"
+            Text="Choose which server the app connects to. Not all servers require user/pass."
+            FontSize="12"
+            TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+            LineBreakMode="WordWrap"
+            MaxLines="3" />
 
-                            <!-- Fields: server on row 0, user/pass on row 1 -->
+                            <!-- Row 2: Fields -->
                             <Grid
-                                Grid.Row="2"
-                                Grid.Column="0"
-                                Grid.ColumnSpan="2"
-                                RowDefinitions="Auto,Auto"
-                                ColumnDefinitions="*"
-                                RowSpacing="4">
+            Grid.Row="2"
+            Grid.Column="0"
+            Grid.ColumnSpan="2"
+            RowDefinitions="Auto,Auto"
+            ColumnDefinitions="*"
+            RowSpacing="8">
 
-                                <!-- Server URL row with buttons on the right -->
+                                <!-- Server row -->
                                 <Grid
-                                    Grid.Row="0"
-                                    ColumnDefinitions="Auto,*,Auto"
-                                    ColumnSpacing="8"
-                                    VerticalOptions="Center">
+                Grid.Row="0"
+                ColumnDefinitions="Auto,*,Auto"
+                ColumnSpacing="8"
+                VerticalOptions="Center">
 
                                     <Label
-                                        Grid.Column="0"
-                                        Text="Server"
-                                        FontSize="12"
-                                        VerticalOptions="Center" />
+                    Grid.Column="0"
+                    Text="Server"
+                    FontSize="12"
+                    VerticalOptions="Center" />
 
                                     <Entry
-                                        Grid.Column="1"
-                                        Text="{Binding ServerUrl}"
-                                        Placeholder="https://app.joesscanner.com"
-                                        FontSize="12"
-                                        HeightRequest="28"
-                                        VerticalOptions="Center" />
+                    Grid.Column="1"
+                    Text="{Binding ServerUrl}"
+                    Placeholder="https://app.joesscanner.com"
+                    FontSize="12"
+                    HeightRequest="28"
+                    VerticalOptions="Center" />
 
                                     <HorizontalStackLayout
-                                        Grid.Column="2"
-                                        Spacing="6"
-                                        VerticalOptions="Center">
+                    Grid.Column="2"
+                    Spacing="6"
+                    VerticalOptions="Center">
 
                                         <Button
-                                            Text="Joe's server"
-                                            Command="{Binding ResetServerCommand}"
-                                            Style="{StaticResource SecondaryPillButtonStyle}" />
+                        Text="Joe's server"
+                        Command="{Binding ResetServerCommand}"
+                        Style="{StaticResource SecondaryPillButtonStyle}" />
 
                                         <Button
-                                            Text="Validate"
-                                            Command="{Binding ValidateServerCommand}"
-                                            Style="{StaticResource PillButtonStyle}">
-
+                        Text="Validate"
+                        Command="{Binding ValidateServerCommand}"
+                        Style="{StaticResource PillButtonStyle}">
                                             <Button.Triggers>
-                                                <DataTrigger TargetType="Button"
-                                                             Binding="{Binding ConnectionNeedsValidation}"
-                                                             Value="True">
+                                                <DataTrigger
+                                TargetType="Button"
+                                Binding="{Binding ConnectionNeedsValidation}"
+                                Value="True">
                                                     <Setter Property="BackgroundColor" Value="Red" />
                                                     <Setter Property="TextColor" Value="White" />
                                                 </DataTrigger>
@@ -248,187 +237,187 @@
 
                                     </HorizontalStackLayout>
                                 </Grid>
-<!-- Username and password row -->
+
+                                <!-- Username and password row -->
                                 <Grid
-                                    Grid.Row="1"
-                                    ColumnDefinitions="Auto,*,Auto,*,Auto"
-                                    ColumnSpacing="6"
-                                    Margin="0,6,0,0">
+                Grid.Row="1"
+                ColumnDefinitions="Auto,*,Auto,*,Auto"
+                ColumnSpacing="6">
 
-                                    <!-- Username -->
                                     <Label
-                                        Grid.Column="0"
-                                        Text="User"
-                                        FontSize="12"
-                                        VerticalOptions="Center"
-                                        TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                    Grid.Column="0"
+                    Text="User"
+                    FontSize="12"
+                    VerticalOptions="Center"
+                    TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
 
                                     <Entry
-                                        Grid.Column="1"
-                                        Text="{Binding BasicAuthUsername}"
-                                        Placeholder="username for restricted servers"
-                                        FontSize="12"
-                                        HeightRequest="30" />
+                    Grid.Column="1"
+                    Text="{Binding BasicAuthUsername}"
+                    Placeholder="username for restricted servers"
+                    FontSize="12"
+                    HeightRequest="30" />
 
-                                    <!-- Password -->
                                     <Label
-                                        Grid.Column="2"
-                                        Text="Pass"
-                                        FontSize="12"
-                                        VerticalOptions="Center"
-                                        TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                    Grid.Column="2"
+                    Text="Pass"
+                    FontSize="12"
+                    VerticalOptions="Center"
+                    TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
 
                                     <Entry
-                                        Grid.Column="3"
-                                        Text="{Binding BasicAuthPassword}"
-                                        Placeholder="password for restricted servers"
-                                        IsPassword="{Binding IsBasicAuthPasswordHidden}"
-                                        FontSize="12"
-                                        HeightRequest="30"
-                                        Margin="0,0,4,0" />
+                    Grid.Column="3"
+                    Text="{Binding BasicAuthPassword}"
+                    Placeholder="password for restricted servers"
+                    IsPassword="{Binding IsBasicAuthPasswordHidden}"
+                    FontSize="12"
+                    HeightRequest="30"
+                    Margin="0,0,4,0" />
 
-                                    <!-- Show / Hide -->
                                     <Button
-                                        Grid.Column="4"
-                                        Text="{Binding BasicAuthPasswordToggleText}"
-                                        Command="{Binding ToggleBasicAuthPasswordVisibilityCommand}"
-                                        Style="{StaticResource SecondaryPillButtonStyle}"
-                                        VerticalOptions="Center" />
+                    Grid.Column="4"
+                    Text="{Binding BasicAuthPasswordToggleText}"
+                    Command="{Binding ToggleBasicAuthPasswordVisibilityCommand}"
+                    Style="{StaticResource SecondaryPillButtonStyle}"
+                    VerticalOptions="Center" />
                                 </Grid>
+
                             </Grid>
+
                         </Grid>
                     </Border>
+
 
                     <!-- CALL QUEUE CARD -->
 
                     <!-- FILTERS CARD -->
                     <Border
-                        Grid.Row="2"
-                        Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
-                        StrokeThickness="1"
-                        Padding="12"
-                        Margin="0,0,0,12"
-                        BackgroundColor="{AppThemeBinding Light=#ffffff, Dark=#111827}"
-                        StrokeShape="RoundRectangle 8">
+                                    Grid.Row="2"
+                                    Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
+                                    StrokeThickness="1"
+                                    Padding="12"
+                                    Margin="0,0,0,12"
+                                    BackgroundColor="{AppThemeBinding Light=#ffffff, Dark=#111827}"
+                                    StrokeShape="RoundRectangle 8">
 
                         <VerticalStackLayout Spacing="8">
 
                             <!-- Header -->
                             <Label
-                                Text="Filters"
-                                FontSize="16"
-                                FontAttributes="Bold"
-                                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                                            Text="Filters"
+                                            FontSize="16"
+                                            FontAttributes="Bold"
+                                            TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
 
                             <Label
-                                Text="Mute or hide traffic by Receiver, Site, or Talkgroup."
-                                FontSize="12"
-                                Opacity="0.8"
-                                TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
+                                            Text="Mute or hide traffic by Receiver, Site, or Talkgroup."
+                                            FontSize="12"
+                                            Opacity="0.8"
+                                            TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
 
                             <!-- Table header row -->
                             <Grid
-                                ColumnDefinitions="*,50,50,60"
-                                RowDefinitions="Auto"
-                                Padding="5,4,5,2">
+                                            ColumnDefinitions="*,50,50,60"
+                                            RowDefinitions="Auto"
+                                            Padding="5,4,5,2">
 
                                 <Label
-                                    Grid.Column="0"
-                                    Text="Receiver > Site > Talkgroup"
-                                    FontSize="11"
-                                    FontAttributes="Bold"
-                                    VerticalOptions="Center" />
+                                                Grid.Column="0"
+                                                Text="Receiver > Site > Talkgroup"
+                                                FontSize="11"
+                                                FontAttributes="Bold"
+                                                VerticalOptions="Center" />
 
                                 <Label
-                                    Grid.Column="1"
-                                    Text="Mute"
-                                    FontSize="11"
-                                    FontAttributes="Bold"
-                                    HorizontalOptions="Center"
-                                    HorizontalTextAlignment="Center"
-                                    VerticalOptions="Center" />
+                                                Grid.Column="1"
+                                                Text="Mute"
+                                                FontSize="11"
+                                                FontAttributes="Bold"
+                                                HorizontalOptions="Center"
+                                                HorizontalTextAlignment="Center"
+                                                VerticalOptions="Center" />
 
                                 <Label
-                                    Grid.Column="2"
-                                    Text="Disable"
-                                    FontSize="11"
-                                    FontAttributes="Bold"
-                                    HorizontalOptions="Center"
-                                    HorizontalTextAlignment="Center"
-                                    VerticalOptions="Center" />
+                                                Grid.Column="2"
+                                                Text="Disable"
+                                                FontSize="11"
+                                                FontAttributes="Bold"
+                                                HorizontalOptions="Center"
+                                                HorizontalTextAlignment="Center"
+                                                VerticalOptions="Center" />
 
                                 <Label
-                                    Grid.Column="3"
-                                    Text="Clear"
-                                    FontSize="11"
-                                    FontAttributes="Bold"
-                                    HorizontalOptions="Center"
-                                    HorizontalTextAlignment="Center"
-                                    VerticalOptions="Center" />
+                                                Grid.Column="3"
+                                                Text="Clear"
+                                                FontSize="11"
+                                                FontAttributes="Bold"
+                                                HorizontalOptions="Center"
+                                                HorizontalTextAlignment="Center"
+                                                VerticalOptions="Center" />
                             </Grid>
 
                             <!-- Filters table -->
                             <CollectionView
-                                x:Name="FiltersList"
-                                ItemsSource="{Binding FilterRules}"
-                                VerticalOptions="Fill"
-                                SelectionMode="None">
+                                            x:Name="FiltersList"
+                                            ItemsSource="{Binding FilterRules}"
+                                            VerticalOptions="Fill"
+                                            SelectionMode="None">
 
                                 <CollectionView.ItemsLayout>
                                     <LinearItemsLayout
-                                        Orientation="Vertical"
-                                        ItemSpacing="2" />
+                                                    Orientation="Vertical"
+                                                    ItemSpacing="2" />
                                 </CollectionView.ItemsLayout>
 
                                 <CollectionView.ItemTemplate>
                                     <DataTemplate x:DataType="models:FilterRule">
                                         <Grid
-                                            ColumnDefinitions="*,50,50,60"
-                                            Padding="0,2">
+                                                        ColumnDefinitions="*,50,50,60"
+                                                        Padding="0,2">
 
                                             <!-- Display key -->
                                             <Label
-                                                Grid.Column="0"
-                                                Text="{Binding DisplayKey}"
-                                                FontSize="11"
-                                                LineBreakMode="TailTruncation"
-                                                MaxLines="1"
-                                                VerticalOptions="Center" />
+                                                            Grid.Column="0"
+                                                            Text="{Binding DisplayKey}"
+                                                            FontSize="11"
+                                                            LineBreakMode="TailTruncation"
+                                                            MaxLines="1"
+                                                            VerticalOptions="Center" />
 
                                             <!-- Mute "button" -->
                                             <Border
-                                                Grid.Column="1"
-                                                Stroke="{AppThemeBinding Light=#d1d5db, Dark=#4b5563}"
-                                                StrokeThickness="1"
-                                                StrokeShape="RoundRectangle 4"
-                                                Padding="5,4,5,2"
-                                                HorizontalOptions="Center"
-                                                VerticalOptions="Center"
-                                                BackgroundColor="Transparent">
+                                                            Grid.Column="1"
+                                                            Stroke="{AppThemeBinding Light=#d1d5db, Dark=#4b5563}"
+                                                            StrokeThickness="1"
+                                                            StrokeShape="RoundRectangle 4"
+                                                            Padding="5,4,5,2"
+                                                            HorizontalOptions="Center"
+                                                            VerticalOptions="Center"
+                                                            BackgroundColor="Transparent">
 
                                                 <Border.GestureRecognizers>
                                                     <TapGestureRecognizer
-                                                        Tapped="OnMuteFilterTapped"
-                                                        CommandParameter="{Binding}" />
+                                                                    Tapped="OnMuteFilterTapped"
+                                                                    CommandParameter="{Binding}" />
                                                 </Border.GestureRecognizers>
 
                                                 <Label
-                                                    FontSize="10"
-                                                    HorizontalOptions="Center"
-                                                    VerticalOptions="Center">
+                                                                FontSize="10"
+                                                                HorizontalOptions="Center"
+                                                                VerticalOptions="Center">
                                                     <Label.Triggers>
                                                         <!-- When muted, show Unmute -->
                                                         <DataTrigger
-                                                            TargetType="Label"
-                                                            Binding="{Binding IsMuted}"
-                                                            Value="True">
+                                                                        TargetType="Label"
+                                                                        Binding="{Binding IsMuted}"
+                                                                        Value="True">
                                                             <Setter Property="Text" Value="Unmute" />
                                                         </DataTrigger>
                                                         <!-- When not muted, show Mute -->
                                                         <DataTrigger
-                                                            TargetType="Label"
-                                                            Binding="{Binding IsMuted}"
-                                                            Value="False">
+                                                                        TargetType="Label"
+                                                                        Binding="{Binding IsMuted}"
+                                                                        Value="False">
                                                             <Setter Property="Text" Value="Mute" />
                                                         </DataTrigger>
                                                     </Label.Triggers>
@@ -437,17 +426,17 @@
                                                 <Border.Triggers>
                                                     <!-- Muted = yellow -->
                                                     <DataTrigger
-                                                        TargetType="Border"
-                                                        Binding="{Binding IsMuted}"
-                                                        Value="True">
+                                                                    TargetType="Border"
+                                                                    Binding="{Binding IsMuted}"
+                                                                    Value="True">
                                                         <Setter Property="BackgroundColor" Value="#f59e0b" />
                                                     </DataTrigger>
 
                                                     <!-- Not muted = clear -->
                                                     <DataTrigger
-                                                        TargetType="Border"
-                                                        Binding="{Binding IsMuted}"
-                                                        Value="False">
+                                                                    TargetType="Border"
+                                                                    Binding="{Binding IsMuted}"
+                                                                    Value="False">
                                                         <Setter Property="BackgroundColor" Value="Transparent" />
                                                     </DataTrigger>
                                                 </Border.Triggers>
@@ -455,38 +444,38 @@
 
                                             <!-- Disable "button" -->
                                             <Border
-                                                Grid.Column="2"
-                                                Stroke="{AppThemeBinding Light=#d1d5db, Dark=#4b5563}"
-                                                StrokeThickness="1"
-                                                StrokeShape="RoundRectangle 4"
-                                                Padding="5,4,5,2"
-                                                HorizontalOptions="Center"
-                                                VerticalOptions="Center"
-                                                BackgroundColor="Transparent">
+                                                            Grid.Column="2"
+                                                            Stroke="{AppThemeBinding Light=#d1d5db, Dark=#4b5563}"
+                                                            StrokeThickness="1"
+                                                            StrokeShape="RoundRectangle 4"
+                                                            Padding="5,4,5,2"
+                                                            HorizontalOptions="Center"
+                                                            VerticalOptions="Center"
+                                                            BackgroundColor="Transparent">
 
                                                 <Border.GestureRecognizers>
                                                     <TapGestureRecognizer
-                                                        Tapped="OnDisableFilterTapped"
-                                                        CommandParameter="{Binding}" />
+                                                                    Tapped="OnDisableFilterTapped"
+                                                                    CommandParameter="{Binding}" />
                                                 </Border.GestureRecognizers>
 
                                                 <Label
-                                                    FontSize="10"
-                                                    HorizontalOptions="Center"
-                                                    VerticalOptions="Center">
+                                                                FontSize="10"
+                                                                HorizontalOptions="Center"
+                                                                VerticalOptions="Center">
                                                     <Label.Triggers>
                                                         <!-- When disabled, show Enable -->
                                                         <DataTrigger
-                                                            TargetType="Label"
-                                                            Binding="{Binding IsDisabled}"
-                                                            Value="True">
+                                                                        TargetType="Label"
+                                                                        Binding="{Binding IsDisabled}"
+                                                                        Value="True">
                                                             <Setter Property="Text" Value="Enable" />
                                                         </DataTrigger>
                                                         <!-- When not disabled, show Disable -->
                                                         <DataTrigger
-                                                            TargetType="Label"
-                                                            Binding="{Binding IsDisabled}"
-                                                            Value="False">
+                                                                        TargetType="Label"
+                                                                        Binding="{Binding IsDisabled}"
+                                                                        Value="False">
                                                             <Setter Property="Text" Value="Disable" />
                                                         </DataTrigger>
                                                     </Label.Triggers>
@@ -495,17 +484,17 @@
                                                 <Border.Triggers>
                                                     <!-- Disabled = red -->
                                                     <DataTrigger
-                                                        TargetType="Border"
-                                                        Binding="{Binding IsDisabled}"
-                                                        Value="True">
+                                                                    TargetType="Border"
+                                                                    Binding="{Binding IsDisabled}"
+                                                                    Value="True">
                                                         <Setter Property="BackgroundColor" Value="#ef4444" />
                                                     </DataTrigger>
 
                                                     <!-- Not disabled = clear -->
                                                     <DataTrigger
-                                                        TargetType="Border"
-                                                        Binding="{Binding IsDisabled}"
-                                                        Value="False">
+                                                                    TargetType="Border"
+                                                                    Binding="{Binding IsDisabled}"
+                                                                    Value="False">
                                                         <Setter Property="BackgroundColor" Value="Transparent" />
                                                     </DataTrigger>
                                                 </Border.Triggers>
@@ -513,26 +502,26 @@
 
                                             <!-- Clear "button" -->
                                             <Border
-                                                Grid.Column="3"
-                                                Stroke="{AppThemeBinding Light=#d1d5db, Dark=#4b5563}"
-                                                StrokeThickness="1"
-                                                StrokeShape="RoundRectangle 4"
-                                                Padding="5,4,5,2"
-                                                HorizontalOptions="Center"
-                                                VerticalOptions="Center"
-                                                BackgroundColor="Transparent">
+                                                            Grid.Column="3"
+                                                            Stroke="{AppThemeBinding Light=#d1d5db, Dark=#4b5563}"
+                                                            StrokeThickness="1"
+                                                            StrokeShape="RoundRectangle 4"
+                                                            Padding="5,4,5,2"
+                                                            HorizontalOptions="Center"
+                                                            VerticalOptions="Center"
+                                                            BackgroundColor="Transparent">
 
                                                 <Border.GestureRecognizers>
                                                     <TapGestureRecognizer
-                                                        Tapped="OnClearFilterTapped"
-                                                        CommandParameter="{Binding}" />
+                                                                    Tapped="OnClearFilterTapped"
+                                                                    CommandParameter="{Binding}" />
                                                 </Border.GestureRecognizers>
 
                                                 <Label
-                                                    FontSize="10"
-                                                    Text="Clear"
-                                                    HorizontalOptions="Center"
-                                                    VerticalOptions="Center" />
+                                                                FontSize="10"
+                                                                Text="Clear"
+                                                                HorizontalOptions="Center"
+                                                                VerticalOptions="Center" />
                                             </Border>
                                         </Grid>
                                     </DataTemplate>
@@ -544,37 +533,37 @@
 
                     <!-- THEME CARD -->
                     <Border
-                        Grid.Row="3"
-                        Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
-                        StrokeThickness="1"
-                        Padding="12"
-                        BackgroundColor="{AppThemeBinding Light=#ffffff, Dark=#111827}"
-                        StrokeShape="RoundRectangle 8">
+                                    Grid.Row="3"
+                                    Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
+                                    StrokeThickness="1"
+                                    Padding="12"
+                                    BackgroundColor="{AppThemeBinding Light=#ffffff, Dark=#111827}"
+                                    StrokeShape="RoundRectangle 8">
 
                         <VerticalStackLayout Spacing="10">
                             <Label
-                                Text="Theme"
-                                FontSize="16"
-                                FontAttributes="Bold"
-                                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                                            Text="Theme"
+                                            FontSize="16"
+                                            FontAttributes="Bold"
+                                            TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
 
                             <Label
-                                Text="Choose System, Light, or Dark."
-                                FontSize="12"
-                                Opacity="0.8"
-                                TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
+                                            Text="Choose System, Light, or Dark."
+                                            FontSize="12"
+                                            Opacity="0.8"
+                                            TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
 
                             <VerticalStackLayout Spacing="6">
                                 <HorizontalStackLayout Spacing="10">
                                     <RadioButton
-                                        Content="System"
-                                        IsChecked="{Binding IsThemeSystem}" />
+                                                    Content="System"
+                                                    IsChecked="{Binding IsThemeSystem}" />
                                     <RadioButton
-                                        Content="Light"
-                                        IsChecked="{Binding IsThemeLight}" />
+                                                    Content="Light"
+                                                    IsChecked="{Binding IsThemeLight}" />
                                     <RadioButton
-                                        Content="Dark"
-                                        IsChecked="{Binding IsThemeDark}" />
+                                                    Content="Dark"
+                                                    IsChecked="{Binding IsThemeDark}" />
                                 </HorizontalStackLayout>
                             </VerticalStackLayout>
                         </VerticalStackLayout>
@@ -582,6 +571,7 @@
 
                 </Grid>
             </Border>
-        </Grid>
-    </ScrollView>
+        </ScrollView>
+
+    </Grid>
 </ContentPage>
