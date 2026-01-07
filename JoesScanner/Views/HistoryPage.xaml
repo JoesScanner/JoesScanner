@@ -26,7 +26,7 @@
 
             <VerticalStackLayout Spacing="10" VerticalOptions="Center" HorizontalOptions="Center">
                 <Label
-                    Text="History"
+                    Text="24 hour History"
                     FontSize="24"
                     FontAttributes="Bold"
                     TextColor="{AppThemeBinding Light=#111827, Dark=White}"

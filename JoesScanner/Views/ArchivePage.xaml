@@ -30,7 +30,7 @@
 
             <VerticalStackLayout Spacing="10" VerticalOptions="Center" HorizontalOptions="Center">
                 <Label
-                    Text="Archive"
+                    Text="Full Archive"
                     FontSize="24"
                     FontAttributes="Bold"
                     TextColor="{AppThemeBinding Light=#111827, Dark=White}"

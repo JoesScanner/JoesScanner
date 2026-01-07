@@ -165,13 +165,12 @@
                             Padding="0"
                             RowDefinitions="Auto,Auto,Auto"
                             ColumnDefinitions="*"
-                            VerticalOptions="Center"
-                            HorizontalOptions="Fill">
+                            VerticalOptions="Start">
 
                             <Border
                                 WidthRequest="60"
                                 HeightRequest="8"
-                                
+                                Margin="0,3,0,0"
                                 BackgroundColor="{Binding ConnectionStatusColor}"
                                 StrokeThickness="0"
                                 HorizontalOptions="Center"
