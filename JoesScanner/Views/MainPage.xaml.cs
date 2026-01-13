@@ -1,5 +1,7 @@
+using JoesScanner.Models;
 using JoesScanner.Services;
 using JoesScanner.ViewModels;
+using System.Linq;
 
 namespace JoesScanner.Views
 {
@@ -156,6 +158,32 @@ namespace JoesScanner.Views
             try
             {
                 await Launcher.Default.OpenAsync("https://www.joesscanner.com/");
+            }
+            catch
+            {
+            }
+        }
+
+        private void OnCallSelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            try
+            {
+                if (sender is not CollectionView cv)
+                    return;
+
+                var selected = e.CurrentSelection?.FirstOrDefault() as CallItem;
+
+                // Always clear selection so the same item can be tapped again.
+                cv.SelectedItem = null;
+
+                if (selected == null)
+                    return;
+
+                if (BindingContext is MainViewModel vm && vm.PlayAudioCommand != null)
+                {
+                    if (vm.PlayAudioCommand.CanExecute(selected))
+                        vm.PlayAudioCommand.Execute(selected);
+                }
             }
             catch
             {

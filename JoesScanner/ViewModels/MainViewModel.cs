@@ -1,9 +1,12 @@
 using JoesScanner.Models;
 using JoesScanner.Services;
 using System.Collections.ObjectModel;
+using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Windows.Input;
+
 namespace JoesScanner.ViewModels
 {
     // Main view model for the primary JoesScanner client screen.
@@ -13,6 +16,7 @@ namespace JoesScanner.ViewModels
         private readonly ICallStreamService _callStreamService;
         private readonly ISettingsService _settingsService;
         private readonly IAudioPlaybackService _audioPlaybackService;
+        private readonly ISystemMediaService _systemMediaService;
         private readonly HttpClient _audioHttpClient;
         private readonly FilterService _filterService = FilterService.Instance;
         private readonly ISubscriptionService _subscriptionService;
@@ -41,6 +45,11 @@ namespace JoesScanner.ViewModels
 
         // True while we are playing through the backlog.
         private bool _isQueuePlaybackRunning;
+
+        // New calls received while the user is behind live are stored here so the backlog can play in order.
+        // Newest pending call is stored at index 0.
+        private readonly object _pendingCallsLock = new();
+        private readonly List<CallItem> _pendingCalls = new();
 
         // Optional settings view model reference. Currently not used but kept for future wiring.
         public SettingsViewModel? SettingsViewModel { get; set; }
@@ -111,7 +120,6 @@ namespace JoesScanner.ViewModels
         // Command to skip backlog and jump playback to the newest call.
         public ICommand JumpToLiveCommand { get; }
 
-
         // Command bound to the premium media play or stop button.
         // When not running, starts monitoring. When running, stops monitoring.
         public ICommand ToggleConnectionCommand { get; }
@@ -132,17 +140,21 @@ namespace JoesScanner.ViewModels
             ICallStreamService callStreamService,
             ISettingsService settingsService,
             IAudioPlaybackService audioPlaybackService,
+            ISystemMediaService systemMediaService,
             ISubscriptionService subscriptionService, ITelemetryService telemetryService)
         {
             _callStreamService = callStreamService ?? throw new ArgumentNullException(nameof(callStreamService));
             _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
             _audioPlaybackService = audioPlaybackService ?? throw new ArgumentNullException(nameof(audioPlaybackService));
+            _systemMediaService = systemMediaService ?? throw new ArgumentNullException(nameof(systemMediaService));
             _subscriptionService = subscriptionService ?? throw new ArgumentNullException(nameof(subscriptionService));
             _telemetryService = telemetryService ?? throw new ArgumentNullException(nameof(telemetryService));
 
             _audioHttpClient = new HttpClient
             {
-                Timeout = TimeSpan.FromSeconds(15)
+                // Do not use HttpClient.Timeout for long call downloads.
+                // Per call watchdog timeouts are enforced via CancellationToken.
+                Timeout = Timeout.InfiniteTimeSpan
             };
 
             // Initialize server URL from settings or default.
@@ -161,8 +173,10 @@ namespace JoesScanner.ViewModels
 
             // AutoPlay is tied to AudioEnabled.
             _autoPlay = _audioEnabled;
-            _settingsService.AutoPlay = _autoPlay;            // Call retention is now fixed after removing queue call control settings.
+            _settingsService.AutoPlay = _autoPlay;
+            // Call retention is now fixed after removing queue call control settings.
             // MaxCallsToKeep is enforced when calls are inserted.
+
             // Restore playback speed step (0 = 1x, 1 = 1.5x, 2 = 2x).
             var savedSpeed = Preferences.Get(PlaybackSpeedStepPreferenceKey, 0.0);
             PlaybackSpeedStep = savedSpeed;
@@ -195,6 +209,49 @@ namespace JoesScanner.ViewModels
 
             // Initialize subscription badge from any cached subscription data.
             UpdateSubscriptionSummaryFromSettings();
+
+            // System media controls (Bluetooth, lock screen, notification actions).
+            _systemMediaService.SetHandlers(
+                onPlay: SystemPlayAsync,
+                onStop: SystemStopAsync,
+                onNext: SystemNextAsync,
+                onPrevious: SystemPreviousAsync);
+        }
+
+        private Task SystemPlayAsync()
+        {
+            return MainThread.InvokeOnMainThreadAsync(async () =>
+            {
+                if (!IsRunning)
+                    await StartMonitoringAsync();
+            });
+        }
+
+        private Task SystemStopAsync()
+        {
+            return MainThread.InvokeOnMainThreadAsync(async () =>
+            {
+                if (IsRunning)
+                    await StopMonitoringAsync();
+            });
+        }
+
+        private Task SystemNextAsync()
+        {
+            return MainThread.InvokeOnMainThreadAsync(async () =>
+            {
+                if (IsRunning)
+                    await NavigateToAdjacentCallAsync(-1);
+            });
+        }
+
+        private Task SystemPreviousAsync()
+        {
+            return MainThread.InvokeOnMainThreadAsync(async () =>
+            {
+                if (IsRunning)
+                    await NavigateToAdjacentCallAsync(1);
+            });
         }
 
         private const string LastConnectedPreferenceKey = "LastConnectedOnExit";
@@ -215,6 +272,8 @@ namespace JoesScanner.ViewModels
                 _isRunning = value;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(MediaPlayStopIcon));
+                OnPropertyChanged(nameof(IsMediaButtonsEnabled));
+                OnPropertyChanged(nameof(IsSpeedButtonsEnabled));
                 ((Command)StartCommand).ChangeCanExecute();
                 ((Command)StopCommand).ChangeCanExecute();
 
@@ -239,10 +298,22 @@ namespace JoesScanner.ViewModels
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(AudioButtonText));
                 OnPropertyChanged(nameof(AudioButtonBackground));
+                OnPropertyChanged(nameof(IsSpeedButtonsEnabled));
 
                 UpdateQueueDerivedState();
 
                 Preferences.Set("AudioEnabled", value);
+
+                try
+                {
+                    if (IsRunning && _currentPlayingCall == null)
+                    {
+                        _systemMediaService.UpdateNowPlaying("Connected", "Joes Scanner", _audioEnabled);
+                    }
+                }
+                catch
+                {
+                }
             }
         }
 
@@ -252,7 +323,6 @@ namespace JoesScanner.ViewModels
         // Background color of the main page audio button.
         // Blue when audio is enabled, gray when muted.
         public Color AudioButtonBackground => AudioEnabled ? Colors.Blue : Colors.LightGray;
-
 
         // Icon for the premium media play/stop button.
         // Shows play when disconnected, stop when connected.
@@ -279,12 +349,15 @@ namespace JoesScanner.ViewModels
         }
 
         // Number of calls waiting in the playback queue, excluding the call at the current anchor.
+        // Includes pending calls collected while the user is behind live.
         public int CallsWaiting
         {
             get
             {
                 if (Calls == null || Calls.Count == 0)
-                    return 0;
+                {
+                    return GetPendingPlayableCount();
+                }
 
                 var anchor = _currentPlayingCall ?? _lastPlayedCall;
 
@@ -302,7 +375,7 @@ namespace JoesScanner.ViewModels
                             total++;
                     }
 
-                    return total;
+                    return total + GetPendingPlayableCount();
                 }
 
                 var anchorIndex = Calls.IndexOf(anchor);
@@ -316,11 +389,11 @@ namespace JoesScanner.ViewModels
                             total++;
                     }
 
-                    return total;
+                    return total + GetPendingPlayableCount();
                 }
 
                 if (anchorIndex <= 0)
-                    return 0;
+                    return GetPendingPlayableCount();
 
                 var count = 0;
                 for (var i = anchorIndex - 1; i >= 0; i--)
@@ -329,8 +402,30 @@ namespace JoesScanner.ViewModels
                         count++;
                 }
 
-                return count;
+                return count + GetPendingPlayableCount();
             }
+        }
+
+        private int GetPendingPlayableCount()
+        {
+            bool IsPlayable(CallItem c) =>
+                c != null &&
+                !string.IsNullOrWhiteSpace(c.AudioUrl) &&
+                !_filterService.ShouldHide(c) &&
+                !_filterService.ShouldMute(c);
+
+            var count = 0;
+
+            lock (_pendingCallsLock)
+            {
+                for (var i = 0; i < _pendingCalls.Count; i++)
+                {
+                    if (IsPlayable(_pendingCalls[i]))
+                        count++;
+                }
+            }
+
+            return count;
         }
 
         // Total number of CallItem objects that have been received from the stream
@@ -348,8 +443,8 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        // Total number of CallItem objects successfully inserted into the Calls
-        // collection for the current session.
+        // Total number of CallItem objects successfully queued for the current session.
+        // Includes both visible Calls and hidden pending calls.
         public int TotalCallsInserted
         {
             get => _totalCallsInserted;
@@ -381,6 +476,14 @@ namespace JoesScanner.ViewModels
 
         // Whether the "Calls waiting" indicator should be visible in the UI.
         public bool IsCallsWaitingVisible => AudioEnabled;
+
+        // Media button enable state (used by the ImageButtons in the header).
+        // Requirement:
+        // - When disconnected, all media buttons except Play/Stop should be disabled.
+        public bool IsMediaButtonsEnabled => ConnectionStatusIsConnected;
+
+        // Speed buttons are only meaningful when connected and audio is enabled.
+        public bool IsSpeedButtonsEnabled => ConnectionStatusIsConnected && AudioEnabled;
 
         // Represents the current connection state of the call stream.
         private enum ConnectionStatus
@@ -518,7 +621,21 @@ namespace JoesScanner.ViewModels
 
             ConnectionStatusColor = color;
 
+            OnPropertyChanged(nameof(IsMediaButtonsEnabled));
+            OnPropertyChanged(nameof(IsSpeedButtonsEnabled));
+
             AppLog.Add($"Connection status changed to {status} ({text})");
+
+            try
+            {
+                if (status == ConnectionStatus.Connected && _currentPlayingCall == null)
+                {
+                    _systemMediaService.UpdateNowPlaying("Connected", "Joes Scanner", AudioEnabled);
+                }
+            }
+            catch
+            {
+            }
         }
 
         // Determine whether current server is the hosted Joe's Scanner service.
@@ -605,11 +722,78 @@ namespace JoesScanner.ViewModels
             ShowSubscriptionSummary = true;
         }
 
+        private void ClearPendingCalls()
+        {
+            lock (_pendingCallsLock)
+            {
+                _pendingCalls.Clear();
+            }
+        }
+
+        private void EnqueuePendingCall(CallItem call)
+        {
+            if (call == null)
+                return;
+
+            lock (_pendingCallsLock)
+            {
+                _pendingCalls.Insert(0, call);
+
+                while (_pendingCalls.Count > MaxCallsToKeep)
+                {
+                    _pendingCalls.RemoveAt(_pendingCalls.Count - 1);
+                }
+            }
+        }
+
+        private bool TryPromoteOldestPendingCallToVisible(out CallItem? promoted)
+        {
+            promoted = null;
+
+            lock (_pendingCallsLock)
+            {
+                if (_pendingCalls.Count == 0)
+                    return false;
+
+                // Oldest is at the end
+                promoted = _pendingCalls[_pendingCalls.Count - 1];
+                _pendingCalls.RemoveAt(_pendingCalls.Count - 1);
+            }
+
+            if (promoted == null)
+                return false;
+
+            Calls.Insert(0, promoted);
+            EnforceMaxCalls();
+
+            return true;
+        }
+
+        private bool ShouldHoldIncomingCalls()
+        {
+            if (!IsRunning)
+                return false;
+
+            var anchor = _currentPlayingCall ?? _lastPlayedCall;
+            if (anchor == null)
+                return false;
+
+            var idx = Calls.IndexOf(anchor);
+            return idx > 0;
+        }
+
         // Returns the next call to play from the backlog.
+        // When the user is behind live, new incoming calls are held in _pendingCalls so playback remains stable.
         private CallItem? GetNextQueuedCall()
         {
             if (Calls.Count == 0)
+            {
+                // Nothing visible yet. If we have pending calls, promote the oldest so it can be played.
+                if (TryPromoteOldestPendingCallToVisible(out var promoted))
+                    return promoted;
+
                 return null;
+            }
 
             if (_currentPlayingCall != null)
                 return null;
@@ -630,6 +814,11 @@ namespace JoesScanner.ViewModels
                 }
                 else if (anchorIndex == 0)
                 {
+                    // We are at live for the visible list. If new calls arrived while we were behind live,
+                    // promote the oldest pending call and play it next.
+                    if (TryPromoteOldestPendingCallToVisible(out var promoted))
+                        return promoted;
+
                     return null;
                 }
                 else
@@ -642,6 +831,9 @@ namespace JoesScanner.ViewModels
             {
                 var candidate = Calls[i];
 
+                if (candidate == null)
+                    continue;
+
                 if (string.IsNullOrWhiteSpace(candidate.AudioUrl))
                     continue;
 
@@ -649,6 +841,14 @@ namespace JoesScanner.ViewModels
                     continue;
 
                 return candidate;
+            }
+
+            // If nothing is playable in the visible backlog and we are effectively at live, try pending.
+            var lastIdx = _lastPlayedCall != null ? Calls.IndexOf(_lastPlayedCall) : -1;
+            if (lastIdx <= 0)
+            {
+                if (TryPromoteOldestPendingCallToVisible(out var promoted))
+                    return promoted;
             }
 
             return null;
@@ -667,24 +867,45 @@ namespace JoesScanner.ViewModels
 
         private void ApplyFiltersToExistingCalls()
         {
-            if (Calls == null || Calls.Count == 0)
-                return;
-
-            var removedCount = 0;
-
-            for (int i = Calls.Count - 1; i >= 0; i--)
+            if (Calls != null && Calls.Count > 0)
             {
-                var call = Calls[i];
-                if (_filterService.ShouldHide(call))
+                var removedCount = 0;
+
+                for (int i = Calls.Count - 1; i >= 0; i--)
                 {
-                    Calls.RemoveAt(i);
-                    removedCount++;
+                    var call = Calls[i];
+                    if (_filterService.ShouldHide(call))
+                    {
+                        Calls.RemoveAt(i);
+                        removedCount++;
+                    }
+                }
+
+                if (removedCount > 0)
+                {
+                    LastQueueEvent = $"Filters updated: removed {removedCount} calls at {DateTime.Now:T}";
+                    UpdateQueueDerivedState();
                 }
             }
 
-            if (removedCount > 0)
+            // Also prune pending calls
+            var removedPending = 0;
+            lock (_pendingCallsLock)
             {
-                LastQueueEvent = $"Filters updated: removed {removedCount} calls at {DateTime.Now:T}";
+                for (int i = _pendingCalls.Count - 1; i >= 0; i--)
+                {
+                    var call = _pendingCalls[i];
+                    if (_filterService.ShouldHide(call))
+                    {
+                        _pendingCalls.RemoveAt(i);
+                        removedPending++;
+                    }
+                }
+            }
+
+            if (removedPending > 0)
+            {
+                LastQueueEvent = $"Filters updated: removed {removedPending} pending calls at {DateTime.Now:T}";
                 UpdateQueueDerivedState();
             }
         }
@@ -732,8 +953,8 @@ namespace JoesScanner.ViewModels
                 OnPropertyChanged();
             }
         }
-        public string TaglineText => $"Server: {ServerUrl}";
 
+        public string TaglineText => $"Server: {ServerUrl}";
         public string DonateUrl => "https://www.joesscanner.com/products/one-time-donation/";
 
         public void Start()
@@ -778,9 +999,6 @@ namespace JoesScanner.ViewModels
                     }
 
                     AppLog.Add("Subscription check passed, starting stream.");
-
-                    // subscription service should have updated cached fields;
-                    // refresh the header badge.
                     UpdateSubscriptionSummaryFromSettings();
                 }
                 catch (Exception ex)
@@ -799,13 +1017,7 @@ namespace JoesScanner.ViewModels
 
             if (_cts != null)
             {
-                try
-                {
-                    _cts.Cancel();
-                }
-                catch
-                {
-                }
+                try { _cts.Cancel(); } catch { }
 
                 _cts.Dispose();
                 _cts = null;
@@ -819,9 +1031,12 @@ namespace JoesScanner.ViewModels
             SetConnectionStatus(ConnectionStatus.Connecting);
             IsRunning = true;
 
+            await EnsureSystemMediaSessionStartedAsync();
+
             _telemetryService.StartMonitoringHeartbeat(serverUrl);
 
             _currentPlayingCall = null;
+            ClearPendingCalls();
 
             if (Calls.Count > 0)
             {
@@ -836,6 +1051,49 @@ namespace JoesScanner.ViewModels
 
             _ = Task.Run(() => RunCallStreamLoopAsync(token));
         }
+
+        private async Task EnsureSystemMediaSessionStartedAsync()
+        {
+            try
+            {
+#if ANDROID
+                await EnsureAndroidNotificationPermissionAsync();
+#endif
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                await _systemMediaService.StartSessionAsync(AudioEnabled);
+                _systemMediaService.UpdateNowPlaying("Connected", "Joes Scanner", AudioEnabled);
+            }
+            catch
+            {
+            }
+        }
+
+#if ANDROID
+        private static async Task EnsureAndroidNotificationPermissionAsync()
+        {
+            try
+            {
+                if (!OperatingSystem.IsAndroidVersionAtLeast(33))
+                    return;
+
+                var status = await Permissions.CheckStatusAsync<Permissions.PostNotifications>();
+                if (status != PermissionStatus.Granted)
+                {
+                    await Permissions.RequestAsync<Permissions.PostNotifications>();
+                }
+            }
+            catch
+            {
+            }
+        }
+#endif
+
         private async Task RunCallStreamLoopAsync(CancellationToken token)
         {
             try
@@ -935,13 +1193,22 @@ namespace JoesScanner.ViewModels
                                 return;
                             }
 
-                            Calls.Insert(0, call);
-                            TotalCallsInserted++;
-
-                            LastQueueEvent = $"Inserted call at {DateTime.Now:T}";
-
-                            EnforceMaxCalls();
-                            UpdateQueueDerivedState();
+                            // If the user is behind live (replaying from an older point), hold incoming calls as pending.
+                            if (ShouldHoldIncomingCalls())
+                            {
+                                EnqueuePendingCall(call);
+                                TotalCallsInserted++;
+                                LastQueueEvent = $"Inserted call (pending) at {DateTime.Now:T}";
+                                UpdateQueueDerivedState();
+                            }
+                            else
+                            {
+                                Calls.Insert(0, call);
+                                TotalCallsInserted++;
+                                LastQueueEvent = $"Inserted call at {DateTime.Now:T}";
+                                EnforceMaxCalls();
+                                UpdateQueueDerivedState();
+                            }
 
                             // If audio is enabled and autoplay is enabled, keep playback running
                             if (AudioEnabled && AutoPlay)
@@ -1005,6 +1272,7 @@ namespace JoesScanner.ViewModels
 
                         _currentPlayingCall = null;
                         _lastPlayedCall = null;
+                        ClearPendingCalls();
 
                         UpdateQueueDerivedState();
                     });
@@ -1021,15 +1289,11 @@ namespace JoesScanner.ViewModels
             AppLog.Add("User clicked Stop monitoring.");
             _telemetryService.StopMonitoringHeartbeat("user_stop");
 
+            ClearPendingCalls();
+
             if (_cts != null)
             {
-                try
-                {
-                    _cts.Cancel();
-                }
-                catch
-                {
-                }
+                try { _cts.Cancel(); } catch { }
 
                 _cts.Dispose();
                 _cts = null;
@@ -1037,13 +1301,7 @@ namespace JoesScanner.ViewModels
 
             if (_audioCts != null)
             {
-                try
-                {
-                    _audioCts.Cancel();
-                }
-                catch
-                {
-                }
+                try { _audioCts.Cancel(); } catch { }
 
                 _audioCts.Dispose();
                 _audioCts = null;
@@ -1054,6 +1312,15 @@ namespace JoesScanner.ViewModels
             try
             {
                 await _audioPlaybackService.StopAsync();
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                await _systemMediaService.StopSessionAsync();
+                _systemMediaService.Clear();
             }
             catch
             {
@@ -1081,18 +1348,11 @@ namespace JoesScanner.ViewModels
             await StartMonitoringAsync();
         }
 
-
         public async Task StopAudioFromToggleAsync()
         {
             if (_audioCts != null)
             {
-                try
-                {
-                    _audioCts.Cancel();
-                }
-                catch
-                {
-                }
+                try { _audioCts.Cancel(); } catch { }
 
                 _audioCts.Dispose();
                 _audioCts = null;
@@ -1145,6 +1405,8 @@ namespace JoesScanner.ViewModels
                         call.IsPlaying = false;
                 }
 
+                // Transition the queue to this point by making it the new anchor.
+                // While anchored behind live, new calls will be stored in pending.
                 _currentPlayingCall = item;
                 UpdateQueueDerivedState();
 
@@ -1171,16 +1433,45 @@ namespace JoesScanner.ViewModels
         {
             try
             {
-                if (Calls.Count == 0)
+                CallItem? newest = null;
+
+                lock (_pendingCallsLock)
                 {
-                    _currentPlayingCall = null;
-                    _lastPlayedCall = null;
-                    UpdateQueueDerivedState();
-                    LastQueueEvent = "Jump to live ignored (no calls)";
-                    return;
+                    if (_pendingCalls.Count > 0)
+                        newest = _pendingCalls[0];
                 }
 
-                var newest = Calls[0];
+                if (newest == null)
+                {
+                    if (Calls.Count == 0)
+                    {
+                        _currentPlayingCall = null;
+                        _lastPlayedCall = null;
+                        UpdateQueueDerivedState();
+                        LastQueueEvent = "Jump to live ignored (no calls)";
+                        return;
+                    }
+
+                    newest = Calls[0];
+                }
+                else
+                {
+                    // Clear pending backlog when jumping live.
+                    ClearPendingCalls();
+
+                    // Ensure newest pending is visible at the top.
+                    var idx = Calls.IndexOf(newest);
+                    if (idx < 0)
+                    {
+                        Calls.Insert(0, newest);
+                        EnforceMaxCalls();
+                    }
+                    else if (idx > 0)
+                    {
+                        Calls.RemoveAt(idx);
+                        Calls.Insert(0, newest);
+                    }
+                }
 
                 foreach (var call in Calls)
                 {
@@ -1335,7 +1626,6 @@ namespace JoesScanner.ViewModels
                 var lastIndex = Calls.Count - 1;
                 if (lastIndex >= 0)
                 {
-                    var removed = Calls[lastIndex];
                     Calls.RemoveAt(lastIndex);
                 }
             }
@@ -1391,8 +1681,25 @@ namespace JoesScanner.ViewModels
                         call.IsHistory = isHistory;
                 }
             }
+        }
 
+        private static string BuildNowPlayingSubtitle(CallItem item)
+        {
+            if (item == null)
+                return string.Empty;
 
+            var parts = new List<string>();
+
+            if (!string.IsNullOrWhiteSpace(item.Source))
+                parts.Add(item.Source);
+
+            if (!string.IsNullOrWhiteSpace(item.Site))
+                parts.Add(item.Site);
+
+            if (!string.IsNullOrWhiteSpace(item.VoiceReceiver))
+                parts.Add(item.VoiceReceiver);
+
+            return string.Join(" | ", parts);
         }
 
         private async Task PlaySingleCallWithoutQueueAsync(CallItem item)
@@ -1416,6 +1723,14 @@ namespace JoesScanner.ViewModels
                 var playbackUrl = await GetPlayableAudioUrlAsync(item.AudioUrl, CancellationToken.None);
                 if (string.IsNullOrWhiteSpace(playbackUrl))
                     return;
+
+                try
+                {
+                    _systemMediaService.UpdateNowPlaying(item.Talkgroup, BuildNowPlayingSubtitle(item), AudioEnabled);
+                }
+                catch
+                {
+                }
 
                 await _audioPlaybackService.PlayAsync(playbackUrl, 1.0);
             }
@@ -1442,20 +1757,39 @@ namespace JoesScanner.ViewModels
 
             if (_audioCts != null)
             {
-                try
-                {
-                    _audioCts.Cancel();
-                }
-                catch
-                {
-                }
+                try { _audioCts.Cancel(); } catch { }
 
                 _audioCts.Dispose();
                 _audioCts = null;
             }
 
             _audioCts = new CancellationTokenSource();
-            var token = _audioCts.Token;
+            var userCts = _audioCts;
+
+            // Playback watchdog (prevents the queue from hanging forever on truly stuck playback).
+            var rateForTimeout = GetEffectivePlaybackRate(item);
+            var playbackSeconds = item.CallDurationSeconds > 0
+                ? (item.CallDurationSeconds / Math.Max(rateForTimeout, 0.1))
+                : 0;
+
+            var playbackLimitSeconds = playbackSeconds > 0
+                ? (playbackSeconds * 2) + 120
+                : 300;
+
+            playbackLimitSeconds = Math.Clamp(playbackLimitSeconds, 180, 10800);
+
+            // Download watchdog (separate, longer timeout).
+            // Android background networking can be throttled; tying download time to call duration causes false timeouts.
+            const int downloadLimitSeconds = 900; // 15 minutes
+
+            using var playbackWatchdogCts = new CancellationTokenSource(TimeSpan.FromSeconds(playbackLimitSeconds));
+            using var downloadWatchdogCts = new CancellationTokenSource(TimeSpan.FromSeconds(downloadLimitSeconds));
+
+            using var playbackLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(userCts.Token, playbackWatchdogCts.Token);
+            using var downloadLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(userCts.Token, downloadWatchdogCts.Token);
+
+            var playbackToken = playbackLinkedCts.Token;
+            var downloadToken = downloadLinkedCts.Token;
 
             foreach (var call in Calls)
             {
@@ -1471,16 +1805,61 @@ namespace JoesScanner.ViewModels
 
             try
             {
-                var rate = GetEffectivePlaybackRate(item);
+                var rate = rateForTimeout;
 
-                var playbackUrl = await GetPlayableAudioUrlAsync(item.AudioUrl, token);
+                string? downloadedTempPath = null;
+                var shouldDeleteTempFile = false;
+
+                // IMPORTANT: Do not use the playback watchdog here.
+                // Backgrounded Android downloads can be slower and would trip the playback watchdog incorrectly.
+                var playbackUrl = await GetPlayableAudioUrlAsync(item.AudioUrl, downloadToken);
                 if (string.IsNullOrWhiteSpace(playbackUrl))
-                    return;
+                {
+                    if (downloadWatchdogCts.IsCancellationRequested && !userCts.IsCancellationRequested)
+                        LastQueueEvent = "Audio download timeout, skipping to next call";
 
-                await _audioPlaybackService.PlayAsync(playbackUrl, rate, token);
+                    return;
+                }
+
+                if (IsDownloadedAudioTempFile(playbackUrl))
+                {
+                    downloadedTempPath = playbackUrl;
+                    shouldDeleteTempFile = true;
+                }
+
+                try
+                {
+                    _systemMediaService.UpdateNowPlaying(item.Talkgroup, BuildNowPlayingSubtitle(item), AudioEnabled);
+                }
+                catch
+                {
+                }
+
+                await _audioPlaybackService.PlayAsync(playbackUrl, rate, playbackToken);
+
+                if (shouldDeleteTempFile && !string.IsNullOrWhiteSpace(downloadedTempPath))
+                {
+                    TryDeleteFile(downloadedTempPath);
+                }
             }
             catch (OperationCanceledException)
             {
+                if (downloadWatchdogCts.IsCancellationRequested && !userCts.IsCancellationRequested)
+                {
+                    LastQueueEvent = "Audio download timeout, skipping to next call";
+                }
+                else if (playbackWatchdogCts.IsCancellationRequested && !userCts.IsCancellationRequested)
+                {
+                    LastQueueEvent = "Call playback watchdog timeout, skipping to next call";
+
+                    try
+                    {
+                        await _audioPlaybackService.StopAsync();
+                    }
+                    catch
+                    {
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -1497,6 +1876,45 @@ namespace JoesScanner.ViewModels
 
                 OnPropertyChanged(nameof(CallsWaiting));
                 OnPropertyChanged(nameof(IsCallsWaitingVisible));
+            }
+        }
+
+
+        private static bool IsDownloadedAudioTempFile(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return false;
+
+            try
+            {
+                var cacheDir = FileSystem.CacheDirectory;
+                if (string.IsNullOrWhiteSpace(cacheDir))
+                    return false;
+
+                var fullPath = Path.GetFullPath(path);
+                var fullCache = Path.GetFullPath(cacheDir);
+
+                if (!fullPath.StartsWith(fullCache, StringComparison.OrdinalIgnoreCase))
+                    return false;
+
+                var name = Path.GetFileName(fullPath);
+                return name.StartsWith("jaas_", StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void TryDeleteFile(string path)
+        {
+            try
+            {
+                if (File.Exists(path))
+                    File.Delete(path);
+            }
+            catch
+            {
             }
         }
 
@@ -1563,14 +1981,28 @@ namespace JoesScanner.ViewModels
                 var cacheDir = FileSystem.CacheDirectory;
                 var fileName = $"jaas_{Guid.NewGuid():N}{ext}";
                 var localPath = Path.Combine(cacheDir, fileName);
+                var tempPath = localPath + ".tmp";
 
-                await using (var target = File.Create(localPath))
-                await using (var stream = await response.Content.ReadAsStreamAsync(cancellationToken))
+                try
                 {
-                    await stream.CopyToAsync(target, cancellationToken);
-                }
+                    await using (var target = File.Create(tempPath))
+                    await using (var stream = await response.Content.ReadAsStreamAsync(cancellationToken))
+                    {
+                        await stream.CopyToAsync(target, cancellationToken);
+                    }
 
-                return localPath;
+                    if (File.Exists(localPath))
+                        File.Delete(localPath);
+
+                    File.Move(tempPath, localPath);
+                    return localPath;
+                }
+                catch
+                {
+                    TryDeleteFile(tempPath);
+                    TryDeleteFile(localPath);
+                    throw;
+                }
             }
             catch (OperationCanceledException)
             {
@@ -1606,6 +2038,7 @@ namespace JoesScanner.ViewModels
 
             await StartMonitoringAsync();
         }
+
         private async Task ToggleConnectionAsync()
         {
             if (IsRunning)

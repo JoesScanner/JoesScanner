@@ -21,7 +21,9 @@ public static class MauiProgram
         // Services
         builder.Services.AddSingleton<ISettingsService, SettingsService>();
         builder.Services.AddSingleton<ICallStreamService, CallStreamService>();
+        builder.Services.AddSingleton<ICallHistoryService, CallHistoryService>();
         builder.Services.AddSingleton<IAudioPlaybackService, AudioPlaybackService>();
+        builder.Services.AddSingleton<ISystemMediaService, SystemMediaService>();
         builder.Services.AddSingleton<ISubscriptionService, SubscriptionService>();
         builder.Services.AddSingleton<ITelemetryService, TelemetryService>();
 
@@ -30,6 +32,7 @@ public static class MauiProgram
 
         // View models
         builder.Services.AddSingleton<MainViewModel>();
+        builder.Services.AddSingleton<HistoryViewModel>();
         builder.Services.AddSingleton<SettingsViewModel>();
 
         // Pages

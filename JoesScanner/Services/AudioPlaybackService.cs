@@ -4,36 +4,46 @@ using WinMediaPlayer = Windows.Media.Playback.MediaPlayer;
 #endif
 
 #if ANDROID
+using Android.Content;
 using Android.Media;
 using Android.OS;
-using AndroidUri = Android.Net.Uri;
-using AStream = Android.Media.Stream;
+using Microsoft.Maui.ApplicationModel;
+using AUri = Android.Net.Uri;
+using AMediaStream = Android.Media.Stream;
+#endif
+
+#if IOS || MACCATALYST
+using AVFoundation;
+using Foundation;
 #endif
 
 namespace JoesScanner.Services
 {
-    // Cross-platform audio playback service used by the app to play call audio.
-    // Uses platform-specific media players on Windows and Android, with optional playback speed control.
+    // Cross-platform audio playback wrapper.
+    // Critical behavior: PlayAsync must not return until playback is actually complete (or canceled),
+    // otherwise the queue will advance and "skip" calls.
     public class AudioPlaybackService : IAudioPlaybackService
     {
 #if WINDOWS
-        // Windows media player instance used for playback on WinUI.
-        private WinMediaPlayer? _player;
+        private WinMediaPlayer? _windowsPlayer;
 #endif
 
 #if ANDROID
-        // Android media player instance used for playback on Android devices.
-        private MediaPlayer? _androidPlayer;
+        private Android.Media.MediaPlayer? _androidPlayer;
+        private AudioManager? _audioManager;
+        private AudioFocusChangeListener? _focusListener;
 #endif
 
-        // Legacy overload that plays at normal speed (1.0x).
+#if IOS || MACCATALYST
+        private AVPlayer? _iosPlayer;
+        private NSObject? _iosEndObserver;
+#endif
+
         public Task PlayAsync(string audioUrl, CancellationToken cancellationToken = default)
         {
             return PlayAsync(audioUrl, 1.0, cancellationToken);
         }
 
-        // Plays the given audio URL at the specified playbackRate.
-        // playbackRate is clamped to a minimum of 1.0 if a non-positive value is provided.
         public async Task PlayAsync(string audioUrl, double playbackRate, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(audioUrl))
@@ -46,35 +56,245 @@ namespace JoesScanner.Services
             await PlayOnWindowsAsync(audioUrl, playbackRate, cancellationToken);
 #elif ANDROID
             await PlayOnAndroidAsync(audioUrl, playbackRate, cancellationToken);
+#elif IOS || MACCATALYST
+            await PlayOnAppleAsync(audioUrl, playbackRate, cancellationToken);
 #else
             await Task.CompletedTask;
 #endif
         }
 
-        // Stops any active playback and releases platform-specific media player resources.
-        public Task StopAsync()
+        public async Task StopAsync()
         {
 #if WINDOWS
+            await StopOnWindowsAsync();
+#elif ANDROID
+            await StopOnAndroidAsync();
+#elif IOS || MACCATALYST
+            await StopOnAppleAsync();
+#else
+            await Task.CompletedTask;
+#endif
+        }
+
+#if WINDOWS
+        private Task PlayOnWindowsAsync(string audioUrl, double playbackRate, CancellationToken cancellationToken)
+        {
+            _windowsPlayer ??= new WinMediaPlayer();
+
+            var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            void OnEnded(object? s, object e)
+            {
+                try { tcs.TrySetResult(); } catch { }
+            }
+
+            void OnFailed(WinMediaPlayer s, Windows.Media.Playback.MediaPlayerFailedEventArgs e)
+            {
+                try { tcs.TrySetResult(); } catch { }
+            }
+
             try
             {
-                _player?.Pause();
-                _player?.Dispose();
+                _windowsPlayer.MediaEnded += OnEnded;
+                _windowsPlayer.MediaFailed += OnFailed;
+
+                _windowsPlayer.Source = MediaSource.CreateFromUri(new global::System.Uri(audioUrl));
+                _windowsPlayer.PlaybackSession.PlaybackRate = playbackRate;
+                _windowsPlayer.Play();
+            }
+            catch
+            {
+                try { tcs.TrySetResult(); } catch { }
+            }
+
+            return WaitWithCleanupAsync(tcs.Task, cancellationToken, () =>
+            {
+                try { _windowsPlayer.MediaEnded -= OnEnded; } catch { }
+                try { _windowsPlayer.MediaFailed -= OnFailed; } catch { }
+            });
+        }
+
+        private Task StopOnWindowsAsync()
+        {
+            try
+            {
+                _windowsPlayer?.Pause();
+                _windowsPlayer?.Dispose();
             }
             catch
             {
             }
             finally
             {
-                _player = null;
+                _windowsPlayer = null;
             }
+
+            return Task.CompletedTask;
+        }
 #endif
 
 #if ANDROID
+        private async Task PlayOnAndroidAsync(string audioUrl, double playbackRate, CancellationToken cancellationToken)
+        {
+            await StopOnAndroidAsync();
+
+            var ctx = Platform.CurrentActivity ?? Platform.AppContext;
+            if (ctx == null)
+                return;
+
+            RequestAudioFocus(ctx);
+
+            var startedTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var finishedTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            Android.Media.MediaPlayer? player = null;
+
             try
             {
-                _androidPlayer?.Stop();
-                _androidPlayer?.Reset();
-                _androidPlayer?.Release();
+                player = new Android.Media.MediaPlayer();
+                _androidPlayer = player;
+
+                try
+                {
+                    var attrs = new AudioAttributes.Builder()
+                        .SetUsage(AudioUsageKind.Media)
+                        .SetContentType(AudioContentType.Speech)
+                        .Build();
+                    player.SetAudioAttributes(attrs);
+                }
+                catch
+                {
+                    try { player.SetAudioStreamType(AMediaStream.Music); } catch { }
+                }
+
+                player.Prepared += (_, __) =>
+                {
+                    try
+                    {
+                        try
+                        {
+                            if (Build.VERSION.SdkInt >= BuildVersionCodes.M)
+                            {
+                                var p = new PlaybackParams();
+                                p.SetSpeed((float)playbackRate);
+                                player.PlaybackParams = p;
+                            }
+                        }
+                        catch
+                        {
+                        }
+
+                        player.Start();
+                    }
+                    catch
+                    {
+                    }
+                    finally
+                    {
+                        try { startedTcs.TrySetResult(); } catch { }
+                    }
+                };
+
+                player.Completion += (_, __) =>
+                {
+                    try { finishedTcs.TrySetResult(); } catch { }
+                };
+
+                player.Error += (_, __) =>
+                {
+                    try { finishedTcs.TrySetResult(); } catch { }
+                };
+
+                var src = audioUrl.Trim();
+
+                if (LooksLikeNetworkOrContentUri(src))
+                {
+                    var uri = AUri.Parse(src);
+                    if (uri == null)
+                        return;
+
+                    player.SetDataSource(ctx, uri);
+                }
+                else
+                {
+                    player.SetDataSource(src);
+                }
+
+                player.PrepareAsync();
+
+                using var reg = cancellationToken.Register(() =>
+                {
+                    try { finishedTcs.TrySetCanceled(cancellationToken); } catch { }
+                });
+
+                // Wait until the player is actually started (or canceled)
+                await startedTcs.Task.WaitAsync(cancellationToken);
+
+                // Primary completion path: Completion or Error event.
+                // Secondary safety: poll IsPlaying so we do not "finish instantly" due to event quirks.
+                while (!cancellationToken.IsCancellationRequested)
+                {
+                    if (finishedTcs.Task.IsCompleted)
+                        break;
+
+                    try
+                    {
+                        if (player != null && !player.IsPlaying)
+                        {
+                            // If playback stopped and no completion fired, treat as finished.
+                            break;
+                        }
+                    }
+                    catch
+                    {
+                        break;
+                    }
+
+                    await Task.Delay(200, cancellationToken);
+                }
+
+                // If event completed, observe it (propagates cancellation cleanly).
+                if (finishedTcs.Task.IsCompleted)
+                    await finishedTcs.Task;
+            }
+            catch (global::System.OperationCanceledException)
+            {
+                throw;
+            }
+            catch
+            {
+                // Swallow playback failures; queue logic handles skipping.
+            }
+        }
+
+        private static bool LooksLikeNetworkOrContentUri(string src)
+        {
+            if (string.IsNullOrWhiteSpace(src))
+                return false;
+
+            if (src.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (src.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (src.StartsWith("content://", StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (src.StartsWith("file://", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            return false;
+        }
+
+        private Task StopOnAndroidAsync()
+        {
+            try
+            {
+                if (_androidPlayer != null)
+                {
+                    try { _androidPlayer.Stop(); } catch { }
+                    try { _androidPlayer.Reset(); } catch { }
+                    try { _androidPlayer.Release(); } catch { }
+                    try { _androidPlayer.Dispose(); } catch { }
+                }
             }
             catch
             {
@@ -82,213 +302,184 @@ namespace JoesScanner.Services
             finally
             {
                 _androidPlayer = null;
+                AbandonAudioFocus();
             }
-#endif
 
             return Task.CompletedTask;
         }
 
-#if WINDOWS
-        // Plays the audio URL on Windows using WinUI's MediaPlayer with the specified playbackRate.
-        // The returned task completes when playback ends or is canceled.
-        private Task PlayOnWindowsAsync(string audioUrl, double playbackRate, CancellationToken cancellationToken)
+        private void RequestAudioFocus(Context context)
         {
-            var tcs = new TaskCompletionSource();
-
-            MainThread.BeginInvokeOnMainThread(() =>
+            try
             {
+                _audioManager ??= (AudioManager?)context.GetSystemService(Context.AudioService);
+                if (_audioManager == null)
+                    return;
+
+                _focusListener ??= new AudioFocusChangeListener(this);
+
+#pragma warning disable CS0618
+                _audioManager.RequestAudioFocus(_focusListener, AMediaStream.Music, AudioFocus.Gain);
+#pragma warning restore CS0618
+            }
+            catch
+            {
+            }
+        }
+
+        private void AbandonAudioFocus()
+        {
+            try
+            {
+                if (_audioManager == null || _focusListener == null)
+                    return;
+
+#pragma warning disable CS0618
+                _audioManager.AbandonAudioFocus(_focusListener);
+#pragma warning restore CS0618
+            }
+            catch
+            {
+            }
+        }
+
+        private sealed class AudioFocusChangeListener : Java.Lang.Object, AudioManager.IOnAudioFocusChangeListener
+        {
+            private readonly AudioPlaybackService _owner;
+
+            public AudioFocusChangeListener(AudioPlaybackService owner)
+            {
+                _owner = owner;
+            }
+
+            public void OnAudioFocusChange(AudioFocus focusChange)
+            {
+                // App semantics: no pause, stop on focus loss.
                 try
                 {
-                    _player?.Pause();
-                    _player?.Dispose();
+                    if (focusChange == AudioFocus.Loss || focusChange == AudioFocus.LossTransient)
+                        _ = _owner.StopAsync();
                 }
                 catch
                 {
                 }
+            }
+        }
+#endif
 
-                var player = new WinMediaPlayer
-                {
-                    Source = MediaSource.CreateFromUri(new Uri(audioUrl))
-                };
+#if IOS || MACCATALYST
+        private async Task PlayOnAppleAsync(string audioUrl, double playbackRate, CancellationToken cancellationToken)
+        {
+            await StopOnAppleAsync();
 
-                _player = player;
+            var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-                // Apply playback rate (1.0 = normal).
-                try
-                {
-                    player.PlaybackSession.PlaybackRate = playbackRate;
-                }
-                catch
-                {
-                    // If rate cannot be set, ignore and play at normal speed.
-                }
+            try
+            {
+                var session = AVAudioSession.SharedInstance();
+                session.SetCategory(
+                    AVAudioSessionCategory.Playback,
+                    AVAudioSessionCategoryOptions.AllowBluetooth | AVAudioSessionCategoryOptions.AllowBluetoothA2DP);
+                session.SetActive(true);
 
-                player.MediaEnded += (sender, args) =>
-                {
-                    try
-                    {
-                        player.Pause();
-                        player.Dispose();
-                    }
-                    catch
-                    {
-                    }
-                    finally
-                    {
-                        if (_player == player)
-                            _player = null;
-                    }
+                var nsUrl = NSUrl.FromString(audioUrl);
+                if (nsUrl == null)
+                    return;
 
-                    tcs.TrySetResult();
-                };
+                var item = new AVPlayerItem(nsUrl);
+                var player = new AVPlayer(item);
+                _iosPlayer = player;
 
-                if (cancellationToken.CanBeCanceled)
-                {
-                    cancellationToken.Register(() =>
-                    {
-                        try
-                        {
-                            player.Pause();
-                            player.Dispose();
-                        }
-                        catch
-                        {
-                        }
-                        finally
-                        {
-                            if (_player == player)
-                                _player = null;
-                        }
-
-                        tcs.TrySetCanceled(cancellationToken);
-                    });
-                }
+                _iosEndObserver = NSNotificationCenter.DefaultCenter.AddObserver(
+                    AVPlayerItem.DidPlayToEndTimeNotification,
+                    _ => { try { tcs.TrySetResult(); } catch { } },
+                    item);
 
                 player.Play();
-            });
 
-            return tcs.Task;
-        }
-#endif
+                try { player.Rate = (float)playbackRate; } catch { }
 
-#if ANDROID
-        // Plays the audio URL on Android using MediaPlayer with the specified playbackRate.
-        // The returned task completes when playback ends, errors, or is canceled.
-        private Task PlayOnAndroidAsync(string audioUrl, double playbackRate, CancellationToken cancellationToken)
-        {
-            var tcs = new TaskCompletionSource();
+                using var reg = cancellationToken.Register(() =>
+                {
+                    try { tcs.TrySetCanceled(cancellationToken); } catch { }
+                });
 
-            Task.Run(() =>
+                await tcs.Task;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch
+            {
+                // Swallow playback failures
+            }
+            finally
             {
                 try
                 {
-                    // Stop any existing playback and dispose prior player instance.
-                    try
-                    {
-                        _androidPlayer?.Stop();
-                        _androidPlayer?.Reset();
-                        _androidPlayer?.Release();
-                    }
-                    catch
-                    {
-                    }
-                    finally
-                    {
-                        _androidPlayer = null;
-                    }
-
-                    var ctx = Platform.CurrentActivity ?? Platform.AppContext;
-                    if (ctx == null)
-                    {
-                        tcs.TrySetResult();
-                        return;
-                    }
-
-                    var uri = AndroidUri.Parse(audioUrl);
-
-                    var player = new MediaPlayer();
-#pragma warning disable CA1422
-                    player.SetAudioStreamType(AStream.Music);
-#pragma warning restore CA1422
-#pragma warning disable CS8604
-                    player.SetDataSource(ctx, uri);
-#pragma warning restore CS8604
-                    player.Prepare();
-
-                    // Apply playback speed on Android M and above using PlaybackParams.
-                    try
-                    {
-                        if (Build.VERSION.SdkInt >= BuildVersionCodes.M)
-                        {
-#pragma warning disable CA1416
-                            var p = player.PlaybackParams ?? new PlaybackParams();
-                            p.SetSpeed((float)playbackRate);
-                            player.PlaybackParams = p;
-#pragma warning restore CA1416
-                        }
-                    }
-                    catch
-                    {
-                        // If speed cannot be set, fall back to normal.
-                    }
-
-                    player.Start();
-
-                    _androidPlayer = player;
-
-                    // When playback completes, clean up and signal completion.
-                    player.Completion += (sender, args) =>
-                    {
-                        try
-                        {
-                            player.Stop();
-                            player.Reset();
-                            player.Release();
-                        }
-                        catch
-                        {
-                        }
-                        finally
-                        {
-                            if (_androidPlayer == player)
-                                _androidPlayer = null;
-                        }
-
-                        tcs.TrySetResult();
-                    };
-
-                    if (cancellationToken.CanBeCanceled)
-                    {
-                        cancellationToken.Register(() =>
-                        {
-                            try
-                            {
-                                player.Stop();
-                                player.Reset();
-                                player.Release();
-                            }
-                            catch
-                            {
-                            }
-                            finally
-                            {
-                                if (_androidPlayer == player)
-                                    _androidPlayer = null;
-                            }
-
-                            tcs.TrySetCanceled(cancellationToken);
-                        });
-                    }
+                    if (_iosEndObserver != null)
+                        NSNotificationCenter.DefaultCenter.RemoveObserver(_iosEndObserver);
                 }
                 catch
                 {
-                    // Swallow playback errors for now and report completion.
-                    tcs.TrySetResult();
                 }
-            }, cancellationToken);
 
-            return tcs.Task;
+                _iosEndObserver = null;
+            }
+        }
+
+        private Task StopOnAppleAsync()
+        {
+            try
+            {
+                if (_iosPlayer != null)
+                {
+                    try { _iosPlayer.Pause(); } catch { }
+                    try { _iosPlayer.ReplaceCurrentItemWithPlayerItem(null); } catch { }
+                    try { _iosPlayer.Dispose(); } catch { }
+                }
+            }
+            catch
+            {
+            }
+            finally
+            {
+                _iosPlayer = null;
+
+                try
+                {
+                    if (_iosEndObserver != null)
+                        NSNotificationCenter.DefaultCenter.RemoveObserver(_iosEndObserver);
+                }
+                catch
+                {
+                }
+
+                _iosEndObserver = null;
+
+                try { AVAudioSession.SharedInstance().SetActive(false); } catch { }
+            }
+
+            return Task.CompletedTask;
         }
 #endif
+
+        private static async Task WaitWithCleanupAsync(Task task, CancellationToken token, Action cleanup)
+        {
+            try
+            {
+                using var reg = token.Register(() => { });
+                await task.WaitAsync(token);
+            }
+            catch (global::System.OperationCanceledException)
+            {
+                throw;
+            }
+            finally
+            {
+                try { cleanup(); } catch { }
+            }
+        }
     }
 }

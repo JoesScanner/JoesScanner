@@ -3,44 +3,323 @@
     x:Class="JoesScanner.Views.HistoryPage"
     xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
     xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    xmlns:vm="clr-namespace:JoesScanner.ViewModels"
     xmlns:controls="clr-namespace:JoesScanner.Views.Controls"
     xmlns:models="clr-namespace:JoesScanner.Models"
+    x:Name="Page"
+    x:DataType="vm:HistoryViewModel"
     Title="History"
     BackgroundColor="{StaticResource TabStripNavy}"
     Shell.NavBarIsVisible="False"
     Shell.TabBarIsVisible="False">
 
-    <Grid Padding="5,0,5,5" RowDefinitions="Auto,*" RowSpacing="6">
+    <Grid Padding="5,0,5,5" RowDefinitions="Auto,*" RowSpacing="0">
+
+        <controls:AppTabStrip
+            Grid.Row="0"
+            SelectedTab="{x:Static models:AppTab.History}" />
 
         <Border
             Grid.Row="1"
             StrokeThickness="0"
             BackgroundColor="{AppThemeBinding Light=White, Dark=#020617}"
             VerticalOptions="FillAndExpand"
-            HorizontalOptions="FillAndExpand"
-            Padding="20">
+            HorizontalOptions="FillAndExpand">
 
             <Border.StrokeShape>
                 <RoundRectangle CornerRadius="0,0,24,24" />
             </Border.StrokeShape>
 
-            <VerticalStackLayout Spacing="10" VerticalOptions="Center" HorizontalOptions="Center">
-                <Label
-                    Text="24 hour History"
-                    FontSize="24"
-                    FontAttributes="Bold"
-                    TextColor="{AppThemeBinding Light=#111827, Dark=White}"
-                    HorizontalOptions="Center" />
-                <Label
-                    Text="Coming soon."
-                    FontSize="14"
-                    TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
-                    HorizontalOptions="Center" />
-            </VerticalStackLayout>
-        </Border>
+            <Grid Padding="8" RowDefinitions="Auto,Auto,Auto,*" RowSpacing="4">
 
-        <controls:AppTabStrip
-            Grid.Row="0"
-            SelectedTab="{x:Static models:AppTab.History}" />
+                <Border
+                    Grid.Row="0"
+                    StrokeThickness="1"
+                    Stroke="#1f2937"
+                    BackgroundColor="#0b1220"
+                    Padding="4"
+                    HorizontalOptions="Fill">
+
+                    <Border.StrokeShape>
+                        <RoundRectangle CornerRadius="16" />
+                    </Border.StrokeShape>
+
+                    <Grid RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="0">
+
+                        <!-- Hour -->
+                        <Grid Row="0" ColumnDefinitions="28,22,*,22,34" ColumnSpacing="3" VerticalOptions="Center">
+                            <Label Text="Hr"
+                                   FontSize="11"
+                                   TextColor="#e5e7eb"
+                                   VerticalOptions="Center" />
+
+                            <Button Grid.Column="1"
+                                    Text="-"
+                                    Command="{Binding HourMinusCommand}"
+                                    Padding="0"
+                                    HeightRequest="22"
+                                    WidthRequest="22"
+                                    MinimumHeightRequest="0"
+                                    MinimumWidthRequest="0"
+                                    FontSize="12"
+                                    CornerRadius="11" />
+
+                            <Slider Grid.Column="2"
+                                    Minimum="1"
+                                    Maximum="12"
+                                    Value="{Binding Hour12, Mode=TwoWay}"
+                                    VerticalOptions="Center" />
+
+                            <Button Grid.Column="3"
+                                    Text="+"
+                                    Command="{Binding HourPlusCommand}"
+                                    Padding="0"
+                                    HeightRequest="22"
+                                    WidthRequest="22"
+                                    MinimumHeightRequest="0"
+                                    MinimumWidthRequest="0"
+                                    FontSize="12"
+                                    CornerRadius="11" />
+
+                            <Label Grid.Column="4"
+                                   Text="{Binding Hour12}"
+                                   FontSize="11"
+                                   TextColor="#e5e7eb"
+                                   HorizontalTextAlignment="End"
+                                   VerticalOptions="Center" />
+                        </Grid>
+
+                        <!-- Minute -->
+                        <Grid Row="1" ColumnDefinitions="28,22,*,22,34" ColumnSpacing="3" VerticalOptions="Center">
+                            <Label Text="Min"
+                                   FontSize="11"
+                                   TextColor="#e5e7eb"
+                                   VerticalOptions="Center" />
+
+                            <Button Grid.Column="1"
+                                    Text="-"
+                                    Command="{Binding MinuteMinusCommand}"
+                                    Padding="0"
+                                    HeightRequest="22"
+                                    WidthRequest="22"
+                                    MinimumHeightRequest="0"
+                                    MinimumWidthRequest="0"
+                                    FontSize="12"
+                                    CornerRadius="11" />
+
+                            <Slider Grid.Column="2"
+                                    Minimum="0"
+                                    Maximum="59"
+                                    Value="{Binding Minute, Mode=TwoWay}"
+                                    VerticalOptions="Center" />
+
+                            <Button Grid.Column="3"
+                                    Text="+"
+                                    Command="{Binding MinutePlusCommand}"
+                                    Padding="0"
+                                    HeightRequest="22"
+                                    WidthRequest="22"
+                                    MinimumHeightRequest="0"
+                                    MinimumWidthRequest="0"
+                                    FontSize="12"
+                                    CornerRadius="11" />
+
+                            <Label Grid.Column="4"
+                                   Text="{Binding MinuteText}"
+                                   FontSize="11"
+                                   TextColor="#e5e7eb"
+                                   HorizontalTextAlignment="End"
+                                   VerticalOptions="Center" />
+                        </Grid>
+
+                        <!-- Second -->
+                        <Grid Row="2" ColumnDefinitions="28,22,*,22,34" ColumnSpacing="3" VerticalOptions="Center">
+                            <Label Text="Sec"
+                                   FontSize="11"
+                                   TextColor="#e5e7eb"
+                                   VerticalOptions="Center" />
+
+                            <Button Grid.Column="1"
+                                    Text="-"
+                                    Command="{Binding SecondMinusCommand}"
+                                    Padding="0"
+                                    HeightRequest="22"
+                                    WidthRequest="22"
+                                    MinimumHeightRequest="0"
+                                    MinimumWidthRequest="0"
+                                    FontSize="12"
+                                    CornerRadius="11" />
+
+                            <Slider Grid.Column="2"
+                                    Minimum="0"
+                                    Maximum="59"
+                                    Value="{Binding Second, Mode=TwoWay}"
+                                    VerticalOptions="Center" />
+
+                            <Button Grid.Column="3"
+                                    Text="+"
+                                    Command="{Binding SecondPlusCommand}"
+                                    Padding="0"
+                                    HeightRequest="22"
+                                    WidthRequest="22"
+                                    MinimumHeightRequest="0"
+                                    MinimumWidthRequest="0"
+                                    FontSize="12"
+                                    CornerRadius="11" />
+
+                            <Label Grid.Column="4"
+                                   Text="{Binding SecondText}"
+                                   FontSize="11"
+                                   TextColor="#e5e7eb"
+                                   HorizontalTextAlignment="End"
+                                   VerticalOptions="Center" />
+                        </Grid>
+
+                        <!-- Search -->
+                        <Grid Row="3" ColumnDefinitions="*,Auto" ColumnSpacing="6" Margin="0,2,0,0">
+                            <Label Text="" Grid.Column="0" />
+                            <Button Grid.Column="1"
+                                    Text="Search"
+                                    Command="{Binding SearchCommand}"
+                                    Padding="10,2"
+                                    HeightRequest="24"
+                                    MinimumHeightRequest="0"
+                                    CornerRadius="10" />
+                        </Grid>
+
+                    </Grid>
+                </Border>
+
+                <!-- Media controls -->
+                <Border
+                    Grid.Row="1"
+                    StrokeThickness="1"
+                    Stroke="#1f2937"
+                    BackgroundColor="#0b1220"
+                    Padding="6"
+                    HorizontalOptions="Fill">
+
+                    <Border.StrokeShape>
+                        <RoundRectangle CornerRadius="16" />
+                    </Border.StrokeShape>
+
+                    <HorizontalStackLayout Spacing="10" HorizontalOptions="Center" VerticalOptions="Center">
+                        <ImageButton
+                            Source="mc_previous.png"
+                            Command="{Binding PreviousCommand}"
+                            BackgroundColor="Transparent"
+                            HeightRequest="38"
+                            WidthRequest="38"
+                            Padding="0"
+                            ToolTipProperties.Text="Previous" />
+
+                        <ImageButton
+                            Source="mc_play.png"
+                            Command="{Binding PlayCommand}"
+                            BackgroundColor="Transparent"
+                            HeightRequest="38"
+                            WidthRequest="38"
+                            Padding="0"
+                            ToolTipProperties.Text="Play" />
+
+                        <ImageButton
+                            Source="mc_stop.png"
+                            Command="{Binding StopCommand}"
+                            BackgroundColor="Transparent"
+                            HeightRequest="38"
+                            WidthRequest="38"
+                            Padding="0"
+                            ToolTipProperties.Text="Stop" />
+
+                        <ImageButton
+                            Source="mc_next.png"
+                            Command="{Binding NextCommand}"
+                            BackgroundColor="Transparent"
+                            HeightRequest="38"
+                            WidthRequest="38"
+                            Padding="0"
+                            ToolTipProperties.Text="Next" />
+                    </HorizontalStackLayout>
+                </Border>
+
+                <Label
+                    Grid.Row="2"
+                    Text="{Binding StatusText}"
+                    FontSize="12"
+                    TextColor="{AppThemeBinding Light=#374151, Dark=#e5e7eb}"
+                    LineBreakMode="TailTruncation" />
+
+                <CollectionView
+                    x:Name="CallsList"
+                    Grid.Row="3"
+                    ItemsSource="{Binding Calls}"
+                    SelectionMode="None">
+
+                    <CollectionView.ItemTemplate>
+                        <DataTemplate x:DataType="models:CallItem">
+                            <Border
+                                StrokeThickness="1"
+                                Stroke="#1f2937"
+                                BackgroundColor="{AppThemeBinding Light=White, Dark=#0b1220}"
+                                Padding="8"
+                                Margin="0,0,0,6">
+
+                                <Border.StrokeShape>
+                                    <RoundRectangle CornerRadius="14" />
+                                </Border.StrokeShape>
+
+                                <Border.Triggers>
+                                    <DataTrigger TargetType="Border" Binding="{Binding IsPlaying}" Value="True">
+                                        <Setter Property="StrokeThickness" Value="2" />
+                                        <Setter Property="Stroke" Value="#22c55e" />
+                                        <Setter Property="BackgroundColor" Value="{AppThemeBinding Light=#ecfdf5, Dark=#022c22}" />
+                                    </DataTrigger>
+                                </Border.Triggers>
+
+                                <Border.GestureRecognizers>
+                                    <TapGestureRecognizer
+                                        Command="{Binding BindingContext.PlayCallCommand, Source={x:Reference Page}}"
+                                        CommandParameter="{Binding .}" />
+                                </Border.GestureRecognizers>
+
+                                <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="*,Auto" ColumnSpacing="8" RowSpacing="2">
+                                    <Label Grid.Row="0" Grid.Column="0"
+                                           FontSize="14"
+                                           TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}">
+                                        <Label.FormattedText>
+                                            <FormattedString>
+                                                <Span Text="{Binding Timestamp, StringFormat='{0:HH:mm:ss}'}" />
+                                                <Span Text="  " />
+                                                <Span Text="{Binding Talkgroup}" FontAttributes="Bold" />
+                                            </FormattedString>
+                                        </Label.FormattedText>
+                                    </Label>
+
+                                    <Label Grid.Row="0" Grid.Column="1"
+                                           FontSize="12"
+                                           TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+                                           Text="{Binding CallDurationSeconds, StringFormat='{0:0}s'}"
+                                           HorizontalTextAlignment="End" />
+
+                                    <Label Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2"
+                                           FontSize="12"
+                                           TextColor="{AppThemeBinding Light=#374151, Dark=#cbd5e1}">
+                                        <Label.FormattedText>
+                                            <FormattedString>
+                                                <Span Text="{Binding Source}" />
+                                                <Span Text="  " />
+                                                <Span Text="{Binding Site}" />
+                                            </FormattedString>
+                                        </Label.FormattedText>
+                                    </Label>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </CollectionView.ItemTemplate>
+
+                </CollectionView>
+
+            </Grid>
+        </Border>
     </Grid>
 </ContentPage>

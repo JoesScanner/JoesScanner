@@ -6,9 +6,9 @@ using AndroidX.Core.App;
 
 namespace JoesScanner.Platforms.Android.Services
 {
-    // Foreground service used to keep the app alive for continuous audio playback.
-    // This does not play audio itself, it just keeps an ongoing notification active.
-    [Service(Exported = false)]
+    [Service(
+        Exported = false,
+        ForegroundServiceType = global::Android.Content.PM.ForegroundService.TypeMediaPlayback)]
     public class AudioForegroundService : Service
     {
         private const int NotificationId = 1001;
@@ -22,7 +22,8 @@ namespace JoesScanner.Platforms.Android.Services
             try
             {
                 CreateNotificationChannelIfNeeded();
-                StartForeground(NotificationId, BuildNotificationNonNull());
+                AndroidMediaCenter.EnsureInitialized(this);
+                StartForeground(NotificationId, AndroidMediaCenter.BuildNotification(this));
             }
             catch
             {
@@ -34,7 +35,8 @@ namespace JoesScanner.Platforms.Android.Services
             try
             {
                 CreateNotificationChannelIfNeeded();
-                StartForeground(NotificationId, BuildNotificationNonNull());
+                AndroidMediaCenter.EnsureInitialized(this);
+                StartForeground(NotificationId, AndroidMediaCenter.BuildNotification(this));
             }
             catch
             {
@@ -67,7 +69,6 @@ namespace JoesScanner.Platforms.Android.Services
 
         private void CreateNotificationChannelIfNeeded()
         {
-            // All NotificationChannel APIs are Android 26+.
             if (!OperatingSystem.IsAndroidVersionAtLeast(26))
                 return;
 
@@ -93,56 +94,6 @@ namespace JoesScanner.Platforms.Android.Services
             }
         }
 
-        private Notification BuildNotificationNonNull()
-        {
-            var builder = new NotificationCompat.Builder(this, ChannelId);
-
-            builder.SetContentTitle("Joe's Scanner");
-            builder.SetContentText("Audio playback active");
-            builder.SetOngoing(true);
-            builder.SetOnlyAlertOnce(true);
-            builder.SetPriority((int)NotificationPriority.Low);
-            builder.SetSmallIcon(Resource.Mipmap.appicon);
-
-            try
-            {
-                var pm = PackageManager;
-                if (pm == null)
-                    return ForceNonNull(builder.Build());
-
-                var packageName = PackageName;
-                if (string.IsNullOrWhiteSpace(packageName))
-                    return ForceNonNull(builder.Build());
-
-                var launchIntent = pm.GetLaunchIntentForPackage(packageName);
-                if (launchIntent == null)
-                    return ForceNonNull(builder.Build());
-
-                launchIntent.AddFlags(ActivityFlags.SingleTop);
-
-                var flags = PendingIntentFlags.UpdateCurrent;
-
-                if (OperatingSystem.IsAndroidVersionAtLeast(23))
-                    flags |= PendingIntentFlags.Immutable;
-
-                var pending = PendingIntent.GetActivity(this, 0, launchIntent, flags);
-                if (pending != null)
-                {
-                    builder.SetContentIntent(pending);
-                }
-            }
-            catch
-            {
-            }
-
-            return ForceNonNull(builder.Build());
-        }
-
-        private static Notification ForceNonNull(Notification? notification)
-        {
-            // Android bindings sometimes annotate Build() as nullable.
-            // This guarantees our service never returns a null Notification.
-            return notification ?? new Notification();
-        }
+        // Notification content is built and updated by AndroidMediaCenter.
     }
 }

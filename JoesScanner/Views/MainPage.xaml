@@ -7,15 +7,16 @@
     xmlns:controls="clr-namespace:JoesScanner.Views.Controls"
     xmlns:models="clr-namespace:JoesScanner.Models"
     x:Name="Page"
+    x:DataType="vm:MainViewModel"
     Title="Joes Scanner"
     BackgroundColor="{StaticResource TabStripNavy}"
     Shell.NavBarIsVisible="False"
     Shell.TabBarIsVisible="False">
 
     <!-- Root grid fills the window -->
-    <Grid 
-        Padding="5,0,5,5" 
-        RowDefinitions="Auto,*" 
+    <Grid
+        Padding="5,0,5,5"
+        RowDefinitions="Auto,*"
         RowSpacing="0">
 
         <controls:AppTabStrip
@@ -27,21 +28,18 @@
             Grid.Row="1"
             StrokeThickness="0"
             BackgroundColor="{AppThemeBinding Light=White, Dark=#020617}"
-            VerticalOptions="FillAndExpand"
-            HorizontalOptions="FillAndExpand"
-            WidthRequest="403">
+            VerticalOptions="Fill"
+            HorizontalOptions="Fill">
 
             <Border.StrokeShape>
-                <RoundRectangle CornerRadius="15" />
+                <RoundRectangle CornerRadius="10" />
             </Border.StrokeShape>
-
 
             <!-- Inner grid: header, calls, footer -->
             <Grid
                 RowDefinitions="Auto,*,Auto"
                 ColumnDefinitions="*"
-                ColumnSpacing="0"
-                WidthRequest="400">
+                ColumnSpacing="0">
 
                 <!-- HEADER PANEL: single merged box (buttons + indicators) -->
                 <Border
@@ -80,25 +78,15 @@
                                 VerticalOptions="Center">
 
                                 <ImageButton
-                                    Source="mc_rewind_double.png"
-                                    Command="{Binding PlaybackSpeedDownCommand}"
-                                    BackgroundColor="Transparent"
-                                    HeightRequest="38"
-                                    WidthRequest="38"
-                                    Padding="0"
-                                    AutomationId="MediaRewindDouble"
-                                    AutomationProperties.Name="Speed down"
-                                    ToolTipProperties.Text="Speed down" />
-
-                                <ImageButton
                                     Source="mc_previous.png"
                                     Command="{Binding PreviousCallCommand}"
+                                    IsEnabled="{Binding IsMediaButtonsEnabled}"
                                     BackgroundColor="Transparent"
                                     HeightRequest="38"
                                     WidthRequest="38"
                                     Padding="0"
                                     AutomationId="MediaPrevious"
-                                    AutomationProperties.Name="Previous call"
+                                    SemanticProperties.Description="Previous call"
                                     ToolTipProperties.Text="Previous call" />
 
                                 <ImageButton
@@ -109,51 +97,67 @@
                                     WidthRequest="38"
                                     Padding="0"
                                     AutomationId="MediaPlayStop"
-                                    AutomationProperties.Name="Connect or disconnect"
+                                    SemanticProperties.Description="Connect or disconnect"
                                     ToolTipProperties.Text="Connect or disconnect" />
 
                                 <ImageButton
                                     Source="mc_next.png"
                                     Command="{Binding NextCallCommand}"
+                                    IsEnabled="{Binding IsMediaButtonsEnabled}"
                                     BackgroundColor="Transparent"
                                     HeightRequest="38"
                                     WidthRequest="38"
                                     Padding="0"
                                     AutomationId="MediaNext"
-                                    AutomationProperties.Name="Next call"
+                                    SemanticProperties.Description="Next call"
                                     ToolTipProperties.Text="Next call" />
-
-                                <ImageButton
-                                    Source="mc_fastforward_double.png"
-                                    Command="{Binding PlaybackSpeedUpCommand}"
-                                    BackgroundColor="Transparent"
-                                    HeightRequest="38"
-                                    WidthRequest="38"
-                                    Padding="0"
-                                    AutomationId="MediaFastForwardDouble"
-                                    AutomationProperties.Name="Speed up"
-                                    ToolTipProperties.Text="Speed up" />
 
                                 <ImageButton
                                     Source="mc_jump_to_live.png"
                                     Command="{Binding JumpToLiveCommand}"
+                                    IsEnabled="{Binding IsMediaButtonsEnabled}"
                                     BackgroundColor="Transparent"
                                     HeightRequest="38"
                                     WidthRequest="38"
                                     Padding="0"
                                     AutomationId="MediaJumpToLive"
-                                    AutomationProperties.Name="Jump to live"
+                                    SemanticProperties.Description="Jump to live"
                                     ToolTipProperties.Text="Jump to live" />
+
+                                <ImageButton
+                                    Source="mc_speeddown.png"
+                                    Command="{Binding PlaybackSpeedDownCommand}"
+                                    IsEnabled="{Binding IsSpeedButtonsEnabled}"
+                                    BackgroundColor="Transparent"
+                                    HeightRequest="38"
+                                    WidthRequest="38"
+                                    Padding="0"
+                                    AutomationId="MediaRewindDouble"
+                                    SemanticProperties.Description="Speed down"
+                                    ToolTipProperties.Text="Speed down" />
+
+                                <ImageButton
+                                    Source="mc_speedup.png"
+                                    Command="{Binding PlaybackSpeedUpCommand}"
+                                    IsEnabled="{Binding IsSpeedButtonsEnabled}"
+                                    BackgroundColor="Transparent"
+                                    HeightRequest="38"
+                                    WidthRequest="38"
+                                    Padding="0"
+                                    AutomationId="MediaFastForwardDouble"
+                                    SemanticProperties.Description="Speed up"
+                                    ToolTipProperties.Text="Speed up" />
 
                                 <ImageButton
                                     Source="mc_volume.png"
                                     Command="{Binding ToggleAudioCommand}"
+                                    IsEnabled="{Binding IsMediaButtonsEnabled}"
                                     BackgroundColor="Transparent"
                                     HeightRequest="38"
                                     WidthRequest="38"
                                     Padding="0"
                                     AutomationId="MediaVolume"
-                                    AutomationProperties.Name="Toggle audio"
+                                    SemanticProperties.Description="Toggle audio"
                                     ToolTipProperties.Text="Toggle audio" />
 
                             </HorizontalStackLayout>
@@ -185,6 +189,7 @@
                                 IsVisible="{Binding IsCallsWaitingVisible}"
                                 Text="{Binding PlaybackSpeedLabel, StringFormat='Speed: {0}'}"
                                 FontSize="9"
+                                FontAutoScalingEnabled="False"
                                 Margin="0,2"
                                 LineBreakMode="NoWrap"
                                 HorizontalTextAlignment="Center"
@@ -195,6 +200,7 @@
                                 IsVisible="{Binding IsCallsWaitingVisible}"
                                 Text="{Binding CallsWaiting, StringFormat='Calls waiting: {0}'}"
                                 FontSize="9"
+                                FontAutoScalingEnabled="False"
                                 LineBreakMode="NoWrap"
                                 HorizontalTextAlignment="Center"
                                 TextColor="White" />
@@ -203,22 +209,33 @@
                     </Grid>
                 </Border>
 
-
                 <!-- CALL LIST -->
                 <CollectionView
                     Grid.Row="1"
                     x:Name="CallsView"
                     ItemsSource="{Binding Calls}"
+                    SelectionMode="Single"
+                    SelectionChanged="OnCallSelectionChanged"
                     ItemsUpdatingScrollMode="KeepScrollOffset"
-                    ItemsLayout="VerticalList"
-                    VerticalOptions="FillAndExpand">
+                    ItemSizingStrategy="MeasureAllItems"
+                    VerticalOptions="Fill"
+                    HorizontalOptions="Fill"
+                    Margin="10,8,10,0">
+
+                    <CollectionView.Header>
+                        <BoxView HeightRequest="2" BackgroundColor="Transparent" />
+                    </CollectionView.Header>
+
+                    <CollectionView.ItemsLayout>
+                        <LinearItemsLayout Orientation="Vertical" ItemSpacing="0" />
+                    </CollectionView.ItemsLayout>
 
                     <CollectionView.ItemTemplate>
-                        <DataTemplate>
+                        <DataTemplate x:DataType="models:CallItem">
                             <!-- Single call card -->
                             <Border
-                                Margin="0,0,0,8"
-                                Padding="6"
+                                HorizontalOptions="Fill"
+                                Padding="{OnPlatform WinUI=6, MacCatalyst=6, Android=5, iOS=5}"
                                 BackgroundColor="{AppThemeBinding Light=White, Dark=#111827}"
                                 StrokeThickness="1"
                                 StrokeShape="RoundRectangle 8">
@@ -227,11 +244,6 @@
                                     <SolidColorBrush Color="{AppThemeBinding Light=#374151, Dark=#1f2937}" />
                                 </Border.Stroke>
 
-                                <Border.GestureRecognizers>
-                                    <TapGestureRecognizer
-                                        Command="{Binding BindingContext.PlayAudioCommand, Source={x:Reference Page}}"
-                                        CommandParameter="{Binding .}" />
-                                </Border.GestureRecognizers>
 
                                 <Border.Triggers>
                                     <DataTrigger
@@ -256,13 +268,18 @@
                                 <!-- Call layout: header row, transcription, debug -->
                                 <Grid
                                     ColumnDefinitions="*,Auto"
-                                    RowDefinitions="Auto,Auto,Auto">
+                                    RowDefinitions="Auto,Auto,Auto"
+                                    RowSpacing="{OnPlatform WinUI=4, MacCatalyst=4, Android=2, iOS=2}"
+                                    ColumnSpacing="6">
 
                                     <!-- Header row: time > receiver > site > talkgroup -->
                                     <Label
                                         Grid.Row="0"
                                         Grid.Column="0"
-                                        FontSize="12">
+                                        FontSize="{OnPlatform WinUI=12, MacCatalyst=12, Android=11, iOS=11}"
+                                        FontAutoScalingEnabled="False"
+                                        MaxLines="1"
+                                        LineBreakMode="TailTruncation">
                                         <Label.FormattedText>
                                             <FormattedString>
                                                 <Span
@@ -292,7 +309,8 @@
                                         Grid.Column="1"
                                         HorizontalTextAlignment="End"
                                         VerticalTextAlignment="Center"
-                                        FontSize="10"
+                                        FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
+                                        FontAutoScalingEnabled="False"
                                         Text="{Binding DurationDisplay}"
                                         TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
 
@@ -301,8 +319,9 @@
                                         Grid.Row="1"
                                         Grid.Column="0"
                                         Grid.ColumnSpan="2"
-                                        Margin="0,4,0,0"
-                                        FontSize="12"
+                                        Margin="0,2,0,0"
+                                        FontSize="{OnPlatform WinUI=12, MacCatalyst=12, Android=11, iOS=11}"
+                                        FontAutoScalingEnabled="False"
                                         LineBreakMode="WordWrap"
                                         TextColor="{AppThemeBinding Light=#374151, Dark=#e5e7eb}"
                                         MaxLines="4"
@@ -314,7 +333,8 @@
                                         Grid.Column="0"
                                         Grid.ColumnSpan="2"
                                         Margin="0,2,0,0"
-                                        FontSize="10"
+                                        FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
+                                        FontAutoScalingEnabled="False"
                                         LineBreakMode="WordWrap"
                                         MaxLines="3"
                                         TextColor="{AppThemeBinding Light=#b91c1c, Dark=#fecaca}"
