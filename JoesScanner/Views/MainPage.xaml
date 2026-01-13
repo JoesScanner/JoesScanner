@@ -248,13 +248,6 @@
                                 <Border.Triggers>
                                     <DataTrigger
                                         TargetType="Border"
-                                        Binding="{Binding IsHistory}"
-                                        Value="True">
-                                        <Setter Property="Opacity" Value="0.55" />
-                                    </DataTrigger>
-
-                                    <DataTrigger
-                                        TargetType="Border"
                                         Binding="{Binding IsPlaying}"
                                         Value="True">
                                         <Setter Property="StrokeThickness" Value="2" />
@@ -314,7 +307,7 @@
                                         Text="{Binding DurationDisplay}"
                                         TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
 
-                                    <!-- Transcription -->
+                                    <!-- Transcription (only show when there is real text) -->
                                     <Label
                                         Grid.Row="1"
                                         Grid.Column="0"
@@ -325,7 +318,28 @@
                                         LineBreakMode="WordWrap"
                                         TextColor="{AppThemeBinding Light=#374151, Dark=#e5e7eb}"
                                         MaxLines="4"
-                                        Text="{Binding Transcription}" />
+                                        Text="{Binding Transcription, TargetNullValue=''}">
+
+                                        <Label.Triggers>
+                                            <!-- Hide when empty -->
+                                            <DataTrigger
+                                                TargetType="Label"
+                                                Binding="{Binding Transcription, TargetNullValue=''}"
+                                                Value="">
+                                                <Setter Property="IsVisible" Value="False" />
+                                                <Setter Property="Margin" Value="0" />
+                                            </DataTrigger>
+
+                                            <!-- Hide when server sends the placeholder string -->
+                                            <DataTrigger
+                                                TargetType="Label"
+                                                Binding="{Binding Transcription, TargetNullValue=''}"
+                                                Value="No transcription from server">
+                                                <Setter Property="IsVisible" Value="False" />
+                                                <Setter Property="Margin" Value="0" />
+                                            </DataTrigger>
+                                        </Label.Triggers>
+                                    </Label>
 
                                     <!-- Debug or error info -->
                                     <Label

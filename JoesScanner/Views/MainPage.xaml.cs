@@ -1,7 +1,8 @@
 using JoesScanner.Models;
 using JoesScanner.Services;
 using JoesScanner.ViewModels;
-using System.Linq;
+using System.Collections.Specialized;
+using System.ComponentModel;
 
 namespace JoesScanner.Views
 {
@@ -9,12 +10,276 @@ namespace JoesScanner.Views
     {
         private readonly MainViewModel _viewModel;
 
+        private bool _handlersAttached;
+        private bool _followLive = true;
+
+        private bool _isAutoScrolling;
+        private int _lastFirstVisibleIndex;
+
+        private CallItem? _trackedTopItem;
+
+        private CancellationTokenSource? _pendingScrollCts;
+
         public MainPage(MainViewModel viewModel)
         {
             InitializeComponent();
 
             _viewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
             BindingContext = _viewModel;
+
+            AttachAutoFollowHandlers();
+        }
+
+        private void AttachAutoFollowHandlers()
+        {
+            if (_handlersAttached)
+                return;
+
+            _handlersAttached = true;
+
+            try
+            {
+                CallsView.Scrolled += OnCallsViewScrolled;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (_viewModel?.Calls != null)
+                    _viewModel.Calls.CollectionChanged += OnCallsCollectionChanged;
+            }
+            catch
+            {
+            }
+
+            TrackTopItemIfNeeded();
+        }
+
+        private void DetachAutoFollowHandlers()
+        {
+            if (!_handlersAttached)
+                return;
+
+            _handlersAttached = false;
+
+            try
+            {
+                CallsView.Scrolled -= OnCallsViewScrolled;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (_viewModel?.Calls != null)
+                    _viewModel.Calls.CollectionChanged -= OnCallsCollectionChanged;
+            }
+            catch
+            {
+            }
+
+            CancelPendingScroll();
+            UntrackTopItem();
+        }
+
+        private void OnCallsViewScrolled(object sender, ItemsViewScrolledEventArgs e)
+        {
+            try
+            {
+                if (_isAutoScrolling)
+                    return;
+
+                _lastFirstVisibleIndex = e.FirstVisibleItemIndex;
+
+                var shouldFollow = e.FirstVisibleItemIndex <= 1;
+
+                if (shouldFollow == _followLive)
+                    return;
+
+                _followLive = shouldFollow;
+
+                if (_followLive)
+                {
+                    TrackTopItemIfNeeded();
+                    RequestScrollToTop(delayMs: 10);
+                }
+                else
+                {
+                    CancelPendingScroll();
+                    UntrackTopItem();
+                }
+            }
+            catch
+            {
+                _followLive = true;
+                TrackTopItemIfNeeded();
+            }
+        }
+
+        private void OnCallsCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+        {
+            if (!_followLive)
+            {
+                UntrackTopItem();
+                return;
+            }
+
+            TrackTopItemIfNeeded();
+
+            if (e.Action == NotifyCollectionChangedAction.Add && e.NewStartingIndex == 0)
+            {
+                // Let the CollectionView finish its insert layout first, then scroll once.
+                RequestScrollToTop(delayMs: 35);
+                return;
+            }
+
+            if (e.Action == NotifyCollectionChangedAction.Reset)
+            {
+                RequestScrollToTop(delayMs: 35);
+                return;
+            }
+        }
+
+        private void TrackTopItemIfNeeded()
+        {
+            if (!_followLive)
+                return;
+
+            try
+            {
+                var calls = _viewModel?.Calls;
+                if (calls == null || calls.Count == 0)
+                {
+                    UntrackTopItem();
+                    return;
+                }
+
+                var newTop = calls[0];
+                if (ReferenceEquals(newTop, _trackedTopItem))
+                    return;
+
+                UntrackTopItem();
+
+                _trackedTopItem = newTop;
+                _trackedTopItem.PropertyChanged += OnTopItemPropertyChanged;
+            }
+            catch
+            {
+            }
+        }
+
+        private void UntrackTopItem()
+        {
+            try
+            {
+                if (_trackedTopItem != null)
+                    _trackedTopItem.PropertyChanged -= OnTopItemPropertyChanged;
+            }
+            catch
+            {
+            }
+            finally
+            {
+                _trackedTopItem = null;
+            }
+        }
+
+        private void OnTopItemPropertyChanged(object? sender, PropertyChangedEventArgs e)
+        {
+            if (!_followLive)
+                return;
+
+            if (e.PropertyName != nameof(CallItem.Transcription))
+                return;
+
+            // Keep this very small so it corrects offset drift without causing visible flashing.
+            RequestScrollToTop(delayMs: 10);
+        }
+
+        private void RequestScrollToTop(int delayMs)
+        {
+            if (!_followLive)
+                return;
+
+            CancelPendingScroll();
+
+            _pendingScrollCts = new CancellationTokenSource();
+            var token = _pendingScrollCts.Token;
+
+            MainThread.BeginInvokeOnMainThread(async () =>
+            {
+                try
+                {
+                    if (delayMs > 0)
+                        await Task.Delay(delayMs, token);
+
+                    if (token.IsCancellationRequested)
+                        return;
+
+                    if (!_followLive)
+                        return;
+
+                    // If we are already pinned to the top, do not force another scroll.
+                    if (_lastFirstVisibleIndex == 0)
+                        return;
+
+                    ScrollToTopNoAnimCore();
+                }
+                catch
+                {
+                }
+            });
+        }
+
+        private void CancelPendingScroll()
+        {
+            try
+            {
+                _pendingScrollCts?.Cancel();
+                _pendingScrollCts?.Dispose();
+            }
+            catch
+            {
+            }
+            finally
+            {
+                _pendingScrollCts = null;
+            }
+        }
+
+        private void ScrollToTopNoAnimCore()
+        {
+            if (_isAutoScrolling)
+                return;
+
+            _isAutoScrolling = true;
+
+            try
+            {
+                try
+                {
+                    // Use the item reference when possible. This tends to be less jarring than index scrolls.
+                    var calls = _viewModel?.Calls;
+                    if (calls != null && calls.Count > 0)
+                    {
+                        CallsView.ScrollTo(calls[0], position: ScrollToPosition.Start, animate: false);
+                    }
+                    else
+                    {
+                        CallsView.ScrollTo(0, position: ScrollToPosition.Start, animate: false);
+                    }
+                }
+                catch
+                {
+                }
+            }
+            finally
+            {
+                _isAutoScrolling = false;
+            }
         }
 
         private async void OnSettingsTapped(object sender, EventArgs e)
@@ -173,7 +438,6 @@ namespace JoesScanner.Views
 
                 var selected = e.CurrentSelection?.FirstOrDefault() as CallItem;
 
-                // Always clear selection so the same item can be tapped again.
                 cv.SelectedItem = null;
 
                 if (selected == null)
@@ -194,10 +458,18 @@ namespace JoesScanner.Views
         {
             base.OnAppearing();
 
+            AttachAutoFollowHandlers();
+
             if (BindingContext is MainViewModel vm)
             {
                 await vm.TryAutoReconnectAsync();
             }
+        }
+
+        protected override void OnDisappearing()
+        {
+            base.OnDisappearing();
+            DetachAutoFollowHandlers();
         }
     }
 }
