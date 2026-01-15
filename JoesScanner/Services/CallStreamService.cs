@@ -126,8 +126,30 @@ namespace JoesScanner.Services
                 }
                 catch (HttpRequestException ex)
                 {
-                    errorMessage = ex.Message;
+                    // Retry once on transient transport failures (for example: "Socket closed").
                     Debug.WriteLine($"[CallStreamService] [HttpError] {ex}");
+
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromMilliseconds(500), cancellationToken);
+                        rows = await FetchLatestAsync(callsUrl, cancellationToken);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        // Caller requested cancellation (disconnect, shutdown, etc.).
+                        yield break;
+                    }
+                    catch (CallStreamAuthException retryAuth)
+                    {
+                        isAuthError = true;
+                        errorMessage = retryAuth.Message;
+                        Debug.WriteLine($"[CallStreamService] [AuthError] {retryAuth}");
+                    }
+                    catch (Exception retryEx)
+                    {
+                        errorMessage = ex.Message;
+                        Debug.WriteLine($"[CallStreamService] [HttpRetryFailed] {retryEx}");
+                    }
                 }
                 catch (Exception ex)
                 {

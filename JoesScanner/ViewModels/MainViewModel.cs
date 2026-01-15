@@ -789,8 +789,8 @@ namespace JoesScanner.ViewModels
             if (Calls.Count == 0)
             {
                 // Nothing visible yet. If we have pending calls, promote the oldest so it can be played.
-                if (TryPromoteOldestPendingCallToVisible(out var promoted))
-                    return promoted;
+                if (TryPromoteOldestPendingCallToVisible(out var promotedFromEmpty))
+                    return promotedFromEmpty;
 
                 return null;
             }
@@ -816,8 +816,8 @@ namespace JoesScanner.ViewModels
                 {
                     // We are at live for the visible list. If new calls arrived while we were behind live,
                     // promote the oldest pending call and play it next.
-                    if (TryPromoteOldestPendingCallToVisible(out var promoted))
-                        return promoted;
+                    if (TryPromoteOldestPendingCallToVisible(out var promotedFromLive))
+                        return promotedFromLive;
 
                     return null;
                 }
@@ -826,6 +826,8 @@ namespace JoesScanner.ViewModels
                     startIndex = anchorIndex - 1;
                 }
             }
+
+            CallItem? skippable = null;
 
             for (var i = startIndex; i >= 0; i--)
             {
@@ -837,19 +839,29 @@ namespace JoesScanner.ViewModels
                 if (string.IsNullOrWhiteSpace(candidate.AudioUrl))
                     continue;
 
-                if (_filterService.ShouldMute(candidate) || _filterService.ShouldHide(candidate))
+                if (_filterService.ShouldHide(candidate))
+                {
+                    skippable ??= candidate;
                     continue;
+                }
+
+                if (_filterService.ShouldMute(candidate))
+                {
+                    skippable ??= candidate;
+                    continue;
+                }
 
                 return candidate;
             }
 
-            // If nothing is playable in the visible backlog and we are effectively at live, try pending.
-            var lastIdx = _lastPlayedCall != null ? Calls.IndexOf(_lastPlayedCall) : -1;
-            if (lastIdx <= 0)
-            {
-                if (TryPromoteOldestPendingCallToVisible(out var promoted))
-                    return promoted;
-            }
+            // No playable calls in the visible backlog.
+            // If a muted or hidden call exists, return it so playback can advance past it.
+            if (skippable != null)
+                return skippable;
+
+            // If we are behind live but the remaining visible calls are not playable, promote pending calls anyway.
+            if (TryPromoteOldestPendingCallToVisible(out var promotedFromBehind))
+                return promotedFromBehind;
 
             return null;
         }
@@ -1749,11 +1761,34 @@ namespace JoesScanner.ViewModels
             if (item == null || string.IsNullOrWhiteSpace(item.AudioUrl))
                 return;
 
-            if (_filterService.ShouldMute(item) || _filterService.ShouldHide(item))
-                return;
-
             if (!AudioEnabled)
                 return;
+
+            if (_filterService.ShouldHide(item))
+            {
+                // Consume the call so queue playback does not stall.
+                LastQueueEvent = $"Call hidden by filter at {DateTime.Now:T}";
+                _lastPlayedCall = item;
+                if (_currentPlayingCall == item)
+                    _currentPlayingCall = null;
+
+                OnPropertyChanged(nameof(CallsWaiting));
+                OnPropertyChanged(nameof(IsCallsWaitingVisible));
+                return;
+            }
+
+            if (_filterService.ShouldMute(item))
+            {
+                // Consume the call so queue playback does not stall.
+                LastQueueEvent = $"Call muted by filter at {DateTime.Now:T}";
+                _lastPlayedCall = item;
+                if (_currentPlayingCall == item)
+                    _currentPlayingCall = null;
+
+                OnPropertyChanged(nameof(CallsWaiting));
+                OnPropertyChanged(nameof(IsCallsWaitingVisible));
+                return;
+            }
 
             if (_audioCts != null)
             {
