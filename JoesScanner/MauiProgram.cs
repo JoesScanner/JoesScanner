@@ -33,6 +33,7 @@ public static class MauiProgram
         // View models
         builder.Services.AddSingleton<MainViewModel>();
         builder.Services.AddSingleton<HistoryViewModel>();
+        builder.Services.AddSingleton<ArchiveViewModel>();
         builder.Services.AddSingleton<SettingsViewModel>();
 
         // Pages

@@ -15,10 +15,10 @@ using System.Windows.Input;
 
 namespace JoesScanner.ViewModels
 {
-    // View model for the History tab.
-    // History is an explicit, fixed result set returned by search and never ingests new calls.
+    // View model for the Archive tab.
+    // Archive is an explicit, fixed result set returned by search and never ingests new calls.
     // Playback and media controls are independent from the Main tab.
-    public sealed class HistoryViewModel : BindableObject
+    public sealed class ArchiveViewModel : BindableObject
     {
         private readonly ICallHistoryService _callHistoryService;
         private readonly IAudioPlaybackService _audioPlaybackService;
@@ -37,11 +37,6 @@ namespace JoesScanner.ViewModels
 
         private DateTime _nextAllowedNewerLoadUtc = DateTime.MinValue;
         private DateTime _nextAllowedOlderLoadUtc = DateTime.MinValue;
-
-        // History tab is limited to the last 24 hours. Older content belongs in Archive.
-        private DateTime _historyCutoffLocal = DateTime.MinValue;
-        private bool _historyCutoffReached;
-        private bool _historyCutoffNotified;
 
         // Internal scroll buffering so the list feels continuous without explicit pagination UI.
         // Newer calls are "above" index 0, older calls are "below" index Calls.Count - 1.
@@ -65,16 +60,18 @@ namespace JoesScanner.ViewModels
         private HistoryLookupItem? _selectedTalkgroup;
 
         private DateTime _selectedDate = DateTime.Today;
+        private DateTime _datePickerTempDate = DateTime.Today;
         private int _selectedHour;
         private int _selectedMinute;
         private int _selectedSecond;
+        private bool _isDatePickerOpen;
         private bool _isTimePickerOpen;
 
         private int _currentIndex = -1;
 
         // 0 = 1x, 1 = 1.5x, 2 = 2x
-        private double _historyPlaybackSpeedStep;
-        private const string HistoryPlaybackSpeedStepPreferenceKey = "HistoryPlaybackSpeedStep";
+        private double _archivePlaybackSpeedStep;
+        private const string ArchivePlaybackSpeedStepPreferenceKey = "ArchivePlaybackSpeedStep";
 
         // Service auth used on app.joesscanner.com, consistent with CallStreamService.
         private const string ServiceAuthUsername = "secappass";
@@ -82,7 +79,7 @@ namespace JoesScanner.ViewModels
 
         public event Action<CallItem, ScrollToPosition>? ScrollRequested;
 
-        public HistoryViewModel(
+        public ArchiveViewModel(
             ICallHistoryService callHistoryService,
             IAudioPlaybackService audioPlaybackService,
             ISettingsService settingsService)
@@ -98,7 +95,7 @@ namespace JoesScanner.ViewModels
 
             Calls.CollectionChanged += (_, __) =>
             {
-                OnPropertyChanged(nameof(IsHistoryMediaButtonsEnabled));
+                OnPropertyChanged(nameof(IsArchiveMediaButtonsEnabled));
                 OnPropertyChanged(nameof(IsStopEnabled));
                 RefreshCommandStates();
             };
@@ -112,8 +109,8 @@ namespace JoesScanner.ViewModels
                 Timeout = Timeout.InfiniteTimeSpan
             };
 
-            var savedSpeed = Preferences.Get(HistoryPlaybackSpeedStepPreferenceKey, 0.0);
-            HistoryPlaybackSpeedStep = savedSpeed;
+            var savedSpeed = Preferences.Get(ArchivePlaybackSpeedStepPreferenceKey, 0.0);
+            ArchivePlaybackSpeedStep = savedSpeed;
 
             // Default time to now.
             var now = DateTime.Now;
@@ -130,6 +127,20 @@ namespace JoesScanner.ViewModels
 
             PlaybackSpeedDownCommand = new Command(DecreasePlaybackSpeedStep, () => Calls.Count > 0);
             PlaybackSpeedUpCommand = new Command(IncreasePlaybackSpeedStep, () => Calls.Count > 0);
+
+            OpenDatePickerCommand = new Command(() =>
+            {
+                DatePickerTempDate = SelectedDate;
+                IsDatePickerOpen = true;
+            }, () => !IsLoading);
+
+            CancelDatePickerCommand = new Command(() => IsDatePickerOpen = false, () => !IsLoading);
+
+            ConfirmDatePickerCommand = new Command(() =>
+            {
+                SelectedDate = DatePickerTempDate;
+                IsDatePickerOpen = false;
+            }, () => !IsLoading);
 
             OpenTimePickerCommand = new Command(() => IsTimePickerOpen = true, () => !IsLoading);
             CancelTimePickerCommand = new Command(() => IsTimePickerOpen = false, () => !IsLoading);
@@ -159,6 +170,10 @@ namespace JoesScanner.ViewModels
         public Command PlaybackSpeedDownCommand { get; }
         public Command PlaybackSpeedUpCommand { get; }
 
+        public Command OpenDatePickerCommand { get; }
+        public Command CancelDatePickerCommand { get; }
+        public Command ConfirmDatePickerCommand { get; }
+
         public Command OpenTimePickerCommand { get; }
         public Command CancelTimePickerCommand { get; }
         public Command ConfirmTimePickerCommand { get; }
@@ -173,7 +188,7 @@ namespace JoesScanner.ViewModels
 
                 _isLoading = value;
                 OnPropertyChanged();
-                OnPropertyChanged(nameof(IsHistoryMediaButtonsEnabled));
+                OnPropertyChanged(nameof(IsArchiveMediaButtonsEnabled));
                 OnPropertyChanged(nameof(IsStopEnabled));
                 RefreshCommandStates();
             }
@@ -241,6 +256,36 @@ namespace JoesScanner.ViewModels
 
                 _selectedDate = value.Date;
                 OnPropertyChanged();
+                OnPropertyChanged(nameof(SelectedDateDisplay));
+            }
+        }
+
+        public string SelectedDateDisplay => SelectedDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
+        public DateTime DatePickerTempDate
+        {
+            get => _datePickerTempDate;
+            set
+            {
+                var v = value.Date;
+                if (_datePickerTempDate.Date == v)
+                    return;
+
+                _datePickerTempDate = v;
+                OnPropertyChanged();
+            }
+        }
+
+        public bool IsDatePickerOpen
+        {
+            get => _isDatePickerOpen;
+            set
+            {
+                if (_isDatePickerOpen == value)
+                    return;
+
+                _isDatePickerOpen = value;
+                OnPropertyChanged();
             }
         }
 
@@ -304,7 +349,6 @@ namespace JoesScanner.ViewModels
                 var m = Math.Clamp(value.Minutes, 0, 59);
                 var s = Math.Clamp(value.Seconds, 0, 59);
 
-                // Use property setters to keep all dependent properties in sync.
                 SelectedHour = h;
                 SelectedMinute = m;
                 SelectedSecond = s;
@@ -320,8 +364,6 @@ namespace JoesScanner.ViewModels
         {
             get
             {
-                // Display as a compact 12-hour time like 7:19 PM.
-                // Include seconds only if the user has explicitly set them.
                 var dt = DateTime.Today.Add(SelectedTime);
                 return SelectedSecond != 0
                     ? dt.ToString("h:mm:ss tt", CultureInfo.InvariantCulture)
@@ -342,14 +384,13 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        public bool IsHistoryMediaButtonsEnabled => Calls.Count > 0;
+        public bool IsArchiveMediaButtonsEnabled => Calls.Count > 0;
         public bool IsStopEnabled => _isQueuePlaybackRunning || Calls.Count > 0;
 
         public bool CanLoadMoreOlder =>
             _activeSearchFilters != null &&
             !IsLoading &&
             !_isPaging &&
-            !_historyCutoffReached &&
             _activeTotalMatches > 0 &&
             (_activeStartIndex + Calls.Count) < _activeTotalMatches;
 
@@ -360,9 +401,9 @@ namespace JoesScanner.ViewModels
             _activeTotalMatches > 0 &&
             _activeStartIndex > 0;
 
-        public double HistoryPlaybackSpeedStep
+        public double ArchivePlaybackSpeedStep
         {
-            get => _historyPlaybackSpeedStep;
+            get => _archivePlaybackSpeedStep;
             set
             {
                 var clamped = value;
@@ -370,18 +411,18 @@ namespace JoesScanner.ViewModels
                 if (clamped > 2) clamped = 2;
                 clamped = Math.Round(clamped);
 
-                if (Math.Abs(_historyPlaybackSpeedStep - clamped) < 0.001)
+                if (Math.Abs(_archivePlaybackSpeedStep - clamped) < 0.001)
                     return;
 
-                _historyPlaybackSpeedStep = clamped;
+                _archivePlaybackSpeedStep = clamped;
                 OnPropertyChanged();
-                OnPropertyChanged(nameof(HistoryPlaybackSpeedLabel));
-                Preferences.Set(HistoryPlaybackSpeedStepPreferenceKey, _historyPlaybackSpeedStep);
+                OnPropertyChanged(nameof(ArchivePlaybackSpeedLabel));
+                Preferences.Set(ArchivePlaybackSpeedStepPreferenceKey, _archivePlaybackSpeedStep);
             }
         }
 
-        public string HistoryPlaybackSpeedLabel =>
-            _historyPlaybackSpeedStep switch
+        public string ArchivePlaybackSpeedLabel =>
+            _archivePlaybackSpeedStep switch
             {
                 1 => "1.5x",
                 2 => "2x",
@@ -390,7 +431,7 @@ namespace JoesScanner.ViewModels
 
         public async Task OnPageOpenedAsync()
         {
-            // Only mute the Main tab audio. Do not stop or disconnect the live queue.
+            // Only mute the Main tab audio while the Archive tab is open. Do not stop or disconnect the live queue.
             QueueControlBus.RequestSetMainAudioMuted(true);
 
             await LoadLookupsAsync();
@@ -531,68 +572,6 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        private DateTime GetSelectedTargetLocal()
-        {
-            var now = DateTime.Now;
-            var candidate = new DateTime(
-                now.Year,
-                now.Month,
-                now.Day,
-                SelectedHour,
-                SelectedMinute,
-                SelectedSecond,
-                DateTimeKind.Local);
-
-            // If the user picked a time that is later than the current clock time, interpret it as yesterday.
-            if (candidate > now)
-                candidate = candidate.AddDays(-1);
-
-            return candidate;
-        }
-
-        private bool IsWithinHistoryWindow(CallItem call)
-        {
-            if (call == null)
-                return false;
-
-            if (_historyCutoffLocal == DateTime.MinValue)
-                return true;
-
-            return call.Timestamp >= _historyCutoffLocal;
-        }
-
-        private async Task NotifyHistoryLimitAsync()
-        {
-            if (_historyCutoffNotified)
-                return;
-
-            _historyCutoffNotified = true;
-
-            try
-            {
-                await MainThread.InvokeOnMainThreadAsync(async () =>
-                {
-                    try
-                    {
-                        var page = Application.Current?.MainPage;
-                        if (page == null)
-                            return;
-
-                        await page.DisplayAlert(
-                            "History limit",
-                            "History is limited to the last 24 hours. Use the Archive tab for older calls.",
-                            "OK");
-                    }
-                    catch
-                    {
-                    }
-                });
-            }
-            catch
-            {
-            }
-        }
-
         private async Task SearchAsync()
         {
             if (IsLoading)
@@ -604,19 +583,14 @@ namespace JoesScanner.ViewModels
                 StatusText = "Searching";
                 await StopAsync();
 
-                _historyCutoffLocal = DateTime.Now.AddHours(-24);
-                _historyCutoffReached = false;
-                _historyCutoffNotified = false;
-
-                var target = GetSelectedTargetLocal();
-
-                if (target < _historyCutoffLocal)
-                {
-                    StatusText = "History is limited to the last 24 hours. Use the Archive tab for older calls.";
-                    await NotifyHistoryLimitAsync();
-                    RefreshCommandStates();
-                    return;
-                }
+                var target = new DateTime(
+                    SelectedDate.Year,
+                    SelectedDate.Month,
+                    SelectedDate.Day,
+                    SelectedHour,
+                    SelectedMinute,
+                    SelectedSecond,
+                    DateTimeKind.Local);
 
                 var filters = new HistorySearchFilters
                 {
@@ -647,33 +621,25 @@ namespace JoesScanner.ViewModels
                 _activeStartIndex = result.StartIndex;
                 _activeTotalMatches = result.TotalMatches;
 
-                var filtered = result.Calls
-                    .Where(IsWithinHistoryWindow)
-                    .ToList();
-
                 Calls.Clear();
-                foreach (var c in filtered)
+                foreach (var c in result.Calls)
                     Calls.Add(c);
 
                 _currentIndex = -1;
 
                 if (Calls.Count == 0)
                 {
-                    StatusText = "No calls found in the last 24 hours. Use the Archive tab for older calls.";
+                    StatusText = "No calls found";
                     RefreshCommandStates();
                     return;
                 }
 
-                // Center the closest call immediately after search.
-                var anchorCall = Calls
-                    .OrderBy(c => Math.Abs((c.Timestamp - target).TotalSeconds))
-                    .FirstOrDefault();
+                var anchor = Math.Clamp(result.AnchorIndex, 0, Calls.Count - 1);
 
-                var anchor = anchorCall != null ? Calls.IndexOf(anchorCall) : 0;
-                anchor = Math.Clamp(anchor, 0, Calls.Count - 1);
+                // Center the closest call immediately after search.
                 ScrollToIndex(anchor);
 
-                StatusText = $"{result.TotalMatches} match(es), showing {Calls.Count}. History is limited to the last 24 hours.";
+                StatusText = $"{result.TotalMatches} match(es), showing {Calls.Count}";
 
                 // Prime the next pages in both directions so scrolling feels continuous.
                 StartPrefetchNewerIfNeeded();
@@ -701,6 +667,9 @@ namespace JoesScanner.ViewModels
                 PreviousCommand.ChangeCanExecute();
                 PlaybackSpeedDownCommand.ChangeCanExecute();
                 PlaybackSpeedUpCommand.ChangeCanExecute();
+                OpenDatePickerCommand.ChangeCanExecute();
+                CancelDatePickerCommand.ChangeCanExecute();
+                ConfirmDatePickerCommand.ChangeCanExecute();
                 OpenTimePickerCommand.ChangeCanExecute();
                 CancelTimePickerCommand.ChangeCanExecute();
                 ConfirmTimePickerCommand.ChangeCanExecute();
@@ -709,7 +678,7 @@ namespace JoesScanner.ViewModels
             {
             }
 
-            OnPropertyChanged(nameof(IsHistoryMediaButtonsEnabled));
+            OnPropertyChanged(nameof(IsArchiveMediaButtonsEnabled));
             OnPropertyChanged(nameof(IsStopEnabled));
             OnPropertyChanged(nameof(CanLoadMoreOlder));
             OnPropertyChanged(nameof(CanLoadMoreNewer));
@@ -887,24 +856,7 @@ namespace JoesScanner.ViewModels
                         if (page?.Calls == null || page.Calls.Count == 0)
                             return;
 
-                        var filtered = page.Calls
-                            .Where(IsWithinHistoryWindow)
-                            .ToList();
-
-                        if (filtered.Count == 0)
-                        {
-                            _historyCutoffReached = true;
-                            await MainThread.InvokeOnMainThreadAsync(() =>
-                            {
-                                StatusText = "End of History. Use the Archive tab for older calls.";
-                                RefreshCommandStates();
-                            }).ConfigureAwait(false);
-
-                            await NotifyHistoryLimitAsync().ConfigureAwait(false);
-                            return;
-                        }
-
-                        _prefetchedOlderCalls = filtered;
+                        _prefetchedOlderCalls = page.Calls.ToList();
                     }
                     catch
                     {
@@ -1275,24 +1227,6 @@ namespace JoesScanner.ViewModels
 
                     _prefetchedOlderCalls = null;
 
-                    // Enforce the 24 hour History limit.
-                    appendCalls = appendCalls
-                        .Where(IsWithinHistoryWindow)
-                        .ToList();
-
-                    if (appendCalls.Count == 0)
-                    {
-                        _historyCutoffReached = true;
-                        await RunOnMainThreadAsync(() =>
-                        {
-                            StatusText = "End of History. Use the Archive tab for older calls.";
-                        }).ConfigureAwait(false);
-
-                        await NotifyHistoryLimitAsync().ConfigureAwait(false);
-                        await RunOnMainThreadAsync(RefreshCommandStates).ConfigureAwait(false);
-                        return 0;
-                    }
-
                     var added = 0;
                     await RunOnMainThreadAsync(() =>
                     {
@@ -1378,7 +1312,7 @@ namespace JoesScanner.ViewModels
 
         private double GetPlaybackRate()
         {
-            return _historyPlaybackSpeedStep switch
+            return _archivePlaybackSpeedStep switch
             {
                 1 => 1.5,
                 2 => 2.0,
@@ -1508,14 +1442,14 @@ namespace JoesScanner.ViewModels
 
         private void DecreasePlaybackSpeedStep()
         {
-            if (HistoryPlaybackSpeedStep > 0)
-                HistoryPlaybackSpeedStep -= 1;
+            if (ArchivePlaybackSpeedStep > 0)
+                ArchivePlaybackSpeedStep -= 1;
         }
 
         private void IncreasePlaybackSpeedStep()
         {
-            if (HistoryPlaybackSpeedStep < 2)
-                HistoryPlaybackSpeedStep += 1;
+            if (ArchivePlaybackSpeedStep < 2)
+                ArchivePlaybackSpeedStep += 1;
         }
 
         private void ScrollToIndex(int index)

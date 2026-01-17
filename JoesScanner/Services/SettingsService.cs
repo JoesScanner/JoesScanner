@@ -1,3 +1,4 @@
+using System;
 using System.Globalization;
 
 namespace JoesScanner.Services
@@ -182,8 +183,29 @@ namespace JoesScanner.Services
 
         public string DeviceInstallId
         {
-            get => Preferences.Get(DeviceInstallIdKey, string.Empty);
-            set => Preferences.Set(DeviceInstallIdKey, (value ?? string.Empty).Trim());
+            get
+            {
+                // Ensure every install has a stable identifier for auth and telemetry.
+                var deviceId = Preferences.Get(DeviceInstallIdKey, string.Empty);
+                if (string.IsNullOrWhiteSpace(deviceId))
+                {
+                    deviceId = Guid.NewGuid().ToString();
+                    Preferences.Set(DeviceInstallIdKey, deviceId);
+                }
+
+                return deviceId;
+            }
+            set
+            {
+                var cleaned = (value ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(cleaned))
+                {
+                    Preferences.Remove(DeviceInstallIdKey);
+                    return;
+                }
+
+                Preferences.Set(DeviceInstallIdKey, cleaned);
+            }
         }
 
         public string AuthSessionToken

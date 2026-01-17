@@ -25,6 +25,10 @@ namespace JoesScanner.ViewModels
         private CancellationTokenSource? _cts;
         private CancellationTokenSource? _audioCts;
 
+        // When true, the live queue continues to run but audio output is suppressed.
+        // This is used when the user navigates to the History tab.
+        private volatile bool _isMainAudioSoftMuted;
+
         private bool _isRunning;
         private string _serverUrl = string.Empty;
         private bool _autoPlay;
@@ -216,6 +220,78 @@ namespace JoesScanner.ViewModels
                 onStop: SystemStopAsync,
                 onNext: SystemNextAsync,
                 onPrevious: SystemPreviousAsync);
+
+            // When another tab (History, etc.) takes over playback, stop the live queue.
+            QueueControlBus.StopMainQueueRequested += () =>
+            {
+                try
+                {
+                    if (!IsRunning)
+                        return;
+
+                    _ = MainThread.InvokeOnMainThreadAsync(async () =>
+                    {
+                        try { await StopMonitoringAsync(); } catch { }
+                    });
+                }
+                catch
+                {
+                }
+            };
+
+            // When another tab (History, etc.) opens, stop main tab audio playback if it is running.
+            // This does not disconnect the live queue; it only stops audio.
+            QueueControlBus.StopMainAudioRequested += () =>
+            {
+                try
+                {
+                    _ = MainThread.InvokeOnMainThreadAsync(async () =>
+                    {
+                        try { await StopAudioFromToggleAsync(); } catch { }
+                    });
+                }
+                catch
+                {
+                }
+            };
+
+            // History tab: soft mute without interrupting the live queue.
+            QueueControlBus.MainAudioMuteRequested += (isMuted) =>
+            {
+                try
+                {
+                    _ = MainThread.InvokeOnMainThreadAsync(async () =>
+                    {
+                        try { await SetMainAudioSoftMuteAsync(isMuted); } catch { }
+                    });
+                }
+                catch
+                {
+                }
+            };
+        }
+
+        private async Task SetMainAudioSoftMuteAsync(bool isMuted)
+        {
+            _isMainAudioSoftMuted = isMuted;
+
+            if (isMuted)
+            {
+                // Cancel any in-flight playback immediately, but do not reset queue state.
+                if (_audioCts != null)
+                {
+                    try { _audioCts.Cancel(); } catch { }
+                }
+
+                try { await _audioPlaybackService.StopAsync(); } catch { }
+                return;
+            }
+
+            // Unmuted: if the queue is running and audio is enabled, resume playback.
+            if (IsRunning && AudioEnabled)
+            {
+                _ = EnsureQueuePlaybackAsync();
+            }
         }
 
         private Task SystemPlayAsync()
@@ -1205,6 +1281,9 @@ namespace JoesScanner.ViewModels
                                 return;
                             }
 
+
+                            call.IsMutedByFilter = _filterService.ShouldMute(call);
+
                             // If the user is behind live (replaying from an older point), hold incoming calls as pending.
                             if (ShouldHoldIncomingCalls())
                             {
@@ -1422,7 +1501,7 @@ namespace JoesScanner.ViewModels
                 _currentPlayingCall = item;
                 UpdateQueueDerivedState();
 
-                await PlayAudioAsync(item);
+                await PlayAudioAsync(item, allowMutedPlayback: true);
 
                 if (AudioEnabled && IsRunning && AutoPlay && CallsWaiting > 0)
                 {
@@ -1691,6 +1770,11 @@ namespace JoesScanner.ViewModels
 
                     if (call.IsHistory != isHistory)
                         call.IsHistory = isHistory;
+
+
+                    var isMutedByFilter = _filterService.ShouldMute(call);
+                    if (call.IsMutedByFilter != isMutedByFilter)
+                        call.IsMutedByFilter = isMutedByFilter;
                 }
             }
         }
@@ -1719,7 +1803,7 @@ namespace JoesScanner.ViewModels
             if (item == null || string.IsNullOrWhiteSpace(item.AudioUrl))
                 return;
 
-            if (_filterService.ShouldMute(item) || _filterService.ShouldHide(item))
+            if (_filterService.ShouldHide(item))
                 return;
 
             try
@@ -1756,7 +1840,7 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        private async Task PlayAudioAsync(CallItem? item)
+        private async Task PlayAudioAsync(CallItem? item, bool allowMutedPlayback = false)
         {
             if (item == null || string.IsNullOrWhiteSpace(item.AudioUrl))
                 return;
@@ -1777,7 +1861,7 @@ namespace JoesScanner.ViewModels
                 return;
             }
 
-            if (_filterService.ShouldMute(item))
+            if (!allowMutedPlayback && _filterService.ShouldMute(item))
             {
                 // Consume the call so queue playback does not stall.
                 LastQueueEvent = $"Call muted by filter at {DateTime.Now:T}";
@@ -1841,6 +1925,18 @@ namespace JoesScanner.ViewModels
             try
             {
                 var rate = rateForTimeout;
+
+                if (_isMainAudioSoftMuted)
+                {
+                    // Soft mute: consume the call silently while preserving queue pacing.
+                    var seconds = item.CallDurationSeconds > 0
+                        ? (item.CallDurationSeconds / Math.Max(rate, 0.1))
+                        : 0.25;
+
+                    seconds = Math.Clamp(seconds, 0.15, 10800);
+                    await Task.Delay(TimeSpan.FromSeconds(seconds), playbackToken);
+                    return;
+                }
 
                 string? downloadedTempPath = null;
                 var shouldDeleteTempFile = false;

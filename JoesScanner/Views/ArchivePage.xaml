@@ -3,14 +3,17 @@
     x:Class="JoesScanner.Views.ArchivePage"
     xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
     xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    xmlns:vm="clr-namespace:JoesScanner.ViewModels"
     xmlns:controls="clr-namespace:JoesScanner.Views.Controls"
     xmlns:models="clr-namespace:JoesScanner.Models"
+    x:Name="Page"
+    x:DataType="vm:ArchiveViewModel"
     Title="Archive"
     BackgroundColor="{StaticResource TabStripNavy}"
     Shell.NavBarIsVisible="False"
     Shell.TabBarIsVisible="False">
 
-    <Grid Padding="5,0,5,5" RowDefinitions="Auto,*" RowSpacing="6">
+    <Grid Padding="5,0,5,5" RowDefinitions="Auto,*" RowSpacing="0">
 
         <controls:AppTabStrip
             Grid.Row="0"
@@ -21,26 +24,386 @@
             StrokeThickness="0"
             BackgroundColor="{AppThemeBinding Light=White, Dark=#020617}"
             VerticalOptions="FillAndExpand"
-            HorizontalOptions="FillAndExpand"
-            Padding="20">
+            HorizontalOptions="FillAndExpand">
 
             <Border.StrokeShape>
                 <RoundRectangle CornerRadius="0,0,24,24" />
             </Border.StrokeShape>
 
-            <VerticalStackLayout Spacing="10" VerticalOptions="Center" HorizontalOptions="Center">
+            <Grid Padding="8" RowDefinitions="Auto,Auto,Auto,*" RowSpacing="6">
+
+                <!-- Filters -->
+                <Border
+                    Grid.Row="0"
+                    StrokeThickness="1"
+                    Stroke="#1f2937"
+                    BackgroundColor="{StaticResource TabStripNavy}"
+                    Padding="8"
+                    HorizontalOptions="Fill">
+
+                    <Border.StrokeShape>
+                        <RoundRectangle CornerRadius="16" />
+                    </Border.StrokeShape>
+
+                    <Grid RowDefinitions="Auto,Auto" RowSpacing="8">
+
+	                        <Grid Row="0" ColumnDefinitions="*,*,*" ColumnSpacing="8">
+	                            <VerticalStackLayout Spacing="2">
+	                                <Label Text="Receiver" FontSize="12" TextColor="White" HorizontalTextAlignment="Center" HorizontalOptions="Fill" />
+	                                <Border
+	                                    BackgroundColor="White"
+	                                    Stroke="#1f2937"
+	                                    StrokeThickness="1"
+	                                    Padding="8,6"
+	                                    HeightRequest="34"
+	                                    HorizontalOptions="Fill">
+	                                    <Border.StrokeShape>
+	                                        <RoundRectangle CornerRadius="12" />
+	                                    </Border.StrokeShape>
+	                                    <Border.GestureRecognizers>
+	                                        <TapGestureRecognizer Tapped="OnReceiverTapped" />
+	                                    </Border.GestureRecognizers>
+	                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6" VerticalOptions="Center">
+	                                        <Label
+	                                            Text="{Binding SelectedReceiver.Label, TargetNullValue=All}"
+	                                            FontSize="13"
+	                                            TextColor="Black"
+	                                            LineBreakMode="TailTruncation"
+	                                            VerticalOptions="Center" />
+	                                    </Grid>
+	                                </Border>
+	                            </VerticalStackLayout>
+
+	                            <VerticalStackLayout Grid.Column="1" Spacing="2">
+	                                <Label Text="Site" FontSize="12" TextColor="White" HorizontalTextAlignment="Center" HorizontalOptions="Fill" />
+	                                <Border
+	                                    BackgroundColor="White"
+	                                    Stroke="#1f2937"
+	                                    StrokeThickness="1"
+	                                    Padding="8,6"
+	                                    HeightRequest="34"
+	                                    HorizontalOptions="Fill">
+	                                    <Border.StrokeShape>
+	                                        <RoundRectangle CornerRadius="12" />
+	                                    </Border.StrokeShape>
+	                                    <Border.GestureRecognizers>
+	                                        <TapGestureRecognizer Tapped="OnSiteTapped" />
+	                                    </Border.GestureRecognizers>
+	                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6" VerticalOptions="Center">
+	                                        <Label
+	                                            Text="{Binding SelectedSite.Label, TargetNullValue=All}"
+	                                            FontSize="13"
+	                                            TextColor="Black"
+	                                            LineBreakMode="TailTruncation"
+	                                            VerticalOptions="Center" />
+	                                    </Grid>
+	                                </Border>
+	                            </VerticalStackLayout>
+
+	                            <VerticalStackLayout Grid.Column="2" Spacing="2">
+	                                <Label Text="Talkgroup" FontSize="12" TextColor="White" HorizontalTextAlignment="Center" HorizontalOptions="Fill" />
+	                                <Border
+	                                    BackgroundColor="White"
+	                                    Stroke="#1f2937"
+	                                    StrokeThickness="1"
+	                                    Padding="8,6"
+	                                    HeightRequest="34"
+	                                    HorizontalOptions="Fill">
+	                                    <Border.StrokeShape>
+	                                        <RoundRectangle CornerRadius="12" />
+	                                    </Border.StrokeShape>
+	                                    <Border.GestureRecognizers>
+	                                        <TapGestureRecognizer Tapped="OnTalkgroupTapped" />
+	                                    </Border.GestureRecognizers>
+	                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6" VerticalOptions="Center">
+	                                        <Label
+	                                            Text="{Binding SelectedTalkgroup.Label, TargetNullValue=All}"
+	                                            FontSize="13"
+	                                            TextColor="Black"
+	                                            LineBreakMode="TailTruncation"
+	                                            VerticalOptions="Center" />
+	                                    </Grid>
+	                                </Border>
+	                            </VerticalStackLayout>
+	                        </Grid>
+
+                        <Grid Row="1" ColumnDefinitions="Auto,Auto,*,Auto" ColumnSpacing="10" VerticalOptions="Center">
+
+                            <HorizontalStackLayout Grid.Column="0" Spacing="4" VerticalOptions="Center">
+                                <Label
+                                    Text="Date:"
+                                    FontSize="12"
+                                    TextColor="White"
+                                    VerticalTextAlignment="Center"
+                                    VerticalOptions="Center" />
+
+                                <Border
+                                    BackgroundColor="{StaticResource TabStripNavy}"
+                                    Stroke="#1f2937"
+                                    StrokeThickness="1"
+                                    Padding="0"
+                                    HeightRequest="32"
+                                    WidthRequest="100"
+                                    HorizontalOptions="Start">
+
+                                    <Border.StrokeShape>
+                                        <RoundRectangle CornerRadius="12" />
+                                    </Border.StrokeShape>
+
+                                    <Grid>
+                                        <Label
+                                            Text="{Binding SelectedDateDisplay}"
+                                            FontSize="13"
+                                            TextColor="White"
+                                            HorizontalTextAlignment="Start"
+                                            VerticalTextAlignment="Center"
+                                            Margin="6,0,0,0" />
+
+                                        <DatePicker
+                                            Date="{Binding SelectedDate, Mode=TwoWay}"
+                                            Format="yyyy-MM-dd"
+                                            Opacity="0.01"
+                                            BackgroundColor="Transparent"
+                                            TextColor="Transparent"
+                                            HorizontalOptions="Fill"
+                                            VerticalOptions="Fill" />
+                                    </Grid>
+                                </Border>
+                            </HorizontalStackLayout>
+
+                            <HorizontalStackLayout Grid.Column="1" Spacing="4" VerticalOptions="Center">
+                                <Label
+                                    Text="Time:"
+                                    FontSize="12"
+                                    TextColor="White"
+                                    VerticalTextAlignment="Center"
+                                    VerticalOptions="Center" />
+
+                                <Border
+                                    BackgroundColor="{StaticResource TabStripNavy}"
+                                    Stroke="#1f2937"
+                                    StrokeThickness="1"
+                                    Padding="0"
+                                    HeightRequest="32"
+                                    WidthRequest="80"
+                                    HorizontalOptions="Start">
+
+                                    <Border.StrokeShape>
+                                        <RoundRectangle CornerRadius="12" />
+                                    </Border.StrokeShape>
+
+                                    <Grid>
+                                        <Label
+                                            Text="{Binding SelectedTimeDisplay}"
+                                            FontSize="13"
+                                            TextColor="White"
+                                            HorizontalTextAlignment="Start"
+                                            VerticalTextAlignment="Center"
+                                            Margin="6,0,0,0" />
+
+                                        <!-- Keep the native picker for interaction, but hide its stretched visuals. -->
+                                        <TimePicker
+                                            Time="{Binding SelectedTime, Mode=TwoWay}"
+                                            Format="h:mm tt"
+                                            Opacity="0.01"
+                                            BackgroundColor="Transparent"
+                                            TextColor="Transparent"
+                                            HorizontalOptions="Fill"
+                                            VerticalOptions="Fill" />
+                                    </Grid>
+                                </Border>
+                            </HorizontalStackLayout>
+
+                            <Border
+                                Grid.Column="3"
+                                BackgroundColor="Transparent"
+                                Stroke="White"
+                                StrokeThickness="1"
+                                Padding="12,6"
+                                HeightRequest="32"
+                                WidthRequest="86"
+                                HorizontalOptions="End"
+                                VerticalOptions="Center">
+
+                                <Border.StrokeShape>
+                                    <RoundRectangle CornerRadius="12" />
+                                </Border.StrokeShape>
+
+                                <Border.GestureRecognizers>
+                                    <TapGestureRecognizer Command="{Binding SearchCommand}" />
+                                </Border.GestureRecognizers>
+
+                                <Label
+                                    Text="Search"
+                                    FontSize="12"
+                                    TextColor="White"
+                                    HorizontalTextAlignment="Center"
+                                    VerticalTextAlignment="Center" />
+                            </Border>
+                        </Grid>
+
+                        
+
+                    </Grid>
+                </Border>
+
+                <!-- Media controls -->
+                <Border
+                    Grid.Row="1"
+                    StrokeThickness="1"
+                    Stroke="#1f2937"
+                    BackgroundColor="{StaticResource TabStripNavy}"
+                    Padding="6"
+                    HorizontalOptions="Fill">
+
+                    <Border.StrokeShape>
+                        <RoundRectangle CornerRadius="16" />
+                    </Border.StrokeShape>
+
+                    <HorizontalStackLayout Spacing="10" HorizontalOptions="Center" VerticalOptions="Center">
+
+                        <ImageButton
+                            Source="mc_previous.png"
+                            Command="{Binding PreviousCommand}"
+                            IsEnabled="{Binding IsArchiveMediaButtonsEnabled}"
+                            BackgroundColor="Transparent"
+                            HeightRequest="38"
+                            WidthRequest="38"
+                            Padding="0"
+                            ToolTipProperties.Text="Previous" />
+
+                        <ImageButton
+                            Source="mc_stop.png"
+                            Command="{Binding StopCommand}"
+                            IsEnabled="{Binding IsStopEnabled}"
+                            BackgroundColor="Transparent"
+                            HeightRequest="38"
+                            WidthRequest="38"
+                            Padding="0"
+                            ToolTipProperties.Text="Stop" />
+
+                        <ImageButton
+                            Source="mc_next.png"
+                            Command="{Binding NextCommand}"
+                            IsEnabled="{Binding IsArchiveMediaButtonsEnabled}"
+                            BackgroundColor="Transparent"
+                            HeightRequest="38"
+                            WidthRequest="38"
+                            Padding="0"
+                            ToolTipProperties.Text="Next" />
+
+                        <ImageButton
+                            Source="mc_speeddown.png"
+                            Command="{Binding PlaybackSpeedDownCommand}"
+                            IsEnabled="{Binding IsArchiveMediaButtonsEnabled}"
+                            BackgroundColor="Transparent"
+                            HeightRequest="38"
+                            WidthRequest="38"
+                            Padding="0"
+                            ToolTipProperties.Text="Speed down" />
+
+                        <ImageButton
+                            Source="mc_speedup.png"
+                            Command="{Binding PlaybackSpeedUpCommand}"
+                            IsEnabled="{Binding IsArchiveMediaButtonsEnabled}"
+                            BackgroundColor="Transparent"
+                            HeightRequest="38"
+                            WidthRequest="38"
+                            Padding="0"
+                            ToolTipProperties.Text="Speed up" />
+
+                        <Label
+                            Text="{Binding ArchivePlaybackSpeedLabel}"
+                            FontSize="12"
+                            TextColor="#e5e7eb"
+                            VerticalOptions="Center"
+                            Margin="6,0,0,0" />
+
+                    </HorizontalStackLayout>
+                </Border>
+
                 <Label
-                    Text="Full Archive"
-                    FontSize="24"
-                    FontAttributes="Bold"
-                    TextColor="{AppThemeBinding Light=#111827, Dark=White}"
-                    HorizontalOptions="Center" />
-                <Label
-                    Text="Coming soon."
-                    FontSize="14"
-                    TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
-                    HorizontalOptions="Center" />
-            </VerticalStackLayout>
+                    Grid.Row="2"
+                    Text="{Binding StatusText}"
+                    FontSize="12"
+                    TextColor="{AppThemeBinding Light=#374151, Dark=#e5e7eb}"
+                    LineBreakMode="TailTruncation" />
+
+                <!-- Calls -->
+                <CollectionView
+                    x:Name="CallsList"
+                    Grid.Row="3"
+                    ItemsSource="{Binding Calls}"
+                    SelectionMode="Single"
+                    SelectionChanged="OnCallSelected"
+                    Scrolled="OnCallsScrolled"
+                    VerticalScrollBarVisibility="Never">
+
+                    <CollectionView.ItemTemplate>
+                        <DataTemplate x:DataType="models:CallItem">
+                            <Border
+                                StrokeThickness="1"
+                                Stroke="#1f2937"
+                                BackgroundColor="{AppThemeBinding Light=White, Dark=#0b1220}"
+                                Padding="8"
+                                Margin="0,0,0,6">
+
+                                <Border.StrokeShape>
+                                    <RoundRectangle CornerRadius="14" />
+                                </Border.StrokeShape>
+
+                                <Border.Triggers>
+                                    <DataTrigger TargetType="Border" Binding="{Binding IsPlaying}" Value="True">
+                                        <Setter Property="StrokeThickness" Value="2" />
+                                        <Setter Property="Stroke" Value="#22c55e" />
+                                        <Setter Property="BackgroundColor" Value="{AppThemeBinding Light=#ecfdf5, Dark=#022c22}" />
+                                    </DataTrigger>
+                                </Border.Triggers>
+
+                                <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="*,Auto" ColumnSpacing="8" RowSpacing="2">
+
+                                    <Label Grid.Row="0" Grid.Column="0" FontSize="14">
+                                        <Label.FormattedText>
+                                            <FormattedString>
+                                                <Span Text="{Binding TimeDisplay}" FontAttributes="Bold" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                                                <Span Text="  >  " TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
+                                                <Span Text="{Binding ReceiverName}" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                                                <Span Text="  >  " TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
+                                                <Span Text="{Binding Site}" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                                                <Span Text="  >  " TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
+                                                <Span Text="{Binding Talkgroup}" FontAttributes="Bold" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                                            </FormattedString>
+                                        </Label.FormattedText>
+                                    </Label>
+
+                                    <Label Grid.Row="0" Grid.Column="1"
+                                           FontSize="12"
+                                           TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+                                           Text="{Binding DurationDisplay}"
+                                           HorizontalTextAlignment="End" />
+
+                                    <Label Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2"
+                                           FontSize="12"
+                                           TextColor="{AppThemeBinding Light=#374151, Dark=#cbd5e1}"
+                                           LineBreakMode="WordWrap"
+                                           Text="{Binding Transcription}">
+                                        <Label.Triggers>
+                                            <DataTrigger TargetType="Label" Binding="{Binding Transcription}" Value="">
+                                                <Setter Property="IsVisible" Value="False" />
+                                            </DataTrigger>
+                                        </Label.Triggers>
+                                    </Label>
+
+                                </Grid>
+
+                            </Border>
+                        </DataTemplate>
+                    </CollectionView.ItemTemplate>
+                </CollectionView>
+
+                
+
+            </Grid>
         </Border>
     </Grid>
 </ContentPage>

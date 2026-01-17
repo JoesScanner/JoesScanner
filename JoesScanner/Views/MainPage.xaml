@@ -218,17 +218,12 @@
                     SelectionChanged="OnCallSelectionChanged"
                     ItemsUpdatingScrollMode="KeepScrollOffset"
                     ItemSizingStrategy="MeasureAllItems"
+                    HorizontalScrollBarVisibility="Never"
+                    VerticalScrollBarVisibility="Never"
                     VerticalOptions="Fill"
-                    HorizontalOptions="Fill"
-                    Margin="10,8,10,0">
+                    HorizontalOptions="Center"
+                    Margin="0,0,0,0">
 
-                    <CollectionView.Header>
-                        <BoxView HeightRequest="2" BackgroundColor="Transparent" />
-                    </CollectionView.Header>
-
-                    <CollectionView.ItemsLayout>
-                        <LinearItemsLayout Orientation="Vertical" ItemSpacing="0" />
-                    </CollectionView.ItemsLayout>
 
                     <CollectionView.ItemTemplate>
                         <DataTemplate x:DataType="models:CallItem">
@@ -296,16 +291,29 @@
                                         </Label.FormattedText>
                                     </Label>
 
-                                    <!-- Duration on the right -->
-                                    <Label
+                                    <!-- Duration on the right (show muted marker when applicable) -->
+                                    <HorizontalStackLayout
                                         Grid.Row="0"
                                         Grid.Column="1"
-                                        HorizontalTextAlignment="End"
-                                        VerticalTextAlignment="Center"
-                                        FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
-                                        FontAutoScalingEnabled="False"
-                                        Text="{Binding DurationDisplay}"
-                                        TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
+                                        Spacing="4"
+                                        HorizontalOptions="End"
+                                        VerticalOptions="Center">
+
+                                        <Label
+                                            Text="M"
+                                            FontSize="{OnPlatform WinUI=9, MacCatalyst=9, Android=8, iOS=8}"
+                                            FontAutoScalingEnabled="False"
+                                            TextColor="#dc2626"
+                                            IsVisible="{Binding IsMutedByFilter}" />
+
+                                        <Label
+                                            HorizontalTextAlignment="End"
+                                            VerticalTextAlignment="Center"
+                                            FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
+                                            FontAutoScalingEnabled="False"
+                                            Text="{Binding DurationDisplay}"
+                                            TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
+                                    </HorizontalStackLayout>
 
                                     <!-- Transcription (only show when there is real text) -->
                                     <Label

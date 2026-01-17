@@ -3,6 +3,8 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Net.WebSockets;
+using System.Threading.Channels;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
@@ -73,6 +75,9 @@ namespace JoesScanner.Services
             // for this connection lifetime.
             var hasReportedIdleConnection = false;
 
+            // When WebSocket is unavailable, fall back to polling and retry WS after a short cooldown.
+            var wsDisableUntilUtc = DateTime.MinValue;
+
             while (!cancellationToken.IsCancellationRequested)
             {
                 var baseUrl = (_settingsService.ServerUrl ?? string.Empty).TrimEnd('/');
@@ -97,6 +102,61 @@ namespace JoesScanner.Services
                 }
 
                 var callsUrl = baseUrl + "/calljson";
+
+                // Prefer the Trunking Recorder WebSocket feed when available.
+                // This reduces polling load and gives us call-level update notifications.
+                if (DateTime.UtcNow >= wsDisableUntilUtc)
+                {
+                    ClientWebSocket? ws = null;
+
+                    try
+                    {
+                        ws = await TryOpenWebSocketAsync(baseUrl, cancellationToken);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"[CallStreamService] [WebSocket] Connect failed: {ex}");
+                    }
+
+                    if (ws != null)
+                    {
+                        // We are live; do not skip later polling batches as "initial backlog."
+                        skipInitialBatch = false;
+
+                        if (!hasReportedIdleConnection)
+                        {
+                            hasReportedIdleConnection = true;
+
+                            AppLog.Add(
+                                $"CallStream: WEBSOCKET CONNECTED. [ServerUrl={baseUrl}, Path=/Calls, Username={usernameForLog}]");
+
+                            yield return new CallItem
+                            {
+                                Timestamp = DateTime.Now,
+                                Talkgroup = "HEARTBEAT",
+                                Transcription = "Connected (WebSocket); waiting for calls.",
+                                AudioUrl = string.Empty
+                            };
+                        }
+
+                        await foreach (var item in StreamFromWebSocketAsync(ws, baseUrl, callsUrl, cancellationToken))
+                        {
+                            yield return item;
+                        }
+
+                        // WebSocket ended; retry after a brief delay.
+                        await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+                        continue;
+                    }
+
+                    // Avoid hammering reconnect attempts if WS is not exposed.
+                    wsDisableUntilUtc = DateTime.UtcNow.AddSeconds(30);
+                }
+
 
                 List<CallRow>? rows = null;
                 string? errorMessage = null;
@@ -243,151 +303,558 @@ namespace JoesScanner.Services
                 {
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    var rawId = r.DT_RowId?.Trim();
-                    if (string.IsNullOrEmpty(rawId))
-                        continue;
+                    var item = BuildCallItemFromRow(r, baseUrl, skipYieldForThisBatch);
 
-                    // Determine whether this row is new or an update for an existing call.
-                    var isNew = !_seenIds.Contains(rawId);
-                    var wasMissingTranscription = _idsMissingTranscription.Contains(rawId);
-
-                    if (isNew)
+                    if (item != null)
                     {
-                        _seenIds.Add(rawId);
+                        yield return item;
                     }
-
-                    // Start with no debug message for this call.
-                    var debugInfo = string.Empty;
-
-                    // Transcription text from the server, may be empty if there is no transcription.
-                    var text = r.CallText?.Trim() ?? string.Empty;
-
-                    if (string.IsNullOrWhiteSpace(text))
-                    {
-                        // Server did not send any transcription text for this call.
-                        debugInfo = AppendDebug(debugInfo, "No transcription from server");
-
-                        // For brand new calls with no text, remember that we are waiting
-                        // for a transcription update on this ID.
-                        if (isNew)
-                        {
-                            _idsMissingTranscription.Add(rawId);
-                        }
-                    }
-                    else
-                    {
-                        // We now have transcription text; if we were previously waiting,
-                        // stop tracking this ID as missing transcription.
-                        if (wasMissingTranscription)
-                        {
-                            _idsMissingTranscription.Remove(rawId);
-                        }
-                    }
-
-                    // Timestamp from StartTime / StartTimeUTC.
-                    var timestamp = ParseTimestamp(r.StartTime, r.StartTimeUTC);
-
-                    // Talkgroup from label or ID.
-                    var talkgroup = !string.IsNullOrWhiteSpace(r.TargetLabel)
-                        ? r.TargetLabel
-                        : r.TargetID ?? string.Empty;
-
-                    // Source radio ID / label.
-                    var source = !string.IsNullOrWhiteSpace(r.SourceLabel)
-                        ? r.SourceLabel
-                        : r.SourceID ?? string.Empty;
-
-                    // Site name from SiteLabel / SiteID.
-                    var site = !string.IsNullOrWhiteSpace(r.SiteLabel)
-                        ? r.SiteLabel
-                        : r.SiteID ?? string.Empty;
-
-                    // Voice receiver name.
-                    var voiceReceiver = r.VoiceReceiver?.Trim() ?? string.Empty;
-
-                    // Call duration in seconds, if the server provides CallDuration.
-                    double durationSeconds = 0;
-                    if (!string.IsNullOrWhiteSpace(r.CallDuration))
-                    {
-                        if (double.TryParse(r.CallDuration, NumberStyles.Float, CultureInfo.InvariantCulture, out var dur))
-                        {
-                            durationSeconds = dur;
-                        }
-                    }
-
-                    // Build audio URL from AudioFilename.
-                    string audioUrl = string.Empty;
-                    if (!string.IsNullOrWhiteSpace(r.AudioFilename))
-                    {
-                        var fileName = r.AudioFilename.Trim();
-
-                        // If TR returns a full URL, use it as-is.
-                        if (fileName.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
-                            fileName.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-                        {
-                            audioUrl = fileName;
-                        }
-                        else
-                        {
-                            // Treat AudioFilename as a relative path from the TR web root.
-                            // Example: "audio/2025-11-14/12345.wav"
-                            audioUrl = $"{baseUrl}/{fileName.TrimStart('/')}";
-                        }
-                    }
-
-                    // If Basic Auth is configured, embed credentials in the audio URL
-                    // so the platform media player can reach pfSense protected audio.
-                    audioUrl = ApplyBasicAuthToAudioUrl(audioUrl, baseUrl);
-
-                    System.Diagnostics.Debug.WriteLine($"[CallStreamService] AudioUrl for {rawId}: {audioUrl}");
-
-                    if (string.IsNullOrWhiteSpace(audioUrl))
-                    {
-                        // No usable audio URL even though the call exists.
-                        debugInfo = AppendDebug(debugInfo, "No audio URL from server");
-
-                        var suffix = "No audio URL built from server data";
-                        debugInfo = AppendDebug(debugInfo, suffix);
-                    }
-
-                    // Decide whether this row should be yielded:
-                    // - Brand new call: always yield (subject to initial backlog skip)
-                    // - Existing ID that just transitioned from "no text" to "has text":
-                    //   yield as a transcription update
-                    // - Existing ID with no text or no change: skip
-                    var isTranscriptionUpdate =
-                        !isNew &&
-                        wasMissingTranscription &&
-                        !string.IsNullOrWhiteSpace(text);
-
-                    if (!isNew && !isTranscriptionUpdate)
-                    {
-                        // Nothing new for this call from the client's perspective.
-                        continue;
-                    }
-
-                    // Do not surface prior calls in the UI on the initial batch.
-                    if (skipYieldForThisBatch && isNew)
-                        continue;
-
-                    // Final CallItem consumed by the UI.
-                    yield return new CallItem
-                    {
-                        BackendId = rawId,
-                        IsTranscriptionUpdate = isTranscriptionUpdate,
-                        Timestamp = timestamp,
-                        CallDurationSeconds = durationSeconds,
-                        Talkgroup = talkgroup,
-                        Source = source,
-                        Site = site,
-                        VoiceReceiver = voiceReceiver,
-                        Transcription = text,
-                        AudioUrl = audioUrl,
-                        DebugInfo = debugInfo
-                    };
                 }
 
                 await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+            }
+        }
+
+
+        // Builds a CallItem from a calljson row (or a WebSocket "full row" message).
+        // Returns null when the row is neither new nor a transcription update from the client's perspective.
+        private CallItem? BuildCallItemFromRow(CallRow r, string baseUrl, bool skipYieldForThisBatch)
+        {
+            var rawId = r.DT_RowId?.Trim();
+            if (string.IsNullOrEmpty(rawId))
+                return null;
+
+            // Determine whether this row is new or an update for an existing call.
+            var isNew = !_seenIds.Contains(rawId);
+            var wasMissingTranscription = _idsMissingTranscription.Contains(rawId);
+
+            if (isNew)
+            {
+                _seenIds.Add(rawId);
+            }
+
+            // Start with no debug message for this call.
+            var debugInfo = string.Empty;
+
+            // Transcription text from the server, may be empty if there is no transcription.
+            var text = NormalizeCallText(r.CallText);
+
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                // Server did not send any transcription text for this call.
+                debugInfo = AppendDebug(debugInfo, "No transcription from server");
+
+                // For brand new calls with no text, remember that we are waiting
+                // for a transcription update on this ID.
+                if (isNew)
+                {
+                    _idsMissingTranscription.Add(rawId);
+                }
+            }
+            else
+            {
+                // We now have transcription text; if we were previously waiting,
+                // stop tracking this ID as missing transcription.
+                if (wasMissingTranscription)
+                {
+                    _idsMissingTranscription.Remove(rawId);
+                }
+            }
+
+            // Timestamp from StartTime / StartTimeUTC.
+            var timestamp = ParseTimestamp(r.StartTime, r.StartTimeUTC);
+
+            // Talkgroup from label or ID.
+            var talkgroup = !string.IsNullOrWhiteSpace(r.TargetLabel)
+                ? r.TargetLabel
+                : r.TargetID ?? string.Empty;
+
+            // Source radio ID / label.
+            var source = !string.IsNullOrWhiteSpace(r.SourceLabel)
+                ? r.SourceLabel
+                : r.SourceID ?? string.Empty;
+
+            // Site name from SiteLabel / SiteID.
+            var site = !string.IsNullOrWhiteSpace(r.SiteLabel)
+                ? r.SiteLabel
+                : r.SiteID ?? string.Empty;
+
+            // Voice receiver name.
+            var voiceReceiver = r.VoiceReceiver?.Trim() ?? string.Empty;
+
+            // Call duration in seconds, if the server provides CallDuration.
+            double durationSeconds = 0;
+            if (!string.IsNullOrWhiteSpace(r.CallDuration))
+            {
+                if (double.TryParse(r.CallDuration, NumberStyles.Float, CultureInfo.InvariantCulture, out var dur))
+                {
+                    durationSeconds = dur;
+                }
+            }
+
+            // Build audio URL from AudioFilename.
+            string audioUrl = string.Empty;
+            if (!string.IsNullOrWhiteSpace(r.AudioFilename))
+            {
+                var fileName = r.AudioFilename.Trim();
+
+                // If TR returns a full URL, use it as-is.
+                if (fileName.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                    fileName.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                {
+                    audioUrl = fileName;
+                }
+                else
+                {
+                    // Treat AudioFilename as a relative path from the TR web root.
+                    audioUrl = $"{baseUrl}/{fileName.TrimStart('/')}";
+                }
+            }
+
+            // Never keep credentialed URLs in memory or logs.
+            // Playback downloads audio with an Authorization header when needed.
+            audioUrl = SanitizeAudioUrl(audioUrl);
+
+            if (string.IsNullOrWhiteSpace(audioUrl))
+            {
+                debugInfo = AppendDebug(debugInfo, "No audio URL from server");
+                debugInfo = AppendDebug(debugInfo, "No audio URL built from server data");
+            }
+
+            // Decide whether this row should be yielded:
+            // - Brand new call: always yield (subject to initial backlog skip)
+            // - Existing ID that just transitioned from "no text" to "has text":
+            //   yield as a transcription update
+            // - Existing ID with no text or no change: skip
+            var isTranscriptionUpdate =
+                !isNew &&
+                wasMissingTranscription &&
+                !string.IsNullOrWhiteSpace(text);
+
+            if (!isNew && !isTranscriptionUpdate)
+            {
+                return null;
+            }
+
+            // Do not surface prior calls in the UI on the initial batch.
+            if (skipYieldForThisBatch && isNew)
+            {
+                return null;
+            }
+
+            return new CallItem
+            {
+                BackendId = rawId,
+                IsTranscriptionUpdate = isTranscriptionUpdate,
+                Timestamp = timestamp,
+                CallDurationSeconds = durationSeconds,
+                Talkgroup = talkgroup,
+                Source = source,
+                Site = site,
+                VoiceReceiver = voiceReceiver,
+                Transcription = text,
+                AudioUrl = audioUrl,
+                DebugInfo = debugInfo
+            };
+        }
+
+        // Normalizes incoming transcription text so a single oversized payload cannot stall the UI.
+        // We intentionally keep this inexpensive: whitespace normalization plus a hard input cap.
+        private static string NormalizeCallText(string? text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return string.Empty;
+
+            var s = text.Trim();
+
+            const int maxIncomingChars = 20000;
+            if (s.Length > maxIncomingChars)
+                s = s.Substring(0, maxIncomingChars);
+
+            var sb = new StringBuilder(s.Length);
+            var lastWasSpace = true; // trim leading whitespace
+            foreach (var ch in s)
+            {
+                var c = ch;
+                if (c == '\n' || c == '\n' || c == '\t')
+                    c = ' ';
+
+                if (char.IsWhiteSpace(c))
+                {
+                    if (lastWasSpace)
+                        continue;
+
+                    sb.Append(' ');
+                    lastWasSpace = true;
+                    continue;
+                }
+
+                sb.Append(c);
+                lastWasSpace = false;
+            }
+
+            return sb.ToString().Trim();
+        }
+
+        private async Task<CallRow?> FetchCallByIdAsync(string callsUrl, string callId, CancellationToken cancellationToken)
+        {
+            const int pageSize = 200;
+            const int maxPages = 5; // up to 1000 rows
+
+            for (var page = 0; page < maxPages; page++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var start = page * pageSize;
+                var rows = await FetchLatestAsync(callsUrl, cancellationToken, start, pageSize);
+
+                if (rows.Count == 0)
+                    return null;
+
+                foreach (var r in rows)
+                {
+                    if (string.Equals(r.DT_RowId?.Trim(), callId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return r;
+                    }
+                }
+
+                if (rows.Count < pageSize)
+                    return null;
+            }
+
+            return null;
+        }
+
+        private async Task<ClientWebSocket?> TryOpenWebSocketAsync(string baseUrl, CancellationToken cancellationToken)
+        {
+            if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var baseUri))
+                return null;
+
+            var builder = new UriBuilder(baseUri);
+
+            if (string.Equals(builder.Scheme, "https", StringComparison.OrdinalIgnoreCase))
+            {
+                builder.Scheme = "wss";
+            }
+            else if (string.Equals(builder.Scheme, "http", StringComparison.OrdinalIgnoreCase))
+            {
+                builder.Scheme = "ws";
+            }
+            else
+            {
+                return null;
+            }
+
+            builder.Path = "/Calls";
+            builder.Query = string.Empty;
+            builder.Fragment = string.Empty;
+
+            var wsUri = builder.Uri;
+
+            var ws = new ClientWebSocket();
+            ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(30);
+
+            // Apply the same basic auth policy used by calljson.
+            var authHeader = BuildBasicAuthHeaderValue(baseUri);
+            if (!string.IsNullOrWhiteSpace(authHeader))
+            {
+                ws.Options.SetRequestHeader("Authorization", authHeader);
+            }
+
+            try
+            {
+                await ws.ConnectAsync(wsUri, cancellationToken);
+
+                if (ws.State == WebSocketState.Open)
+                {
+                    return ws;
+                }
+            }
+            catch
+            {
+                try
+                {
+                    ws.Dispose();
+                }
+                catch
+                {
+                }
+            }
+
+            return null;
+        }
+
+        private string? BuildBasicAuthHeaderValue(Uri serverUri)
+        {
+            try
+            {
+                var isJoesScannerHost = serverUri.Host.EndsWith("app.joesscanner.com", StringComparison.OrdinalIgnoreCase);
+
+                string username;
+                string password;
+
+                if (isJoesScannerHost)
+                {
+                    // Joe's Scanner hosted servers use the hard coded service account.
+                    username = ServiceAuthUsername;
+                    password = ServiceAuthPassword;
+                }
+                else
+                {
+                    // Custom servers use user configured basic auth credentials, if any.
+                    username = _settingsService.BasicAuthUsername ?? string.Empty;
+                    password = _settingsService.BasicAuthPassword ?? string.Empty;
+
+                    if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
+                        return null;
+                }
+
+                var raw = $"{username}:{password}";
+                var bytes = Encoding.ASCII.GetBytes(raw);
+                var base64 = Convert.ToBase64String(bytes);
+                return $"Basic {base64}";
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private async IAsyncEnumerable<CallItem> StreamFromWebSocketAsync(
+            ClientWebSocket ws,
+            string baseUrl,
+            string callsUrl,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            var buffer = new byte[32 * 1024];
+            var segment = new ArraySegment<byte>(buffer);
+            var sb = new StringBuilder(64 * 1024);
+
+            try
+            {
+                while (!cancellationToken.IsCancellationRequested && ws.State == WebSocketState.Open)
+                {
+                    sb.Clear();
+
+                    WebSocketReceiveResult result;
+
+                    do
+                    {
+                        result = await ws.ReceiveAsync(segment, cancellationToken);
+
+                        if (result.MessageType == WebSocketMessageType.Close)
+                        {
+                            try
+                            {
+                                await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "closed", CancellationToken.None);
+                            }
+                            catch
+                            {
+                            }
+
+                            yield break;
+                        }
+
+                        if (result.Count > 0)
+                        {
+                            sb.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
+                        }
+                    }
+                    while (!result.EndOfMessage);
+
+                    var message = sb.ToString().Trim();
+                    if (string.IsNullOrWhiteSpace(message))
+                        continue;
+
+                    JsonDocument? doc = null;
+
+                    try
+                    {
+                        doc = JsonDocument.Parse(message);
+                    }
+                    catch
+                    {
+                        // Ignore malformed frames.
+                        continue;
+                    }
+
+                    using (doc)
+                    {
+                        var root = doc.RootElement;
+
+                        if (root.ValueKind == JsonValueKind.Array)
+                        {
+                            foreach (var element in root.EnumerateArray())
+                            {
+                                await foreach (var item in ProcessWebSocketElementAsync(element, baseUrl, callsUrl, cancellationToken))
+                                {
+                                    yield return item;
+                                }
+                            }
+                        }
+                        else if (root.ValueKind == JsonValueKind.Object)
+                        {
+                            await foreach (var item in ProcessWebSocketElementAsync(root, baseUrl, callsUrl, cancellationToken))
+                            {
+                                yield return item;
+                            }
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                try
+                {
+                    ws.Dispose();
+                }
+                catch
+                {
+                }
+            }
+        }
+
+        private async IAsyncEnumerable<CallItem> ProcessWebSocketElementAsync(
+            JsonElement element,
+            string baseUrl,
+            string callsUrl,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            // Update notifications: {"Update": true, "DT_RowId": 123}
+            var isUpdate = false;
+
+            if (TryGetBoolean(element, "Update", out var updateFlag))
+            {
+                isUpdate = updateFlag;
+            }
+
+            var callId = GetString(element, "DT_RowId") ?? GetString(element, "DT_RowID");
+
+            if (isUpdate)
+            {
+                if (string.IsNullOrWhiteSpace(callId))
+                    yield break;
+
+                // Only refresh calls that we have already surfaced to the UI.
+                if (!_seenIds.Contains(callId.Trim()))
+                    yield break;
+
+                var row = await FetchCallByIdAsync(callsUrl, callId.Trim(), cancellationToken);
+                if (row == null)
+                    yield break;
+
+                var updated = BuildCallItemFromRow(row, baseUrl, skipYieldForThisBatch: false);
+                if (updated != null && updated.IsTranscriptionUpdate)
+                {
+                    yield return updated;
+                }
+
+                yield break;
+            }
+
+            // Full row messages: treat as a normal row insert.
+            var parsed = ParseRow(element);
+            var item = BuildCallItemFromRow(parsed, baseUrl, skipYieldForThisBatch: false);
+
+            if (item != null && !item.IsTranscriptionUpdate)
+            {
+                yield return item;
+            }
+        }
+
+        private static bool TryGetBoolean(JsonElement obj, string name, out bool value)
+        {
+            value = false;
+
+            if (obj.TryGetProperty(name, out var prop))
+            {
+                if (prop.ValueKind == JsonValueKind.True)
+                {
+                    value = true;
+                    return true;
+                }
+
+                if (prop.ValueKind == JsonValueKind.False)
+                {
+                    value = false;
+                    return true;
+                }
+
+                if (prop.ValueKind == JsonValueKind.Number && prop.TryGetInt32(out var i))
+                {
+                    value = i != 0;
+                    return true;
+                }
+
+                if (prop.ValueKind == JsonValueKind.String && bool.TryParse(prop.GetString(), out var b))
+                {
+                    value = b;
+                    return true;
+                }
+            }
+
+            // Case-insensitive fallback
+            foreach (var p in obj.EnumerateObject())
+            {
+                if (!string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var v = p.Value;
+
+                if (v.ValueKind == JsonValueKind.True)
+                {
+                    value = true;
+                    return true;
+                }
+
+                if (v.ValueKind == JsonValueKind.False)
+                {
+                    value = false;
+                    return true;
+                }
+
+                if (v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var ii))
+                {
+                    value = ii != 0;
+                    return true;
+                }
+
+                if (v.ValueKind == JsonValueKind.String && bool.TryParse(v.GetString(), out var bb))
+                {
+                    value = bb;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+
+
+
+        private static string SanitizeAudioUrl(string audioUrl)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(audioUrl))
+                    return audioUrl;
+
+                if (!Uri.TryCreate(audioUrl, UriKind.Absolute, out var uri))
+                    return audioUrl;
+
+                // Always strip embedded credentials.
+                var builder = new UriBuilder(uri)
+                {
+                    UserName = string.Empty,
+                    Password = string.Empty
+                };
+
+                return builder.Uri.ToString();
+            }
+            catch
+            {
+                return audioUrl;
             }
         }
 
@@ -463,7 +930,16 @@ namespace JoesScanner.Services
         // Calls the calljson endpoint with the expected DataTables payload and returns parsed rows.
         private async Task<List<CallRow>> FetchLatestAsync(string callsUrl, CancellationToken cancellationToken)
         {
-            var payload = BuildDataTablesPayload(_draw, PollBatchSize);
+            return await FetchLatestAsync(callsUrl, cancellationToken, start: 0, length: PollBatchSize);
+        }
+
+        private async Task<List<CallRow>> FetchLatestAsync(
+            string callsUrl,
+            CancellationToken cancellationToken,
+            int start,
+            int length)
+        {
+            var payload = BuildDataTablesPayload(_draw, start, length);
             _draw++;
 
             var jsonPayload = JsonSerializer.Serialize(payload, _jsonOptions);
@@ -630,8 +1106,21 @@ namespace JoesScanner.Services
         private static string? GetString(JsonElement obj, string name)
         {
             if (!obj.TryGetProperty(name, out var prop))
-                return null;
+            {
+                // Some TR endpoints and WebSocket messages vary casing (for example DT_RowID vs DT_RowId).
+                foreach (var p in obj.EnumerateObject())
+                {
+                    if (string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        prop = p.Value;
+                        goto Found;
+                    }
+                }
 
+                return null;
+            }
+
+        Found:
             return prop.ValueKind switch
             {
                 JsonValueKind.String => prop.GetString(),
@@ -729,7 +1218,7 @@ namespace JoesScanner.Services
         }
 
         // Builds the DataTables payload used by the calljson endpoint.
-        private static DataTablesPayload BuildDataTablesPayload(int draw, int length)
+        private static DataTablesPayload BuildDataTablesPayload(int draw, int start, int length)
         {
             var cols = new[]
             {
@@ -761,7 +1250,7 @@ namespace JoesScanner.Services
             var payload = new DataTablesPayload
             {
                 Draw = draw,
-                Start = 0,
+                Start = Math.Max(0, start),
                 Length = Math.Max(0, length),
                 Search = new DataTablesSearch { Value = string.Empty, Regex = false },
                 SmartSort = false

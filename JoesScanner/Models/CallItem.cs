@@ -15,6 +15,7 @@ namespace JoesScanner.Models
         private string _debugInfo = string.Empty;
         private bool _isHistory;
         private bool _isPlaying;
+        private bool _isMutedByFilter;
         private string _backendId = string.Empty;
         private bool _isTranscriptionUpdate;
 
@@ -152,15 +153,19 @@ namespace JoesScanner.Models
         }
 
         // Transcription text as produced by the server for this call.
+        // Note: extremely large transcriptions can stall UI layout on some platforms.
+        // We normalize whitespace and cap the stored text to keep the queue responsive.
         public string Transcription
         {
             get => _transcription;
             set
             {
-                if (_transcription == value)
+                var normalized = NormalizeTranscriptionForUi(value);
+
+                if (_transcription == normalized)
                     return;
 
-                _transcription = value ?? string.Empty;
+                _transcription = normalized;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(AccessibilitySummary));
                 OnPropertyChanged(nameof(AccessibilityAnnouncement));
@@ -228,6 +233,20 @@ namespace JoesScanner.Models
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(AccessibilitySummary));
                 OnPropertyChanged(nameof(AccessibilityAnnouncement));
+            }
+        }
+
+        // True when the call is muted by an active filter rule. The call remains visible. Queue autoplay will skip it, but the user can still tap to play.
+        public bool IsMutedByFilter
+        {
+            get => _isMutedByFilter;
+            set
+            {
+                if (_isMutedByFilter == value)
+                    return;
+
+                _isMutedByFilter = value;
+                OnPropertyChanged();
             }
         }
 
@@ -301,6 +320,53 @@ namespace JoesScanner.Models
 
                 return $"New call. {tg}. {site}.";
             }
+        }
+
+        // Hard caps for UI safety. The Label is already limited by MaxLines, but very large strings
+        // can still cause expensive layout and text shaping work.
+        private const int MaxIncomingTranscriptionChars = 20000;
+        private const int MaxUiTranscriptionChars = 2000;
+
+        private static string NormalizeTranscriptionForUi(string? text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return string.Empty;
+
+            var s = text;
+
+            // Avoid pathological allocations from extremely large server payloads.
+            if (s.Length > MaxIncomingTranscriptionChars)
+                s = s.Substring(0, MaxIncomingTranscriptionChars);
+
+            // Normalize whitespace: convert newlines/tabs to spaces and collapse runs of whitespace.
+            var sb = new System.Text.StringBuilder(s.Length);
+            var lastWasSpace = true; // trim leading whitespace
+            foreach (var ch in s)
+            {
+                var c = ch;
+                if (c == '\n' || c == '\n' || c == '\t')
+                    c = ' ';
+
+                if (char.IsWhiteSpace(c))
+                {
+                    if (lastWasSpace)
+                        continue;
+
+                    sb.Append(' ');
+                    lastWasSpace = true;
+                    continue;
+                }
+
+                sb.Append(c);
+                lastWasSpace = false;
+            }
+
+            var normalized = sb.ToString().Trim();
+
+            if (normalized.Length > MaxUiTranscriptionChars)
+                normalized = normalized.Substring(0, MaxUiTranscriptionChars).TrimEnd() + "...";
+
+            return normalized;
         }
 
         private static string TruncateForAccessibility(string text, int maxLen)

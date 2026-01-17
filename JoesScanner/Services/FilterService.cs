@@ -1,4 +1,5 @@
 ﻿using JoesScanner.Models;
+using Microsoft.Maui.Storage;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Text.Json;
@@ -11,6 +12,11 @@ namespace JoesScanner.Services
     {
         private const string FiltersPreferenceKey = "FilterRulesV1";
 
+        // Windows LocalSettings has a relatively small per-value limit.
+        // Store the rule payload in a file when it is large or when running on Windows.
+        private const string FiltersFileName = "filter_rules_v1.json";
+        private const string FiltersStoredInFileMarker = "FILE";
+        private const int MaxPreferenceChars = 6000;
         public event EventHandler? RulesChanged;
 
         private readonly ObservableCollection<FilterRule> _rules = [];
@@ -400,11 +406,75 @@ namespace JoesScanner.Services
             public DateTime LastSeenUtc { get; set; }
         }
 
+        private static string GetFiltersFilePath()
+        {
+            try
+            {
+                var dir = FileSystem.AppDataDirectory;
+                return Path.Combine(dir, FiltersFileName);
+            }
+            catch
+            {
+                return FiltersFileName;
+            }
+        }
+
+        private static string? TryReadFiltersFile()
+        {
+            try
+            {
+                var path = GetFiltersFilePath();
+                if (!File.Exists(path))
+                    return null;
+
+                return File.ReadAllText(path);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static void TryWriteFiltersFile(string json)
+        {
+            try
+            {
+                var path = GetFiltersFilePath();
+                var dir = Path.GetDirectoryName(path);
+                if (!string.IsNullOrWhiteSpace(dir) && !Directory.Exists(dir))
+                    Directory.CreateDirectory(dir);
+
+                File.WriteAllText(path, json);
+            }
+            catch
+            {
+            }
+        }
+
         private void LoadFromPreferences()
         {
             try
             {
-                var json = Preferences.Get(FiltersPreferenceKey, string.Empty);
+                string json = string.Empty;
+
+                // Prefer the file when present.
+                var filePath = GetFiltersFilePath();
+                if (File.Exists(filePath))
+                {
+                    json = File.ReadAllText(filePath);
+                }
+                else
+                {
+                    json = Preferences.Get(FiltersPreferenceKey, string.Empty);
+                    if (string.Equals(json, FiltersStoredInFileMarker, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (File.Exists(filePath))
+                            json = File.ReadAllText(filePath);
+                        else
+                            json = string.Empty;
+                    }
+                }
+
                 if (string.IsNullOrWhiteSpace(json))
                     return;
 
@@ -450,7 +520,7 @@ namespace JoesScanner.Services
             }
         }
 
-        private void PruneInvalidRules(bool saveIfChanged)
+        private void PruneInvalidRules(bool saveIfChanged)        
         {
             var changed = false;
 
@@ -500,11 +570,51 @@ namespace JoesScanner.Services
                 }
 
                 var json = JsonSerializer.Serialize(dtoList);
+
+                var useFile = OperatingSystem.IsWindows() || json.Length > MaxPreferenceChars;
+
+                if (useFile)
+                {
+                    var filePath = GetFiltersFilePath();
+                    File.WriteAllText(filePath, json);
+                    Preferences.Set(FiltersPreferenceKey, FiltersStoredInFileMarker);
+                    return;
+                }
+
                 Preferences.Set(FiltersPreferenceKey, json);
             }
             catch
             {
+                // If we fail to persist to Preferences (for example, Windows size limits),
+                // fall back to the file so the app can continue operating normally.
+                try
+                {
+                    List<FilterRuleDto> dtoList;
+
+                    lock (_rulesGate)
+                    {
+                        dtoList = _rules.Select(r => new FilterRuleDto
+                        {
+                            Level = r.Level,
+                            Receiver = r.Receiver,
+                            Site = r.Site,
+                            Talkgroup = r.Talkgroup,
+                            IsMuted = r.IsMuted,
+                            IsDisabled = r.IsDisabled,
+                            LastSeenUtc = r.LastSeenUtc
+                        }).ToList();
+                    }
+
+                    var json = JsonSerializer.Serialize(dtoList);
+                    var filePath = GetFiltersFilePath();
+                    File.WriteAllText(filePath, json);
+                    Preferences.Set(FiltersPreferenceKey, FiltersStoredInFileMarker);
+                }
+                catch
+                {
+                }
             }
         }
+
     }
 }
