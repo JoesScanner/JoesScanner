@@ -1184,158 +1184,207 @@ namespace JoesScanner.ViewModels
 
         private async Task RunCallStreamLoopAsync(CancellationToken token)
         {
+            var retryDelay = TimeSpan.FromSeconds(2);
+
             try
             {
-                await foreach (var call in _callStreamService.GetCallStreamAsync(token))
+                while (!token.IsCancellationRequested)
                 {
+                    try
+                    {
+                        await foreach (var call in _callStreamService.GetCallStreamAsync(token))
+                        {
+                            if (token.IsCancellationRequested)
+                                break;
+
+                            if (call == null)
+                                continue;
+
+                            TotalCallsReceived++;
+
+                            try
+                            {
+                                await MainThread.InvokeOnMainThreadAsync(() =>
+                                {
+                                    if (token.IsCancellationRequested)
+                                        return;
+
+                                    // Status sentinel messages
+                                    if (string.Equals(call.Talkgroup, "AUTH", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        SetConnectionStatus(ConnectionStatus.AuthFailed);
+                                        return;
+                                    }
+
+                                    if (string.Equals(call.Talkgroup, "ERROR", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        SetConnectionStatus(ConnectionStatus.ServerUnreachable);
+                                        return;
+                                    }
+
+                                    if (string.Equals(call.Talkgroup, "HEARTBEAT", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        if (_connectionStatus == ConnectionStatus.Connecting ||
+                                            _connectionStatus == ConnectionStatus.AuthFailed ||
+                                            _connectionStatus == ConnectionStatus.ServerUnreachable ||
+                                            _connectionStatus == ConnectionStatus.Error)
+                                        {
+                                            SetConnectionStatus(ConnectionStatus.Connected);
+                                        }
+
+                                        return;
+                                    }
+
+                                    if (_connectionStatus == ConnectionStatus.Connecting ||
+                                        _connectionStatus == ConnectionStatus.AuthFailed ||
+                                        _connectionStatus == ConnectionStatus.ServerUnreachable ||
+                                        _connectionStatus == ConnectionStatus.Error)
+                                    {
+                                        SetConnectionStatus(ConnectionStatus.Connected);
+                                    }
+
+                                    // Transcription update for an existing call
+                                    if (call.IsTranscriptionUpdate && !string.IsNullOrWhiteSpace(call.BackendId))
+                                    {
+                                        var existing = Calls.FirstOrDefault(c => c.BackendId == call.BackendId);
+                                        if (existing != null)
+                                        {
+                                            if (!string.IsNullOrWhiteSpace(call.Transcription))
+                                            {
+                                                existing.Transcription = call.Transcription;
+
+                                                if (!string.IsNullOrWhiteSpace(existing.DebugInfo))
+                                                {
+                                                    var cleaned = existing.DebugInfo
+                                                        .Replace("No transcription from server", string.Empty, StringComparison.OrdinalIgnoreCase)
+                                                        .Trim();
+
+                                                    cleaned = cleaned.Trim(' ', '|', ';');
+
+                                                    existing.DebugInfo = cleaned;
+                                                }
+                                            }
+
+                                            if (!string.IsNullOrWhiteSpace(call.DebugInfo))
+                                            {
+                                                existing.DebugInfo = string.IsNullOrWhiteSpace(existing.DebugInfo)
+                                                    ? call.DebugInfo
+                                                    : $"{existing.DebugInfo}; {call.DebugInfo}";
+                                            }
+
+                                            LastQueueEvent = $"Transcription updated at {DateTime.Now:T}";
+                                        }
+
+                                        return;
+                                    }
+
+                                    // Ensure filter rules exist and apply filters
+                                    _filterService.EnsureRulesForCall(call);
+
+                                    if (_filterService.ShouldHide(call))
+                                    {
+                                        LastQueueEvent = $"Call dropped by filter at {DateTime.Now:T}";
+                                        return;
+                                    }
+
+                                    call.IsMutedByFilter = _filterService.ShouldMute(call);
+
+                                    // If the user is behind live (replaying from an older point), hold incoming calls as pending.
+                                    if (ShouldHoldIncomingCalls())
+                                    {
+                                        EnqueuePendingCall(call);
+                                        TotalCallsInserted++;
+                                        LastQueueEvent = $"Inserted call (pending) at {DateTime.Now:T}";
+                                        UpdateQueueDerivedState();
+                                    }
+                                    else
+                                    {
+                                        Calls.Insert(0, call);
+                                        TotalCallsInserted++;
+                                        LastQueueEvent = $"Inserted call at {DateTime.Now:T}";
+                                        EnforceMaxCalls();
+                                        UpdateQueueDerivedState();
+                                    }
+
+                                    // If audio is enabled and autoplay is enabled, keep playback running
+                                    if (AudioEnabled && AutoPlay)
+                                    {
+                                        _ = EnsureQueuePlaybackAsync();
+                                    }
+                                });
+                            }
+                            catch (Exception ex)
+                            {
+                                System.Diagnostics.Debug.WriteLine($"Error updating UI for call: {ex}");
+                            }
+                        }
+
+                        // The stream should only end on cancellation. If it ends for any other reason,
+                        // treat it as a transient disconnect and retry.
+                        if (!token.IsCancellationRequested)
+                        {
+                            try
+                            {
+                                await MainThread.InvokeOnMainThreadAsync(() =>
+                                {
+                                    SetConnectionStatus(ConnectionStatus.ServerUnreachable, "Stream ended. Reconnecting.");
+                                });
+                            }
+                            catch
+                            {
+                            }
+                        }
+                    }
+                    catch (OperationCanceledException) when (token.IsCancellationRequested)
+                    {
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"Error in call stream loop: {ex}");
+
+                        try
+                        {
+                            await MainThread.InvokeOnMainThreadAsync(() =>
+                            {
+                                SetConnectionStatus(ConnectionStatus.ServerUnreachable, ex.Message);
+                            });
+                        }
+                        catch
+                        {
+                        }
+                    }
+
                     if (token.IsCancellationRequested)
                         break;
 
-                    if (call == null)
-                        continue;
-
-                    TotalCallsReceived++;
-
+                    // Transition to Connecting during the retry window so the UI reflects an auto reconnect.
                     try
                     {
                         await MainThread.InvokeOnMainThreadAsync(() =>
                         {
-                            if (token.IsCancellationRequested)
+                            if (_cts == null || _cts.Token != token)
                                 return;
 
-                            // Status sentinel messages
-                            if (string.Equals(call.Talkgroup, "AUTH", StringComparison.OrdinalIgnoreCase))
-                            {
-                                SetConnectionStatus(ConnectionStatus.AuthFailed);
-                                return;
-                            }
-
-                            if (string.Equals(call.Talkgroup, "ERROR", StringComparison.OrdinalIgnoreCase))
-                            {
-                                SetConnectionStatus(ConnectionStatus.ServerUnreachable);
-                                return;
-                            }
-
-                            if (string.Equals(call.Talkgroup, "HEARTBEAT", StringComparison.OrdinalIgnoreCase))
-                            {
-                                if (_connectionStatus == ConnectionStatus.Connecting ||
-                                    _connectionStatus == ConnectionStatus.AuthFailed ||
-                                    _connectionStatus == ConnectionStatus.ServerUnreachable ||
-                                    _connectionStatus == ConnectionStatus.Error)
-                                {
-                                    SetConnectionStatus(ConnectionStatus.Connected);
-                                }
-
-                                return;
-                            }
-
-                            if (_connectionStatus == ConnectionStatus.Connecting ||
-                                _connectionStatus == ConnectionStatus.AuthFailed ||
-                                _connectionStatus == ConnectionStatus.ServerUnreachable ||
-                                _connectionStatus == ConnectionStatus.Error)
-                            {
-                                SetConnectionStatus(ConnectionStatus.Connected);
-                            }
-
-                            // Transcription update for an existing call
-                            if (call.IsTranscriptionUpdate && !string.IsNullOrWhiteSpace(call.BackendId))
-                            {
-                                var existing = Calls.FirstOrDefault(c => c.BackendId == call.BackendId);
-                                if (existing != null)
-                                {
-                                    if (!string.IsNullOrWhiteSpace(call.Transcription))
-                                    {
-                                        existing.Transcription = call.Transcription;
-
-                                        if (!string.IsNullOrWhiteSpace(existing.DebugInfo))
-                                        {
-                                            var cleaned = existing.DebugInfo
-                                                .Replace("No transcription from server", string.Empty, StringComparison.OrdinalIgnoreCase)
-                                                .Trim();
-
-                                            cleaned = cleaned.Trim(' ', '|', ';');
-
-                                            existing.DebugInfo = cleaned;
-                                        }
-                                    }
-
-                                    if (!string.IsNullOrWhiteSpace(call.DebugInfo))
-                                    {
-                                        existing.DebugInfo = string.IsNullOrWhiteSpace(existing.DebugInfo)
-                                            ? call.DebugInfo
-                                            : $"{existing.DebugInfo}; {call.DebugInfo}";
-                                    }
-
-                                    LastQueueEvent = $"Transcription updated at {DateTime.Now:T}";
-                                }
-
-                                return;
-                            }
-
-                            // Ensure filter rules exist and apply filters
-                            _filterService.EnsureRulesForCall(call);
-
-                            if (_filterService.ShouldHide(call))
-                            {
-                                LastQueueEvent = $"Call dropped by filter at {DateTime.Now:T}";
-                                return;
-                            }
-
-
-                            call.IsMutedByFilter = _filterService.ShouldMute(call);
-
-                            // If the user is behind live (replaying from an older point), hold incoming calls as pending.
-                            if (ShouldHoldIncomingCalls())
-                            {
-                                EnqueuePendingCall(call);
-                                TotalCallsInserted++;
-                                LastQueueEvent = $"Inserted call (pending) at {DateTime.Now:T}";
-                                UpdateQueueDerivedState();
-                            }
-                            else
-                            {
-                                Calls.Insert(0, call);
-                                TotalCallsInserted++;
-                                LastQueueEvent = $"Inserted call at {DateTime.Now:T}";
-                                EnforceMaxCalls();
-                                UpdateQueueDerivedState();
-                            }
-
-                            // If audio is enabled and autoplay is enabled, keep playback running
-                            if (AudioEnabled && AutoPlay)
-                            {
-                                _ = EnsureQueuePlaybackAsync();
-                            }
+                            SetConnectionStatus(ConnectionStatus.Connecting);
                         });
                     }
-                    catch (Exception ex)
+                    catch
                     {
-                        System.Diagnostics.Debug.WriteLine($"Error updating UI for call: {ex}");
                     }
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                // Expected during shutdown
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"Error in call stream loop: {ex}");
 
-                try
-                {
-                    await MainThread.InvokeOnMainThreadAsync(() =>
+                    try
                     {
-                        SetConnectionStatus(ConnectionStatus.Error, ex.Message);
-                    });
-                }
-                catch
-                {
-                    // Swallow any cross thread failures on shutdown
+                        await Task.Delay(retryDelay, token);
+                    }
+                    catch
+                    {
+                    }
                 }
             }
             finally
             {
+                // Only stop trying when the user clicks Stop (cancellation).
                 try
                 {
                     await MainThread.InvokeOnMainThreadAsync(async () =>
@@ -1357,7 +1406,6 @@ namespace JoesScanner.ViewModels
                             }
                             catch
                             {
-                                // Ignore audio stop failures
                             }
                         }
 
@@ -1370,7 +1418,6 @@ namespace JoesScanner.ViewModels
                 }
                 catch
                 {
-                    // Ignore shutdown failures
                 }
             }
         }

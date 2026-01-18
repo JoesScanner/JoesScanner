@@ -143,7 +143,7 @@ namespace JoesScanner.Services
                             };
                         }
 
-                        await foreach (var item in StreamFromWebSocketAsync(ws, baseUrl, callsUrl, cancellationToken))
+                        await foreach (var item in StreamFromWebSocketWithRecoveryAsync(ws, baseUrl, callsUrl, usernameForLog, cancellationToken))
                         {
                             yield return item;
                         }
@@ -553,7 +553,8 @@ namespace JoesScanner.Services
             var wsUri = builder.Uri;
 
             var ws = new ClientWebSocket();
-            ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(30);
+            // Keepalive helps prevent intermediate proxies from timing out idle connections.
+            ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(15);
 
             // Apply the same basic auth policy used by calljson.
             var authHeader = BuildBasicAuthHeaderValue(baseUri);
@@ -618,6 +619,75 @@ namespace JoesScanner.Services
             catch
             {
                 return null;
+            }
+        }
+
+        // Wraps the WebSocket streaming enumerator so that WebSocket exceptions do not
+        // tear down the outer GetCallStreamAsync iterator.
+        //
+        // Important: C# async iterators cannot yield from a try block that has a catch.
+        // We therefore catch exceptions in a background pump task and forward items
+        // through a channel that this iterator reads and yields.
+        private async IAsyncEnumerable<CallItem> StreamFromWebSocketWithRecoveryAsync(
+            ClientWebSocket ws,
+            string baseUrl,
+            string callsUrl,
+            string usernameForLog,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            var channel = Channel.CreateUnbounded<CallItem>(new UnboundedChannelOptions
+            {
+                SingleReader = true,
+                SingleWriter = true
+            });
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await foreach (var item in StreamFromWebSocketAsync(ws, baseUrl, callsUrl, cancellationToken))
+                    {
+                        await channel.Writer.WriteAsync(item, cancellationToken);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    // Normal during Stop or shutdown.
+                }
+                catch (WebSocketException ex)
+                {
+                    var msg = ex.Message;
+
+                    AppLog.Add(
+                        $"CallStream: ERROR - WebSocket closed unexpectedly: {msg} [ServerUrl={baseUrl}, Path=/Calls, Username={usernameForLog}]");
+
+                    // Surface a synthetic error row so the UI can show a transient failure.
+                    // The caller loop will retry automatically.
+                    await channel.Writer.WriteAsync(
+                        new CallItem
+                        {
+                            Timestamp = DateTime.Now,
+                            Talkgroup = "ERROR",
+                            Transcription = "Live feed disconnected. Reconnecting.",
+                            AudioUrl = string.Empty
+                        },
+                        CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Add(
+                        $"CallStream: ERROR - WebSocket stream failed: {ex.Message} [ServerUrl={baseUrl}, Path=/Calls, Username={usernameForLog}]");
+                }
+                finally
+                {
+                    channel.Writer.TryComplete();
+                }
+            },
+            CancellationToken.None);
+
+            await foreach (var item in channel.Reader.ReadAllAsync(cancellationToken))
+            {
+                yield return item;
             }
         }
 
