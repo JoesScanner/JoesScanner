@@ -1186,9 +1186,12 @@ namespace JoesScanner.ViewModels
         {
             var retryDelay = TimeSpan.FromSeconds(2);
 
-            try
+            // Important behavior contract:
+            // This loop must continue attempting to reconnect until the user explicitly clicks Stop.
+            // It must never terminate itself due to transient network, polling, or WebSocket failures.
+            while (!token.IsCancellationRequested)
             {
-                while (!token.IsCancellationRequested)
+                try
                 {
                     try
                     {
@@ -1381,44 +1384,69 @@ namespace JoesScanner.ViewModels
                     {
                     }
                 }
-            }
-            finally
-            {
-                // Only stop trying when the user clicks Stop (cancellation).
-                try
+                catch (Exception ex)
                 {
-                    await MainThread.InvokeOnMainThreadAsync(async () =>
+                    // Absolute guard: do not allow an unexpected exception to terminate monitoring.
+                    if (token.IsCancellationRequested)
+                        break;
+
+                    AppLog.Add($"Call stream loop guard caught exception: {ex.Message}");
+
+                    try
                     {
-                        // Only stop if this is still the active run
-                        if (_cts == null || _cts.Token != token)
-                            return;
-
-                        _telemetryService.StopMonitoringHeartbeat("stream_loop_end");
-
-                        IsRunning = false;
-                        Preferences.Default.Set(LastConnectedPreferenceKey, false);
-
-                        if (_audioPlaybackService != null)
+                        await MainThread.InvokeOnMainThreadAsync(() =>
                         {
-                            try
-                            {
-                                await _audioPlaybackService.StopAsync();
-                            }
-                            catch
-                            {
-                            }
-                        }
+                            SetConnectionStatus(ConnectionStatus.ServerUnreachable, "Unexpected stream error. Reconnecting.");
+                        });
+                    }
+                    catch
+                    {
+                    }
 
-                        _currentPlayingCall = null;
-                        _lastPlayedCall = null;
-                        ClearPendingCalls();
-
-                        UpdateQueueDerivedState();
-                    });
+                    try
+                    {
+                        await Task.Delay(retryDelay, token);
+                    }
+                    catch
+                    {
+                    }
                 }
-                catch
+            }
+
+            // Only perform the full stop cleanup when the user explicitly cancels.
+            try
+            {
+                await MainThread.InvokeOnMainThreadAsync(async () =>
                 {
-                }
+                    // Only stop if this is still the active run
+                    if (_cts == null || _cts.Token != token)
+                        return;
+
+                    _telemetryService.StopMonitoringHeartbeat("stream_loop_end");
+
+                    IsRunning = false;
+                    Preferences.Default.Set(LastConnectedPreferenceKey, false);
+
+                    if (_audioPlaybackService != null)
+                    {
+                        try
+                        {
+                            await _audioPlaybackService.StopAsync();
+                        }
+                        catch
+                        {
+                        }
+                    }
+
+                    _currentPlayingCall = null;
+                    _lastPlayedCall = null;
+                    ClearPendingCalls();
+
+                    UpdateQueueDerivedState();
+                });
+            }
+            catch
+            {
             }
         }
 

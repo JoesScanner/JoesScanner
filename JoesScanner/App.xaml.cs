@@ -6,11 +6,13 @@ namespace JoesScanner
     {
         private readonly ISettingsService _settings;
         private readonly ITelemetryService _telemetryService;
+        private readonly ISubscriptionService _subscriptionService;
 
-        public App(ISettingsService settings, ITelemetryService telemetryService)
+        public App(ISettingsService settings, ITelemetryService telemetryService, ISubscriptionService subscriptionService)
         {
             _settings = settings ?? throw new ArgumentNullException(nameof(settings));
             _telemetryService = telemetryService ?? throw new ArgumentNullException(nameof(telemetryService));
+            _subscriptionService = subscriptionService ?? throw new ArgumentNullException(nameof(subscriptionService));
 
             InitializeComponent();
 
@@ -23,6 +25,11 @@ namespace JoesScanner
 
             _telemetryService.TrackAppStarted();
 
+            // Verify auth + subscription once per app start.
+            // This keeps the local subscription cache current and ensures the server can associate
+            // the current session token to an account whenever credentials are configured.
+            BeginStartupAuthVerification();
+
             AppDomain.CurrentDomain.ProcessExit += (_, _) =>
             {
                 try
@@ -33,6 +40,34 @@ namespace JoesScanner
                 {
                 }
             };
+        }
+
+        private void BeginStartupAuthVerification()
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var serverUrl = (_settings.ServerUrl ?? string.Empty).Trim();
+                    if (!Uri.TryCreate(serverUrl, UriKind.Absolute, out var serverUri))
+                        return;
+
+                    // Only the hosted Joe's Scanner backend requires subscription checks.
+                    if (!string.Equals(serverUri.Host, "app.joesscanner.com", StringComparison.OrdinalIgnoreCase))
+                        return;
+
+                    var user = (_settings.BasicAuthUsername ?? string.Empty).Trim();
+                    var pass = (_settings.BasicAuthPassword ?? string.Empty).Trim();
+                    if (string.IsNullOrWhiteSpace(user) || string.IsNullOrWhiteSpace(pass))
+                        return;
+
+                    await _subscriptionService.EnsureSubscriptionAsync(CancellationToken.None).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Best effort. Offline behavior is handled inside SubscriptionService.
+                }
+            });
         }
 
         protected override Window CreateWindow(IActivationState? activationState)

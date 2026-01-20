@@ -230,7 +230,7 @@
                                 </Border.StrokeShape>
 
                                 <Border.GestureRecognizers>
-                                    <TapGestureRecognizer Command="{Binding SearchCommand}" />
+                                    <!-- <TapGestureRecognizer Command="{Binding SearchCommand}" /> -->
                                 </Border.GestureRecognizers>
 
                                 <Label
@@ -242,7 +242,6 @@
                             </Border>
                         </Grid>
 
-                        
 
                     </Grid>
                 </Border>

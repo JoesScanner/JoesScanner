@@ -154,7 +154,7 @@ namespace JoesScanner.Services
                     }
 
                     // Avoid hammering reconnect attempts if WS is not exposed.
-                    wsDisableUntilUtc = DateTime.UtcNow.AddSeconds(30);
+                    wsDisableUntilUtc = DateTime.UtcNow.AddSeconds(5);
                 }
 
 
@@ -701,6 +701,11 @@ namespace JoesScanner.Services
             var segment = new ArraySegment<byte>(buffer);
             var sb = new StringBuilder(64 * 1024);
 
+            // If the network path dies without a clean WebSocket close frame, ReceiveAsync can
+            // block indefinitely. An idle receive timeout forces the iterator to unwind so the
+            // outer reconnect loop can re-establish the connection.
+            var receiveIdleTimeout = TimeSpan.FromSeconds(45);
+
             try
             {
                 while (!cancellationToken.IsCancellationRequested && ws.State == WebSocketState.Open)
@@ -711,7 +716,19 @@ namespace JoesScanner.Services
 
                     do
                     {
-                        result = await ws.ReceiveAsync(segment, cancellationToken);
+                        try
+                        {
+                            using var receiveCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                            receiveCts.CancelAfter(receiveIdleTimeout);
+
+                            result = await ws.ReceiveAsync(segment, receiveCts.Token);
+                        }
+                        catch (System.OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                        {
+                            // Idle timeout: connection is likely half-open. Abort so the caller can reconnect.
+                            try { ws.Abort(); } catch { }
+                            throw new WebSocketException($"WebSocket receive idle timeout after {receiveIdleTimeout.TotalSeconds:0} seconds.");
+                        }
 
                         if (result.MessageType == WebSocketMessageType.Close)
                         {

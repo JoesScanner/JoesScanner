@@ -8,7 +8,7 @@ namespace JoesScanner.Services
     public sealed class SubscriptionService : ISubscriptionService, IDisposable
     {
         // Change this number when you want a different grace window
-        private const int SubscriptionGraceDays = 3;
+        private const int SubscriptionGraceDays = 7;
 
         private const string DefaultAuthServerBaseUrl = "https://joesscanner.com";
 
@@ -229,23 +229,74 @@ namespace JoesScanner.Services
             }
             catch
             {
-                // Unreachable auth server. Allow grace if we recently had a successful check.
-                if (_settings.SubscriptionLastStatusOk &&
-                    _settings.SubscriptionLastCheckUtc.HasValue &&
-                    (DateTime.UtcNow - _settings.SubscriptionLastCheckUtc.Value) <= TimeSpan.FromDays(SubscriptionGraceDays))
+                // Unreachable auth server.
+                // Policy:
+                // - If the cached subscription is still current, do NOT deauthorize.
+                // - If the cached subscription is no longer current, allow a 7-day grace period.
+                // - If grace is exceeded, deny.
+
+                var nowUtc = DateTime.UtcNow;
+
+                if (_settings.SubscriptionLastStatusOk)
                 {
-                    return new SubscriptionCheckResult(true, "grace", "Auth server unreachable. Using grace period.");
+                    var validUntilUtc = GetCachedValidUntilUtc();
+
+                    // If we have an explicit validity date, prefer it.
+                    if (validUntilUtc.HasValue)
+                    {
+                        if (nowUtc <= validUntilUtc.Value)
+                        {
+                            _settings.SubscriptionLastMessage = BuildOfflineMessage(validUntilUtc.Value, isGrace: false);
+                            return new SubscriptionCheckResult(true, "offline_cached", _settings.SubscriptionLastMessage);
+                        }
+
+                        if (nowUtc <= validUntilUtc.Value.AddDays(SubscriptionGraceDays))
+                        {
+                            _settings.SubscriptionLastMessage = BuildOfflineMessage(validUntilUtc.Value, isGrace: true);
+                            return new SubscriptionCheckResult(true, "grace", _settings.SubscriptionLastMessage);
+                        }
+                    }
+                    else
+                    {
+                        // If the server did not provide a clear validity date, allow a conservative grace window
+                        // based on the last successful contact.
+                        if (_settings.SubscriptionLastCheckUtc.HasValue &&
+                            (nowUtc - _settings.SubscriptionLastCheckUtc.Value) <= TimeSpan.FromDays(SubscriptionGraceDays))
+                        {
+                            _settings.SubscriptionLastMessage = "Auth server unreachable. Using cached subscription (grace period).";
+                            return new SubscriptionCheckResult(true, "grace", _settings.SubscriptionLastMessage);
+                        }
+                    }
                 }
 
-                _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
+                _settings.SubscriptionLastCheckUtc = nowUtc;
                 _settings.SubscriptionLastStatusOk = false;
-                _settings.SubscriptionLastLevel = string.Empty;
-                _settings.SubscriptionExpiresUtc = null;
-                _settings.SubscriptionRenewalUtc = null;
-                _settings.SubscriptionLastMessage = "Auth server unreachable";
+                _settings.SubscriptionLastMessage = "Auth server unreachable and cached subscription is not current.";
 
                 return new SubscriptionCheckResult(false, "unreachable", _settings.SubscriptionLastMessage);
             }
+        }
+
+        private DateTime? GetCachedValidUntilUtc()
+        {
+            // Prefer renewal (period end) if available; otherwise fall back to expires.
+            // Both are stored as UTC by SubscriptionService.
+            if (_settings.SubscriptionRenewalUtc.HasValue)
+                return _settings.SubscriptionRenewalUtc.Value;
+
+            if (_settings.SubscriptionExpiresUtc.HasValue)
+                return _settings.SubscriptionExpiresUtc.Value;
+
+            return null;
+        }
+
+        private static string BuildOfflineMessage(DateTime validUntilUtc, bool isGrace)
+        {
+            var localDate = DateTime.SpecifyKind(validUntilUtc, DateTimeKind.Utc).ToLocalTime().ToString("yyyy-MM-dd");
+            if (!isGrace)
+                return $"Auth server unreachable. Using cached subscription (valid until {localDate}).";
+
+            return $"Auth server unreachable. Using grace period (cached subscription expired {localDate}).";
         }
 
         private static string BuildPlanSummary(AuthSubscriptionDto? sub)
