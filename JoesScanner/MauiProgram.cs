@@ -27,7 +27,12 @@ public static class MauiProgram
         builder.Services.AddSingleton<ISubscriptionService, SubscriptionService>();
         builder.Services.AddSingleton<ITelemetryService, TelemetryService>();
 
-        builder.Services.AddSingleton(sp => new HttpClient());
+        // Use separate HttpClient instances for services that need them.
+        // Keeping HttpClient transient here avoids shared state issues (BaseAddress, headers, timeout).
+        builder.Services.AddTransient(sp => new HttpClient());
+
+        builder.Services.AddSingleton<ICommunicationsService, CommunicationsService>();
+        builder.Services.AddSingleton<ICommsBadgeService, CommsBadgeService>();
         builder.Services.AddSingleton<IJoesScannerApiClient, JoesScannerApiClient>();
 
         // View models
@@ -35,6 +40,8 @@ public static class MauiProgram
         builder.Services.AddSingleton<HistoryViewModel>();
         builder.Services.AddSingleton<ArchiveViewModel>();
         builder.Services.AddSingleton<SettingsViewModel>();
+
+        builder.Services.AddSingleton<CommunicationsViewModel>();
 
         // Pages
         builder.Services.AddTransient<MainPage>();

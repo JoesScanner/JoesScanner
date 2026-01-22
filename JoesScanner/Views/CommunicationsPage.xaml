@@ -3,14 +3,17 @@
     x:Class="JoesScanner.Views.CommunicationsPage"
     xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
     xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    xmlns:vm="clr-namespace:JoesScanner.ViewModels"
     xmlns:controls="clr-namespace:JoesScanner.Views.Controls"
     xmlns:models="clr-namespace:JoesScanner.Models"
+    x:Name="Page"
+    x:DataType="vm:CommunicationsViewModel"
     Title="Communications"
     BackgroundColor="{StaticResource TabStripNavy}"
     Shell.NavBarIsVisible="False"
     Shell.TabBarIsVisible="False">
 
-    <Grid Padding="5,0,5,5" RowDefinitions="Auto,*" RowSpacing="6">
+    <Grid Padding="5,0,5,5" RowDefinitions="Auto,*" RowSpacing="0">
 
         <controls:AppTabStrip
             Grid.Row="0"
@@ -21,26 +24,101 @@
             StrokeThickness="0"
             BackgroundColor="{AppThemeBinding Light=White, Dark=#020617}"
             VerticalOptions="FillAndExpand"
-            HorizontalOptions="FillAndExpand"
-            Padding="20">
+            HorizontalOptions="FillAndExpand">
 
             <Border.StrokeShape>
                 <RoundRectangle CornerRadius="0,0,24,24" />
             </Border.StrokeShape>
 
-            <VerticalStackLayout Spacing="10" VerticalOptions="Center" HorizontalOptions="Center">
-                <Label
-                    Text="Communications"
-                    FontSize="24"
-                    FontAttributes="Bold"
-                    TextColor="{AppThemeBinding Light=#111827, Dark=White}"
-                    HorizontalOptions="Center" />
-                <Label
-                    Text="Coming soon."
-                    FontSize="14"
-                    TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
-                    HorizontalOptions="Center" />
-            </VerticalStackLayout>
+            <Grid Padding="10" RowDefinitions="Auto,Auto,*" RowSpacing="10">
+
+                <Grid Grid.Row="0" ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                    <Label
+                        Text="Communications"
+                        FontSize="22"
+                        FontAttributes="Bold"
+                        TextColor="{AppThemeBinding Light=#111827, Dark=White}"
+                        VerticalOptions="Center" />
+
+                    <Button
+                        Grid.Column="1"
+                        Text="Refresh"
+                        Command="{Binding RefreshCommand}"
+                        Padding="14,8"
+                        CornerRadius="14"
+                        BackgroundColor="{AppThemeBinding Light=#111827, Dark=#1f2937}"
+                        TextColor="White"
+                        VerticalOptions="Center" />
+                </Grid>
+
+                <Grid Grid.Row="1" ColumnDefinitions="Auto,*" ColumnSpacing="10" VerticalOptions="Center">
+                    <ActivityIndicator
+                        IsRunning="{Binding IsBusy}"
+                        IsVisible="{Binding IsBusy}"
+                        VerticalOptions="Center" />
+                    <Label
+                        Grid.Column="1"
+                        Text="{Binding StatusText}"
+                        FontSize="13"
+                        TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+                        LineBreakMode="TailTruncation" />
+                </Grid>
+
+                <CollectionView
+                    Grid.Row="2"
+                    ItemsSource="{Binding Messages}"
+                    SelectionMode="None">
+
+                    <CollectionView.EmptyView>
+                        <Label
+                            Text="No messages yet."
+                            FontSize="14"
+                            TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+                            HorizontalOptions="Center"
+                            VerticalOptions="Center" />
+                    </CollectionView.EmptyView>
+
+                    <CollectionView.ItemTemplate>
+                        <DataTemplate x:DataType="models:CommsMessage">
+                            <Border
+                                StrokeThickness="0"
+                                Margin="0,0,0,10"
+                                BackgroundColor="{AppThemeBinding Light=#f3f4f6, Dark=#0b1220}">
+
+                                <Border.StrokeShape>
+                                    <RoundRectangle CornerRadius="14" />
+                                </Border.StrokeShape>
+
+                                <Grid Padding="12" RowDefinitions="Auto,Auto" RowSpacing="6">
+                                    <Grid RowDefinitions="Auto" ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                                        <Label
+                                            Text="{Binding AuthorLabel}"
+                                            FontSize="13"
+                                            FontAttributes="Bold"
+                                            TextColor="{AppThemeBinding Light=#111827, Dark=White}"
+                                            LineBreakMode="TailTruncation" />
+                                        <Label
+                                            Grid.Column="1"
+                                            Text="{Binding DisplayTimeLocal}"
+                                            FontSize="12"
+                                            TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+                                            HorizontalTextAlignment="End" />
+                                    </Grid>
+
+                                    <Label
+                                        Grid.Row="1"
+                                        Text="{Binding MessageText}"
+                                        FontSize="14"
+                                        TextColor="{AppThemeBinding Light=#111827, Dark=White}"
+                                        LineBreakMode="WordWrap" />
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </CollectionView.ItemTemplate>
+
+                </CollectionView>
+
+            </Grid>
         </Border>
     </Grid>
 </ContentPage>

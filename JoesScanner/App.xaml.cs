@@ -7,12 +7,14 @@ namespace JoesScanner
         private readonly ISettingsService _settings;
         private readonly ITelemetryService _telemetryService;
         private readonly ISubscriptionService _subscriptionService;
+        private readonly ICommsBadgeService _commsBadgeService;
 
-        public App(ISettingsService settings, ITelemetryService telemetryService, ISubscriptionService subscriptionService)
+        public App(ISettingsService settings, ITelemetryService telemetryService, ISubscriptionService subscriptionService, ICommsBadgeService commsBadgeService)
         {
             _settings = settings ?? throw new ArgumentNullException(nameof(settings));
             _telemetryService = telemetryService ?? throw new ArgumentNullException(nameof(telemetryService));
             _subscriptionService = subscriptionService ?? throw new ArgumentNullException(nameof(subscriptionService));
+            _commsBadgeService = commsBadgeService ?? throw new ArgumentNullException(nameof(commsBadgeService));
 
             InitializeComponent();
 
@@ -29,6 +31,10 @@ namespace JoesScanner
             // This keeps the local subscription cache current and ensures the server can associate
             // the current session token to an account whenever credentials are configured.
             BeginStartupAuthVerification();
+
+            // Start the communications badge poller so the tab can show unread state.
+            // The poller is best effort and will no-op until credentials are configured and the session is associated.
+            try { _commsBadgeService.Start(); } catch { }
 
             AppDomain.CurrentDomain.ProcessExit += (_, _) =>
             {

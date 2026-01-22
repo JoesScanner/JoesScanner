@@ -29,7 +29,7 @@
         <Grid
             RowDefinitions="Auto,Auto"
             RowSpacing="0"
-            Padding="0"
+            Padding="0,5,0,0"
             Margin="0">
 
             <ScrollView
@@ -38,15 +38,15 @@
                 HeightRequest="{Binding TabStripHeight, Source={x:Reference Root}}"
                 HorizontalScrollBarVisibility="Never"
                 VerticalScrollBarVisibility="Never"
-                VerticalOptions="End"
-                Padding="0,5,0,0">
+                VerticalOptions="Center"
+                Padding="0">
 
                 <HorizontalStackLayout
                     Spacing="0"
                     Padding="0"
-                    VerticalOptions="End"
+                    VerticalOptions="Center"
                     HorizontalOptions="Center"
-                    HeightRequest="{Binding TabStripHeight, Source={x:Reference Root}}">
+                    Margin="0">
 
                     <!-- Main tab, logo removed by swapping icon -->
                     <ImageButton
@@ -92,6 +92,7 @@
                     <ImageButton
                         Style="{StaticResource TabButtonStyle}"
                         Source="mc_communications.png"
+                        x:Name="CommunicationsButton"
                         HeightRequest="{Binding TabIconSize, Source={x:Reference Root}}"
                         WidthRequest="{Binding TabIconSize, Source={x:Reference Root}}"
                         Clicked="OnCommunicationsClicked"

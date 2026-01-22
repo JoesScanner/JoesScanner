@@ -1,6 +1,11 @@
 using System;
+using System.Threading;
+using System.Threading.Tasks;
+using JoesScanner.Services;
 using JoesScanner.Models;
 using Microsoft.Maui.Controls;
+using Microsoft.Maui.ApplicationModel;
+using Microsoft.Maui.Graphics;
 
 namespace JoesScanner.Views.Controls;
 
@@ -99,12 +104,138 @@ public partial class AppTabStrip : ContentView
     {
         InitializeComponent();
 
+        // The control can be created before a Handler (and therefore MauiContext.Services) exists.
+        // If we only attempt DI resolution once, the comms badge may never attach, which prevents
+        // the button background from updating when new messages arrive.
+        Loaded += (_, _) => BeginAttachCommsBadge();
+        Unloaded += (_, _) =>
+        {
+            StopAttachCommsBadge();
+            DetachCommsBadge();
+        };
+
+        HandlerChanged += (_, _) => BeginAttachCommsBadge();
+
         // Keep the hooks in place in case you ever re-enable AutoSizeEnabled,
         // but UpdateSizing will apply static sizing when AutoSizeEnabled is false.
         SizeChanged += (_, _) => UpdateSizing();
         Loaded += (_, _) => UpdateSizing();
 
         UpdateSizing();
+    }
+
+    private CancellationTokenSource? _attachCts;
+
+    private ICommsBadgeService? _commsBadge;
+
+    private void BeginAttachCommsBadge()
+    {
+        if (_commsBadge != null)
+        {
+            UpdateCommsButtonBadge();
+            return;
+        }
+
+        StopAttachCommsBadge();
+        _attachCts = new CancellationTokenSource();
+
+        // Retry for a short period until the MauiContext services become available.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                for (var i = 0; i < 20 && !_attachCts.IsCancellationRequested; i++)
+                {
+                    MainThread.BeginInvokeOnMainThread(() =>
+                    {
+                        try { TryAttachCommsBadge(); } catch { }
+                    });
+
+                    if (_commsBadge != null)
+                        break;
+
+                    await Task.Delay(250, _attachCts.Token).ConfigureAwait(false);
+                }
+            }
+            catch
+            {
+            }
+        });
+    }
+
+    private void StopAttachCommsBadge()
+    {
+        try { _attachCts?.Cancel(); } catch { }
+        try { _attachCts?.Dispose(); } catch { }
+        _attachCts = null;
+    }
+
+    private void TryAttachCommsBadge()
+    {
+        if (_commsBadge != null)
+        {
+            UpdateCommsButtonBadge();
+            return;
+        }
+
+        try
+        {
+            // Prefer this control's Handler, fall back to Application handler.
+            var services = Handler?.MauiContext?.Services ?? Application.Current?.Handler?.MauiContext?.Services;
+            _commsBadge = services?.GetService(typeof(ICommsBadgeService)) as ICommsBadgeService;
+
+            if (_commsBadge == null)
+                return;
+
+            _commsBadge.Changed += OnCommsBadgeChanged;
+            UpdateCommsButtonBadge();
+        }
+        catch
+        {
+        }
+    }
+
+    private void DetachCommsBadge()
+    {
+        try
+        {
+            if (_commsBadge != null)
+                _commsBadge.Changed -= OnCommsBadgeChanged;
+        }
+        catch
+        {
+        }
+    }
+
+    private void OnCommsBadgeChanged()
+    {
+        try
+        {
+            MainThread.BeginInvokeOnMainThread(UpdateCommsButtonBadge);
+        }
+        catch
+        {
+        }
+    }
+
+    private void UpdateCommsButtonBadge()
+    {
+        if (CommunicationsButton == null)
+            return;
+
+        var hasUnread = _commsBadge?.HasUnread == true;
+
+        // When unread, inset the icon slightly so the green background remains visible.
+        // Use a fixed inset in pixels so the effect is consistent across icon sizes.
+        const double unreadInsetPx = 2d;
+        CommunicationsButton.Padding = hasUnread
+            ? new Thickness(unreadInsetPx)
+            : new Thickness(0);
+
+        // When new messages exist, tint the button background green.
+        CommunicationsButton.BackgroundColor = hasUnread
+            ? Color.FromArgb("#16a34a")
+            : Colors.Transparent;
     }
 
     private void UpdateSizing()
