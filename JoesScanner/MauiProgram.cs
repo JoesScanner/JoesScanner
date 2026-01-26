@@ -1,4 +1,3 @@
-using System.Net.Http;
 using JoesScanner.Services;
 using JoesScanner.ViewModels;
 using JoesScanner.Views;
@@ -34,6 +33,12 @@ public static class MauiProgram
         builder.Services.AddSingleton<ICommunicationsService, CommunicationsService>();
         builder.Services.AddSingleton<ICommsBadgeService, CommsBadgeService>();
         builder.Services.AddSingleton<IJoesScannerApiClient, JoesScannerApiClient>();
+
+        // Local filter profile storage (device only).
+        builder.Services.AddSingleton<IFilterProfileStore, LocalFilterProfileStore>();
+
+        // Local Settings filter profile storage (device only).
+        builder.Services.AddSingleton<ISettingsFilterProfileStore, LocalSettingsFilterProfileStore>();
 
         // View models
         builder.Services.AddSingleton<MainViewModel>();

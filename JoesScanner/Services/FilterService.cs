@@ -1,5 +1,4 @@
 ﻿using JoesScanner.Models;
-using Microsoft.Maui.Storage;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Text.Json;
@@ -21,6 +20,89 @@ namespace JoesScanner.Services
 
         private readonly ObservableCollection<FilterRule> _rules = [];
         public ObservableCollection<FilterRule> Rules => _rules;
+
+        public List<FilterRuleStateRecord> GetActiveStateRecords()
+        {
+            var list = new List<FilterRuleStateRecord>();
+
+            lock (_rulesGate)
+            {
+                foreach (var r in _rules)
+                {
+                    if (!r.IsMuted && !r.IsDisabled)
+                        continue;
+
+                    list.Add(new FilterRuleStateRecord
+                    {
+                        Level = r.Level,
+                        Receiver = r.Receiver,
+                        Site = r.Site,
+                        Talkgroup = r.Talkgroup,
+                        IsMuted = r.IsMuted,
+                        IsDisabled = r.IsDisabled
+                    });
+                }
+            }
+
+            return list;
+        }
+
+        public void ApplyStateRecords(IEnumerable<FilterRuleStateRecord> records, bool resetOthers)
+        {
+            var incoming = records?.ToList() ?? new List<FilterRuleStateRecord>();
+
+            lock (_rulesGate)
+            {
+                if (resetOthers)
+                {
+                    foreach (var r in _rules)
+                    {
+                        r.IsMuted = false;
+                        r.IsDisabled = false;
+                    }
+                }
+
+                foreach (var rec in incoming)
+                {
+                    if (rec == null)
+                        continue;
+
+                    var receiver = Normalize(rec.Receiver);
+                    var site = Normalize(rec.Site);
+                    var talkgroup = Normalize(rec.Talkgroup);
+
+                    if (!IsRuleValid(rec.Level, receiver, site, talkgroup))
+                        continue;
+
+                    var match = _rules.FirstOrDefault(r =>
+                        r.Level == rec.Level &&
+                        string.Equals(Normalize(r.Receiver), receiver, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(Normalize(r.Site), site, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(Normalize(r.Talkgroup), talkgroup, StringComparison.OrdinalIgnoreCase));
+
+                    if (match == null)
+                    {
+                        match = new FilterRule
+                        {
+                            Level = rec.Level,
+                            Receiver = receiver,
+                            Site = site,
+                            Talkgroup = talkgroup,
+                            LastSeenUtc = DateTime.UtcNow
+                        };
+
+                        match.PropertyChanged += OnRulePropertyChanged;
+                        InsertRuleSorted_NoYield(match);
+                    }
+
+                    match.IsMuted = rec.IsMuted;
+                    match.IsDisabled = rec.IsDisabled;
+                }
+            }
+
+            SaveToPreferences();
+            OnRulesChanged();
+        }
 
         // Use System.Threading.Lock to satisfy IDE0330 and to guarantee safe snapshots.
         private readonly Lock _rulesGate = new();
@@ -157,21 +239,20 @@ namespace JoesScanner.Services
 
         public bool ShouldHide(CallItem call)
         {
-            var rules = GetEffectiveRulesForCall(call);
-            return rules.Any(static r => r.IsDisabled);
+            var rule = GetBestMatchRuleForCall(call);
+            return rule != null && rule.IsDisabled;
         }
 
         public bool ShouldMute(CallItem call)
         {
-            var rules = GetEffectiveRulesForCall(call);
+            var rule = GetBestMatchRuleForCall(call);
+            if (rule == null)
+                return false;
 
-            if (rules.Any(static r => r.IsDisabled))
+            if (rule.IsDisabled)
                 return true;
 
-            if (rules.Any(static r => r.IsMuted))
-                return true;
-
-            return false;
+            return rule.IsMuted;
         }
 
         private void OnRulesChanged() => RulesChanged?.Invoke(this, EventArgs.Empty);
@@ -285,12 +366,58 @@ namespace JoesScanner.Services
                     return;
                 }
 
+                // New rules must inherit the current receiver or site state.
+                // This ensures that new talkgroups discovered after a higher level mute or disable
+                // remain muted or disabled until explicitly overridden.
+                var inheritedMuted = false;
+                var inheritedDisabled = false;
+
+                if (level == FilterLevel.Site)
+                {
+                    var receiverRule = _rules.FirstOrDefault(r =>
+                        r.Level == FilterLevel.Receiver &&
+                        string.Equals(Normalize(r.Receiver), normReceiver, StringComparison.OrdinalIgnoreCase));
+
+                    if (receiverRule != null)
+                    {
+                        inheritedMuted = receiverRule.IsMuted;
+                        inheritedDisabled = receiverRule.IsDisabled;
+                    }
+                }
+                else if (level == FilterLevel.Talkgroup)
+                {
+                    var siteRule = _rules.FirstOrDefault(r =>
+                        r.Level == FilterLevel.Site &&
+                        string.Equals(Normalize(r.Receiver), normReceiver, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(Normalize(r.Site), normSite, StringComparison.OrdinalIgnoreCase));
+
+                    if (siteRule != null)
+                    {
+                        inheritedMuted = siteRule.IsMuted;
+                        inheritedDisabled = siteRule.IsDisabled;
+                    }
+                    else
+                    {
+                        var receiverRule = _rules.FirstOrDefault(r =>
+                            r.Level == FilterLevel.Receiver &&
+                            string.Equals(Normalize(r.Receiver), normReceiver, StringComparison.OrdinalIgnoreCase));
+
+                        if (receiverRule != null)
+                        {
+                            inheritedMuted = receiverRule.IsMuted;
+                            inheritedDisabled = receiverRule.IsDisabled;
+                        }
+                    }
+                }
+
                 var rule = new FilterRule
                 {
                     Level = level,
                     Receiver = receiver,
                     Site = site,
                     Talkgroup = talkgroup,
+                    IsMuted = inheritedMuted,
+                    IsDisabled = inheritedDisabled,
                     LastSeenUtc = nowUtc
                 };
 
@@ -315,7 +442,9 @@ namespace JoesScanner.Services
             for (int i = 0; i < _rules.Count; i++)
             {
                 var existingKey = _rules[i].DisplayKey ?? string.Empty;
-                if (string.Compare(key, existingKey, StringComparison.OrdinalIgnoreCase) < 0)
+
+                // Natural sort so "2" comes before "10"
+                if (NaturalCompareIgnoreCase(key, existingKey) < 0)
                 {
                     _rules.Insert(i, rule);
                     return;
@@ -324,6 +453,94 @@ namespace JoesScanner.Services
 
             _rules.Add(rule);
         }
+
+        private static int NaturalCompareIgnoreCase(string a, string b)
+        {
+            if (ReferenceEquals(a, b))
+                return 0;
+
+            a ??= string.Empty;
+            b ??= string.Empty;
+
+            int ia = 0, ib = 0;
+
+            while (ia < a.Length && ib < b.Length)
+            {
+                var ca = a[ia];
+                var cb = b[ib];
+
+                var da = char.IsDigit(ca);
+                var db = char.IsDigit(cb);
+
+                if (da && db)
+                {
+                    // Compare numeric runs by value without allocating
+                    int startA = ia;
+                    int startB = ib;
+
+                    // Skip leading zeros for value comparison
+                    while (startA < a.Length && a[startA] == '0') startA++;
+                    while (startB < b.Length && b[startB] == '0') startB++;
+
+                    int endA = startA;
+                    int endB = startB;
+
+                    while (endA < a.Length && char.IsDigit(a[endA])) endA++;
+                    while (endB < b.Length && char.IsDigit(b[endB])) endB++;
+
+                    int lenA = endA - startA;
+                    int lenB = endB - startB;
+
+                    // Longer numeric value wins
+                    if (lenA != lenB)
+                        return lenA < lenB ? -1 : 1;
+
+                    // Same length, compare digit by digit
+                    for (int k = 0; k < lenA; k++)
+                    {
+                        char x = a[startA + k];
+                        char y = b[startB + k];
+                        if (x != y)
+                            return x < y ? -1 : 1;
+                    }
+
+                    // Values equal, fewer leading zeros sorts first
+                    int runA = 0;
+                    int runB = 0;
+
+                    while (ia + runA < a.Length && char.IsDigit(a[ia + runA])) runA++;
+                    while (ib + runB < b.Length && char.IsDigit(b[ib + runB])) runB++;
+
+                    if (runA != runB)
+                        return runA < runB ? -1 : 1;
+
+                    ia += runA;
+                    ib += runB;
+                    continue;
+                }
+
+                if (da != db)
+                {
+                    // Put digit chunks before letter chunks
+                    return da ? -1 : 1;
+                }
+
+                var ua = char.ToUpperInvariant(ca);
+                var ub = char.ToUpperInvariant(cb);
+
+                if (ua != ub)
+                    return ua < ub ? -1 : 1;
+
+                ia++;
+                ib++;
+            }
+
+            if (ia == a.Length && ib == b.Length)
+                return 0;
+
+            return ia == a.Length ? -1 : 1;
+        }
+
 
         private void OnRulePropertyChanged(object? sender, PropertyChangedEventArgs e)
         {
@@ -334,57 +551,65 @@ namespace JoesScanner.Services
             }
         }
 
-        // Returns an array so nothing here can trigger CsWinRT1030.
-        private FilterRule[] GetEffectiveRulesForCall(CallItem call)
+        // Returns a single rule so callers can apply "most specific wins" semantics.
+        // This enables explicit overrides at lower levels, for example unmuting a talkgroup
+        // even while its receiver or site remains muted.
+        private FilterRule? GetBestMatchRuleForCall(CallItem call)
         {
             if (call == null)
-                return Array.Empty<FilterRule>();
+                return null;
 
             var receiver = Normalize(call.ReceiverName);
             if (string.IsNullOrWhiteSpace(receiver))
-                return Array.Empty<FilterRule>();
+                return null;
 
             var site = Normalize(call.SystemName);
             var talkgroup = Normalize(call.Talkgroup);
 
+            // Snapshot so nothing here can trigger CsWinRT1030.
             var snapshot = GetRulesSnapshot();
             if (snapshot.Length == 0)
-                return Array.Empty<FilterRule>();
+                return null;
 
-            var result = new List<FilterRule>(capacity: 8);
+            FilterRule? receiverRule = null;
+            FilterRule? siteRule = null;
+            FilterRule? talkgroupRule = null;
 
             foreach (var rule in snapshot)
             {
                 if (!string.Equals(Normalize(rule.Receiver), receiver, StringComparison.OrdinalIgnoreCase))
                     continue;
 
-                switch (rule.Level)
+                if (rule.Level == FilterLevel.Receiver)
                 {
-                    case FilterLevel.Receiver:
-                        result.Add(rule);
-                        break;
+                    receiverRule = rule;
+                    continue;
+                }
 
-                    case FilterLevel.Site:
-                        if (!string.IsNullOrWhiteSpace(site) &&
-                            string.Equals(Normalize(rule.Site), site, StringComparison.OrdinalIgnoreCase))
-                        {
-                            result.Add(rule);
-                        }
-                        break;
+                if (rule.Level == FilterLevel.Site)
+                {
+                    if (!string.IsNullOrWhiteSpace(site) &&
+                        string.Equals(Normalize(rule.Site), site, StringComparison.OrdinalIgnoreCase))
+                    {
+                        siteRule = rule;
+                    }
 
-                    case FilterLevel.Talkgroup:
-                        if (!string.IsNullOrWhiteSpace(site) &&
-                            !string.IsNullOrWhiteSpace(talkgroup) &&
-                            string.Equals(Normalize(rule.Site), site, StringComparison.OrdinalIgnoreCase) &&
-                            string.Equals(Normalize(rule.Talkgroup), talkgroup, StringComparison.OrdinalIgnoreCase))
-                        {
-                            result.Add(rule);
-                        }
-                        break;
+                    continue;
+                }
+
+                if (rule.Level == FilterLevel.Talkgroup)
+                {
+                    if (!string.IsNullOrWhiteSpace(site) &&
+                        !string.IsNullOrWhiteSpace(talkgroup) &&
+                        string.Equals(Normalize(rule.Site), site, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(Normalize(rule.Talkgroup), talkgroup, StringComparison.OrdinalIgnoreCase))
+                    {
+                        talkgroupRule = rule;
+                    }
                 }
             }
 
-            return result.Count == 0 ? [] : result.ToArray();
+            return talkgroupRule ?? siteRule ?? receiverRule;
         }
 
         private FilterRule[] GetRulesSnapshot()
@@ -520,7 +745,7 @@ namespace JoesScanner.Services
             }
         }
 
-        private void PruneInvalidRules(bool saveIfChanged)        
+        private void PruneInvalidRules(bool saveIfChanged)
         {
             var changed = false;
 

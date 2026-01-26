@@ -1,8 +1,6 @@
-﻿using System;
-using Android.App;
+﻿using Android.App;
 using Android.Content;
 using Android.OS;
-using AndroidX.Core.App;
 
 namespace JoesScanner.Platforms.Android.Services
 {

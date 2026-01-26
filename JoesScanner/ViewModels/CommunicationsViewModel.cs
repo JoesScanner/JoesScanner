@@ -1,9 +1,7 @@
-using System.Collections.ObjectModel;
-using System.Linq;
-using System.Windows.Input;
 using JoesScanner.Models;
 using JoesScanner.Services;
-using Microsoft.Maui.ApplicationModel;
+using System.Collections.ObjectModel;
+using System.Windows.Input;
 
 namespace JoesScanner.ViewModels
 {

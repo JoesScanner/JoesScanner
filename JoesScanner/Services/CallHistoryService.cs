@@ -978,7 +978,7 @@ namespace JoesScanner.Services
                 CallText = GetString(e, "CallText"),
                 Transcript = GetString(e, "Transcript"),
                 Transcription = GetString(e, "Transcription"),
-                AudioFilename = GetStringAny(e, "AudioFilename", "AudioFileName", "AudioFile", "Filename", "FileName", "CallAudioFilename", "CallAudioFile") ,
+                AudioFilename = GetStringAny(e, "AudioFilename", "AudioFileName", "AudioFile", "Filename", "FileName", "CallAudioFilename", "CallAudioFile"),
                 CallDuration = GetString(e, "CallDuration")
             };
         }

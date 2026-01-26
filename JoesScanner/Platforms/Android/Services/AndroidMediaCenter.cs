@@ -1,12 +1,10 @@
 #if ANDROID
-using System;
-using System.Threading.Tasks;
 using global::Android.App;
 using global::Android.Content;
+using global::Android.Graphics.Drawables;
 using global::Android.Media;
 using global::Android.Media.Session;
 using global::Android.OS;
-using global::Android.Graphics.Drawables;
 
 namespace JoesScanner.Platforms.Android.Services
 {

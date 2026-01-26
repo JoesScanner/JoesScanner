@@ -89,7 +89,7 @@
                                     <RoundRectangle CornerRadius="14" />
                                 </Border.StrokeShape>
 
-                                <Grid Padding="12" RowDefinitions="Auto,Auto" RowSpacing="6">
+                                                                <Grid Padding="12" RowDefinitions="Auto,Auto,Auto" RowSpacing="6">
                                     <Grid RowDefinitions="Auto" ColumnDefinitions="*,Auto" ColumnSpacing="10">
                                         <Label
                                             Text="{Binding AuthorLabel}"
@@ -107,12 +107,21 @@
 
                                     <Label
                                         Grid.Row="1"
+                                        Text="{Binding HeadingText}"
+                                        FontSize="15"
+                                        FontAttributes="Bold"
+                                        TextColor="{AppThemeBinding Light=#111827, Dark=White}"
+                                        LineBreakMode="TailTruncation"
+                                        IsVisible="{Binding HeadingText, Converter={StaticResource StringNotNullOrWhitespaceConverter}}" />
+
+                                    <Label
+                                        Grid.Row="2"
                                         Text="{Binding MessageText}"
                                         FontSize="14"
                                         TextColor="{AppThemeBinding Light=#111827, Dark=White}"
                                         LineBreakMode="WordWrap" />
                                 </Grid>
-                            </Border>
+                                </Border>
                         </DataTemplate>
                     </CollectionView.ItemTemplate>
 

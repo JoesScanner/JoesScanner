@@ -8,8 +8,8 @@ using Android.Content;
 using Android.Media;
 using Android.OS;
 using Microsoft.Maui.ApplicationModel;
-using AUri = Android.Net.Uri;
 using AMediaStream = Android.Media.Stream;
+using AUri = Android.Net.Uri;
 #endif
 
 #if IOS || MACCATALYST

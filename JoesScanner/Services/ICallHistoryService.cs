@@ -1,6 +1,4 @@
 using JoesScanner.Models;
-using System;
-using System.Collections.Generic;
 
 namespace JoesScanner.Services
 {

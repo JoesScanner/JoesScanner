@@ -1,6 +1,7 @@
 using JoesScanner.Models;
 using JoesScanner.Services;
 using System.Collections.ObjectModel;
+using System.Linq;
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
@@ -21,6 +22,150 @@ namespace JoesScanner.ViewModels
         private readonly ITelemetryService _telemetryService;
         private readonly HttpClient _httpClient;
         private readonly FilterService _filterService = FilterService.Instance;
+
+        private readonly ISettingsFilterProfileStore _settingsFilterProfileStore;
+
+        private readonly ObservableCollection<SettingsFilterProfile> _settingsFilterProfiles = new();
+        private readonly ObservableCollection<string> _settingsFilterProfileNameOptions = new();
+        private string _selectedSettingsFilterProfileNameOption = NoneSettingsProfileNameOption;
+        private bool _isCustomSettingsFilterProfileName;
+        public ObservableCollection<SettingsFilterProfile> SettingsFilterProfiles => _settingsFilterProfiles;
+
+
+        public ObservableCollection<string> SettingsFilterProfileNameOptions => _settingsFilterProfileNameOptions;
+
+        public string SelectedSettingsFilterProfileNameOption
+        {
+            get => _selectedSettingsFilterProfileNameOption;
+            set
+            {
+                var newValue = string.IsNullOrWhiteSpace(value) ? NoneSettingsProfileNameOption : value;
+                if (string.Equals(_selectedSettingsFilterProfileNameOption, newValue, StringComparison.Ordinal))
+                    return;
+
+                _selectedSettingsFilterProfileNameOption = newValue;
+
+                if (string.Equals(newValue, NoneSettingsProfileNameOption, StringComparison.Ordinal))
+                {
+                    _isCustomSettingsFilterProfileName = false;
+                    SettingsFilterProfileNameDraft = string.Empty;
+                    _ = SelectSettingsFilterProfileAsync(null, apply: false);
+                }
+                else if (string.Equals(newValue, CustomSettingsProfileNameOption, StringComparison.Ordinal))
+                {
+                    _isCustomSettingsFilterProfileName = true;
+                    SettingsFilterProfileNameDraft = string.Empty;
+                }
+                else
+                {
+                    _isCustomSettingsFilterProfileName = false;
+                    SettingsFilterProfileNameDraft = newValue;
+                    TrySelectSettingsFilterProfileFromNameOption(newValue);
+                }
+
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(IsCustomSettingsFilterProfileName));
+            }
+        }
+
+        public bool IsCustomSettingsFilterProfileName => _isCustomSettingsFilterProfileName;
+
+        private SettingsFilterProfile? _selectedSettingsFilterProfile;
+
+        private string _settingsFilterProfileNameDraft = string.Empty;
+        public SettingsFilterProfile? SelectedSettingsFilterProfile
+        {
+            get => _selectedSettingsFilterProfile;
+            private set
+            {
+                if (ReferenceEquals(_selectedSettingsFilterProfile, value))
+                    return;
+
+                _selectedSettingsFilterProfile = value;
+                SettingsFilterProfileNameDraft = _selectedSettingsFilterProfile?.Name ?? string.Empty;
+                SyncSettingsProfileNameDropdownFromDraft();
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(SelectedSettingsFilterProfileDisplay));
+            }
+        }
+
+        public string SettingsFilterProfileNameDraft
+        {
+            get => _settingsFilterProfileNameDraft;
+            set
+            {
+                var newValue = value ?? string.Empty;
+                if (string.Equals(_settingsFilterProfileNameDraft, newValue, StringComparison.Ordinal))
+                    return;
+
+                _settingsFilterProfileNameDraft = newValue;
+                OnPropertyChanged();
+            }
+        }
+
+        public string SelectedSettingsFilterProfileDisplay =>
+            SelectedSettingsFilterProfile?.Name ?? "None";
+
+        private const string SelectedSettingsFilterProfileIdPreferenceKey = "SelectedSettingsFilterProfileIdV1";
+
+        private const string CustomSettingsProfileNameOption = "New";
+        
+        private const string NoneSettingsProfileNameOption = "None";
+
+        private void RefreshSettingsProfileNameOptions()
+        {
+            _settingsFilterProfileNameOptions.Clear();
+            _settingsFilterProfileNameOptions.Add(NoneSettingsProfileNameOption);
+            foreach (var name in _settingsFilterProfiles.Select(p => p.Name).Where(n => !string.IsNullOrWhiteSpace(n)).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(n => n))
+                _settingsFilterProfileNameOptions.Add(name);
+
+            _settingsFilterProfileNameOptions.Add(CustomSettingsProfileNameOption);
+            SyncSettingsProfileNameDropdownFromDraft();
+            OnPropertyChanged(nameof(SettingsFilterProfileNameOptions));
+        }
+
+        private void SyncSettingsProfileNameDropdownFromDraft()
+        {
+            var draft = (SettingsFilterProfileNameDraft ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(draft))
+            {
+                _selectedSettingsFilterProfileNameOption = NoneSettingsProfileNameOption;
+                _isCustomSettingsFilterProfileName = false;
+                OnPropertyChanged(nameof(SelectedSettingsFilterProfileNameOption));
+                OnPropertyChanged(nameof(IsCustomSettingsFilterProfileName));
+                return;
+            }
+
+            if (!string.IsNullOrWhiteSpace(draft) && _settingsFilterProfileNameOptions.Any(n => string.Equals(n, draft, StringComparison.OrdinalIgnoreCase)))
+            {
+                _selectedSettingsFilterProfileNameOption = _settingsFilterProfileNameOptions.First(n => string.Equals(n, draft, StringComparison.OrdinalIgnoreCase));
+                _isCustomSettingsFilterProfileName = false;
+            }
+            else
+            {
+                _selectedSettingsFilterProfileNameOption = CustomSettingsProfileNameOption;
+                _isCustomSettingsFilterProfileName = true;
+            }
+
+            OnPropertyChanged(nameof(SelectedSettingsFilterProfileNameOption));
+            OnPropertyChanged(nameof(IsCustomSettingsFilterProfileName));
+        }
+
+        private void TrySelectSettingsFilterProfileFromNameOption(string nameOption)
+        {
+            if (string.IsNullOrWhiteSpace(nameOption))
+                return;
+
+            if (string.Equals(nameOption, NoneSettingsProfileNameOption, StringComparison.Ordinal) ||
+                string.Equals(nameOption, CustomSettingsProfileNameOption, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            var profile = _settingsFilterProfiles.FirstOrDefault(p => string.Equals(p.Name, nameOption, StringComparison.OrdinalIgnoreCase));
+            if (profile != null)
+                _ = SelectSettingsFilterProfileAsync(profile, apply: true);
+        }
 
         public ObservableCollection<FilterRule> FilterRules => _filterService.Rules;
 
@@ -150,11 +295,13 @@ namespace JoesScanner.ViewModels
 
         public const string DefaultServerUrl = "https://app.joesscanner.com";
 
-        public SettingsViewModel(ISettingsService settingsService, MainViewModel mainViewModel, ITelemetryService telemetryService)
+        public SettingsViewModel(ISettingsService settingsService, MainViewModel mainViewModel, ITelemetryService telemetryService, ISettingsFilterProfileStore settingsFilterProfileStore)
         {
             _settings = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
             _mainViewModel = mainViewModel ?? throw new ArgumentNullException(nameof(mainViewModel));
             _telemetryService = telemetryService ?? throw new ArgumentNullException(nameof(telemetryService));
+
+            _settingsFilterProfileStore = settingsFilterProfileStore ?? throw new ArgumentNullException(nameof(settingsFilterProfileStore));
 
             _httpClient = new HttpClient
             {
@@ -177,6 +324,123 @@ namespace JoesScanner.ViewModels
             ToggleMuteFilterCommand = new Command<FilterRule>(OnToggleMuteFilter);
             ToggleDisableFilterCommand = new Command<FilterRule>(OnToggleDisableFilter);
             ClearFilterCommand = new Command<FilterRule>(OnClearFilter);
+        }
+
+
+        public async Task OnPageOpenedAsync()
+        {
+            try
+            {
+                await LoadSettingsFilterProfilesAsync(applySelectedProfile: true);
+            }
+            catch
+            {
+            }
+        }
+
+        public async Task LoadSettingsFilterProfilesAsync(bool applySelectedProfile)
+        {
+            var profiles = await _settingsFilterProfileStore.GetProfilesAsync(CancellationToken.None);
+
+            _settingsFilterProfiles.Clear();
+            foreach (var p in profiles)
+                _settingsFilterProfiles.Add(p);
+
+            
+            RefreshSettingsProfileNameOptions();
+var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, string.Empty);
+            if (string.IsNullOrWhiteSpace(selectedId))
+            {
+                SelectedSettingsFilterProfile = null;
+                return;
+            }
+
+            var selected = _settingsFilterProfiles.FirstOrDefault(p => string.Equals(p.Id, selectedId, StringComparison.Ordinal));
+            SelectedSettingsFilterProfile = selected;
+
+            if (applySelectedProfile && selected != null)
+                ApplySettingsProfile(selected);
+        }
+
+        public async Task SelectSettingsFilterProfileAsync(SettingsFilterProfile? profile, bool apply)
+        {
+            SelectedSettingsFilterProfile = profile;
+            Preferences.Set(SelectedSettingsFilterProfileIdPreferenceKey, profile?.Id ?? string.Empty);
+
+            if (apply && profile != null)
+                ApplySettingsProfile(profile);
+        }
+
+        public async Task<SettingsFilterProfile?> SaveCurrentSettingsFiltersAsync(string name)
+        {
+            name = (name ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(name))
+                return null;
+
+            var existing = _settingsFilterProfiles.FirstOrDefault(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase));
+            var profileId = existing?.Id;
+
+            var records = _filterService.GetActiveStateRecords();
+
+            var profile = new SettingsFilterProfile
+            {
+                Id = profileId ?? string.Empty,
+                Name = name,
+                UpdatedUtc = DateTime.UtcNow,
+                Rules = records
+            };
+
+            await _settingsFilterProfileStore.SaveOrUpdateAsync(profile, CancellationToken.None);
+            await LoadSettingsFilterProfilesAsync(applySelectedProfile: false);
+
+            var saved = _settingsFilterProfiles.FirstOrDefault(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase));
+            if (saved != null)
+                await SelectSettingsFilterProfileAsync(saved, apply: false);
+
+            return saved;
+        }
+
+        public async Task<bool> RenameSelectedSettingsProfileAsync(string newName)
+        {
+            var current = SelectedSettingsFilterProfile;
+            if (current == null)
+                return false;
+
+            newName = (newName ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(newName))
+                return false;
+
+            await _settingsFilterProfileStore.RenameAsync(current.Id, newName, CancellationToken.None);
+            await LoadSettingsFilterProfilesAsync(applySelectedProfile: false);
+
+            var refreshed = _settingsFilterProfiles.FirstOrDefault(p => string.Equals(p.Id, current.Id, StringComparison.Ordinal));
+            if (refreshed != null)
+                await SelectSettingsFilterProfileAsync(refreshed, apply: false);
+
+            return true;
+        }
+
+        public async Task<bool> DeleteSelectedSettingsProfileAsync()
+        {
+            var current = SelectedSettingsFilterProfile;
+            if (current == null)
+                return false;
+
+            await _settingsFilterProfileStore.DeleteAsync(current.Id, CancellationToken.None);
+            Preferences.Set(SelectedSettingsFilterProfileIdPreferenceKey, string.Empty);
+            SelectedSettingsFilterProfile = null;
+
+            await LoadSettingsFilterProfilesAsync(applySelectedProfile: false);
+            return true;
+        }
+
+        private void ApplySettingsProfile(SettingsFilterProfile profile)
+        {
+            if (profile == null)
+                return;
+
+            var records = profile.Rules ?? new List<FilterRuleStateRecord>();
+            _filterService.ApplyStateRecords(records, resetOthers: true);
         }
 
         // True when any setting on this page differs from what was last saved.

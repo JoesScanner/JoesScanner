@@ -1,9 +1,6 @@
 #if ANDROID
-using System;
-using System.Threading.Tasks;
 using global::Android.Content;
 using global::Android.OS;
-using global::Microsoft.Maui.ApplicationModel;
 using JoesScanner.Platforms.Android.Services;
 
 namespace JoesScanner.Services

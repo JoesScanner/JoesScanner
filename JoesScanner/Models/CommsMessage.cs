@@ -10,6 +10,8 @@ namespace JoesScanner.Models
 
         public string AuthorLabel { get; init; } = string.Empty;
 
+        public string HeadingText { get; init; } = string.Empty;
+
         public string MessageText { get; init; } = string.Empty;
 
         public string DisplayTimeLocal

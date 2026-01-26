@@ -3,6 +3,7 @@ using JoesScanner.Services;
 using JoesScanner.ViewModels;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Linq;
 
 namespace JoesScanner.Views
 {
@@ -12,6 +13,10 @@ namespace JoesScanner.Views
     // Also provides handlers for filter tap gestures.
     public partial class SettingsPage : ContentPage
     {
+        
+        private bool _isRenamingSettingsProfileName;
+private bool _isProfileDropdownOpen;
+
         // Default constructor used by XAML.
         // BindingContext is expected to be supplied by DI / Shell.
         public SettingsPage()
@@ -41,6 +46,17 @@ namespace JoesScanner.Views
                     : raw;
 
             AppVersionLabel.Text = $"v{display}";
+        }
+
+
+        protected override async void OnAppearing()
+        {
+            base.OnAppearing();
+
+            if (BindingContext is SettingsViewModel vm)
+            {
+                await vm.OnPageOpenedAsync();
+            }
         }
 
         // Handler for the Close button in the header.
@@ -382,6 +398,240 @@ namespace JoesScanner.Views
                 {
                     vm.DiscardConnectionChanges();
                 }
+            }
+        }
+
+
+        private async void OnSettingsProfileTapped(object sender, TappedEventArgs e)
+        {
+            try
+            {
+                if (_isProfileDropdownOpen)
+                    return;
+
+                _isProfileDropdownOpen = true;
+
+                if (BindingContext is not SettingsViewModel vm)
+                    return;
+
+                const string cancel = "Cancel";
+                const string none = "None";
+
+                var list = vm.SettingsFilterProfiles.ToList();
+                var options = new List<string> { none };
+                options.AddRange(list.Select(p => p.Name));
+
+                var choice = await DisplayActionSheet("Profile", cancel, null, options.ToArray());
+                if (string.IsNullOrWhiteSpace(choice) || string.Equals(choice, cancel, StringComparison.Ordinal))
+                    return;
+
+                if (string.Equals(choice, none, StringComparison.Ordinal))
+                {
+                    await vm.SelectSettingsFilterProfileAsync(null, apply: false);
+                    return;
+                }
+
+                var selected = list.FirstOrDefault(p => string.Equals(p.Name, choice, StringComparison.Ordinal));
+                if (selected == null)
+                    return;
+
+                await vm.SelectSettingsFilterProfileAsync(selected, apply: true);
+            }
+            catch
+            {
+            }
+            finally
+            {
+                _isProfileDropdownOpen = false;
+            }
+        }
+
+                private async void OnSaveSettingsProfileClicked(object sender, EventArgs e)
+{
+    try
+    {
+        if (BindingContext is not SettingsViewModel vm)
+            return;
+
+        var option = (vm.SelectedSettingsFilterProfileNameOption ?? string.Empty).Trim();
+                if (_isRenamingSettingsProfileName && !string.Equals(option, "New", StringComparison.Ordinal))
+                {
+                    _isRenamingSettingsProfileName = false;
+                }
+
+
+        if (_isRenamingSettingsProfileName)
+        {
+            var renameTo = (vm.SettingsFilterProfileNameDraft ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(renameTo))
+            {
+                await DisplayAlert("Name required", "Enter a new profile name, then tap Save.", "OK");
+                return;
+            }
+
+            if (string.Equals(renameTo, "None", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(renameTo, "New", StringComparison.OrdinalIgnoreCase))
+            {
+                await DisplayAlert("Invalid name", "Choose a different profile name.", "OK");
+                return;
+            }
+
+            await vm.RenameSelectedSettingsProfileAsync(renameTo);
+            _isRenamingSettingsProfileName = false;
+
+            vm.SelectedSettingsFilterProfileNameOption = renameTo;
+            return;
+        }
+
+        var targetName = option;
+
+        if (string.Equals(option, "None", StringComparison.Ordinal))
+        {
+            await DisplayAlert("Select a profile", "Choose an existing profile to overwrite, or choose New to create a new one.", "OK");
+            return;
+        }
+
+        if (string.Equals(option, "New", StringComparison.Ordinal))
+        {
+            targetName = (vm.SettingsFilterProfileNameDraft ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(targetName))
+            {
+                await DisplayAlert("Name required", "Enter a new profile name, then tap Save.", "OK");
+                return;
+            }
+        }
+
+        if (string.Equals(targetName, "None", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(targetName, "New", StringComparison.OrdinalIgnoreCase))
+        {
+            await DisplayAlert("Invalid name", "Choose a different profile name.", "OK");
+            return;
+        }
+
+        await vm.SaveCurrentSettingsFiltersAsync(targetName);
+    }
+    catch
+    {
+    }
+}
+
+
+private async void OnEditSettingsProfileClicked(object sender, EventArgs e)
+{
+    try
+    {
+        if (BindingContext is not SettingsViewModel vm)
+            return;
+
+        var option = (vm.SelectedSettingsFilterProfileNameOption ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(option) ||
+            string.Equals(option, "None", StringComparison.Ordinal) ||
+            string.Equals(option, "New", StringComparison.Ordinal))
+        {
+            await DisplayAlert("Select a profile", "Select an existing profile to rename.", "OK");
+            return;
+        }
+
+        _isRenamingSettingsProfileName = true;
+        vm.SettingsFilterProfileNameDraft = option;
+        vm.SelectedSettingsFilterProfileNameOption = "New";
+    }
+    catch
+    {
+    }
+}
+		private async void OnDeleteSettingsProfileClicked(object sender, EventArgs e)
+        {
+            try
+            {
+                if (BindingContext is not SettingsViewModel vm)
+                    return;
+
+var option = (vm.SelectedSettingsFilterProfileNameOption ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(option) ||
+                    string.Equals(option, "None", StringComparison.Ordinal) ||
+                    string.Equals(option, "New", StringComparison.Ordinal))
+                {
+                    await DisplayAlert("Select a profile", "Select an existing profile to delete.", "OK");
+                    return;
+                }
+
+                var confirm = await DisplayAlert("Delete profile?", $"Delete '{option}'?", "Delete", "Cancel");
+                if (!confirm)
+                    return;
+
+                await vm.DeleteSelectedSettingsProfileAsync();
+                await vm.SelectSettingsFilterProfileAsync(null, apply: false);
+            }
+            catch
+            {
+            }
+        }
+
+        private async void OnManageSettingsProfileTapped(object sender, TappedEventArgs e)
+        {
+            try
+            {
+                if (BindingContext is not SettingsViewModel vm)
+                    return;
+
+                var current = vm.SelectedSettingsFilterProfile;
+                if (current == null)
+                {
+                    await DisplayAlert("No profile selected", "Select a profile first.", "OK");
+                    return;
+                }
+
+                const string cancel = "Cancel";
+                const string rename = "Rename";
+                const string delete = "Delete";
+                const string clear = "Clear selection";
+
+                var choice = await DisplayActionSheet("Manage profile", cancel, null, rename, delete, clear);
+                if (string.IsNullOrWhiteSpace(choice) || string.Equals(choice, cancel, StringComparison.Ordinal))
+                    return;
+
+                if (string.Equals(choice, clear, StringComparison.Ordinal))
+                {
+                    await vm.SelectSettingsFilterProfileAsync(null, apply: false);
+                    return;
+                }
+
+                if (string.Equals(choice, rename, StringComparison.Ordinal))
+                {
+                    var newName = (vm.SettingsFilterProfileNameDraft ?? string.Empty).Trim();
+                    if (string.IsNullOrWhiteSpace(newName))
+                    {
+                        await DisplayAlert("Profile name required", "Enter a profile name, then choose Rename.", "OK");
+                        return;
+                    }
+
+                    if (string.Equals(newName, current.Name, StringComparison.Ordinal))
+                        return;
+
+                    var existing = vm.SettingsFilterProfiles.FirstOrDefault(p => string.Equals(p.Name, newName, StringComparison.OrdinalIgnoreCase));
+                    if (existing != null && !string.Equals(existing.Id, current.Id, StringComparison.Ordinal))
+                    {
+                        await DisplayAlert("Name already exists", "Choose a different name.", "OK");
+                        return;
+                    }
+
+                    await vm.RenameSelectedSettingsProfileAsync(newName);
+                    return;
+                }
+
+                if (string.Equals(choice, delete, StringComparison.Ordinal))
+                {
+                    var confirm = await DisplayAlert("Delete profile?", $"Delete '{current.Name}'?", "Delete", "Cancel");
+                    if (!confirm)
+                        return;
+
+                    await vm.DeleteSelectedSettingsProfileAsync();
+                    return;
+                }
+            }
+            catch
+            {
             }
         }
 

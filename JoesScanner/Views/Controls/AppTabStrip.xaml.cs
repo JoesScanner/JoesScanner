@@ -1,11 +1,5 @@
-using System;
-using System.Threading;
-using System.Threading.Tasks;
-using JoesScanner.Services;
 using JoesScanner.Models;
-using Microsoft.Maui.Controls;
-using Microsoft.Maui.ApplicationModel;
-using Microsoft.Maui.Graphics;
+using JoesScanner.Services;
 
 namespace JoesScanner.Views.Controls;
 

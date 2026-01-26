@@ -8,6 +8,8 @@
 
     <converters:InverseBooleanConverter x:Key="InverseBooleanConverter" />
 
+    <converters:StringNotNullOrWhitespaceConverter x:Key="StringNotNullOrWhitespaceConverter" />
+
     <Style TargetType="ActivityIndicator">
         <Setter Property="Color" Value="{AppThemeBinding Light={StaticResource Primary}, Dark={StaticResource White}}" />
     </Style>

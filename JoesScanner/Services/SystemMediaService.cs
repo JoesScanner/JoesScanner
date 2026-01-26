@@ -99,10 +99,10 @@ namespace JoesScanner.Services
         }
 
         // Platform hooks
-		private partial void PlatformSetHandlers(Func<Task> onPlay, Func<Task> onStop, Func<Task>? onNext, Func<Task>? onPrevious);
-		private partial Task PlatformStartSessionAsync(bool audioEnabled);
-		private partial Task PlatformStopSessionAsync();
-		private partial void PlatformUpdateNowPlaying(string title, string subtitle, bool audioEnabled);
-		private partial void PlatformClear();
+        private partial void PlatformSetHandlers(Func<Task> onPlay, Func<Task> onStop, Func<Task>? onNext, Func<Task>? onPrevious);
+        private partial Task PlatformStartSessionAsync(bool audioEnabled);
+        private partial Task PlatformStopSessionAsync();
+        private partial void PlatformUpdateNowPlaying(string title, string subtitle, bool audioEnabled);
+        private partial void PlatformClear();
     }
 }

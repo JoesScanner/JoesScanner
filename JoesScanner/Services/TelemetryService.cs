@@ -1,15 +1,5 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Net.Http;
 using System.Text;
 using System.Text.Json;
-using System.Threading;
-using System.Threading.Tasks;
-using Microsoft.Maui.ApplicationModel;
-using Microsoft.Maui.Devices;
-using Microsoft.Maui.Storage;
 
 namespace JoesScanner.Services
 {
@@ -151,7 +141,7 @@ namespace JoesScanner.Services
             });
         }
 
-        
+
         public void StartMonitoringHeartbeat(string streamServerUrl)
         {
             EnsureAppStartSessionInitialized();

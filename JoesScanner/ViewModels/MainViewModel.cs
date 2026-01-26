@@ -1,8 +1,6 @@
 using JoesScanner.Models;
 using JoesScanner.Services;
 using System.Collections.ObjectModel;
-using System.Collections.Generic;
-using System.Linq;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Windows.Input;

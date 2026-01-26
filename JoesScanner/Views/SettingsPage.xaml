@@ -44,7 +44,7 @@
                              2 = filters
                              3 = theme -->
                 <Grid
-                            RowDefinitions="Auto,Auto,*,Auto"
+                            RowDefinitions="Auto,Auto,Auto,Auto"
                             ColumnDefinitions="*">
 
                     <!-- HEADER CARD -->
@@ -314,6 +314,88 @@
                                             FontSize="12"
                                             Opacity="0.8"
                                             TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
+
+                            <!-- Filter profiles -->
+<Grid ColumnDefinitions="*,Auto,Auto,Auto"
+      RowDefinitions="Auto,Auto"
+      ColumnSpacing="8"
+      RowSpacing="6"
+      VerticalOptions="Center">
+
+	<Border Grid.Row="0"
+	        Grid.Column="0"
+	        Stroke="#334155"
+	        StrokeThickness="1"
+	        BackgroundColor="White"
+	        Padding="0"
+	        Margin="0"
+	        VerticalOptions="Center"
+	        HeightRequest="34">
+	    <Border.StrokeShape>
+	        <RoundRectangle CornerRadius="6" />
+	    </Border.StrokeShape>
+	    <Grid>
+	        <Picker x:Name="SettingsFilterProfilePicker"
+	                ItemsSource="{Binding SettingsFilterProfileNameOptions}"
+	                SelectedItem="{Binding SelectedSettingsFilterProfileNameOption}"
+	                Title="Profile"
+	                FontSize="13"
+	                BackgroundColor="Transparent"
+	                VerticalOptions="Center"
+	                Opacity="0.02"
+	                MinimumHeightRequest="34" />
+
+	        <Label InputTransparent="True"
+	               Text="{Binding SelectedSettingsFilterProfileNameOption}"
+	               FontSize="13"
+	               TextColor="Black"
+	               VerticalOptions="Center"
+	               Margin="10,0,26,0"
+	               LineBreakMode="TailTruncation" />
+
+	        <Label InputTransparent="True"
+	               Text="▾"
+	               FontSize="12"
+	               TextColor="Black"
+	               VerticalOptions="Center"
+	               HorizontalOptions="End"
+	               Margin="0,0,10,0" />
+	    </Grid>
+	</Border>
+
+    <Button Grid.Row="0"
+            Grid.Column="1"
+            Text="Save"
+            Style="{StaticResource PillButtonStyle}"
+            Clicked="OnSaveSettingsProfileClicked" />
+
+    <Button Grid.Row="0"
+            Grid.Column="2"
+            Text="Edit"
+            Style="{StaticResource SecondaryPillButtonStyle}"
+            Clicked="OnEditSettingsProfileClicked" />
+
+    <Button Grid.Row="0"
+            Grid.Column="3"
+            Text="Delete"
+            Style="{StaticResource SecondaryPillButtonStyle}"
+            Clicked="OnDeleteSettingsProfileClicked" />
+
+    <Entry Grid.Row="1"
+           Grid.Column="0"
+           Grid.ColumnSpan="4"
+           IsVisible="{Binding IsCustomSettingsFilterProfileName}"
+           Text="{Binding SettingsFilterProfileNameDraft}"
+           Placeholder="New profile name"
+           FontSize="13"
+           TextColor="White"
+           PlaceholderColor="#9ca3af"
+           BackgroundColor="Transparent"
+           VerticalOptions="Center"
+           MinimumHeightRequest="34" />
+</Grid>
+
+
 
                             <!-- Table header row -->
                             <Grid

@@ -4,11 +4,11 @@ using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.WebSockets;
-using System.Threading.Channels;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading.Channels;
 
 namespace JoesScanner.Services
 {
@@ -714,174 +714,174 @@ namespace JoesScanner.Services
             }
         }
 
-private async IAsyncEnumerable<CallItem> StreamFromWebSocketAsync(
-    ClientWebSocket ws,
-    string baseUrl,
-    string callsUrl,
-    [EnumeratorCancellation] CancellationToken cancellationToken)
-{
-    var buffer = new byte[32 * 1024];
-    var segment = new ArraySegment<byte>(buffer);
-    var sb = new StringBuilder(64 * 1024);
-
-    // Trunking Recorder only pushes messages when calls arrive or update, so long idle periods are normal.
-    // We must not disconnect simply because the stream is quiet.
-    //
-    // Important platform note: On some platforms (notably Android), cancelling ReceiveAsync can destabilize
-    // the underlying socket. To avoid that, we do not cancel ReceiveAsync for idle timeouts.
-    // Instead, we await ReceiveAsync and periodically run a lightweight HTTP health check while we wait.
-    var receiveSlice = TimeSpan.FromSeconds(30);
-    var healthCheckInterval = TimeSpan.FromSeconds(60);
-
-    var lastHealthCheckUtc = DateTime.UtcNow;
-    var consecutiveHealthFailures = 0;
-    const int maxConsecutiveHealthFailures = 3;
-
-    var fragmentSlices = 0;
-    const int maxFragmentSlices = 4; // 4 x 30s = 120s to finish a fragmented message
-
-    try
-    {
-        while (!cancellationToken.IsCancellationRequested && ws.State == WebSocketState.Open)
+        private async IAsyncEnumerable<CallItem> StreamFromWebSocketAsync(
+            ClientWebSocket ws,
+            string baseUrl,
+            string callsUrl,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
         {
-            sb.Clear();
-            fragmentSlices = 0;
+            var buffer = new byte[32 * 1024];
+            var segment = new ArraySegment<byte>(buffer);
+            var sb = new StringBuilder(64 * 1024);
 
-            while (true)
-            {
-                // Start a receive and wait either for data or for a "slice" to elapse.
-                var receiveTask = ws.ReceiveAsync(segment, cancellationToken);
-                var delayTask = Task.Delay(receiveSlice, cancellationToken);
+            // Trunking Recorder only pushes messages when calls arrive or update, so long idle periods are normal.
+            // We must not disconnect simply because the stream is quiet.
+            //
+            // Important platform note: On some platforms (notably Android), cancelling ReceiveAsync can destabilize
+            // the underlying socket. To avoid that, we do not cancel ReceiveAsync for idle timeouts.
+            // Instead, we await ReceiveAsync and periodically run a lightweight HTTP health check while we wait.
+            var receiveSlice = TimeSpan.FromSeconds(30);
+            var healthCheckInterval = TimeSpan.FromSeconds(60);
 
-                var completed = await Task.WhenAny(receiveTask, delayTask);
+            var lastHealthCheckUtc = DateTime.UtcNow;
+            var consecutiveHealthFailures = 0;
+            const int maxConsecutiveHealthFailures = 3;
 
-                if (completed != receiveTask)
-                {
-                    // No data received within this slice. That is normal while idle.
-                    if (sb.Length > 0)
-                    {
-                        // We already have partial data for a message. If the remainder never arrives,
-                        // treat that as a stalled connection.
-                        fragmentSlices++;
-
-                        if (fragmentSlices >= maxFragmentSlices)
-                        {
-                            try { ws.Abort(); } catch { }
-                            throw new WebSocketException("WebSocket stalled while assembling a message.");
-                        }
-                    }
-                    else
-                    {
-                        // Fully idle. Periodically verify the server is still reachable so a half-open
-                        // socket does not stall forever.
-                        var nowUtc = DateTime.UtcNow;
-                        if (nowUtc - lastHealthCheckUtc >= healthCheckInterval)
-                        {
-                            lastHealthCheckUtc = nowUtc;
-
-                            var ok = await IsServerReachableAsync(callsUrl, cancellationToken);
-                            if (ok)
-                            {
-                                consecutiveHealthFailures = 0;
-                            }
-                            else
-                            {
-                                consecutiveHealthFailures++;
-
-                                // Do not drop the socket on a single transient health check failure.
-                                // Only abort after multiple consecutive failures.
-                                if (consecutiveHealthFailures >= maxConsecutiveHealthFailures)
-                                {
-                                    try { ws.Abort(); } catch { }
-                                    throw new WebSocketException("WebSocket appears stalled and server health checks are failing.");
-                                }
-                            }
-                        }
-                    }
-
-                    continue;
-                }
-
-                // Receive completed.
-                var result = await receiveTask;
-
-                // Any successful receive resets stall detection.
-                consecutiveHealthFailures = 0;
-                fragmentSlices = 0;
-
-                if (result.MessageType == WebSocketMessageType.Close)
-                {
-                    try
-                    {
-                        await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "closed", CancellationToken.None);
-                    }
-                    catch
-                    {
-                    }
-
-                    yield break;
-                }
-
-                if (result.Count > 0)
-                {
-                    sb.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
-                }
-
-                if (result.EndOfMessage)
-                    break;
-            }
-
-            var message = sb.ToString().Trim();
-            if (string.IsNullOrWhiteSpace(message))
-                continue;
-
-            JsonDocument? doc = null;
+            var fragmentSlices = 0;
+            const int maxFragmentSlices = 4; // 4 x 30s = 120s to finish a fragmented message
 
             try
             {
-                doc = JsonDocument.Parse(message);
-            }
-            catch
-            {
-                // Ignore malformed frames.
-                continue;
-            }
-
-            using (doc)
-            {
-                var root = doc.RootElement;
-
-                if (root.ValueKind == JsonValueKind.Array)
+                while (!cancellationToken.IsCancellationRequested && ws.State == WebSocketState.Open)
                 {
-                    foreach (var element in root.EnumerateArray())
+                    sb.Clear();
+                    fragmentSlices = 0;
+
+                    while (true)
                     {
-                        await foreach (var item in ProcessWebSocketElementAsync(element, baseUrl, callsUrl, cancellationToken))
+                        // Start a receive and wait either for data or for a "slice" to elapse.
+                        var receiveTask = ws.ReceiveAsync(segment, cancellationToken);
+                        var delayTask = Task.Delay(receiveSlice, cancellationToken);
+
+                        var completed = await Task.WhenAny(receiveTask, delayTask);
+
+                        if (completed != receiveTask)
                         {
-                            yield return item;
+                            // No data received within this slice. That is normal while idle.
+                            if (sb.Length > 0)
+                            {
+                                // We already have partial data for a message. If the remainder never arrives,
+                                // treat that as a stalled connection.
+                                fragmentSlices++;
+
+                                if (fragmentSlices >= maxFragmentSlices)
+                                {
+                                    try { ws.Abort(); } catch { }
+                                    throw new WebSocketException("WebSocket stalled while assembling a message.");
+                                }
+                            }
+                            else
+                            {
+                                // Fully idle. Periodically verify the server is still reachable so a half-open
+                                // socket does not stall forever.
+                                var nowUtc = DateTime.UtcNow;
+                                if (nowUtc - lastHealthCheckUtc >= healthCheckInterval)
+                                {
+                                    lastHealthCheckUtc = nowUtc;
+
+                                    var ok = await IsServerReachableAsync(callsUrl, cancellationToken);
+                                    if (ok)
+                                    {
+                                        consecutiveHealthFailures = 0;
+                                    }
+                                    else
+                                    {
+                                        consecutiveHealthFailures++;
+
+                                        // Do not drop the socket on a single transient health check failure.
+                                        // Only abort after multiple consecutive failures.
+                                        if (consecutiveHealthFailures >= maxConsecutiveHealthFailures)
+                                        {
+                                            try { ws.Abort(); } catch { }
+                                            throw new WebSocketException("WebSocket appears stalled and server health checks are failing.");
+                                        }
+                                    }
+                                }
+                            }
+
+                            continue;
+                        }
+
+                        // Receive completed.
+                        var result = await receiveTask;
+
+                        // Any successful receive resets stall detection.
+                        consecutiveHealthFailures = 0;
+                        fragmentSlices = 0;
+
+                        if (result.MessageType == WebSocketMessageType.Close)
+                        {
+                            try
+                            {
+                                await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "closed", CancellationToken.None);
+                            }
+                            catch
+                            {
+                            }
+
+                            yield break;
+                        }
+
+                        if (result.Count > 0)
+                        {
+                            sb.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
+                        }
+
+                        if (result.EndOfMessage)
+                            break;
+                    }
+
+                    var message = sb.ToString().Trim();
+                    if (string.IsNullOrWhiteSpace(message))
+                        continue;
+
+                    JsonDocument? doc = null;
+
+                    try
+                    {
+                        doc = JsonDocument.Parse(message);
+                    }
+                    catch
+                    {
+                        // Ignore malformed frames.
+                        continue;
+                    }
+
+                    using (doc)
+                    {
+                        var root = doc.RootElement;
+
+                        if (root.ValueKind == JsonValueKind.Array)
+                        {
+                            foreach (var element in root.EnumerateArray())
+                            {
+                                await foreach (var item in ProcessWebSocketElementAsync(element, baseUrl, callsUrl, cancellationToken))
+                                {
+                                    yield return item;
+                                }
+                            }
+                        }
+                        else if (root.ValueKind == JsonValueKind.Object)
+                        {
+                            await foreach (var item in ProcessWebSocketElementAsync(root, baseUrl, callsUrl, cancellationToken))
+                            {
+                                yield return item;
+                            }
                         }
                     }
                 }
-                else if (root.ValueKind == JsonValueKind.Object)
+            }
+            finally
+            {
+                try
                 {
-                    await foreach (var item in ProcessWebSocketElementAsync(root, baseUrl, callsUrl, cancellationToken))
-                    {
-                        yield return item;
-                    }
+                    ws.Dispose();
+                }
+                catch
+                {
                 }
             }
         }
-    }
-    finally
-    {
-        try
-        {
-            ws.Dispose();
-        }
-        catch
-        {
-        }
-    }
-}
 
         private async IAsyncEnumerable<CallItem> ProcessWebSocketElementAsync(
             JsonElement element,

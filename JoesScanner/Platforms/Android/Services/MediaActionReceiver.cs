@@ -1,5 +1,4 @@
 #if ANDROID
-using System;
 using global::Android.Content;
 
 namespace JoesScanner.Platforms.Android.Services

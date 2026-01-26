@@ -1,5 +1,3 @@
-using System;
-using Microsoft.Maui.Controls;
 using JoesScanner.ViewModels;
 
 namespace JoesScanner.Views

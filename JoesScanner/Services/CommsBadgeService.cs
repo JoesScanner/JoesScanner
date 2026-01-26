@@ -1,9 +1,3 @@
-using System;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
-using Microsoft.Maui.Storage;
-
 namespace JoesScanner.Services
 {
     public sealed class CommsBadgeService : ICommsBadgeService

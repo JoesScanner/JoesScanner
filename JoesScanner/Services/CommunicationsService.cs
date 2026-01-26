@@ -1,7 +1,7 @@
+using JoesScanner.Models;
 using System.Globalization;
 using System.Net.Http.Json;
 using System.Text.Json;
-using JoesScanner.Models;
 
 namespace JoesScanner.Services
 {
@@ -155,6 +155,7 @@ namespace JoesScanner.Services
             var updatedUtc = TryGetDateTimeUtcNullable(el, "updated_at_utc");
 
             var author = TryGetString(el, "author_label");
+            var heading = TryGetString(el, "heading_text");
             var text = TryGetString(el, "message_text");
 
             if (id <= 0 || createdUtc == null)
@@ -166,6 +167,7 @@ namespace JoesScanner.Services
                 CreatedAtUtc = createdUtc.Value,
                 UpdatedAtUtc = updatedUtc,
                 AuthorLabel = author ?? string.Empty,
+                HeadingText = heading ?? string.Empty,
                 MessageText = text ?? string.Empty
             };
         }

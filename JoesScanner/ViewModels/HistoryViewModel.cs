@@ -1,16 +1,10 @@
 using JoesScanner.Models;
 using JoesScanner.Services;
-using Microsoft.Maui.ApplicationModel;
-using Microsoft.Maui.Storage;
 using System.Collections.ObjectModel;
-using System.Collections.Generic;
 using System.Globalization;
-using System.Net;
+using System.Linq;
 using System.Net.Http.Headers;
 using System.Text;
-using System.Linq;
-using System.Threading;
-using System.Threading.Tasks;
 using System.Windows.Input;
 
 namespace JoesScanner.ViewModels
@@ -23,11 +17,12 @@ namespace JoesScanner.ViewModels
         private readonly ICallHistoryService _callHistoryService;
         private readonly IAudioPlaybackService _audioPlaybackService;
         private readonly ISettingsService _settingsService;
+        private readonly IFilterProfileStore _filterProfileStore;
         private readonly HttpClient _audioHttpClient;
 
         private CancellationTokenSource? _audioCts;
         private CancellationTokenSource? _queuePlaybackCts;
-		private readonly SemaphoreSlim _playbackLock = new SemaphoreSlim(1, 1);
+        private readonly SemaphoreSlim _playbackLock = new SemaphoreSlim(1, 1);
 
         private HistorySearchFilters? _activeSearchFilters;
         private int _activeWindowSize = 35;
@@ -64,6 +59,22 @@ namespace JoesScanner.ViewModels
         private HistoryLookupItem? _selectedSite;
         private HistoryLookupItem? _selectedTalkgroup;
 
+        private readonly ObservableCollection<FilterProfile> _filterProfiles;
+        private FilterProfile? _selectedFilterProfile;
+
+        private string _filterProfileNameDraft = string.Empty;
+
+        private readonly ObservableCollection<string> _filterProfileNameOptions = new();
+        private string _selectedFilterProfileNameOption = NoneProfileNameOption;
+        private bool _isCustomFilterProfileName;
+
+
+        private const string SelectedFilterProfileIdPreferenceKey = "HistorySelectedFilterProfileId";
+
+        private const string CustomProfileNameOption = "New";
+        
+        private const string NoneProfileNameOption = "None";
+
         private DateTime _selectedDate = DateTime.Today;
         private int _selectedHour;
         private int _selectedMinute;
@@ -85,16 +96,26 @@ namespace JoesScanner.ViewModels
         public HistoryViewModel(
             ICallHistoryService callHistoryService,
             IAudioPlaybackService audioPlaybackService,
-            ISettingsService settingsService)
+            ISettingsService settingsService,
+            IFilterProfileStore filterProfileStore)
         {
             _callHistoryService = callHistoryService ?? throw new ArgumentNullException(nameof(callHistoryService));
             _audioPlaybackService = audioPlaybackService ?? throw new ArgumentNullException(nameof(audioPlaybackService));
             _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
+            _filterProfileStore = filterProfileStore ?? throw new ArgumentNullException(nameof(filterProfileStore));
 
             Calls = new ObservableCollection<CallItem>();
             Receivers = new ObservableCollection<HistoryLookupItem>();
             Sites = new ObservableCollection<HistoryLookupItem>();
             Talkgroups = new ObservableCollection<HistoryLookupItem>();
+
+            _filterProfiles = new ObservableCollection<FilterProfile>();
+
+            _filterProfileNameOptions.Clear();
+            _filterProfileNameOptions.Add(NoneProfileNameOption);
+            _filterProfileNameOptions.Add(CustomProfileNameOption);
+            _selectedFilterProfileNameOption = NoneProfileNameOption;
+            _isCustomFilterProfileName = false;
 
             Calls.CollectionChanged += (_, __) =>
             {
@@ -144,6 +165,132 @@ namespace JoesScanner.ViewModels
         public ObservableCollection<HistoryLookupItem> Receivers { get; }
         public ObservableCollection<HistoryLookupItem> Sites { get; }
         public ObservableCollection<HistoryLookupItem> Talkgroups { get; }
+
+        public ObservableCollection<FilterProfile> FilterProfiles => _filterProfiles;
+
+
+        public ObservableCollection<string> FilterProfileNameOptions => _filterProfileNameOptions;
+
+        public string SelectedFilterProfileNameOption
+        {
+            get => _selectedFilterProfileNameOption;
+            set
+            {
+                var newValue = string.IsNullOrWhiteSpace(value) ? NoneProfileNameOption : value;
+                if (string.Equals(_selectedFilterProfileNameOption, newValue, StringComparison.Ordinal))
+                    return;
+
+                _selectedFilterProfileNameOption = newValue;
+                if (string.Equals(newValue, NoneProfileNameOption, StringComparison.Ordinal))
+                {
+                    _isCustomFilterProfileName = false;
+                    FilterProfileNameDraft = string.Empty;
+                    _ = SelectFilterProfileAsync(null, apply: false);
+                }
+                else if (string.Equals(newValue, CustomProfileNameOption, StringComparison.Ordinal))
+                {
+                    _isCustomFilterProfileName = true;
+                    FilterProfileNameDraft = string.Empty;
+                }
+                else
+                {
+                    _isCustomFilterProfileName = false;
+                    FilterProfileNameDraft = newValue;
+                    TrySelectFilterProfileFromNameOption(newValue);
+                }
+
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(IsCustomFilterProfileName));
+            }
+        }
+
+        public bool IsCustomFilterProfileName => _isCustomFilterProfileName;
+
+        public FilterProfile? SelectedFilterProfile
+        {
+            get => _selectedFilterProfile;
+            private set
+            {
+                if (ReferenceEquals(_selectedFilterProfile, value))
+                    return;
+
+                _selectedFilterProfile = value;
+                FilterProfileNameDraft = _selectedFilterProfile?.Name ?? string.Empty;
+                SyncProfileNameDropdownFromDraft();
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(SelectedFilterProfileDisplay));
+            }
+        }
+
+        public string SelectedFilterProfileDisplay => SelectedFilterProfile?.Name ?? "None";
+
+        public string FilterProfileNameDraft
+        {
+            get => _filterProfileNameDraft;
+            set
+            {
+                var newValue = value ?? string.Empty;
+                if (string.Equals(_filterProfileNameDraft, newValue, StringComparison.Ordinal))
+                    return;
+
+                _filterProfileNameDraft = newValue;
+                OnPropertyChanged();
+            }
+        }
+        private void RefreshFilterProfileNameOptions()
+        {
+            _filterProfileNameOptions.Clear();
+            _filterProfileNameOptions.Add(NoneProfileNameOption);
+            foreach (var name in _filterProfiles.Select(p => p.Name).Where(n => !string.IsNullOrWhiteSpace(n)).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(n => n))
+                _filterProfileNameOptions.Add(name);
+
+            _filterProfileNameOptions.Add(CustomProfileNameOption);
+            SyncProfileNameDropdownFromDraft();
+            OnPropertyChanged(nameof(FilterProfileNameOptions));
+        }
+
+        private void SyncProfileNameDropdownFromDraft()
+        {
+            var draft = (FilterProfileNameDraft ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(draft))
+            {
+                _selectedFilterProfileNameOption = NoneProfileNameOption;
+                _isCustomFilterProfileName = false;
+                OnPropertyChanged(nameof(SelectedFilterProfileNameOption));
+                OnPropertyChanged(nameof(IsCustomFilterProfileName));
+                return;
+            }
+            if (_filterProfileNameOptions.Any(n => string.Equals(n, draft, StringComparison.OrdinalIgnoreCase)))
+            {
+                _selectedFilterProfileNameOption = _filterProfileNameOptions.First(n => string.Equals(n, draft, StringComparison.OrdinalIgnoreCase));
+                _isCustomFilterProfileName = false;
+            }
+            else
+            {
+                _selectedFilterProfileNameOption = CustomProfileNameOption;
+                _isCustomFilterProfileName = true;
+            }
+
+            OnPropertyChanged(nameof(SelectedFilterProfileNameOption));
+            OnPropertyChanged(nameof(IsCustomFilterProfileName));
+        }
+
+        private void TrySelectFilterProfileFromNameOption(string nameOption)
+        {
+            if (string.IsNullOrWhiteSpace(nameOption))
+                return;
+
+            if (string.Equals(nameOption, NoneProfileNameOption, StringComparison.Ordinal) ||
+                string.Equals(nameOption, CustomProfileNameOption, StringComparison.Ordinal))
+                return;
+
+            var match = _filterProfiles.FirstOrDefault(p => string.Equals(p.Name, nameOption, StringComparison.OrdinalIgnoreCase));
+            if (match == null)
+                return;
+
+            _ = SelectFilterProfileAsync(match, apply: true);
+        }
+
 
         public IReadOnlyList<int> HourOptions { get; }
         public IReadOnlyList<int> MinuteOptions { get; }
@@ -394,6 +541,158 @@ namespace JoesScanner.ViewModels
             QueueControlBus.RequestSetMainAudioMuted(true);
 
             await LoadLookupsAsync();
+
+            try
+            {
+                await LoadFilterProfilesAsync(applySelectedProfile: true);
+            }
+            catch
+            {
+            }
+        }
+
+        public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
+        {
+            var profiles = await _filterProfileStore.GetProfilesAsync(FilterProfileContexts.History, CancellationToken.None);
+
+            _filterProfiles.Clear();
+            foreach (var p in profiles)
+                _filterProfiles.Add(p);
+
+            
+            RefreshFilterProfileNameOptions();
+var selectedId = Preferences.Get(SelectedFilterProfileIdPreferenceKey, string.Empty);
+            if (string.IsNullOrWhiteSpace(selectedId))
+            {
+                SelectedFilterProfile = null;
+                return;
+            }
+
+            var selected = _filterProfiles.FirstOrDefault(p => string.Equals(p.Id, selectedId, StringComparison.Ordinal));
+            SelectedFilterProfile = selected;
+
+            if (applySelectedProfile && selected != null)
+                ApplyProfileToFilters(selected);
+        }
+
+        public async Task SelectFilterProfileAsync(FilterProfile? profile, bool apply)
+        {
+            SelectedFilterProfile = profile;
+
+            var id = profile?.Id ?? string.Empty;
+            Preferences.Set(SelectedFilterProfileIdPreferenceKey, id);
+
+            if (apply && profile != null)
+                ApplyProfileToFilters(profile);
+        }
+
+        public async Task<FilterProfile?> SaveCurrentFiltersAsync(string name)
+        {
+            name = (name ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(name))
+                return null;
+
+            var existing = _filterProfiles.FirstOrDefault(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase));
+            var profileId = existing?.Id;
+
+            var profile = new FilterProfile
+            {
+                Id = profileId ?? string.Empty,
+                Name = name,
+                Context = FilterProfileContexts.History,
+                Filters = new FilterProfileFilters
+                {
+                    ReceiverValue = SelectedReceiver?.Value,
+                    ReceiverLabel = SelectedReceiver?.Label,
+                    SiteValue = SelectedSite?.Value,
+                    SiteLabel = SelectedSite?.Label,
+                    TalkgroupValue = SelectedTalkgroup?.Value,
+                    TalkgroupLabel = SelectedTalkgroup?.Label,
+                    SelectedTime = SelectedTime
+                }
+            };
+
+            await _filterProfileStore.SaveOrUpdateAsync(profile, CancellationToken.None);
+            await LoadFilterProfilesAsync(applySelectedProfile: false);
+
+            var saved = _filterProfiles.FirstOrDefault(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase));
+            if (saved != null)
+                await SelectFilterProfileAsync(saved, apply: false);
+
+            return saved;
+        }
+
+        public async Task<bool> RenameSelectedProfileAsync(string newName)
+        {
+            var current = SelectedFilterProfile;
+            if (current == null)
+                return false;
+
+            newName = (newName ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(newName))
+                return false;
+
+            await _filterProfileStore.RenameAsync(FilterProfileContexts.History, current.Id, newName, CancellationToken.None);
+            await LoadFilterProfilesAsync(applySelectedProfile: false);
+
+            var refreshed = _filterProfiles.FirstOrDefault(p => string.Equals(p.Id, current.Id, StringComparison.Ordinal));
+            if (refreshed != null)
+                await SelectFilterProfileAsync(refreshed, apply: false);
+
+            return true;
+        }
+
+        public async Task<bool> DeleteSelectedProfileAsync()
+        {
+            var current = SelectedFilterProfile;
+            if (current == null)
+                return false;
+
+            await _filterProfileStore.DeleteAsync(FilterProfileContexts.History, current.Id, CancellationToken.None);
+            Preferences.Set(SelectedFilterProfileIdPreferenceKey, string.Empty);
+            SelectedFilterProfile = null;
+
+            await LoadFilterProfilesAsync(applySelectedProfile: false);
+            return true;
+        }
+
+        private void ApplyProfileToFilters(FilterProfile profile)
+        {
+            if (profile == null)
+                return;
+
+            var f = profile.Filters;
+            if (f == null)
+                return;
+
+            SelectedReceiver = FindMatch(Receivers, f.ReceiverValue, f.ReceiverLabel);
+            SelectedSite = FindMatch(Sites, f.SiteValue, f.SiteLabel);
+            SelectedTalkgroup = FindMatch(Talkgroups, f.TalkgroupValue, f.TalkgroupLabel);
+
+            if (f.SelectedTime != null)
+                SelectedTime = f.SelectedTime.Value;
+        }
+
+        private static HistoryLookupItem? FindMatch(ObservableCollection<HistoryLookupItem> items, string? value, string? label)
+        {
+            if (items == null || items.Count == 0)
+                return null;
+
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                var byValue = items.FirstOrDefault(i => string.Equals(i.Value, value, StringComparison.Ordinal));
+                if (byValue != null)
+                    return byValue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(label))
+            {
+                var byLabel = items.FirstOrDefault(i => string.Equals(i.Label, label, StringComparison.Ordinal));
+                if (byLabel != null)
+                    return byLabel;
+            }
+
+            return items.FirstOrDefault();
         }
 
         public async Task OnPageClosedAsync()

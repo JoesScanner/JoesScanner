@@ -45,9 +45,88 @@
                         <RoundRectangle CornerRadius="16" />
                     </Border.StrokeShape>
 
-                    <Grid RowDefinitions="Auto,Auto" RowSpacing="8">
+	                    <Grid RowDefinitions="Auto,Auto,Auto" RowSpacing="8">
 
-	                        <Grid Row="0" ColumnDefinitions="*,*,*" ColumnSpacing="8">
+                        <!-- Filter profiles -->
+<Grid ColumnDefinitions="*,Auto,Auto,Auto"
+      RowDefinitions="Auto,Auto"
+      ColumnSpacing="8"
+      RowSpacing="6"
+      VerticalOptions="Center">
+
+	<Border Grid.Row="0"
+	        Grid.Column="0"
+	        Stroke="#334155"
+	        StrokeThickness="1"
+	        BackgroundColor="White"
+	        Padding="0"
+	        Margin="0"
+	        VerticalOptions="Center"
+	        HeightRequest="34">
+	    <Grid>
+	        <Picker x:Name="HistoryFilterProfilePicker"
+	                ItemsSource="{Binding FilterProfileNameOptions}"
+	                SelectedItem="{Binding SelectedFilterProfileNameOption}"
+	                Title="Profile"
+	                FontSize="13"
+	                TextColor="Black"
+	                BackgroundColor="Transparent"
+	                VerticalOptions="Center"
+	                Opacity="0.02"
+	                MinimumHeightRequest="34" />
+
+	        <Label InputTransparent="True"
+	               Text="{Binding SelectedFilterProfileNameOption}"
+	               FontSize="13"
+	               TextColor="Black"
+	               VerticalOptions="Center"
+	               Margin="10,0,28,0"
+	               LineBreakMode="TailTruncation" />
+
+	        <Label InputTransparent="True"
+	               Text="▾"
+	               FontSize="12"
+	               TextColor="Black"
+	               VerticalOptions="Center"
+	               HorizontalOptions="End"
+	               Margin="0,0,10,0" />
+	    </Grid>
+	</Border>
+
+    <Button Grid.Row="0"
+            Grid.Column="1"
+            Text="Save"
+            Style="{StaticResource PillButtonStyle}"
+            Clicked="OnSaveProfileClicked" />
+
+    <Button Grid.Row="0"
+            Grid.Column="2"
+            Text="Edit"
+            Style="{StaticResource SecondaryPillButtonStyle}"
+            Clicked="OnEditProfileClicked" />
+
+    <Button Grid.Row="0"
+            Grid.Column="3"
+            Text="Delete"
+            Style="{StaticResource SecondaryPillButtonStyle}"
+            Clicked="OnDeleteProfileClicked" />
+
+    <Entry Grid.Row="1"
+           Grid.Column="0"
+           Grid.ColumnSpan="4"
+           IsVisible="{Binding IsCustomFilterProfileName}"
+           Text="{Binding FilterProfileNameDraft}"
+           Placeholder="New profile name"
+           FontSize="13"
+           TextColor="White"
+           PlaceholderColor="#9ca3af"
+           BackgroundColor="Transparent"
+           VerticalOptions="Center"
+           MinimumHeightRequest="34" />
+</Grid>
+
+
+	                        <Grid Grid.Row="1" ColumnDefinitions="*,*,*" ColumnSpacing="8">
 	                            <VerticalStackLayout Spacing="2">
 	                                <Label Text="Receiver" FontSize="12" TextColor="White" HorizontalTextAlignment="Center" HorizontalOptions="Fill" />
 	                                <Border
@@ -127,7 +206,7 @@
 	                            </VerticalStackLayout>
 	                        </Grid>
 
-                        <Grid Row="1" ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8" VerticalOptions="Center">
+                        <Grid Grid.Row="2" ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8" VerticalOptions="Center">
 
                             <HorizontalStackLayout Grid.Column="0" Spacing="4" VerticalOptions="Center">
                                 <Label
