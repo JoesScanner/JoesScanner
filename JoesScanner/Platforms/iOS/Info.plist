@@ -36,7 +36,5 @@
 	<array>
 		<string>audio</string>
 	</array>
-	<key>CFBundleIdentifier</key>
-	<string>com.joesscanner.joesscanner</string>
 </dict>
 </plist>
