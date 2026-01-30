@@ -12,6 +12,8 @@ namespace JoesScanner.Services
 
         void MarkSeenUpTo(long messageId);
 
+        void MarkAllKnownAsSeen();
+
         void UpdateLastKnown(long messageId);
     }
 }

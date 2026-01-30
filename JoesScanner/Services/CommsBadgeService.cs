@@ -76,6 +76,14 @@ namespace JoesScanner.Services
             RecomputeHasUnread(raiseEvent: true);
         }
 
+        public void MarkAllKnownAsSeen()
+        {
+            if (_lastKnownId <= 0)
+                return;
+
+            MarkSeenUpTo(_lastKnownId);
+        }
+
         public void UpdateLastKnown(long messageId)
         {
             if (messageId <= 0)

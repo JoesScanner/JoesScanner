@@ -10,57 +10,106 @@
     Shell.NavBarIsVisible="False"
     Shell.TabBarIsVisible="False">
 
-    <Grid Padding="5,0,5,5" RowDefinitions="Auto,*" RowSpacing="6">
 
-        <controls:AppTabStrip
-            Grid.Row="0"
-            SelectedTab="{x:Static models:AppTab.Log}" />
+	<Grid Padding="5,0,5,5" RowDefinitions="0,*" RowSpacing="0">
 
-        <Border
+		<Border
             Grid.Row="1"
             StrokeThickness="0"
             BackgroundColor="{AppThemeBinding Light=White, Dark=#020617}"
-            VerticalOptions="FillAndExpand"
-            HorizontalOptions="FillAndExpand"
-            Padding="12">
+			VerticalOptions="FillAndExpand"
+			HorizontalOptions="FillAndExpand">
 
-            <Border.StrokeShape>
-                <RoundRectangle CornerRadius="0,0,24,24" />
-            </Border.StrokeShape>
+			<Border.StrokeShape>
+				<RoundRectangle CornerRadius="10" />
+			</Border.StrokeShape>
 
-            <Grid RowDefinitions="44,*" ColumnDefinitions="*">
+			<Grid Padding="2" RowDefinitions="Auto,*" ColumnDefinitions="*" RowSpacing="8">
 
-                <HorizontalStackLayout
-                    Grid.Row="0"
-                    Spacing="10"
-                    HorizontalOptions="End"
-                    Margin="0,0,0,10">
+				<Border
+					Grid.Row="0"
+					BackgroundColor="#0D0D28"
+					Padding="2,0"
+					VerticalOptions="Center"
+					HorizontalOptions="Fill">
 
-                    <Button
-                        Text="Refresh"
-                        Style="{StaticResource SecondaryPillButtonStyle}"
-                        Clicked="OnRefreshClicked" />
+                    <Border.StrokeShape>
+						<RoundRectangle CornerRadius="10" />
+					</Border.StrokeShape>
 
-                    <Button
-                        Text="Copy"
-                        Style="{StaticResource SecondaryPillButtonStyle}"
-                        Clicked="OnCopyClicked" />
+					<Grid 
+                        Padding="8,6" 
+                        ColumnDefinitions="*" 
+                        RowDefinitions="Auto">
+						<HorizontalStackLayout
+							Grid.Row="0"
+							Spacing="8"
+							HorizontalOptions="Start">
+                            <Label
+                                Text="Log"
+                                FontSize="15"
+                                FontAttributes="Bold"
+                                TextColor="White"
+                                VerticalOptions="Center" />
+                            <Button
+								Text="Load"
+								Style="{StaticResource SecondaryPillButtonStyle}"
+							Clicked="OnLoadClicked" />
+                            <Button
+								x:Name="AutoRefreshButton"
+								Text="Auto-refresh"
+								Style="{StaticResource SecondaryPillButtonStyle}"
+								Clicked="OnAutoRefreshClicked" />
 
-                </HorizontalStackLayout>
+                            <Border
+								Stroke="#334155"
+								StrokeThickness="1"
+								BackgroundColor="White"
+								Padding="0"
+								Margin="0"
+								VerticalOptions="Center"
+								HeightRequest="22"
+								WidthRequest="40">
+                                <Border.StrokeShape>
+                                    <RoundRectangle CornerRadius="6" />
+                                </Border.StrokeShape>
+                                <Border.GestureRecognizers>
+                                    <TapGestureRecognizer Tapped="OnAutoRefreshIntervalTapped" />
+                                </Border.GestureRecognizers>
+                                <Grid>
+                                    <Label
+										x:Name="AutoRefreshIntervalLabel"
+										InputTransparent="True"
+										FontSize="13"
+                                        
+										TextColor="Black"
+										VerticalOptions="Center"
+										HorizontalOptions="Center" />
+                                </Grid>
+                            </Border>
 
-                <Editor
-                    Grid.Row="1"
-                    x:Name="LogEditor"
-                    IsReadOnly="True"
-                    AutoSize="Disabled"
-                    FontFamily="Courier New"
-                    FontSize="12"
-                    TextColor="{AppThemeBinding Light=#111827, Dark=White}"
-                    BackgroundColor="Transparent"
-                    VerticalOptions="FillAndExpand"
-                    HorizontalOptions="FillAndExpand" />
+                            <Button
+								Text="Copy"
+								Style="{StaticResource SecondaryPillButtonStyle}"
+								Clicked="OnCopyClicked" />
+						</HorizontalStackLayout>
+					</Grid>
+				</Border>
 
-            </Grid>
+				<Editor
+					Grid.Row="1"
+					x:Name="LogEditor"
+					IsReadOnly="True"
+					AutoSize="Disabled"
+					FontFamily="Courier New"
+					FontSize="12"
+					TextColor="{AppThemeBinding Light=#111827, Dark=White}"
+					BackgroundColor="Transparent"
+					Margin="2"
+					VerticalOptions="FillAndExpand"
+					HorizontalOptions="FillAndExpand" />
+
+			</Grid>
         </Border>
     </Grid>
 </ContentPage>

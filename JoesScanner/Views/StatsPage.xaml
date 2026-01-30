@@ -10,11 +10,7 @@
     Shell.NavBarIsVisible="False"
     Shell.TabBarIsVisible="False">
 
-    <Grid Padding="5,0,5,5" RowDefinitions="Auto,*" RowSpacing="6">
-
-        <controls:AppTabStrip
-            Grid.Row="0"
-            SelectedTab="{x:Static models:AppTab.Stats}" />
+    <Grid Padding="5,0,5,5" RowDefinitions="0,*" RowSpacing="0">
 
         <Border
             Grid.Row="1"
@@ -22,25 +18,46 @@
             BackgroundColor="{AppThemeBinding Light=White, Dark=#020617}"
             VerticalOptions="FillAndExpand"
             HorizontalOptions="FillAndExpand"
-            Padding="20">
+            Padding="0">
 
             <Border.StrokeShape>
-                <RoundRectangle CornerRadius="0,0,24,24" />
+                <RoundRectangle CornerRadius="10" />
             </Border.StrokeShape>
 
-            <VerticalStackLayout Spacing="10" VerticalOptions="Center" HorizontalOptions="Center">
-                <Label
-                    Text="Stats"
-                    FontSize="24"
-                    FontAttributes="Bold"
-                    TextColor="{AppThemeBinding Light=#111827, Dark=White}"
-                    HorizontalOptions="Center" />
-                <Label
-                    Text="Coming soon."
-                    FontSize="14"
-                    TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
-                    HorizontalOptions="Center" />
-            </VerticalStackLayout>
+            <Grid Padding="2" RowDefinitions="Auto,*" RowSpacing="8">
+
+                <Border
+                    Grid.Row="0"
+                    BackgroundColor="#0D0D28"
+                    Padding="2,0"
+                    VerticalOptions="Center"
+                    HorizontalOptions="Fill">
+
+                    <Border.StrokeShape>
+                        <RoundRectangle CornerRadius="10" />
+                    </Border.StrokeShape>
+
+                    <Grid Padding="8,6" ColumnDefinitions="*">
+                        <Label
+                            Text="Stats"
+                            FontSize="18"
+                            FontAttributes="Bold"
+                            TextColor="White"
+                            HorizontalTextAlignment="Center"
+                            HorizontalOptions="Fill"
+                            VerticalOptions="Center" />
+                    </Grid>
+                </Border>
+
+                <VerticalStackLayout Grid.Row="1" Spacing="10" VerticalOptions="Center" HorizontalOptions="Center">
+                    <Label
+                        Text="Coming soon."
+                        FontSize="14"
+                        TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+                        HorizontalOptions="Center" />
+                </VerticalStackLayout>
+
+            </Grid>
         </Border>
     </Grid>
 </ContentPage>

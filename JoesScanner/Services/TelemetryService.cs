@@ -52,6 +52,10 @@ namespace JoesScanner.Services
             {
                 try
                 {
+                    // Register the app-start session token with the server early so other features
+                    // (like Communications preload) can use the token before monitoring begins.
+                    await SendPingAsync(_settings.AuthSessionToken, "app_start", CancellationToken.None).ConfigureAwait(false);
+
                     await SendAppEventAsync("app_started", null, CancellationToken.None).ConfigureAwait(false);
                     await TryFlushQueueAsync(CancellationToken.None).ConfigureAwait(false);
                 }

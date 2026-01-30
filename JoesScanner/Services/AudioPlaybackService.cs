@@ -17,6 +17,8 @@ using AVFoundation;
 using Foundation;
 #endif
 
+using System.IO;
+
 namespace JoesScanner.Services
 {
     // Cross-platform audio playback wrapper.
@@ -382,7 +384,36 @@ namespace JoesScanner.Services
                     AVAudioSessionCategoryOptions.AllowBluetooth | AVAudioSessionCategoryOptions.AllowBluetoothA2DP);
                 session.SetActive(true);
 
-                var nsUrl = NSUrl.FromString(audioUrl);
+                // When audio is downloaded to a local temp file, iOS needs a file URL.
+                // Passing a raw filesystem path into NSUrl.FromString often fails.
+                NSUrl? nsUrl = null;
+
+                try
+                {
+                    if (Uri.TryCreate(audioUrl, UriKind.Absolute, out var uri))
+                    {
+                        if (uri.IsFile)
+                        {
+                            nsUrl = NSUrl.FromFilename(uri.LocalPath);
+                        }
+                        else
+                        {
+                            nsUrl = NSUrl.FromString(audioUrl);
+                        }
+                    }
+                    else
+                    {
+                        if (File.Exists(audioUrl))
+                            nsUrl = NSUrl.FromFilename(audioUrl);
+                        else
+                            nsUrl = NSUrl.FromString(audioUrl);
+                    }
+                }
+                catch
+                {
+                    nsUrl = NSUrl.FromString(audioUrl);
+                }
+
                 if (nsUrl == null)
                     return;
 
@@ -458,7 +489,10 @@ namespace JoesScanner.Services
 
                 _iosEndObserver = null;
 
-                try { AVAudioSession.SharedInstance().SetActive(false); } catch { }
+                // Do not deactivate the shared AVAudioSession here.
+                // The SystemMediaService owns the lifetime of the playback session while monitoring is running.
+                // Deactivating it on every Stop can cause iOS to suspend background execution,
+                // which makes the call stream appear to stall when audio is toggled off.
             }
 
             return Task.CompletedTask;

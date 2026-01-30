@@ -4,10 +4,8 @@
 <dict>
 	<key>CFBundleName</key>
 	<string>JoesScanner</string>
-
 	<key>CFBundleDisplayName</key>
-	<string>Joe's Scanner</string>
-
+	<string>Joe&apos;s Scanner</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UIDeviceFamily</key>
@@ -34,10 +32,11 @@
 	</array>
 	<key>XSAppIconAssets</key>
 	<string>Assets.xcassets/appicon.appiconset</string>
-
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
 	</array>
+	<key>CFBundleIdentifier</key>
+	<string>com.joesscanner.joesscanner</string>
 </dict>
 </plist>

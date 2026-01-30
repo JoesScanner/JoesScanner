@@ -277,21 +277,29 @@ public partial class AppTabStrip : ContentView
         TabStripHeight = target;
     }
 
-    private async void NavigateTo(string route)
+    private void NavigateTo(string route)
     {
-        if (Shell.Current is null)
+        var tab = route switch
         {
-            return;
-        }
+            "//main" => AppTab.Main,
+            "//history" => AppTab.History,
+            "//archive" => AppTab.Archive,
+            "//stats" => AppTab.Stats,
+            "//communications" => AppTab.Communications,
+            "//log" => AppTab.Log,
+            "//settings" => AppTab.Settings,
+            _ => AppTab.Main
+        };
 
         try
         {
-            await Shell.Current.GoToAsync(route);
+            SelectedTab = tab;
         }
         catch
         {
-            // Intentionally ignore navigation errors.
         }
+
+        TabNavigationService.Instance.Request(tab);
     }
 
     // TapGestureRecognizer handlers (Border + Image approach)

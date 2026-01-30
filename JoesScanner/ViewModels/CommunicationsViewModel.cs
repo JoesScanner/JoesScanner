@@ -63,6 +63,13 @@ namespace JoesScanner.ViewModels
             }
         }
 
+        
+        public void MarkAllKnownAsSeenOnNavigate()
+        {
+            try { _commsBadge.MarkAllKnownAsSeen(); } catch { }
+        }
+
+
         public async Task OnPageOpenedAsync()
         {
             if (_isPolling)
@@ -70,15 +77,30 @@ namespace JoesScanner.ViewModels
 
             _isPolling = true;
 
+            // Entering the page counts as viewing messages. Clear the badge immediately.
+            try { _commsBadge.MarkAllKnownAsSeen(); } catch { }
+
             try { _pollCts?.Cancel(); } catch { }
             _pollCts = new CancellationTokenSource();
 
-            _lastSeq = 0;
-            _lastMessageId = 0;
-            _pollTick = 0;
+            // If messages were preloaded at app start, keep the existing state so we can
+            // begin with an incremental sync instead of forcing a full snapshot.
+            var hasExistingState = Messages.Count > 0 && _lastSeq > 0;
 
-            // Initial snapshot
-            await SyncOnceAsync(forceSnapshot: true, forceShowBusy: true);
+            if (!hasExistingState)
+            {
+                _lastSeq = 0;
+                _lastMessageId = 0;
+                _pollTick = 0;
+
+                // Initial snapshot
+                await SyncOnceAsync(forceSnapshot: true, forceShowBusy: true, markSeen: true);
+            }
+            else
+            {
+                // Quick incremental sync to catch anything since preload.
+                await SyncOnceAsync(forceSnapshot: false, forceShowBusy: false, markSeen: true);
+            }
 
             _ = Task.Run(async () =>
             {
@@ -91,7 +113,7 @@ namespace JoesScanner.ViewModels
                         _pollTick++;
                         var forceSnapshot = (_pollTick % SnapshotEveryPolls) == 0;
 
-                        await SyncOnceAsync(forceSnapshot, forceShowBusy: false);
+                        await SyncOnceAsync(forceSnapshot, forceShowBusy: false, markSeen: true);
                     }
                 }
                 catch
@@ -100,11 +122,70 @@ namespace JoesScanner.ViewModels
             });
         }
 
+                // Called at app start to make sure the communications tab is ready immediately.
+        // This loads a snapshot once but does not start the polling loop and does not mark messages as seen.
+        public async Task PreloadOnAppStartAsync()
+        {
+            if (Messages.Count > 0)
+                return;
+
+            // Best effort preload. The comms endpoint requires a valid server-side session row.
+            // On fresh startup the app may generate a new token before the first telemetry ping/app_event reaches the server.
+            // Retry briefly and suppress transient auth errors.
+            var delaysMs = new[] { 250, 500, 900, 1200, 1500, 2000, 2000, 2000 };
+
+            for (var attempt = 0; attempt < delaysMs.Length; attempt++)
+            {
+                try
+                {
+                    if (_pollCts == null || _pollCts.IsCancellationRequested)
+                        _pollCts = new CancellationTokenSource();
+
+                    _lastSeq = 0;
+                    _lastMessageId = 0;
+                    _pollTick = 0;
+
+                    await SyncOnceAsync(forceSnapshot: true, forceShowBusy: false, markSeen: false, suppressAuthErrors: true);
+                    if (Messages.Count > 0 || StatusText == "No messages yet.")
+                        return;
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(delaysMs[attempt]), CancellationToken.None).ConfigureAwait(false);
+                }
+                catch
+                {
+                }
+            }
+        }
+
         public Task OnPageClosedAsync()
         {
             _isPolling = false;
             try { _pollCts?.Cancel(); } catch { }
             return Task.CompletedTask;
+        }
+
+        private static bool IsAuthNotReadyMessage(string? message)
+        {
+            message = (message ?? string.Empty).Trim();
+            if (message.Length == 0)
+                return true;
+
+            if (message.Contains("Not authenticated", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            if (message.Contains("HTTP 400", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            if (message.Contains("HTTP 403", StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            return false;
         }
 
         private async Task FullRefreshAsync()
@@ -117,16 +198,16 @@ namespace JoesScanner.ViewModels
                 _lastSeq = 0;
                 _lastMessageId = 0;
 
-                MainThread.BeginInvokeOnMainThread(() => Messages.Clear());
+                await MainThread.InvokeOnMainThreadAsync(() => Messages.Clear());
 
-                await SyncOnceAsync(forceSnapshot: true, forceShowBusy: true);
+                await SyncOnceAsync(forceSnapshot: true, forceShowBusy: true, markSeen: true);
             }
             catch
             {
             }
         }
 
-        private async Task SyncOnceAsync(bool forceSnapshot, bool forceShowBusy)
+        private async Task SyncOnceAsync(bool forceSnapshot, bool forceShowBusy, bool markSeen, bool suppressAuthErrors = false)
         {
             if (_pollCts == null)
                 return;
@@ -148,6 +229,9 @@ namespace JoesScanner.ViewModels
 
                 if (!result.Ok)
                 {
+                    if (suppressAuthErrors && IsAuthNotReadyMessage(result.Message))
+                        return;
+
                     StatusText = string.IsNullOrWhiteSpace(result.Message) ? "Unable to load messages." : result.Message;
                     return;
                 }
@@ -160,7 +244,7 @@ namespace JoesScanner.ViewModels
                         .OrderBy(m => m.CreatedAtUtc)
                         .ToList();
 
-                    MainThread.BeginInvokeOnMainThread(() =>
+                    await MainThread.InvokeOnMainThreadAsync(() =>
                     {
                         Messages.Clear();
                         foreach (var m in ordered)
@@ -175,25 +259,34 @@ namespace JoesScanner.ViewModels
                 }
                 else if (result.Changes.Count > 0)
                 {
-                    foreach (var change in result.Changes)
+                    var deletes = result.Changes
+                        .Where(c => string.Equals(c.Type, "delete", StringComparison.OrdinalIgnoreCase))
+                        .Select(c => c.MessageId)
+                        .ToList();
+
+                    var upserts = result.Changes
+                        .Where(c => string.Equals(c.Type, "upsert", StringComparison.OrdinalIgnoreCase) && c.Message != null)
+                        .Select(c => c.Message!)
+                        .ToList();
+
+                    foreach (var msg in upserts)
                     {
-                        if (string.Equals(change.Type, "delete", StringComparison.OrdinalIgnoreCase))
+                        if (msg.Id > _lastMessageId)
+                            _lastMessageId = msg.Id;
+                    }
+
+                    if (deletes.Count > 0 || upserts.Count > 0)
+                    {
+                        await MainThread.InvokeOnMainThreadAsync(() =>
                         {
-                            var id = change.MessageId;
-                            MainThread.BeginInvokeOnMainThread(() =>
+                            foreach (var id in deletes)
                             {
                                 var existing = Messages.FirstOrDefault(x => x.Id == id);
                                 if (existing != null)
                                     Messages.Remove(existing);
-                            });
-                        }
-                        else if (string.Equals(change.Type, "upsert", StringComparison.OrdinalIgnoreCase) && change.Message != null)
-                        {
-                            var msg = change.Message;
-                            if (msg.Id > _lastMessageId)
-                                _lastMessageId = msg.Id;
+                            }
 
-                            MainThread.BeginInvokeOnMainThread(() =>
+                            foreach (var msg in upserts)
                             {
                                 var existingIndex = -1;
                                 for (var i = 0; i < Messages.Count; i++)
@@ -208,7 +301,7 @@ namespace JoesScanner.ViewModels
                                 if (existingIndex >= 0)
                                 {
                                     Messages[existingIndex] = msg;
-                                    return;
+                                    continue;
                                 }
 
                                 // Keep chronological order (oldest at top).
@@ -223,17 +316,18 @@ namespace JoesScanner.ViewModels
                                 }
 
                                 Messages.Insert(insertAt, msg);
-                            });
+                            }
+                        });
 
+                        if (upserts.Count > 0)
                             didAdd = true;
-                        }
                     }
                 }
 
                 _lastSeq = result.NextSeq > _lastSeq ? result.NextSeq : _lastSeq;
 
-                // Viewing the communications page counts as having seen the latest messages.
-                if (_lastMessageId > 0)
+                // Only treat messages as seen when the page is open.
+                if (markSeen && _lastMessageId > 0)
                     _commsBadge.MarkSeenUpTo(_lastMessageId);
 
                 if (Messages.Count == 0)
@@ -244,9 +338,7 @@ namespace JoesScanner.ViewModels
                 if (didAdd)
                     ScrollToBottomRequested?.Invoke();
 
-                // When the communications page is open, treat messages as seen.
-                if (_lastMessageId > 0)
-                    _commsBadge.MarkSeenUpTo(_lastMessageId);
+                // MarkSeenUpTo already handled above.
             }
             catch (OperationCanceledException)
             {

@@ -56,6 +56,7 @@ public static class MauiProgram
         builder.Services.AddTransient<CommunicationsPage>();
         builder.Services.AddTransient<LogPage>();
         builder.Services.AddTransient<SettingsPage>();
+        builder.Services.AddTransient<RootPage>();
 
         return builder.Build();
     }

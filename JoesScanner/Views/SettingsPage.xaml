@@ -13,30 +13,17 @@
     BackgroundColor="{StaticResource TabStripNavy}">
 
     <!-- Scroll so content works on phone and desktop -->
-    <Grid Padding="5,0,5,5" RowDefinitions="Auto,*" RowSpacing="6">
-
-        <controls:AppTabStrip
-        Grid.Row="0"
-        SelectedTab="{x:Static models:AppTab.Settings}" />
+    <Grid Padding="5,0,5,5" RowDefinitions="0,*" RowSpacing="0">
 
         <ScrollView Grid.Row="1">
             <Border
-                        Padding="16"
+                        Padding="2"
                         BackgroundColor="{AppThemeBinding Light=White, Dark=#020617}"
-                        Stroke="#111827"
-                        >
+                        StrokeThickness="0">
 
                 <Border.StrokeShape>
-                    <RoundRectangle CornerRadius="0,0,24,24" />
+                    <RoundRectangle CornerRadius="10" />
                 </Border.StrokeShape>
-
-                <Border.Shadow>
-                    <Shadow
-                                Brush="#000000"
-                                Offset="0,1"
-                                Radius="8"
-                                Opacity="0.10" />
-                </Border.Shadow>
 
                 <!-- Rows:
                              0 = header
@@ -47,16 +34,22 @@
                             RowDefinitions="Auto,Auto,Auto,Auto"
                             ColumnDefinitions="*">
 
-                    <!-- HEADER CARD -->
+                    <!-- HEADER PANEL -->
                     <Border
                                 Grid.Row="0"
-                                Padding="15,0,15,0"
-                                BackgroundColor="{AppThemeBinding Light=#f9fafb, Dark=#020617}"
+                                BackgroundColor="#0D0D28"
+                                Padding="2,0"
                                 StrokeThickness="0"
-                                StrokeShape="RoundRectangle 16"
-                                Margin="0,0,0,10">
+                                Margin="0,0,0,10"
+                                HorizontalOptions="Fill">
 
-                        <VerticalStackLayout 
+                        <Border.StrokeShape>
+                            <RoundRectangle CornerRadius="10" />
+                        </Border.StrokeShape>
+
+                        <Grid Padding="8,6">
+
+                        <VerticalStackLayout
                             Spacing="0"
                             VerticalOptions="Center">
 
@@ -65,23 +58,22 @@
                                 ColumnDefinitions="*,Auto">
 
                                 <!-- Row 0: Title (left) + Version (right) -->
-                                <Label 
+                                <Label
                                     Grid.Row="0"
                                     Grid.Column="0"
                                     Text="Adjust connection, call list behavior, filters and theme"
                                     FontSize="12"
-                                    Opacity="0.8"
-                                    Margin="0,0,0,0"
-                                    LineBreakMode="WordWrap"/>
-                                <Label 
+                                    LineBreakMode="WordWrap"
+                                    TextColor="White" />
+                                <Label
                                     x:Name="AppVersionLabel"
                                     Grid.Row="0"
                                     Grid.Column="1"
                                     Text=""
                                     FontSize="12"
-                                    Opacity="0.8"
                                     VerticalOptions="Center"
-                                    HorizontalOptions="Center"/>
+                                    HorizontalOptions="Center"
+                                    TextColor="White" />
 
                             </Grid>
 
@@ -100,7 +92,7 @@
                                                 Text="Validating server..."
                                                 IsVisible="{Binding ShowServerValidationProgressHeader}"
                                                 FontSize="14"
-                                                TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}"
+                                                TextColor="#cbd5e1"
                                                 HorizontalOptions="FillAndExpand"
                                                 LineBreakMode="WordWrap"
                                                 MaxLines="2" />
@@ -128,6 +120,8 @@
                             </Grid>
 
                         </VerticalStackLayout>
+
+                        </Grid>
                     </Border>
 
                     <!-- CONNECTION CARD -->

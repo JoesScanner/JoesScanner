@@ -13,11 +13,7 @@
     Shell.NavBarIsVisible="False"
     Shell.TabBarIsVisible="False">
 
-    <Grid Padding="5,0,5,5" RowDefinitions="Auto,*" RowSpacing="0">
-
-        <controls:AppTabStrip
-            Grid.Row="0"
-            SelectedTab="{x:Static models:AppTab.Communications}" />
+    <Grid Padding="5,0,5,5" RowDefinitions="0,*" RowSpacing="0">
 
         <Border
             Grid.Row="1"
@@ -27,45 +23,49 @@
             HorizontalOptions="FillAndExpand">
 
             <Border.StrokeShape>
-                <RoundRectangle CornerRadius="0,0,24,24" />
+                <RoundRectangle CornerRadius="10" />
             </Border.StrokeShape>
 
-            <Grid Padding="10" RowDefinitions="Auto,Auto,*" RowSpacing="10">
+            <Grid Padding="2" RowDefinitions="Auto,*" RowSpacing="8">
 
-                <Grid Grid.Row="0" ColumnDefinitions="*,Auto" ColumnSpacing="10">
-                    <Label
-                        Text="Communications"
-                        FontSize="22"
-                        FontAttributes="Bold"
-                        TextColor="{AppThemeBinding Light=#111827, Dark=White}"
-                        VerticalOptions="Center" />
+                <Border
+                    Grid.Row="0"
+                    StrokeThickness="0"
+                    BackgroundColor="#0D0D28"
+                    Padding="2,0"
+                    HorizontalOptions="Fill">
 
-                    <Button
-                        Grid.Column="1"
-                        Text="Refresh"
-                        Command="{Binding RefreshCommand}"
-                        Padding="14,8"
-                        CornerRadius="14"
-                        BackgroundColor="{AppThemeBinding Light=#111827, Dark=#1f2937}"
-                        TextColor="White"
-                        VerticalOptions="Center" />
-                </Grid>
+                    <Border.StrokeShape>
+                        <RoundRectangle CornerRadius="10" />
+                    </Border.StrokeShape>
 
-                <Grid Grid.Row="1" ColumnDefinitions="Auto,*" ColumnSpacing="10" VerticalOptions="Center">
-                    <ActivityIndicator
-                        IsRunning="{Binding IsBusy}"
-                        IsVisible="{Binding IsBusy}"
-                        VerticalOptions="Center" />
-                    <Label
-                        Grid.Column="1"
-                        Text="{Binding StatusText}"
-                        FontSize="13"
-                        TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
-                        LineBreakMode="TailTruncation" />
-                </Grid>
+                    <Grid Padding="8,6" ColumnDefinitions="Auto,*,Auto" ColumnSpacing="10" VerticalOptions="Center">
+                        <Label
+                            Text="Communications"
+                            FontSize="15"
+                            FontAttributes="Bold"
+                            TextColor="White"
+                            VerticalOptions="Center" />
+
+                        <Label
+                            Grid.Column="1"
+                            Text="{Binding StatusText}"
+                            FontSize="13"
+                            TextColor="White"
+                            Opacity="0.85"
+                            LineBreakMode="TailTruncation"
+                            VerticalOptions="Center" />
+
+                        <Button
+                            Grid.Column="2"
+                            Text="Refresh"
+                            Style="{StaticResource SecondaryPillButtonStyle}"
+                            Command="{Binding RefreshCommand}" />
+                    </Grid>
+                </Border>
 
                 <CollectionView
-                    Grid.Row="2"
+                    Grid.Row="1"
                     ItemsSource="{Binding Messages}"
                     SelectionMode="None">
 
@@ -89,7 +89,7 @@
                                     <RoundRectangle CornerRadius="14" />
                                 </Border.StrokeShape>
 
-                                                                <Grid Padding="12" RowDefinitions="Auto,Auto,Auto" RowSpacing="6">
+                                <Grid Padding="12" RowDefinitions="Auto,Auto,Auto" RowSpacing="6">
                                     <Grid RowDefinitions="Auto" ColumnDefinitions="*,Auto" ColumnSpacing="10">
                                         <Label
                                             Text="{Binding AuthorLabel}"
@@ -121,7 +121,8 @@
                                         TextColor="{AppThemeBinding Light=#111827, Dark=White}"
                                         LineBreakMode="WordWrap" />
                                 </Grid>
-                                </Border>
+
+                            </Border>
                         </DataTemplate>
                     </CollectionView.ItemTemplate>
 

@@ -19,6 +19,8 @@ namespace JoesScanner.Views
 
             try
             {
+                // Clear the badge immediately when navigating to the page.
+                _viewModel.MarkAllKnownAsSeenOnNavigate();
                 await _viewModel.OnPageOpenedAsync();
             }
             catch

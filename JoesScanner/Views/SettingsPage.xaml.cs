@@ -75,7 +75,7 @@ private bool _isProfileDropdownOpen;
             {
                 try
                 {
-                    await Shell.Current.GoToAsync("..");
+                    TabNavigationService.Instance.Request(AppTab.Main);
                 }
                 catch
                 {

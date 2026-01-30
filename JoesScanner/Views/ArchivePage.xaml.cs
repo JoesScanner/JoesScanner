@@ -137,7 +137,19 @@ namespace JoesScanner.Views
                 setSelected: item => _viewModel.SelectedTalkgroup = item);
         }
 
-        private async void OnProfileTapped(object sender, TappedEventArgs e)
+        
+
+        private void OnArchiveFilterProfileTapped(object sender, TappedEventArgs e)
+        {
+            try
+            {
+                ArchiveFilterProfilePicker.Focus();
+            }
+            catch
+            {
+            }
+        }
+private async void OnProfileTapped(object sender, TappedEventArgs e)
         {
             try
             {

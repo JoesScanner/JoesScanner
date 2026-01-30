@@ -315,6 +315,36 @@ namespace JoesScanner.Services
             }
         }
 
+        public async Task<string?> TryFetchTranscriptionByIdAsync(string backendId, CancellationToken cancellationToken)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(backendId))
+                    return null;
+
+                var baseUrl = (_settingsService.ServerUrl ?? string.Empty).TrimEnd('/');
+                if (string.IsNullOrWhiteSpace(baseUrl))
+                    return null;
+
+                var callsUrl = baseUrl + "/calljson";
+
+                var row = await FetchCallByIdAsync(callsUrl, backendId.Trim(), cancellationToken);
+                if (row == null)
+                    return null;
+
+                var normalized = NormalizeCallText(row.CallText);
+                return string.IsNullOrWhiteSpace(normalized) ? null : normalized;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
 
         // Builds a CallItem from a calljson row (or a WebSocket "full row" message).
         // Returns null when the row is neither new nor a transcription update from the client's perspective.

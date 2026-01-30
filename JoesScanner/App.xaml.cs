@@ -1,16 +1,19 @@
 using JoesScanner.Services;
+using JoesScanner.ViewModels;
 
 namespace JoesScanner
 {
     public partial class App : Application
     {
+        private readonly IServiceProvider _services;
         private readonly ISettingsService _settings;
         private readonly ITelemetryService _telemetryService;
         private readonly ISubscriptionService _subscriptionService;
         private readonly ICommsBadgeService _commsBadgeService;
 
-        public App(ISettingsService settings, ITelemetryService telemetryService, ISubscriptionService subscriptionService, ICommsBadgeService commsBadgeService)
+        public App(IServiceProvider services, ISettingsService settings, ITelemetryService telemetryService, ISubscriptionService subscriptionService, ICommsBadgeService commsBadgeService)
         {
+            _services = services ?? throw new ArgumentNullException(nameof(services));
             _settings = settings ?? throw new ArgumentNullException(nameof(settings));
             _telemetryService = telemetryService ?? throw new ArgumentNullException(nameof(telemetryService));
             _subscriptionService = subscriptionService ?? throw new ArgumentNullException(nameof(subscriptionService));
@@ -35,6 +38,9 @@ namespace JoesScanner
             // Start the communications badge poller so the tab can show unread state.
             // The poller is best effort and will no-op until credentials are configured and the session is associated.
             try { _commsBadgeService.Start(); } catch { }
+
+            // Preload communications once per app start so the messages page is ready immediately.
+            BeginStartupCommsPreload();
 
             AppDomain.CurrentDomain.ProcessExit += (_, _) =>
             {
@@ -76,9 +82,29 @@ namespace JoesScanner
             });
         }
 
+        private void BeginStartupCommsPreload()
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var vm = _services.GetService(typeof(CommunicationsViewModel)) as CommunicationsViewModel;
+                    if (vm == null)
+                        return;
+
+                    await Task.Delay(TimeSpan.FromMilliseconds(1200)).ConfigureAwait(false);
+
+                    await vm.PreloadOnAppStartAsync().ConfigureAwait(false);
+                }
+                catch
+                {
+                }
+            });
+        }
+
         protected override Window CreateWindow(IActivationState? activationState)
         {
-            var window = new Window(new AppShell());
+            var window = new Window(new AppShell(_services));
 
 #if WINDOWS
             const double defaultWidth = 430;

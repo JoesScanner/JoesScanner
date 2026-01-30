@@ -401,5 +401,17 @@ private async void OnEditProfileClicked(object sender, EventArgs e)
                 _isDropdownOpen = false;
             }
         }
+
+        void OnHistoryFilterProfileTapped(object sender, TappedEventArgs e)
+        {
+            try
+            {
+                HistoryFilterProfilePicker.Focus();
+            }
+            catch
+            {
+            }
+        }
+
     }
 }

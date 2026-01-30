@@ -16,12 +16,8 @@
     <!-- Root grid fills the window -->
     <Grid
         Padding="5,0,5,5"
-        RowDefinitions="Auto,*"
+        RowDefinitions="0,*"
         RowSpacing="0">
-
-        <controls:AppTabStrip
-            Grid.Row="0"
-            SelectedTab="{x:Static models:AppTab.Main}" />
 
         <!-- Outer card that fills the available area -->
         <Border
@@ -39,27 +35,26 @@
             <Grid
                 RowDefinitions="Auto,*,Auto"
                 ColumnDefinitions="*"
-                ColumnSpacing="0">
+                ColumnSpacing="0"
+                Padding="2">
 
                 <!-- HEADER PANEL: single merged box (buttons + indicators) -->
                 <Border
                     Grid.Row="0"
-                    HeightRequest="50"
-                    StrokeThickness="1"
-                    Stroke="#0D0D28"
+                    
                     BackgroundColor="#0D0D28"
                     Padding="2,0"
                     VerticalOptions="Center"
-                    HorizontalOptions="Center">
+                    HorizontalOptions="Fill">
 
                     <Border.StrokeShape>
                         <RoundRectangle CornerRadius="10" />
                     </Border.StrokeShape>
 
                     <Grid
-                        ColumnDefinitions="Auto,80"
-                        ColumnSpacing="0"
-                        Padding="2"
+                        ColumnDefinitions="Auto,Auto"
+                        
+                        Padding="03"
                         VerticalOptions="Center"
                         HorizontalOptions="Center">
 
@@ -67,9 +62,10 @@
                         <ScrollView
                             Grid.Column="0"
                             Orientation="Horizontal"
+                             HorizontalOptions="Fill"
                             HorizontalScrollBarVisibility="Never"
                             VerticalScrollBarVisibility="Never"
-                            Padding="0"
+                            Padding="0,0,3,0"
                             Margin="0">
 
                             <HorizontalStackLayout
@@ -172,7 +168,7 @@
                             VerticalOptions="Start">
 
                             <Border
-                                WidthRequest="60"
+                                WidthRequest="50"
                                 HeightRequest="8"
                                 Margin="0,3,0,0"
                                 BackgroundColor="{Binding ConnectionStatusColor}"
@@ -198,7 +194,7 @@
                             <Label
                                 Grid.Row="2"
                                 IsVisible="{Binding IsCallsWaitingVisible}"
-                                Text="{Binding CallsWaiting, StringFormat='Calls waiting: {0}'}"
+                                Text="{Binding CallsWaiting, StringFormat='Waiting: {0}'}"
                                 FontSize="9"
                                 FontAutoScalingEnabled="False"
                                 LineBreakMode="NoWrap"

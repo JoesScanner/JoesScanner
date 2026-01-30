@@ -13,39 +13,40 @@
     Shell.NavBarIsVisible="False"
     Shell.TabBarIsVisible="False">
 
-    <Grid Padding="5,0,5,5" RowDefinitions="Auto,*" RowSpacing="0">
-
-        <controls:AppTabStrip
-            Grid.Row="0"
-            SelectedTab="{x:Static models:AppTab.Archive}" />
+    <Grid 
+        Padding="5,0,5,5" 
+        RowDefinitions="0,*" 
+        RowSpacing="0">
 
         <Border
             Grid.Row="1"
             StrokeThickness="0"
             BackgroundColor="{AppThemeBinding Light=White, Dark=#020617}"
-            VerticalOptions="FillAndExpand"
-            HorizontalOptions="FillAndExpand">
+            VerticalOptions="Fill"
+            HorizontalOptions="Fill">
 
             <Border.StrokeShape>
-                <RoundRectangle CornerRadius="0,0,24,24" />
+                <RoundRectangle CornerRadius="10" />
             </Border.StrokeShape>
 
-            <Grid Padding="8" RowDefinitions="Auto,Auto,Auto,*" RowSpacing="6">
+            <Grid 
+                Padding="2" 
+                RowDefinitions="Auto,Auto,Auto,*" 
+                RowSpacing="8">
 
                 <!-- Filters -->
                 <Border
                     Grid.Row="0"
-                    StrokeThickness="1"
-                    Stroke="#1f2937"
-                    BackgroundColor="{StaticResource TabStripNavy}"
-                    Padding="8"
+                    StrokeThickness="0"
+                    BackgroundColor="#0D0D28"
+                    Padding="2,0"
                     HorizontalOptions="Fill">
 
                     <Border.StrokeShape>
-                        <RoundRectangle CornerRadius="16" />
+                        <RoundRectangle CornerRadius="10" />
                     </Border.StrokeShape>
 
-	                    <Grid RowDefinitions="Auto,Auto,Auto" RowSpacing="8">
+	                    <Grid Padding="8,6" RowDefinitions="Auto,Auto,Auto" RowSpacing="8">
 
                         <!-- Filter profiles -->
 <Grid ColumnDefinitions="*,Auto,Auto,Auto"
@@ -64,8 +65,11 @@
 	        VerticalOptions="Center"
 	        HeightRequest="34">
 	    <Border.StrokeShape>
-	        <RoundRectangle CornerRadius="8" />
+	        <RoundRectangle CornerRadius="12" />
 	    </Border.StrokeShape>
+	    <Border.GestureRecognizers>
+	        <TapGestureRecognizer Tapped="OnArchiveFilterProfileTapped" />
+	    </Border.GestureRecognizers>
 	    <Grid>
 	        <Picker x:Name="ArchiveFilterProfilePicker"
 	                ItemsSource="{Binding FilterProfileNameOptions}"
@@ -120,7 +124,7 @@
            Text="{Binding FilterProfileNameDraft}"
            Placeholder="New profile name"
            FontSize="13"
-	               TextColor="Black"
+	               TextColor="White"
            PlaceholderColor="#9ca3af"
            BackgroundColor="Transparent"
            VerticalOptions="Center"

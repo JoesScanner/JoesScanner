@@ -23,7 +23,9 @@ namespace JoesScanner.ViewModels
         private CancellationTokenSource? _cts;
         private CancellationTokenSource? _audioCts;
 
-        // When true, the live queue continues to run but audio output is suppressed.
+        
+        private int _audioToggleSerial;
+// When true, the live queue continues to run but audio output is suppressed.
         // This is used when the user navigates to the History tab.
         private volatile bool _isMainAudioSoftMuted;
 
@@ -374,22 +376,76 @@ namespace JoesScanner.ViewModels
                 OnPropertyChanged(nameof(AudioButtonBackground));
                 OnPropertyChanged(nameof(IsSpeedButtonsEnabled));
 
-                UpdateQueueDerivedState();
+                // AutoPlay is tied to AudioEnabled.
+                AutoPlay = value;
 
                 Preferences.Set("AudioEnabled", value);
 
-                try
+                // Refresh UI state immediately, then do any heavier work on the UI thread.
+                UpdateQueueDerivedState();
+
+                var serial = global::System.Threading.Interlocked.Increment(ref _audioToggleSerial);
+
+                MainThread.BeginInvokeOnMainThread(async () =>
                 {
-                    if (IsRunning && _currentPlayingCall == null)
+                    if (serial != _audioToggleSerial)
+                        return;
+
+                    if (!_audioEnabled)
                     {
-                        _systemMediaService.UpdateNowPlaying("Connected", "Joes Scanner", _audioEnabled);
+                        try
+                        {
+                            await StopAudioFromToggleAsync();
+                        }
+                        catch
+                        {
+                        }
+
+                        // When audio is off, keep the queue at live and do not hold calls in pending.
+                        _currentPlayingCall = null;
+                        // If the user was behind live, make any pending calls visible as transcription-only rows.
+                        // This preserves what "Calls waiting" was indicating and prevents silent drops.
+                        DrainPendingCallsToVisible();
+
+                        _lastPlayedCall = Calls.Count > 0 ? Calls[0] : null;
+
+                        UpdateQueueDerivedState();
+
+                        try
+                        {
+                            if (IsRunning && _currentPlayingCall == null)
+                                _systemMediaService.UpdateNowPlaying("Connected", "Joes Scanner", _audioEnabled);
+                        }
+                        catch
+                        {
+                        }
+
+                        return;
                     }
-                }
-                catch
-                {
-                }
+
+                    // Audio toggled on: ensure anchor is sane and restart playback if needed.
+                    if (_lastPlayedCall == null && Calls.Count > 0)
+                        _lastPlayedCall = Calls[0];
+
+                    UpdateQueueDerivedState();
+
+                    try
+                    {
+                        if (IsRunning && _currentPlayingCall == null)
+                            _systemMediaService.UpdateNowPlaying("Connected", "Joes Scanner", _audioEnabled);
+                    }
+                    catch
+                    {
+                    }
+
+                    if (IsRunning && _audioEnabled && AutoPlay)
+                    {
+                        _ = EnsureQueuePlaybackAsync();
+                    }
+                });
             }
         }
+
 
         // Text shown on the main page audio button.
         public string AudioButtonText => AudioEnabled ? "Audio On" : "Audio Off";
@@ -804,6 +860,28 @@ namespace JoesScanner.ViewModels
             }
         }
 
+        private void DrainPendingCallsToVisible()
+        {
+            List<CallItem> pending;
+
+            lock (_pendingCallsLock)
+            {
+                if (_pendingCalls.Count == 0)
+                    return;
+
+                pending = new List<CallItem>(_pendingCalls);
+                _pendingCalls.Clear();
+            }
+
+            // _pendingCalls newest is at index 0. Insert oldest first so ordering remains newest at index 0.
+            for (var i = pending.Count - 1; i >= 0; i--)
+            {
+                Calls.Insert(0, pending[i]);
+            }
+
+            EnforceMaxCalls();
+        }
+
         private void EnqueuePendingCall(CallItem call)
         {
             if (call == null)
@@ -846,6 +924,10 @@ namespace JoesScanner.ViewModels
         private bool ShouldHoldIncomingCalls()
         {
             if (!IsRunning)
+                return false;
+
+            // If audio is off, we are not stabilizing playback, so do not hold calls in pending.
+            if (!AudioEnabled)
                 return false;
 
             var anchor = _currentPlayingCall ?? _lastPlayedCall;
@@ -2241,6 +2323,93 @@ namespace JoesScanner.ViewModels
                 return;
 
             await StartMonitoringAsync();
+        }
+
+        public async Task RefreshStaleTranscriptionsAsync(int maxToRefresh = 20)
+        {
+            try
+            {
+                // Snapshot candidates on the UI thread so we do not enumerate the bound collection off-thread.
+                var candidates = await MainThread.InvokeOnMainThreadAsync(() =>
+                {
+                    if (Calls == null || Calls.Count == 0)
+                        return new List<CallItem>();
+
+                    bool NeedsRefresh(CallItem c)
+                    {
+                        if (c == null)
+                            return false;
+
+                        if (string.IsNullOrWhiteSpace(c.BackendId))
+                            return false;
+
+                        if (string.IsNullOrWhiteSpace(c.Transcription))
+                            return true;
+
+                        var t = c.Transcription.Trim();
+                        return t.Contains("No transcription", StringComparison.OrdinalIgnoreCase);
+                    }
+
+                    return Calls.Where(NeedsRefresh).Take(maxToRefresh).ToList();
+                });
+
+                if (candidates.Count == 0)
+                    return;
+
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+
+                foreach (var item in candidates)
+                {
+                    if (string.IsNullOrWhiteSpace(item.BackendId))
+                        continue;
+
+                    string? refreshed;
+                    try
+                    {
+                        refreshed = await _callStreamService.TryFetchTranscriptionByIdAsync(item.BackendId, cts.Token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        break;
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    if (string.IsNullOrWhiteSpace(refreshed))
+                        continue;
+
+                    await MainThread.InvokeOnMainThreadAsync(() =>
+                    {
+                        try
+                        {
+                            if (!string.Equals(item.Transcription, refreshed, StringComparison.Ordinal))
+                            {
+                                item.Transcription = refreshed;
+
+                                if (!string.IsNullOrWhiteSpace(item.DebugInfo))
+                                {
+                                    var cleaned = item.DebugInfo
+                                        .Replace("No transcription from server", string.Empty, StringComparison.OrdinalIgnoreCase)
+                                        .Trim();
+
+                                    cleaned = cleaned.Trim(' ', '|', ';');
+                                    item.DebugInfo = cleaned;
+                                }
+
+                                LastQueueEvent = $"Transcription catch-up at {DateTime.Now:T}";
+                            }
+                        }
+                        catch
+                        {
+                        }
+                    });
+                }
+            }
+            catch
+            {
+            }
         }
 
         private async Task ToggleConnectionAsync()
