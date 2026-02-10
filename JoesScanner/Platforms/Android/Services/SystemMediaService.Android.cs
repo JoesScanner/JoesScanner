@@ -80,14 +80,14 @@ namespace JoesScanner.Services
             return Task.CompletedTask;
         }
 
-        private partial void PlatformUpdateNowPlaying(string title, string subtitle, bool audioEnabled)
+        private partial void PlatformUpdateNowPlaying(NowPlayingMetadata metadata, bool audioEnabled)
         {
             try
             {
                 var ctx = Platform.CurrentActivity ?? Platform.AppContext;
                 if (ctx != null)
                 {
-                    AndroidMediaCenter.UpdateNowPlaying(ctx, title, subtitle);
+                    AndroidMediaCenter.UpdateNowPlaying(ctx, metadata);
 
                     // For your app semantics:
                     // If audio is enabled, treat as "playing"; otherwise treat as "stopped" but still connected.

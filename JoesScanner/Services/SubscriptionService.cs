@@ -53,6 +53,11 @@ namespace JoesScanner.Services
                 return new SubscriptionCheckResult(true, null, "Auth disabled");
             }
 
+            // Persist the last authenticated username so other services can
+            // reliably know which account is in use, even when scanner calls use
+            // a separate service credential.
+            _settings.LastAuthUsername = basicUser;
+
             var appVersion = AppInfo.Current.VersionString ?? string.Empty;
             var appBuild = AppInfo.Current.BuildString ?? string.Empty;
 

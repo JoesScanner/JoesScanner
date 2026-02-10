@@ -38,7 +38,7 @@ public static class MauiProgram
         builder.Services.AddSingleton<IFilterProfileStore, LocalFilterProfileStore>();
 
         // Local Settings filter profile storage (device only).
-        builder.Services.AddSingleton<ISettingsFilterProfileStore, LocalSettingsFilterProfileStore>();
+        // Unified profiles are provided by IFilterProfileStore (shared across History, Archive, Settings)
 
         // View models
         builder.Services.AddSingleton<MainViewModel>();

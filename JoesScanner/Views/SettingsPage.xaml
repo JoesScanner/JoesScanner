@@ -11,8 +11,7 @@
     Shell.NavBarIsVisible="False"
     Shell.TabBarIsVisible="False"
     BackgroundColor="{StaticResource TabStripNavy}">
-
-    <!-- Scroll so content works on phone and desktop -->
+<!-- Scroll so content works on phone and desktop -->
     <Grid Padding="5,0,5,5" RowDefinitions="0,*" RowSpacing="0">
 
         <ScrollView Grid.Row="1">
@@ -28,10 +27,12 @@
                 <!-- Rows:
                              0 = header
                              1 = connection
-                             2 = filters
-                             3 = theme -->
+                             2 = auto connect (Windows)
+                             3 = filters
+                             4 = bluetooth labels
+                             5 = theme -->
                 <Grid
-                            RowDefinitions="Auto,Auto,Auto,Auto"
+                            RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto"
                             ColumnDefinitions="*">
 
                     <!-- HEADER PANEL -->
@@ -60,8 +61,7 @@
                                 <!-- Row 0: Title (left) + Version (right) -->
                                 <Label
                                     Grid.Row="0"
-                                    Grid.Column="0"
-                                    Text="Adjust connection, call list behavior, filters and theme"
+                                                                        Text="Adjust connection, call list behavior, filters and theme"
                                     FontSize="12"
                                     LineBreakMode="WordWrap"
                                     TextColor="White" />
@@ -142,8 +142,7 @@
                             <!-- Row 0: Title left -->
                             <Label
             Grid.Row="0"
-            Grid.Column="0"
-            Text="Connection"
+                        Text="Connection"
             FontAttributes="Bold"
             FontSize="16"
             HorizontalOptions="Start"
@@ -165,8 +164,7 @@
                             <!-- Row 1: Description spans both columns -->
                             <Label
             Grid.Row="1"
-            Grid.Column="0"
-            Grid.ColumnSpan="2"
+                        Grid.ColumnSpan="2"
             Margin="0,0,0,4"
             Text="Choose which server the app connects to. Not all servers require user/pass."
             FontSize="12"
@@ -177,9 +175,8 @@
                             <!-- Row 2: Fields -->
                             <Grid
             Grid.Row="2"
-            Grid.Column="0"
-            Grid.ColumnSpan="2"
-            RowDefinitions="Auto,Auto"
+                        Grid.ColumnSpan="2"
+            RowDefinitions="Auto,Auto,Auto"
             ColumnDefinitions="*"
             RowSpacing="8">
 
@@ -191,8 +188,7 @@
                 VerticalOptions="Center">
 
                                     <Label
-                    Grid.Column="0"
-                    Text="Server"
+                                        Text="Server"
                     FontSize="12"
                     VerticalOptions="Center" />
 
@@ -201,7 +197,6 @@
                     Text="{Binding ServerUrl}"
                     Placeholder="https://app.joesscanner.com"
                     FontSize="12"
-                    HeightRequest="28"
                     VerticalOptions="Center" />
 
                                     <HorizontalStackLayout
@@ -239,8 +234,7 @@
                 ColumnSpacing="6">
 
                                     <Label
-                    Grid.Column="0"
-                    Text="User"
+                                        Text="User"
                     FontSize="12"
                     VerticalOptions="Center"
                     TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
@@ -282,11 +276,65 @@
                     </Border>
 
 
-                    <!-- CALL QUEUE CARD -->
+                    <!-- AUTO CONNECT OPTIONS (WINDOWS ONLY) -->
+                    <Border
+                                    Grid.Row="2"
+                                    Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
+                                    StrokeThickness="1"
+                                    Padding="12"
+                                    Margin="0,0,0,12"
+                                    BackgroundColor="{AppThemeBinding Light=#ffffff, Dark=#111827}"
+                                    StrokeShape="RoundRectangle 8"
+                                    IsVisible="{OnPlatform WinUI=True, Default=False}">
+
+                        <VerticalStackLayout Spacing="10">
+                            <Label
+                                            Text="Auto Connect options"
+                                            FontSize="16"
+                                            FontAttributes="Bold"
+                                            TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+
+                            <Label
+                                            Text="Choose what happens automatically on Windows."
+                                            FontSize="12"
+                                            Opacity="0.8"
+                                            TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
+
+                            <Grid
+                                            RowDefinitions="Auto,Auto"
+                                            ColumnDefinitions="*,Auto"
+                                            RowSpacing="10"
+                                            ColumnSpacing="12">
+
+                                <Label
+                                                Grid.Row="0"
+                                                Text="Auto start playback when app started"
+                                                FontSize="12"
+                                                VerticalOptions="Center" />
+
+                                <Switch
+                                                Grid.Row="0"
+                                                Grid.Column="1"
+                                                IsToggled="{Binding WindowsAutoConnectOnStart}" />
+
+                                <Label
+                                                Grid.Row="1"
+                                                Text="Automatically start when Windows loads"
+                                                FontSize="12"
+                                                VerticalOptions="Center" />
+
+                                <Switch
+                                                Grid.Row="1"
+                                                Grid.Column="1"
+                                                IsToggled="{Binding WindowsStartWithWindows}" />
+                            </Grid>
+
+                        </VerticalStackLayout>
+                    </Border>
 
                     <!-- FILTERS CARD -->
                     <Border
-                                    Grid.Row="2"
+                                    Grid.Row="3"
                                     Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
                                     StrokeThickness="1"
                                     Padding="12"
@@ -309,97 +357,18 @@
                                             Opacity="0.8"
                                             TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
 
-                            <!-- Filter profiles -->
-<Grid ColumnDefinitions="*,Auto,Auto,Auto"
-      RowDefinitions="Auto,Auto"
-      ColumnSpacing="8"
-      RowSpacing="6"
-      VerticalOptions="Center">
+                            
 
-	<Border Grid.Row="0"
-	        Grid.Column="0"
-	        Stroke="#334155"
-	        StrokeThickness="1"
-	        BackgroundColor="White"
-	        Padding="0"
-	        Margin="0"
-	        VerticalOptions="Center"
-	        HeightRequest="34">
-	    <Border.StrokeShape>
-	        <RoundRectangle CornerRadius="6" />
-	    </Border.StrokeShape>
-	    <Grid>
-	        <Picker x:Name="SettingsFilterProfilePicker"
-	                ItemsSource="{Binding SettingsFilterProfileNameOptions}"
-	                SelectedItem="{Binding SelectedSettingsFilterProfileNameOption}"
-	                Title="Profile"
-	                FontSize="13"
-	                BackgroundColor="Transparent"
-	                VerticalOptions="Center"
-	                Opacity="0.02"
-	                MinimumHeightRequest="34" />
+                            
 
-	        <Label InputTransparent="True"
-	               Text="{Binding SelectedSettingsFilterProfileNameOption}"
-	               FontSize="13"
-	               TextColor="Black"
-	               VerticalOptions="Center"
-	               Margin="10,0,26,0"
-	               LineBreakMode="TailTruncation" />
-
-	        <Label InputTransparent="True"
-	               Text="▾"
-	               FontSize="12"
-	               TextColor="Black"
-	               VerticalOptions="Center"
-	               HorizontalOptions="End"
-	               Margin="0,0,10,0" />
-	    </Grid>
-	</Border>
-
-    <Button Grid.Row="0"
-            Grid.Column="1"
-            Text="Save"
-            Style="{StaticResource PillButtonStyle}"
-            Clicked="OnSaveSettingsProfileClicked" />
-
-    <Button Grid.Row="0"
-            Grid.Column="2"
-            Text="Edit"
-            Style="{StaticResource SecondaryPillButtonStyle}"
-            Clicked="OnEditSettingsProfileClicked" />
-
-    <Button Grid.Row="0"
-            Grid.Column="3"
-            Text="Delete"
-            Style="{StaticResource SecondaryPillButtonStyle}"
-            Clicked="OnDeleteSettingsProfileClicked" />
-
-    <Entry Grid.Row="1"
-           Grid.Column="0"
-           Grid.ColumnSpan="4"
-           IsVisible="{Binding IsCustomSettingsFilterProfileName}"
-           Text="{Binding SettingsFilterProfileNameDraft}"
-           Placeholder="New profile name"
-           FontSize="13"
-           TextColor="White"
-           PlaceholderColor="#9ca3af"
-           BackgroundColor="Transparent"
-           VerticalOptions="Center"
-           MinimumHeightRequest="34" />
-</Grid>
-
-
-
-                            <!-- Table header row -->
+<!-- Table header row -->
                             <Grid
                                             ColumnDefinitions="*,50,50,60"
                                             RowDefinitions="Auto"
                                             Padding="5,4,5,2">
 
                                 <Label
-                                                Grid.Column="0"
-                                                Text="Receiver > Site > Talkgroup"
+                                                                                                Text="Receiver > Site > Talkgroup"
                                                 FontSize="11"
                                                 FontAttributes="Bold"
                                                 VerticalOptions="Center" />
@@ -453,8 +422,7 @@
 
                                             <!-- Display key -->
                                             <Label
-                                                            Grid.Column="0"
-                                                            Text="{Binding DisplayKey}"
+                                                                                                                        Text="{Binding DisplayKey}"
                                                             FontSize="11"
                                                             LineBreakMode="TailTruncation"
                                                             MaxLines="1"
@@ -607,9 +575,86 @@
                         </VerticalStackLayout>
                     </Border>
 
+                    <!-- BLUETOOTH LABELS CARD -->
+                    <Border
+                                    Grid.Row="4"
+                                    Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
+                                    StrokeThickness="1"
+                                    Padding="10"
+                                    BackgroundColor="{AppThemeBinding Light=#ffffff, Dark=#111827}"
+                                    StrokeShape="RoundRectangle 8"
+                                    Margin="0,0,0,10">
+
+                        <VerticalStackLayout Spacing="6">
+                            <Label
+                                            Text="Bluetooth labels"
+                                            FontSize="16"
+                                            FontAttributes="Bold"
+                                            TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+
+                            <Label
+                                            Text="Choose which call fields show up on your Bluetooth device. Not all devices display all fields."
+                                            FontSize="12"
+                                            Margin="0,0,0,2"
+                                            Opacity="0.8"
+                                            TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
+
+                            <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto"
+                                  ColumnDefinitions="Auto,*"
+                                  RowSpacing="4"
+                                  ColumnSpacing="10">
+
+                                <Label Grid.Row="0" Text="Artist" FontSize="12" VerticalOptions="Center" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                                <Picker Grid.Row="0" Grid.Column="1"
+                                        ItemsSource="{Binding BluetoothLabelOptions}"
+                                        SelectedItem="{Binding BluetoothLabelArtistOption}"
+                                        ItemDisplayBinding="{Binding Label}"
+                                        FontSize="13"
+                                        HorizontalOptions="FillAndExpand"
+                                        VerticalOptions="Center" />
+
+                                <Label Grid.Row="1" Text="Title" FontSize="12" VerticalOptions="Center" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                                <Picker Grid.Row="1" Grid.Column="1"
+                                        ItemsSource="{Binding BluetoothLabelOptions}"
+                                        SelectedItem="{Binding BluetoothLabelTitleOption}"
+                                        ItemDisplayBinding="{Binding Label}"
+                                        FontSize="13"
+                                        HorizontalOptions="FillAndExpand"
+                                        VerticalOptions="Center" />
+
+                                <Label Grid.Row="2" Text="Album" FontSize="12" VerticalOptions="Center" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                                <Picker Grid.Row="2" Grid.Column="1"
+                                        ItemsSource="{Binding BluetoothLabelOptions}"
+                                        SelectedItem="{Binding BluetoothLabelAlbumOption}"
+                                        ItemDisplayBinding="{Binding Label}"
+                                        FontSize="13"
+                                        HorizontalOptions="FillAndExpand"
+                                        VerticalOptions="Center" />
+
+                                <Label Grid.Row="3" Text="Composer" FontSize="12" VerticalOptions="Center" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                                <Picker Grid.Row="3" Grid.Column="1"
+                                        ItemsSource="{Binding BluetoothLabelOptions}"
+                                        SelectedItem="{Binding BluetoothLabelComposerOption}"
+                                        ItemDisplayBinding="{Binding Label}"
+                                        FontSize="13"
+                                        HorizontalOptions="FillAndExpand"
+                                        VerticalOptions="Center" />
+
+                                <Label Grid.Row="4" Text="Genre" FontSize="12" VerticalOptions="Center" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                                <Picker Grid.Row="4" Grid.Column="1"
+                                        ItemsSource="{Binding BluetoothLabelOptions}"
+                                        SelectedItem="{Binding BluetoothLabelGenreOption}"
+                                        ItemDisplayBinding="{Binding Label}"
+                                        FontSize="13"
+                                        HorizontalOptions="FillAndExpand"
+                                        VerticalOptions="Center" />
+                            </Grid>
+                        </VerticalStackLayout>
+                    </Border>
+
                     <!-- THEME CARD -->
                     <Border
-                                    Grid.Row="3"
+                                    Grid.Row="5"
                                     Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
                                     StrokeThickness="1"
                                     Padding="12"

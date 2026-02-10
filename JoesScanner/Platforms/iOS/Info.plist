@@ -13,13 +13,10 @@
 		<integer>1</integer>
 		<integer>2</integer>
 	</array>
-	<key>UIRequiredDeviceCapabilities</key>
-	<array>
-		<string>arm64</string>
-	</array>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
@@ -36,5 +33,7 @@
 	<array>
 		<string>audio</string>
 	</array>
+	<key>CFBundleIdentifier</key>
+	<string></string>
 </dict>
 </plist>

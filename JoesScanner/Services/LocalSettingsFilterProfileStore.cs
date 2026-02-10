@@ -1,219 +1,270 @@
 using JoesScanner.Models;
-using System.Text.Json;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace JoesScanner.Services
 {
-    // Local device storage for Settings filter profiles.
-    // File format is versioned and ready to be exported to a server later.
+    // Uses SharedFilterProfilesStore so the same profile list is available on Settings, History, and Archive.
     public sealed class LocalSettingsFilterProfileStore : ISettingsFilterProfileStore
     {
-        private const string FileName = "filter_profiles_settings.json";
-
         private readonly Lock _gate = new();
-        private readonly JsonSerializerOptions _jsonOptions;
-
-        public LocalSettingsFilterProfileStore()
-        {
-            _jsonOptions = new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                PropertyNameCaseInsensitive = true
-            };
-        }
 
         public Task<IReadOnlyList<SettingsFilterProfile>> GetProfilesAsync(CancellationToken cancellationToken = default)
         {
-            var env = LoadEnvelope();
-            var list = env.Profiles
-                .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
-                .ToList();
+            cancellationToken.ThrowIfCancellationRequested();
 
-            return Task.FromResult<IReadOnlyList<SettingsFilterProfile>>(list);
+            lock (_gate)
+            {
+                var shared = SharedFilterProfilesStore.LoadOrCreateMigrated();
+
+                var list = shared.Profiles
+                    .Select(p => new SettingsFilterProfile
+                    {
+                        Id = p.Id,
+                        Name = p.Name,
+                        UpdatedUtc = p.UpdatedUtc,
+                        Rules = p.SettingsRules ?? new List<FilterRuleStateRecord>()
+                    })
+                    .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                return Task.FromResult<IReadOnlyList<SettingsFilterProfile>>(list);
+            }
         }
 
         public Task<SettingsFilterProfile?> GetProfileAsync(string profileId, CancellationToken cancellationToken = default)
         {
-            if (string.IsNullOrWhiteSpace(profileId))
-                return Task.FromResult<SettingsFilterProfile?>(null);
+            cancellationToken.ThrowIfCancellationRequested();
 
-            var env = LoadEnvelope();
-            var p = env.Profiles.FirstOrDefault(x => string.Equals(x.Id, profileId, StringComparison.Ordinal));
-            return Task.FromResult(p);
+            lock (_gate)
+            {
+                var shared = SharedFilterProfilesStore.LoadOrCreateMigrated();
+                var rec = shared.Profiles.FirstOrDefault(p => string.Equals(p.Id, profileId, StringComparison.OrdinalIgnoreCase));
+                if (rec is null)
+                    return Task.FromResult<SettingsFilterProfile?>(null);
+
+                return Task.FromResult<SettingsFilterProfile?>(new SettingsFilterProfile
+                {
+                    Id = rec.Id,
+                    Name = rec.Name,
+                    UpdatedUtc = rec.UpdatedUtc,
+                    Rules = rec.SettingsRules ?? new List<FilterRuleStateRecord>()
+                });
+            }
         }
 
         public Task SaveOrUpdateAsync(SettingsFilterProfile profile, CancellationToken cancellationToken = default)
         {
-            if (profile == null)
-                return Task.CompletedTask;
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (profile is null)
+                throw new ArgumentNullException(nameof(profile));
 
             lock (_gate)
             {
-                var env = LoadEnvelope_NoLock();
+                var shared = SharedFilterProfilesStore.LoadOrCreateMigrated();
+                var list = shared.Profiles.ToList();
 
-                if (string.IsNullOrWhiteSpace(profile.Id))
-                    profile.Id = Guid.NewGuid().ToString("N");
+                var name = (profile.Name ?? string.Empty).Trim();
+                if (name.Length == 0)
+                    throw new InvalidOperationException("Profile name is required.");
 
-                profile.Name = (profile.Name ?? string.Empty).Trim();
-                profile.UpdatedUtc = DateTime.UtcNow;
+                var existing = list.FirstOrDefault(p => string.Equals(p.Id, profile.Id, StringComparison.OrdinalIgnoreCase))
+                               ?? list.FirstOrDefault(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase));
 
-                var existingIndex = env.Profiles.FindIndex(p => string.Equals(p.Id, profile.Id, StringComparison.Ordinal));
-                if (existingIndex >= 0)
+                var now = DateTime.UtcNow;
+
+                SharedProfileRecord updated;
+                if (existing is null)
                 {
-                    env.Profiles[existingIndex] = profile;
+                    updated = new SharedProfileRecord
+                    {
+                        Id = string.IsNullOrWhiteSpace(profile.Id) ? Guid.NewGuid().ToString("N") : profile.Id,
+                        Name = name,
+                        UpdatedUtc = now,
+                        SettingsRules = profile.Rules ?? new List<FilterRuleStateRecord>(),
+                        HistoryFilters = new FilterProfileFilters(),
+                        ArchiveFilters = new FilterProfileFilters()
+                    };
+                    list.Add(updated);
                 }
                 else
                 {
-                    // If another profile has the same name, replace it.
-                    var nameIndex = env.Profiles.FindIndex(p => string.Equals(p.Name, profile.Name, StringComparison.OrdinalIgnoreCase));
-                    if (nameIndex >= 0)
-                        env.Profiles[nameIndex] = profile;
-                    else
-                        env.Profiles.Add(profile);
+                    updated = new SharedProfileRecord
+                    {
+                        Id = string.IsNullOrWhiteSpace(profile.Id) ? existing.Id : profile.Id,
+                        Name = name,
+                        UpdatedUtc = now,
+                        SettingsRules = profile.Rules ?? new List<FilterRuleStateRecord>(),
+                        HistoryFilters = existing.HistoryFilters,
+                        ArchiveFilters = existing.ArchiveFilters
+                    };
+
+                    list.RemoveAll(p => string.Equals(p.Id, existing.Id, StringComparison.OrdinalIgnoreCase));
+                    list.Add(updated);
                 }
 
-                SaveEnvelope_NoLock(env);
-            }
+                SharedFilterProfilesStore.Save(new SharedEnvelope
+                {
+                    SchemaVersion = shared.SchemaVersion,
+                    UpdatedUtc = now,
+                    Profiles = list.OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase).ToList()
+                });
 
-            return Task.CompletedTask;
+                return Task.CompletedTask;
+            }
         }
 
         public Task DeleteAsync(string profileId, CancellationToken cancellationToken = default)
         {
-            if (string.IsNullOrWhiteSpace(profileId))
-                return Task.CompletedTask;
+            cancellationToken.ThrowIfCancellationRequested();
 
             lock (_gate)
             {
-                var env = LoadEnvelope_NoLock();
-                env.Profiles.RemoveAll(p => string.Equals(p.Id, profileId, StringComparison.Ordinal));
-                SaveEnvelope_NoLock(env);
-            }
+                var shared = SharedFilterProfilesStore.LoadOrCreateMigrated();
+                var list = shared.Profiles.ToList();
+                list.RemoveAll(p => string.Equals(p.Id, profileId, StringComparison.OrdinalIgnoreCase));
 
-            return Task.CompletedTask;
+                SharedFilterProfilesStore.Save(new SharedEnvelope
+                {
+                    SchemaVersion = shared.SchemaVersion,
+                    UpdatedUtc = DateTime.UtcNow,
+                    Profiles = list
+                });
+
+                return Task.CompletedTask;
+            }
         }
 
         public Task RenameAsync(string profileId, string newName, CancellationToken cancellationToken = default)
         {
-            if (string.IsNullOrWhiteSpace(profileId))
-                return Task.CompletedTask;
-
-            newName = (newName ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(newName))
-                return Task.CompletedTask;
+            cancellationToken.ThrowIfCancellationRequested();
 
             lock (_gate)
             {
-                var env = LoadEnvelope_NoLock();
-                var p = env.Profiles.FirstOrDefault(x => string.Equals(x.Id, profileId, StringComparison.Ordinal));
-                if (p == null)
+                var shared = SharedFilterProfilesStore.LoadOrCreateMigrated();
+                var list = shared.Profiles.ToList();
+                var rec = list.FirstOrDefault(p => string.Equals(p.Id, profileId, StringComparison.OrdinalIgnoreCase));
+                if (rec is null)
                     return Task.CompletedTask;
 
-                p.Name = newName;
-                p.UpdatedUtc = DateTime.UtcNow;
+                var name = (newName ?? string.Empty).Trim();
+                if (name.Length == 0)
+                    return Task.CompletedTask;
 
-                SaveEnvelope_NoLock(env);
+                var now = DateTime.UtcNow;
+                var updated = new SharedProfileRecord
+                {
+                    Id = rec.Id,
+                    Name = name,
+                    UpdatedUtc = now,
+                    SettingsRules = rec.SettingsRules,
+                    HistoryFilters = rec.HistoryFilters,
+                    ArchiveFilters = rec.ArchiveFilters
+                };
+
+                list.RemoveAll(p => string.Equals(p.Id, rec.Id, StringComparison.OrdinalIgnoreCase));
+                list.Add(updated);
+
+                SharedFilterProfilesStore.Save(new SharedEnvelope
+                {
+                    SchemaVersion = shared.SchemaVersion,
+                    UpdatedUtc = now,
+                    Profiles = list.OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase).ToList()
+                });
+
+                return Task.CompletedTask;
             }
-
-            return Task.CompletedTask;
         }
 
         public Task<SettingsFilterProfileStoreEnvelope> ExportAsync(CancellationToken cancellationToken = default)
         {
-            var env = LoadEnvelope();
-            env.ExportedUtc = DateTime.UtcNow;
-            return Task.FromResult(env);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            lock (_gate)
+            {
+                var shared = SharedFilterProfilesStore.LoadOrCreateMigrated();
+                var profiles = shared.Profiles
+                    .Select(p => new SettingsFilterProfile
+                    {
+                        Id = p.Id,
+                        Name = p.Name,
+                        UpdatedUtc = p.UpdatedUtc,
+                        Rules = p.SettingsRules ?? new List<FilterRuleStateRecord>()
+                    })
+                    .ToList();
+
+                return Task.FromResult(new SettingsFilterProfileStoreEnvelope
+                {
+                    SchemaVersion = 1,
+                    Context = "settings",
+                    ExportedUtc = DateTime.UtcNow,
+                    Profiles = profiles
+                });
+            }
         }
 
         public Task ImportAsync(SettingsFilterProfileStoreEnvelope envelope, bool merge, CancellationToken cancellationToken = default)
         {
-            if (envelope == null)
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (envelope is null)
+                throw new ArgumentNullException(nameof(envelope));
+
+            lock (_gate)
+            {
+                var shared = SharedFilterProfilesStore.LoadOrCreateMigrated();
+                var list = merge ? shared.Profiles.ToList() : new List<SharedProfileRecord>();
+                var now = DateTime.UtcNow;
+
+                foreach (var p in envelope.Profiles ?? new List<SettingsFilterProfile>())
+                {
+                    var name = (p.Name ?? string.Empty).Trim();
+                    if (name.Length == 0)
+                        continue;
+
+                    var existing = list.FirstOrDefault(x => string.Equals(x.Id, p.Id, StringComparison.OrdinalIgnoreCase))
+                                   ?? list.FirstOrDefault(x => string.Equals(x.Name, name, StringComparison.OrdinalIgnoreCase));
+
+                    if (existing is null)
+                    {
+                        list.Add(new SharedProfileRecord
+                        {
+                            Id = string.IsNullOrWhiteSpace(p.Id) ? Guid.NewGuid().ToString("N") : p.Id,
+                            Name = name,
+                            UpdatedUtc = now,
+                            SettingsRules = p.Rules ?? new List<FilterRuleStateRecord>(),
+                            HistoryFilters = new FilterProfileFilters(),
+                            ArchiveFilters = new FilterProfileFilters()
+                        });
+                    }
+                    else
+                    {
+                        list.RemoveAll(x => string.Equals(x.Id, existing.Id, StringComparison.OrdinalIgnoreCase));
+                        list.Add(new SharedProfileRecord
+                        {
+                            Id = string.IsNullOrWhiteSpace(p.Id) ? existing.Id : p.Id,
+                            Name = name,
+                            UpdatedUtc = now,
+                            SettingsRules = p.Rules ?? new List<FilterRuleStateRecord>(),
+                            HistoryFilters = existing.HistoryFilters,
+                            ArchiveFilters = existing.ArchiveFilters
+                        });
+                    }
+                }
+
+                SharedFilterProfilesStore.Save(new SharedEnvelope
+                {
+                    SchemaVersion = shared.SchemaVersion,
+                    UpdatedUtc = now,
+                    Profiles = list.OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase).ToList()
+                });
+
                 return Task.CompletedTask;
-
-            lock (_gate)
-            {
-                var existing = LoadEnvelope_NoLock();
-
-                if (!merge)
-                {
-                    existing.Profiles = envelope.Profiles ?? new List<SettingsFilterProfile>();
-                    SaveEnvelope_NoLock(existing);
-                    return Task.CompletedTask;
-                }
-
-                foreach (var incoming in envelope.Profiles ?? new List<SettingsFilterProfile>())
-                {
-                    if (string.IsNullOrWhiteSpace(incoming.Id))
-                        incoming.Id = Guid.NewGuid().ToString("N");
-
-                    incoming.Name = (incoming.Name ?? string.Empty).Trim();
-                    if (string.IsNullOrWhiteSpace(incoming.Name))
-                        continue;
-
-                    var idx = existing.Profiles.FindIndex(p => string.Equals(p.Id, incoming.Id, StringComparison.Ordinal));
-                    if (idx >= 0)
-                    {
-                        existing.Profiles[idx] = incoming;
-                        continue;
-                    }
-
-                    var nameIdx = existing.Profiles.FindIndex(p => string.Equals(p.Name, incoming.Name, StringComparison.OrdinalIgnoreCase));
-                    if (nameIdx >= 0)
-                    {
-                        existing.Profiles[nameIdx] = incoming;
-                        continue;
-                    }
-
-                    existing.Profiles.Add(incoming);
-                }
-
-                SaveEnvelope_NoLock(existing);
-            }
-
-            return Task.CompletedTask;
-        }
-
-        private SettingsFilterProfileStoreEnvelope LoadEnvelope()
-        {
-            lock (_gate)
-            {
-                return LoadEnvelope_NoLock();
             }
         }
-
-        private SettingsFilterProfileStoreEnvelope LoadEnvelope_NoLock()
-        {
-            try
-            {
-                var path = GetFilePath();
-                if (!File.Exists(path))
-                    return new SettingsFilterProfileStoreEnvelope();
-
-                var json = File.ReadAllText(path);
-                if (string.IsNullOrWhiteSpace(json))
-                    return new SettingsFilterProfileStoreEnvelope();
-
-                var env = JsonSerializer.Deserialize<SettingsFilterProfileStoreEnvelope>(json, _jsonOptions);
-                return env ?? new SettingsFilterProfileStoreEnvelope();
-            }
-            catch
-            {
-                return new SettingsFilterProfileStoreEnvelope();
-            }
-        }
-
-        private void SaveEnvelope_NoLock(SettingsFilterProfileStoreEnvelope envelope)
-        {
-            try
-            {
-                var path = GetFilePath();
-                var json = JsonSerializer.Serialize(envelope ?? new SettingsFilterProfileStoreEnvelope(), _jsonOptions);
-                File.WriteAllText(path, json);
-            }
-            catch
-            {
-            }
-        }
-
-        private static string GetFilePath() => Path.Combine(FileSystem.AppDataDirectory, FileName);
     }
 }

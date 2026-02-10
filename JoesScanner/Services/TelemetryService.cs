@@ -20,6 +20,10 @@ namespace JoesScanner.Services
 
         private int _appStartInitialized;
 
+        private readonly object _serverStateLock = new();
+        private string _lastStreamServerUrl = string.Empty;
+        private bool _lastStreamServerIsHosted;
+
         public TelemetryService(ISettingsService settings)
         {
             _settings = settings ?? throw new ArgumentNullException(nameof(settings));
@@ -35,6 +39,39 @@ namespace JoesScanner.Services
             try { _heartbeatTimer?.Dispose(); } catch { }
             try { _flushLock.Dispose(); } catch { }
             try { _httpClient.Dispose(); } catch { }
+        }
+
+        private void UpdateLastStreamServer(string? streamServerUrl, bool isHosted)
+        {
+            var url = (streamServerUrl ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(url))
+                return;
+
+            lock (_serverStateLock)
+            {
+                _lastStreamServerUrl = url;
+                _lastStreamServerIsHosted = isHosted;
+            }
+        }
+
+        private (string Url, bool IsHosted) GetLastStreamServer()
+        {
+            lock (_serverStateLock)
+            {
+                return (_lastStreamServerUrl, _lastStreamServerIsHosted);
+            }
+        }
+
+        private static bool IsHostedStreamServerUrl(string? streamServerUrl)
+        {
+            var url = (streamServerUrl ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(url))
+                return false;
+
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+                return false;
+
+            return string.Equals(uri.Host, "app.joesscanner.com", StringComparison.OrdinalIgnoreCase);
         }
 
         public void TrackAppStarted()
@@ -67,6 +104,7 @@ namespace JoesScanner.Services
 
         public void TrackAppStopping()
         {
+            var token = _settings.AuthSessionToken;
             StopHeartbeat();
 
             // Session end is inferred by absence of heartbeat pings.
@@ -75,7 +113,7 @@ namespace JoesScanner.Services
                 try
                 {
                     await SendAppEventAsync("app_stopping", null, CancellationToken.None).ConfigureAwait(false);
-                    await SendAppEventAsync("session_end", BuildSessionEndPayload(_settings.AuthSessionToken), CancellationToken.None).ConfigureAwait(false);
+                    await SendAppEventAsync("session_end", BuildSessionEndPayload(token), CancellationToken.None).ConfigureAwait(false);
                     await TryFlushQueueAsync(CancellationToken.None).ConfigureAwait(false);
                 }
                 catch
@@ -87,6 +125,8 @@ namespace JoesScanner.Services
         public void TrackConnectionAttempt(string streamServerUrl, bool isHostedServer)
         {
             EnsureAppStartSessionInitialized();
+
+            UpdateLastStreamServer(streamServerUrl, isHostedServer);
 
             EnqueueEvent(new TelemetryEvent
             {
@@ -115,6 +155,8 @@ namespace JoesScanner.Services
         public void TrackConnectionStatusChanged(string status, string? detailMessage, string streamServerUrl)
         {
             EnsureAppStartSessionInitialized();
+
+            UpdateLastStreamServer(streamServerUrl, IsHostedStreamServerUrl(streamServerUrl));
 
             var data = new Dictionary<string, string>
             {
@@ -150,15 +192,19 @@ namespace JoesScanner.Services
         {
             EnsureAppStartSessionInitialized();
 
-            // Treat each monitoring run as its own session on the server.
-            BeginNewMonitoringSessionToken();
+            UpdateLastStreamServer(streamServerUrl, IsHostedStreamServerUrl(streamServerUrl));
 
-            StartHeartbeat();
+            // Use the app launch session token for monitoring so opening the app and connecting creates a single session row.
+
+            // Immediately send at least one ping so short runs do not
+            // create 0 second or 1 second sessions on the server.
+            StartHeartbeat(fireImmediately: true);
 
             _ = Task.Run(async () =>
             {
                 try
                 {
+                    // Record the start promptly (separate from the heartbeat cadence).
                     await SendPingAsync(_settings.AuthSessionToken, "monitoring_start", CancellationToken.None).ConfigureAwait(false);
                     await SendAppEventAsync("session_start", BuildSessionStartPayload("monitoring_start"), CancellationToken.None).ConfigureAwait(false);
                     await SendAppEventAsync("monitoring_start", new
@@ -176,6 +222,22 @@ namespace JoesScanner.Services
 
         public void StopMonitoringHeartbeat(string reason)
         {
+            // Capture the token now so the stop ping always lands on the session that just ended.
+            var token = _settings.AuthSessionToken;
+
+            // Send a final ping so the server updates last_seen_utc even if the monitoring run is
+            // shorter than the heartbeat interval.
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await SendPingAsync(token, "monitoring_stop", CancellationToken.None).ConfigureAwait(false);
+                }
+                catch
+                {
+                }
+            });
+
             StopHeartbeat();
 
             _ = Task.Run(async () =>
@@ -187,7 +249,7 @@ namespace JoesScanner.Services
                         reason = reason ?? string.Empty
                     }, CancellationToken.None).ConfigureAwait(false);
 
-                    await SendAppEventAsync("session_end", BuildSessionEndPayload(_settings.AuthSessionToken), CancellationToken.None).ConfigureAwait(false);
+                    await SendAppEventAsync("session_end", BuildSessionEndPayload(token), CancellationToken.None).ConfigureAwait(false);
                     await TryFlushQueueAsync(CancellationToken.None).ConfigureAwait(false);
                 }
                 catch
@@ -285,7 +347,7 @@ namespace JoesScanner.Services
             }
         }
 
-        private void StartHeartbeat()
+        private void StartHeartbeat(bool fireImmediately)
         {
             _heartbeatTimer ??= new Timer(async _ =>
             {
@@ -298,7 +360,7 @@ namespace JoesScanner.Services
                 catch
                 {
                 }
-            }, null, HeartbeatInterval, HeartbeatInterval);
+            }, null, fireImmediately ? TimeSpan.Zero : HeartbeatInterval, HeartbeatInterval);
         }
 
         private void StopHeartbeat()
@@ -409,6 +471,17 @@ namespace JoesScanner.Services
 
         private object BuildPingPayload(string sessionToken, string reason)
         {
+            var (serverUrl, isHosted) = GetLastStreamServer();
+            if (string.IsNullOrWhiteSpace(serverUrl))
+            {
+                serverUrl = (_settings.ServerUrl ?? string.Empty).Trim();
+                isHosted = IsHostedStreamServerUrl(serverUrl);
+                if (!string.IsNullOrWhiteSpace(serverUrl))
+                {
+                    UpdateLastStreamServer(serverUrl, isHosted);
+                }
+            }
+
             var appVersion = AppInfo.Current.VersionString ?? string.Empty;
             var appBuild = AppInfo.Current.BuildString ?? string.Empty;
             var app = string.IsNullOrWhiteSpace(appBuild) ? appVersion : (appVersion + "+" + appBuild);
@@ -423,7 +496,9 @@ namespace JoesScanner.Services
                 device_model = CombineDeviceModel(DeviceInfo.Manufacturer, DeviceInfo.Model),
 
                 app_version = app,
-                reason = reason ?? string.Empty
+                reason = reason ?? string.Empty,
+                stream_server_url = serverUrl,
+                stream_server_is_hosted = isHosted
             };
         }
 

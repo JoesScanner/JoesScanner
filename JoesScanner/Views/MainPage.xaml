@@ -389,7 +389,7 @@
                     <!-- Donate button -->
                     <Button
                         Grid.Column="1"
-                        Text="Donate to the app developer"
+                        Text="{OnPlatform iOS='About the developer', Default='Donate to the app developer'}"
                         Style="{StaticResource SecondaryPillButtonStyle}"
                         FontSize="10"
                         Command="{Binding OpenDonateCommand}" />

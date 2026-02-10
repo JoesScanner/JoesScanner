@@ -168,7 +168,8 @@ namespace JoesScanner.Services
                 UpdatedAtUtc = updatedUtc,
                 AuthorLabel = author ?? string.Empty,
                 HeadingText = heading ?? string.Empty,
-                MessageText = text ?? string.Empty
+                MessageText = text ?? string.Empty,
+                MessageFormatted = CommsMessageFormatter.ToFormattedString(text)
             };
         }
 

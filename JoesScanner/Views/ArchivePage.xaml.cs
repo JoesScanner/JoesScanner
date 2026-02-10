@@ -1,6 +1,7 @@
 using JoesScanner.Models;
 using JoesScanner.Services;
 using JoesScanner.ViewModels;
+using System.Linq;
 
 namespace JoesScanner.Views
 {
@@ -9,7 +10,6 @@ namespace JoesScanner.Views
         private readonly ArchiveViewModel _viewModel;
         private int _ignoreNextScrollEvents;
         private bool _isDropdownOpen;
-        private bool _isRenamingProfileName;
 
         public ArchivePage(ArchiveViewModel viewModel)
         {
@@ -48,6 +48,7 @@ namespace JoesScanner.Views
             {
             }
         }
+
 
         private void OnScrollRequested(CallItem call, ScrollToPosition position)
         {
@@ -137,236 +138,6 @@ namespace JoesScanner.Views
                 setSelected: item => _viewModel.SelectedTalkgroup = item);
         }
 
-        
-
-        private void OnArchiveFilterProfileTapped(object sender, TappedEventArgs e)
-        {
-            try
-            {
-                ArchiveFilterProfilePicker.Focus();
-            }
-            catch
-            {
-            }
-        }
-private async void OnProfileTapped(object sender, TappedEventArgs e)
-        {
-            try
-            {
-                if (_isDropdownOpen)
-                    return;
-
-                _isDropdownOpen = true;
-
-                const string cancel = "Cancel";
-                const string none = "None";
-
-                var list = _viewModel.FilterProfiles.ToList();
-                var options = new List<string> { none };
-                options.AddRange(list.Select(p => p.Name));
-
-                var choice = await DisplayActionSheet("Profile", cancel, null, options.ToArray());
-                if (string.IsNullOrWhiteSpace(choice) || string.Equals(choice, cancel, StringComparison.Ordinal))
-                    return;
-
-                if (string.Equals(choice, none, StringComparison.Ordinal))
-                {
-                    await _viewModel.SelectFilterProfileAsync(null, apply: false);
-                    return;
-                }
-
-                var selected = list.FirstOrDefault(p => string.Equals(p.Name, choice, StringComparison.Ordinal));
-                if (selected == null)
-                    return;
-
-                await _viewModel.SelectFilterProfileAsync(selected, apply: true);
-            }
-            catch
-            {
-            }
-            finally
-            {
-                _isDropdownOpen = false;
-            }
-        }
-
-        private async void OnSaveProfileClicked(object sender, EventArgs e)
-{
-    try
-    {
-        var option = (_viewModel.SelectedFilterProfileNameOption ?? string.Empty).Trim();
-                if (_isRenamingProfileName && !string.Equals(option, "New", StringComparison.Ordinal))
-                {
-                    _isRenamingProfileName = false;
-                }
-
-
-        if (_isRenamingProfileName)
-        {
-            var renameTo = (_viewModel.FilterProfileNameDraft ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(renameTo))
-            {
-                await DisplayAlert("Name required", "Enter a new profile name, then tap Save.", "OK");
-                return;
-            }
-
-            if (string.Equals(renameTo, "None", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(renameTo, "New", StringComparison.OrdinalIgnoreCase))
-            {
-                await DisplayAlert("Invalid name", "Choose a different profile name.", "OK");
-                return;
-            }
-
-            await _viewModel.RenameSelectedProfileAsync(renameTo);
-            _isRenamingProfileName = false;
-
-            _viewModel.SelectedFilterProfileNameOption = renameTo;
-            return;
-        }
-
-        var targetName = option;
-
-        if (string.Equals(option, "None", StringComparison.Ordinal))
-        {
-            await DisplayAlert("Select a profile", "Choose an existing profile to overwrite, or choose New to create a new one.", "OK");
-            return;
-        }
-
-        if (string.Equals(option, "New", StringComparison.Ordinal))
-        {
-            targetName = (_viewModel.FilterProfileNameDraft ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(targetName))
-            {
-                await DisplayAlert("Name required", "Enter a new profile name, then tap Save.", "OK");
-                return;
-            }
-        }
-
-        if (string.Equals(targetName, "None", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(targetName, "New", StringComparison.OrdinalIgnoreCase))
-        {
-            await DisplayAlert("Invalid name", "Choose a different profile name.", "OK");
-            return;
-        }
-
-        await _viewModel.SaveCurrentFiltersAsync(targetName);
-    }
-    catch
-    {
-    }
-}
-
-
-private async void OnEditProfileClicked(object sender, EventArgs e)
-{
-    try
-    {
-        var option = (_viewModel.SelectedFilterProfileNameOption ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(option) ||
-            string.Equals(option, "None", StringComparison.Ordinal) ||
-            string.Equals(option, "New", StringComparison.Ordinal))
-        {
-            await DisplayAlert("Select a profile", "Select an existing profile to rename.", "OK");
-            return;
-        }
-
-        _isRenamingProfileName = true;
-        _viewModel.FilterProfileNameDraft = option;
-        _viewModel.SelectedFilterProfileNameOption = "New";
-    }
-    catch
-    {
-    }
-}
-		private async void OnDeleteProfileClicked(object sender, EventArgs e)
-{
-    try
-    {
-        var option = (_viewModel.SelectedFilterProfileNameOption ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(option) ||
-            string.Equals(option, "None", StringComparison.Ordinal) ||
-            string.Equals(option, "New", StringComparison.Ordinal))
-        {
-            await DisplayAlert("Select a profile", "Select an existing profile to delete.", "OK");
-            return;
-        }
-
-        var confirm = await DisplayAlert("Delete profile?", $"Delete '{option}'?", "Delete", "Cancel");
-        if (!confirm)
-            return;
-
-        await _viewModel.DeleteSelectedProfileAsync();
-        await _viewModel.SelectFilterProfileAsync(null, apply: false);
-    }
-    catch
-    {
-    }
-}
-
-        private async void OnManageProfileTapped(object sender, TappedEventArgs e)
-        {
-            try
-            {
-                var current = _viewModel.SelectedFilterProfile;
-                if (current == null)
-                {
-                    await DisplayAlert("No profile selected", "Select a profile first.", "OK");
-                    return;
-                }
-
-                const string cancel = "Cancel";
-                const string rename = "Rename";
-                const string delete = "Delete";
-                const string clear = "Clear selection";
-
-                var choice = await DisplayActionSheet("Manage profile", cancel, null, rename, delete, clear);
-                if (string.IsNullOrWhiteSpace(choice) || string.Equals(choice, cancel, StringComparison.Ordinal))
-                    return;
-
-                if (string.Equals(choice, clear, StringComparison.Ordinal))
-                {
-                    await _viewModel.SelectFilterProfileAsync(null, apply: false);
-                    return;
-                }
-
-                if (string.Equals(choice, rename, StringComparison.Ordinal))
-                {
-                    var newName = (_viewModel.FilterProfileNameDraft ?? string.Empty).Trim();
-                    if (string.IsNullOrWhiteSpace(newName))
-                    {
-                        await DisplayAlert("Profile name required", "Enter a profile name, then choose Rename.", "OK");
-                        return;
-                    }
-
-                    if (string.Equals(newName, current.Name, StringComparison.Ordinal))
-                        return;
-
-                    var existing = _viewModel.FilterProfiles.FirstOrDefault(p => string.Equals(p.Name, newName, StringComparison.OrdinalIgnoreCase));
-                    if (existing != null && !string.Equals(existing.Id, current.Id, StringComparison.Ordinal))
-                    {
-                        await DisplayAlert("Name already exists", "Choose a different name.", "OK");
-                        return;
-                    }
-
-                    await _viewModel.RenameSelectedProfileAsync(newName);
-                    return;
-                }
-
-                if (string.Equals(choice, delete, StringComparison.Ordinal))
-                {
-                    var confirm = await DisplayAlert("Delete profile?", $"Delete '{current.Name}'?", "Delete", "Cancel");
-                    if (!confirm)
-                        return;
-
-                    await _viewModel.DeleteSelectedProfileAsync();
-                    return;
-                }
-            }
-            catch
-            {
-            }
-        }
-
         private async Task ShowLookupAsync(
             string title,
             Func<System.Collections.Generic.IEnumerable<HistoryLookupItem>> getItems,
@@ -386,7 +157,7 @@ private async void OnEditProfileClicked(object sender, EventArgs e)
 
                 const string cancel = "Cancel";
                 var labels = items.Select(i => i.Label).Where(s => !string.IsNullOrWhiteSpace(s)).ToArray();
-                var choice = await DisplayActionSheet(title, cancel, null, labels);
+                var choice = await UiDialogs.ActionSheetAsync(title, cancel, null, labels);
                 if (string.IsNullOrWhiteSpace(choice) || string.Equals(choice, cancel, StringComparison.Ordinal))
                     return;
 

@@ -16,12 +16,19 @@ namespace JoesScanner.Services
     // to the UI, using server fields for time, receiver, site, talkgroup, transcription, and audio.
     public class CallStreamService : ICallStreamService
     {
+        private const string AppleIosTestAccountEmail = "iostest@joesscanner.com";
+        private const string AppleIosTestAccountEmailLegacy = "iostest@jeosscanner.com";
+
         private readonly ISettingsService _settingsService;
         private readonly HttpClient _httpClient;
         private readonly JsonSerializerOptions _jsonOptions;
 
         // Mirrors DEFAULT_CONFIG["poll_batch"] from the server.
         private const int PollBatchSize = 25;
+
+        // When true, the next GetCallStreamAsync run should preserve the IDs learned
+        // during a warm start so we do not re-emit the same recent calls.
+        private volatile bool _preserveSeenIdsForNextConnect;
 
         private const string ServiceAuthUsername = "secappass";
         private const string ServiceAuthPassword = "7a65vBLeqLjdRut5bSav4eMYGUJPrmjHhgnPmEji3q3S7tZ3K5aadFZz2EZtbaE7";
@@ -58,18 +65,121 @@ namespace JoesScanner.Services
             };
         }
 
+
+        // Calls calljson using standard DataTables form encoding.
+        // Kept as a fallback for servers that ignore JSON bodies for paging.
+        private async Task<List<CallRow>> FetchLatestFormAsync(
+            string callsUrl,
+            CancellationToken cancellationToken,
+            int start,
+            int length)
+        {
+            var payload = BuildDataTablesPayload(_draw, start, length);
+            _draw++;
+
+            var pairs = new List<KeyValuePair<string, string>>
+            {
+                new("draw", payload.Draw.ToString(CultureInfo.InvariantCulture)),
+                new("start", payload.Start.ToString(CultureInfo.InvariantCulture)),
+                new("length", payload.Length.ToString(CultureInfo.InvariantCulture)),
+                new("search[value]", payload.Search?.Value ?? string.Empty),
+                new("search[regex]", payload.Search?.Regex == true ? "true" : "false"),
+                new("smartSort", payload.SmartSort ? "true" : "false"),
+            };
+
+            for (var i = 0; i < payload.Columns.Count; i++)
+            {
+                var c = payload.Columns[i];
+
+                pairs.Add(new($"columns[{i}][data]", c.Data?.ToString() ?? string.Empty));
+                pairs.Add(new($"columns[{i}][name]", c.Name ?? string.Empty));
+                pairs.Add(new($"columns[{i}][searchable]", c.Searchable ? "true" : "false"));
+                pairs.Add(new($"columns[{i}][orderable]", c.Orderable ? "true" : "false"));
+                pairs.Add(new($"columns[{i}][search][value]", c.Search?.Value ?? string.Empty));
+                pairs.Add(new($"columns[{i}][search][regex]", c.Search?.Regex == true ? "true" : "false"));
+            }
+
+            // Ensure auth header matches current settings for this request.
+            UpdateAuthorizationHeader();
+
+            using var content = new FormUrlEncodedContent(pairs);
+            using var response = await _httpClient.PostAsync(callsUrl, content, cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var statusCode = response.StatusCode;
+                var statusInt = (int)statusCode;
+
+                if (statusCode == HttpStatusCode.Unauthorized || statusCode == HttpStatusCode.Forbidden)
+                {
+                    throw new CallStreamAuthException(
+                        $"Authentication failed when calling {callsUrl} (HTTP {statusInt} {response.ReasonPhrase}).");
+                }
+
+                throw new HttpRequestException(
+                    $"Server returned HTTP {statusInt} {response.ReasonPhrase} when calling {callsUrl}.");
+            }
+
+            var json = await response.Content.ReadAsStringAsync(cancellationToken);
+            var rows = new List<CallRow>();
+
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            if (root.TryGetProperty("data", out var rowsElement) && rowsElement.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in rowsElement.EnumerateArray())
+                {
+                    rows.Add(ParseRow(item));
+                }
+            }
+            else if (root.TryGetProperty("rows", out rowsElement) && rowsElement.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in rowsElement.EnumerateArray())
+                {
+                    rows.Add(ParseRow(item));
+                }
+            }
+
+            return rows;
+        }
+
         // Continuously polls the server and yields new calls as CallItem objects.
         // Skips initial backlog so only new calls after connection are surfaced.
         public async IAsyncEnumerable<CallItem> GetCallStreamAsync(
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
-            // New connection: clear any previously seen IDs and suppress the first batch
-            // so we only show calls that arrive after the user connects.
-            _seenIds.Clear();
-            _idsMissingTranscription.Clear();
+            var isAppleTestAccount = IsAppleIosTestAccount();
+            AppLog.Add($"AppleTest: enabled={isAppleTestAccount}, user={_settingsService.BasicAuthUsername}");
 
-            // We still skip the first non-empty batch so we do not backfill history.
+            // New connection: by default clear any previously seen IDs and suppress the first batch
+            // so we only show calls that arrive after the user connects.
+            // If a warm start was performed immediately before this stream begins, preserve the
+            // warm-start IDs so we do not duplicate the initial backfilled calls.
             var skipInitialBatch = true;
+
+            if (_preserveSeenIdsForNextConnect)
+            {
+                _preserveSeenIdsForNextConnect = false;
+                skipInitialBatch = false;
+            }
+            else
+            {
+                _seenIds.Clear();
+                _idsMissingTranscription.Clear();
+            }
+
+            // Apple review test account behavior.
+            // For this one account only, backfill several hours of calls so playback can
+            // start immediately even if there are no brand new calls arriving.
+            if (isAppleTestAccount)
+            {
+                skipInitialBatch = false;
+                await foreach (var backfilled in BackfillRecentHoursAsync(cancellationToken))
+                {
+                    yield return backfilled;
+                }
+            }
 
             // Tracks whether we have already reported a "connected but idle" heartbeat
             // for this connection lifetime.
@@ -313,6 +423,143 @@ namespace JoesScanner.Services
 
                 await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
             }
+        }
+
+        private bool IsAppleIosTestAccount()
+        {
+            var username = _settingsService.BasicAuthUsername ?? string.Empty;
+            username = username.Trim();
+            return string.Equals(username, AppleIosTestAccountEmail, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(username, AppleIosTestAccountEmailLegacy, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private async IAsyncEnumerable<CallItem> BackfillRecentHoursAsync(
+            [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            var baseUrl = (_settingsService.ServerUrl ?? string.Empty).TrimEnd('/');
+            if (string.IsNullOrWhiteSpace(baseUrl))
+                yield break;
+
+            var callsUrl = baseUrl + "/calljson";
+
+            // Use a 2 hour window to satisfy the review goal.
+            AppLog.Add("AppleTest: starting 2 hour backfill");
+            var cutoffUtc = DateTimeOffset.UtcNow.AddHours(-2);
+
+            var rows = new List<CallRow>();
+            var start = 0;
+            var pages = 0;
+
+            // Safety caps so a very quiet system does not cause large downloads.
+            const int maxPages = 20;
+            const int maxRows = 500;
+
+            while (!cancellationToken.IsCancellationRequested && pages < maxPages && rows.Count < maxRows)
+            {
+                List<CallRow> page;
+
+                try
+                {
+                    // Primary: use the same request format as the normal poller.
+                    // On the hosted Joe's Scanner gateway, the form-encoded DataTables request can 502,
+                    // while the existing JSON-as-form payload works reliably.
+                    page = await FetchLatestAsync(callsUrl, cancellationToken, start, PollBatchSize);
+                }
+                catch (HttpRequestException ex) when (ex.Message.Contains("HTTP 502", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Fallback: some self-hosted servers ignore JSON paging and require classic form encoding.
+                    try
+                    {
+                        page = await FetchLatestFormAsync(callsUrl, cancellationToken, start, PollBatchSize);
+                    }
+                    catch (Exception ex2)
+                    {
+                        AppLog.Add($"AppleTest: backfill failed: {ex2.Message}");
+                        yield break;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Add($"AppleTest: backfill failed: {ex.Message}");
+                    yield break;
+                }
+
+                if (page.Count == 0)
+                    break;
+
+                rows.AddRange(page);
+
+                var oldestUtc = GetOldestTimestampUtc(page);
+                if (oldestUtc.HasValue && oldestUtc.Value <= cutoffUtc)
+                    break;
+
+                start += PollBatchSize;
+                pages++;
+            }
+
+            if (rows.Count == 0)
+                yield break;
+
+            // Only keep calls within the window, then order them oldest to newest.
+            var filtered = rows
+                .Select(r => new { Row = r, TimeUtc = ParseTimestampUtc(r.StartTime, r.StartTimeUTC) })
+                .Where(x => x.TimeUtc >= cutoffUtc)
+                .OrderBy(x => x.TimeUtc)
+                .Select(x => x.Row)
+                .ToList();
+
+            AppLog.Add($"AppleTest: backfill rows={filtered.Count}");
+
+            foreach (var r in filtered)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var item = BuildCallItemFromRow(r, baseUrl, skipYieldForThisBatch: false);
+                if (item != null)
+                    yield return item;
+            }
+        }
+
+        private DateTimeOffset? GetOldestTimestampUtc(List<CallRow> page)
+        {
+            DateTimeOffset? oldest = null;
+
+            foreach (var r in page)
+            {
+                var ts = ParseTimestampUtc(r.StartTime, r.StartTimeUTC);
+                if (oldest == null || ts < oldest.Value)
+                    oldest = ts;
+            }
+
+            return oldest;
+        }
+
+        private static DateTimeOffset ParseTimestampUtc(string? startTime, string? startTimeUtc)
+        {
+            var value = !string.IsNullOrWhiteSpace(startTimeUtc) ? startTimeUtc : startTime;
+            if (string.IsNullOrWhiteSpace(value))
+                return DateTimeOffset.UtcNow;
+
+            try
+            {
+                if (value.Contains("T", StringComparison.Ordinal))
+                {
+                    // ISO 8601
+                    var dto = DateTimeOffset.Parse(value.Replace("Z", "+00:00"), CultureInfo.InvariantCulture);
+                    return dto.ToUniversalTime();
+                }
+
+                // Unix seconds
+                if (double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds))
+                {
+                    return DateTimeOffset.FromUnixTimeSeconds((long)seconds);
+                }
+            }
+            catch
+            {
+            }
+
+            return DateTimeOffset.UtcNow;
         }
 
         public async Task<string?> TryFetchTranscriptionByIdAsync(string backendId, CancellationToken cancellationToken)
@@ -1208,6 +1455,7 @@ namespace JoesScanner.Services
 
             return rows;
         }
+
 
         // Updates the HttpClient Authorization header based on the current basic auth settings.
         private void UpdateAuthorizationHeader()

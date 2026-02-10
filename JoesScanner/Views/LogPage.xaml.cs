@@ -198,11 +198,11 @@ namespace JoesScanner.Views
             {
                 var text = LogEditor.Text ?? string.Empty;
                 await Clipboard.Default.SetTextAsync(text);
-                await DisplayAlertAsync("Copied", "Log copied to clipboard.", "OK");
+                await UiDialogs.AlertAsync("Copied", "Log copied to clipboard.", "OK");
             }
             catch
             {
-                await DisplayAlertAsync("Error", "Unable to copy log.", "OK");
+                await UiDialogs.AlertAsync("Error", "Unable to copy log.", "OK");
             }
         }
     }

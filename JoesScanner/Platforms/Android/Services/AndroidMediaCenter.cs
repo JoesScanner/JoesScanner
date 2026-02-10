@@ -5,6 +5,7 @@ using global::Android.Graphics.Drawables;
 using global::Android.Media;
 using global::Android.Media.Session;
 using global::Android.OS;
+using JoesScanner.Services;
 
 namespace JoesScanner.Platforms.Android.Services
 {
@@ -80,14 +81,42 @@ namespace JoesScanner.Platforms.Android.Services
                 ? (_isConnected ? "Connected" : "Disconnected")
                 : subtitle;
 
+            var meta = new NowPlayingMetadata
+            {
+                Title = _title,
+                Artist = _subtitle
+            };
+
+            UpdateNowPlaying(context, meta);
+        }
+
+        public static void UpdateNowPlaying(Context context, NowPlayingMetadata metadata)
+        {
+            EnsureInitialized(context);
+
+            metadata ??= new NowPlayingMetadata();
+
+            _title = string.IsNullOrWhiteSpace(metadata.Title) ? "Joe's Scanner" : metadata.Title;
+            _subtitle = string.IsNullOrWhiteSpace(metadata.Artist)
+                ? (_isConnected ? "Connected" : "Disconnected")
+                : metadata.Artist;
+
             try
             {
                 var meta = new MediaMetadata.Builder()
                     .PutString(MediaMetadata.MetadataKeyTitle, _title)
-                    .PutString(MediaMetadata.MetadataKeyArtist, _subtitle)
-                    .Build();
+                    .PutString(MediaMetadata.MetadataKeyArtist, _subtitle);
 
-                _session?.SetMetadata(meta);
+                if (!string.IsNullOrWhiteSpace(metadata.Album))
+                    meta.PutString(MediaMetadata.MetadataKeyAlbum, metadata.Album);
+
+                if (!string.IsNullOrWhiteSpace(metadata.Composer))
+                    meta.PutString(MediaMetadata.MetadataKeyComposer, metadata.Composer);
+
+                if (!string.IsNullOrWhiteSpace(metadata.Genre))
+                    meta.PutString(MediaMetadata.MetadataKeyGenre, metadata.Genre);
+
+                _session?.SetMetadata(meta.Build());
             }
             catch
             {

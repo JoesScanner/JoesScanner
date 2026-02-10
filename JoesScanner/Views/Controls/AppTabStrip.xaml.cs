@@ -299,7 +299,35 @@ public partial class AppTabStrip : ContentView
         {
         }
 
-        TabNavigationService.Instance.Request(tab);
+        
+        // Viewing the Communications tab counts as reading messages, clear unread state immediately.
+        if (tab == AppTab.Communications)
+        {
+            try
+            {
+                // Clear the green background right away, even before the page finishes appearing.
+                if (CommunicationsButton != null)
+                {
+                    CommunicationsButton.Padding = new Thickness(0);
+                    CommunicationsButton.BackgroundColor = Colors.Transparent;
+                }
+
+                _commsBadge?.MarkAllKnownAsSeen();
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                UpdateCommsButtonBadge();
+            }
+            catch
+            {
+            }
+        }
+
+TabNavigationService.Instance.Request(tab);
     }
 
     // TapGestureRecognizer handlers (Border + Image approach)

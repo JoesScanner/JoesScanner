@@ -11,7 +11,10 @@ namespace JoesScanner.Services
         private const string ServerUrlKey = "ServerUrl";
         private const string BasicAuthUserKey = "BasicAuthUser";
         private const string BasicAuthPassKey = "BasicAuthPass";
+        private const string LastAuthUserKey = "LastAuthUserV1";
         private const string AutoPlayKey = "AutoPlay";
+        private const string WindowsAutoConnectOnStartKey = "WindowsAutoConnectOnStart";
+        private const string WindowsStartWithWindowsKey = "WindowsStartWithWindows";
         private const string ScrollDirectionKey = "ScrollDirection";
         private const string ReceiverFilterKey = "ReceiverFilter";
         private const string TalkgroupFilterKey = "TalkgroupFilter";
@@ -29,6 +32,13 @@ namespace JoesScanner.Services
         // Device and session tracking keys.
         private const string DeviceInstallIdKey = "DeviceInstallId";
         private const string AuthSessionTokenKey = "AuthSessionToken";
+
+        // Bluetooth label mapping keys
+        private const string BluetoothLabelArtistKey = "BluetoothLabelArtistV1";
+        private const string BluetoothLabelTitleKey = "BluetoothLabelTitleV1";
+        private const string BluetoothLabelAlbumKey = "BluetoothLabelAlbumV1";
+        private const string BluetoothLabelComposerKey = "BluetoothLabelComposerV1";
+        private const string BluetoothLabelGenreKey = "BluetoothLabelGenreV1";
 
         public string SubscriptionPriceId
         {
@@ -60,10 +70,28 @@ namespace JoesScanner.Services
             set => Preferences.Set(BasicAuthPassKey, (value ?? string.Empty).Trim());
         }
 
+
+        public string LastAuthUsername
+        {
+            get => Preferences.Get(LastAuthUserKey, string.Empty);
+            set => Preferences.Set(LastAuthUserKey, (value ?? string.Empty).Trim());
+        }
         public bool AutoPlay
         {
             get => Preferences.Get(AutoPlayKey, true);
             set => Preferences.Set(AutoPlayKey, value);
+        }
+
+        public bool WindowsAutoConnectOnStart
+        {
+            get => Preferences.Get(WindowsAutoConnectOnStartKey, false);
+            set => Preferences.Set(WindowsAutoConnectOnStartKey, value);
+        }
+
+        public bool WindowsStartWithWindows
+        {
+            get => Preferences.Get(WindowsStartWithWindowsKey, false);
+            set => Preferences.Set(WindowsStartWithWindowsKey, value);
         }
 
         public string ScrollDirection
@@ -211,6 +239,36 @@ namespace JoesScanner.Services
         {
             get => Preferences.Get(AuthSessionTokenKey, string.Empty);
             set => Preferences.Set(AuthSessionTokenKey, (value ?? string.Empty).Trim());
+        }
+
+        public string BluetoothLabelArtist
+        {
+            get => Preferences.Get(BluetoothLabelArtistKey, "AppName");
+            set => Preferences.Set(BluetoothLabelArtistKey, (value ?? "AppName").Trim());
+        }
+
+        public string BluetoothLabelTitle
+        {
+            get => Preferences.Get(BluetoothLabelTitleKey, "Transcription");
+            set => Preferences.Set(BluetoothLabelTitleKey, (value ?? "Transcription").Trim());
+        }
+
+        public string BluetoothLabelAlbum
+        {
+            get => Preferences.Get(BluetoothLabelAlbumKey, "Talkgroup");
+            set => Preferences.Set(BluetoothLabelAlbumKey, (value ?? "Talkgroup").Trim());
+        }
+
+        public string BluetoothLabelComposer
+        {
+            get => Preferences.Get(BluetoothLabelComposerKey, "Site");
+            set => Preferences.Set(BluetoothLabelComposerKey, (value ?? "Site").Trim());
+        }
+
+        public string BluetoothLabelGenre
+        {
+            get => Preferences.Get(BluetoothLabelGenreKey, "Receiver");
+            set => Preferences.Set(BluetoothLabelGenreKey, (value ?? "Receiver").Trim());
         }
     }
 }

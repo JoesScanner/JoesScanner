@@ -19,7 +19,7 @@ namespace JoesScanner.Services
             return Task.CompletedTask;
         }
 
-        private partial void PlatformUpdateNowPlaying(string title, string subtitle, bool audioEnabled)
+        private partial void PlatformUpdateNowPlaying(NowPlayingMetadata metadata, bool audioEnabled)
         {
         }
 

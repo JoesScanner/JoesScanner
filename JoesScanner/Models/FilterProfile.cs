@@ -2,19 +2,18 @@ using System.Text.Json.Serialization;
 
 namespace JoesScanner.Models
 {
-    public static class FilterProfileContexts
-    {
-        public const string History = "History";
-        public const string Archive = "Archive";
-    }
-
+    // Unified filter profile shared by History, Archive, and Settings.
+    // One profile file is used everywhere.
     public sealed class FilterProfile
     {
         public string Id { get; init; } = string.Empty;
         public string Name { get; init; } = string.Empty;
-        public string Context { get; init; } = string.Empty;
 
+        // History and Archive selection state.
         public FilterProfileFilters Filters { get; init; } = new FilterProfileFilters();
+
+        // Settings filter rule snapshot (only rules with non default state should be stored).
+        public List<FilterRuleStateRecord> Rules { get; init; } = new List<FilterRuleStateRecord>();
 
         public DateTime CreatedUtc { get; init; } = DateTime.UtcNow;
         public DateTime UpdatedUtc { get; init; } = DateTime.UtcNow;
@@ -40,7 +39,7 @@ namespace JoesScanner.Models
     public sealed class FilterProfileStoreEnvelope
     {
         [JsonPropertyName("schema_version")]
-        public int SchemaVersion { get; init; } = 1;
+        public int SchemaVersion { get; init; } = 2;
 
         [JsonPropertyName("profiles")]
         public List<FilterProfile> Profiles { get; init; } = new List<FilterProfile>();

@@ -575,24 +575,39 @@ if (!string.IsNullOrWhiteSpace(draft) && _filterProfileNameOptions.Any(n => stri
             };
 
         public async Task OnPageOpenedAsync()
+{
+    // Only mute the Main tab audio. Do not stop or disconnect the live queue.
+    QueueControlBus.RequestSetMainAudioMuted(true);
+
+    // Load locally stored profiles first so the UI is usable even when the server is unreachable
+    // or when lookups would otherwise block on a network timeout.
+    try
+    {
+        await LoadFilterProfilesAsync(applySelectedProfile: true);
+    }
+    catch
+    {
+    }
+
+    // Lookups depend on the server and may fail when offline. Do not block profile loading.
+    _ = LoadLookupsAsyncSafe();
+}
+
+private async Task LoadLookupsAsyncSafe()
+{
+    try
+    {
+        await LoadLookupsAsync();
+    }
+    catch
+    {
+    }
+}
+
+
+public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
         {
-            // Only mute the Main tab audio while the Archive tab is open. Do not stop or disconnect the live queue.
-            QueueControlBus.RequestSetMainAudioMuted(true);
-
-            await LoadLookupsAsync();
-
-            try
-            {
-                await LoadFilterProfilesAsync(applySelectedProfile: true);
-            }
-            catch
-            {
-            }
-        }
-
-        public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
-        {
-            var profiles = await _filterProfileStore.GetProfilesAsync(FilterProfileContexts.Archive, CancellationToken.None);
+            var profiles = await _filterProfileStore.GetProfilesAsync(CancellationToken.None);
 
             _filterProfiles.Clear();
             foreach (var p in profiles)
@@ -638,7 +653,6 @@ var selectedId = Preferences.Get(SelectedFilterProfileIdPreferenceKey, string.Em
             {
                 Id = profileId ?? string.Empty,
                 Name = name,
-                Context = FilterProfileContexts.Archive,
                 Filters = new FilterProfileFilters
                 {
                     ReceiverValue = SelectedReceiver?.Value,
@@ -649,7 +663,8 @@ var selectedId = Preferences.Get(SelectedFilterProfileIdPreferenceKey, string.Em
                     TalkgroupLabel = SelectedTalkgroup?.Label,
                     SelectedDateLocal = SelectedDate.Date,
                     SelectedTime = SelectedTime
-                }
+                },
+                Rules = FilterService.Instance.GetActiveStateRecords()
             };
 
             await _filterProfileStore.SaveOrUpdateAsync(profile, CancellationToken.None);
@@ -672,7 +687,7 @@ var selectedId = Preferences.Get(SelectedFilterProfileIdPreferenceKey, string.Em
             if (string.IsNullOrWhiteSpace(newName))
                 return false;
 
-            await _filterProfileStore.RenameAsync(FilterProfileContexts.Archive, current.Id, newName, CancellationToken.None);
+            await _filterProfileStore.RenameAsync(current.Id, newName, CancellationToken.None);
             await LoadFilterProfilesAsync(applySelectedProfile: false);
 
             var refreshed = _filterProfiles.FirstOrDefault(p => string.Equals(p.Id, current.Id, StringComparison.Ordinal));
@@ -688,7 +703,7 @@ var selectedId = Preferences.Get(SelectedFilterProfileIdPreferenceKey, string.Em
             if (current == null)
                 return false;
 
-            await _filterProfileStore.DeleteAsync(FilterProfileContexts.Archive, current.Id, CancellationToken.None);
+            await _filterProfileStore.DeleteAsync(current.Id, CancellationToken.None);
             Preferences.Set(SelectedFilterProfileIdPreferenceKey, string.Empty);
             SelectedFilterProfile = null;
 
@@ -700,6 +715,15 @@ var selectedId = Preferences.Get(SelectedFilterProfileIdPreferenceKey, string.Em
         {
             if (profile == null)
                 return;
+
+            // Profiles are shared with Settings. Apply mute/disable snapshot as well.
+            try
+            {
+                FilterService.Instance.ApplyStateRecords(profile.Rules ?? new List<FilterRuleStateRecord>(), resetOthers: true);
+            }
+            catch
+            {
+            }
 
             var f = profile.Filters;
             if (f == null)

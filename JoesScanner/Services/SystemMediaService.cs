@@ -30,7 +30,18 @@ namespace JoesScanner.Services
 
         public void UpdateNowPlaying(string title, string subtitle, bool audioEnabled)
         {
-            PlatformUpdateNowPlaying(title, subtitle, audioEnabled);
+            var meta = new NowPlayingMetadata
+            {
+                Title = title ?? string.Empty,
+                Artist = subtitle ?? string.Empty
+            };
+
+            UpdateNowPlaying(meta, audioEnabled);
+        }
+
+        public void UpdateNowPlaying(NowPlayingMetadata metadata, bool audioEnabled)
+        {
+            PlatformUpdateNowPlaying(metadata ?? new NowPlayingMetadata(), audioEnabled);
         }
 
         public void Clear()
@@ -102,7 +113,7 @@ namespace JoesScanner.Services
         private partial void PlatformSetHandlers(Func<Task> onPlay, Func<Task> onStop, Func<Task>? onNext, Func<Task>? onPrevious);
         private partial Task PlatformStartSessionAsync(bool audioEnabled);
         private partial Task PlatformStopSessionAsync();
-        private partial void PlatformUpdateNowPlaying(string title, string subtitle, bool audioEnabled);
+        private partial void PlatformUpdateNowPlaying(NowPlayingMetadata metadata, bool audioEnabled);
         private partial void PlatformClear();
     }
 }

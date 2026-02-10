@@ -241,7 +241,7 @@ namespace JoesScanner.ViewModels
                 if (result.HasSnapshot)
                 {
                     var ordered = result.Snapshot
-                        .OrderBy(m => m.CreatedAtUtc)
+                        .OrderByDescending(m => m.CreatedAtUtc)
                         .ToList();
 
                     await MainThread.InvokeOnMainThreadAsync(() =>
@@ -304,11 +304,11 @@ namespace JoesScanner.ViewModels
                                     continue;
                                 }
 
-                                // Keep chronological order (oldest at top).
+                                // Keep newest at top.
                                 var insertAt = Messages.Count;
                                 for (var i = 0; i < Messages.Count; i++)
                                 {
-                                    if (Messages[i].CreatedAtUtc > msg.CreatedAtUtc)
+                                    if (Messages[i].CreatedAtUtc < msg.CreatedAtUtc)
                                     {
                                         insertAt = i;
                                         break;

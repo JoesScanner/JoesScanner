@@ -23,13 +23,13 @@ namespace JoesScanner.ViewModels
         private readonly HttpClient _httpClient;
         private readonly FilterService _filterService = FilterService.Instance;
 
-        private readonly ISettingsFilterProfileStore _settingsFilterProfileStore;
+        private readonly IFilterProfileStore _filterProfileStore;
 
-        private readonly ObservableCollection<SettingsFilterProfile> _settingsFilterProfiles = new();
+        private readonly ObservableCollection<FilterProfile> _settingsFilterProfiles = new();
         private readonly ObservableCollection<string> _settingsFilterProfileNameOptions = new();
         private string _selectedSettingsFilterProfileNameOption = NoneSettingsProfileNameOption;
         private bool _isCustomSettingsFilterProfileName;
-        public ObservableCollection<SettingsFilterProfile> SettingsFilterProfiles => _settingsFilterProfiles;
+        public ObservableCollection<FilterProfile> SettingsFilterProfiles => _settingsFilterProfiles;
 
 
         public ObservableCollection<string> SettingsFilterProfileNameOptions => _settingsFilterProfileNameOptions;
@@ -51,11 +51,6 @@ namespace JoesScanner.ViewModels
                     SettingsFilterProfileNameDraft = string.Empty;
                     _ = SelectSettingsFilterProfileAsync(null, apply: false);
                 }
-                else if (string.Equals(newValue, CustomSettingsProfileNameOption, StringComparison.Ordinal))
-                {
-                    _isCustomSettingsFilterProfileName = true;
-                    SettingsFilterProfileNameDraft = string.Empty;
-                }
                 else
                 {
                     _isCustomSettingsFilterProfileName = false;
@@ -70,10 +65,10 @@ namespace JoesScanner.ViewModels
 
         public bool IsCustomSettingsFilterProfileName => _isCustomSettingsFilterProfileName;
 
-        private SettingsFilterProfile? _selectedSettingsFilterProfile;
+        private FilterProfile? _selectedSettingsFilterProfile;
 
         private string _settingsFilterProfileNameDraft = string.Empty;
-        public SettingsFilterProfile? SelectedSettingsFilterProfile
+        public FilterProfile? SelectedSettingsFilterProfile
         {
             get => _selectedSettingsFilterProfile;
             private set
@@ -104,13 +99,10 @@ namespace JoesScanner.ViewModels
         }
 
         public string SelectedSettingsFilterProfileDisplay =>
-            SelectedSettingsFilterProfile?.Name ?? "None";
+            SelectedSettingsFilterProfile?.Name ?? string.Empty;
 
         private const string SelectedSettingsFilterProfileIdPreferenceKey = "SelectedSettingsFilterProfileIdV1";
-
-        private const string CustomSettingsProfileNameOption = "New";
-        
-        private const string NoneSettingsProfileNameOption = "None";
+        private const string NoneSettingsProfileNameOption = "";
 
         private void RefreshSettingsProfileNameOptions()
         {
@@ -118,9 +110,7 @@ namespace JoesScanner.ViewModels
             _settingsFilterProfileNameOptions.Add(NoneSettingsProfileNameOption);
             foreach (var name in _settingsFilterProfiles.Select(p => p.Name).Where(n => !string.IsNullOrWhiteSpace(n)).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(n => n))
                 _settingsFilterProfileNameOptions.Add(name);
-
-            _settingsFilterProfileNameOptions.Add(CustomSettingsProfileNameOption);
-            SyncSettingsProfileNameDropdownFromDraft();
+SyncSettingsProfileNameDropdownFromDraft();
             OnPropertyChanged(nameof(SettingsFilterProfileNameOptions));
         }
 
@@ -143,7 +133,7 @@ namespace JoesScanner.ViewModels
             }
             else
             {
-                _selectedSettingsFilterProfileNameOption = CustomSettingsProfileNameOption;
+                _selectedSettingsFilterProfileNameOption = NoneSettingsProfileNameOption;
                 _isCustomSettingsFilterProfileName = true;
             }
 
@@ -156,8 +146,7 @@ namespace JoesScanner.ViewModels
             if (string.IsNullOrWhiteSpace(nameOption))
                 return;
 
-            if (string.Equals(nameOption, NoneSettingsProfileNameOption, StringComparison.Ordinal) ||
-                string.Equals(nameOption, CustomSettingsProfileNameOption, StringComparison.Ordinal))
+            if (string.Equals(nameOption, NoneSettingsProfileNameOption, StringComparison.Ordinal))
             {
                 return;
             }
@@ -265,12 +254,32 @@ namespace JoesScanner.ViewModels
         private bool _savedUseDefaultConnection;
         private bool _hasChanges;
 
+        // Windows-only startup behavior (only acted on in WINDOWS builds).
+        private bool _windowsAutoConnectOnStart;
+        private bool _savedWindowsAutoConnectOnStart;
+
+        private bool _windowsStartWithWindows;
+        private bool _savedWindowsStartWithWindows;
+
         // Saved snapshot for settings that are only committed on Save
 
         // Call display settings
 
         // Theme as a single string: "System", "Light", "Dark"
         private string _themeMode = "System";
+
+        // Bluetooth label mapping
+        private string _bluetoothLabelArtistToken = BluetoothLabelMapping.TokenAppName;
+        private string _bluetoothLabelTitleToken = BluetoothLabelMapping.TokenTranscription;
+        private string _bluetoothLabelAlbumToken = BluetoothLabelMapping.TokenTalkgroup;
+        private string _bluetoothLabelComposerToken = BluetoothLabelMapping.TokenSite;
+        private string _bluetoothLabelGenreToken = BluetoothLabelMapping.TokenReceiver;
+
+        private string _savedBluetoothLabelArtistToken = BluetoothLabelMapping.TokenAppName;
+        private string _savedBluetoothLabelTitleToken = BluetoothLabelMapping.TokenTranscription;
+        private string _savedBluetoothLabelAlbumToken = BluetoothLabelMapping.TokenTalkgroup;
+        private string _savedBluetoothLabelComposerToken = BluetoothLabelMapping.TokenSite;
+        private string _savedBluetoothLabelGenreToken = BluetoothLabelMapping.TokenReceiver;
 
         // Disabled entries persisted in settings, keyed as "receiver|site|talkgroup"
         private static readonly HashSet<string> _disabledKeys =
@@ -295,18 +304,29 @@ namespace JoesScanner.ViewModels
 
         public const string DefaultServerUrl = "https://app.joesscanner.com";
 
-        public SettingsViewModel(ISettingsService settingsService, MainViewModel mainViewModel, ITelemetryService telemetryService, ISettingsFilterProfileStore settingsFilterProfileStore)
+        public SettingsViewModel(ISettingsService settingsService, MainViewModel mainViewModel, ITelemetryService telemetryService, IFilterProfileStore filterProfileStore)
         {
             _settings = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
             _mainViewModel = mainViewModel ?? throw new ArgumentNullException(nameof(mainViewModel));
             _telemetryService = telemetryService ?? throw new ArgumentNullException(nameof(telemetryService));
 
-            _settingsFilterProfileStore = settingsFilterProfileStore ?? throw new ArgumentNullException(nameof(settingsFilterProfileStore));
+            _filterProfileStore = filterProfileStore ?? throw new ArgumentNullException(nameof(filterProfileStore));
 
             _httpClient = new HttpClient
             {
                 Timeout = TimeSpan.FromSeconds(3)
             };
+
+            // Seed the profile name options immediately so the Settings profile picker never renders empty
+            // while profiles are still loading.
+            _settingsFilterProfileNameOptions.Clear();
+            _settingsFilterProfileNameOptions.Add(NoneSettingsProfileNameOption);
+            _selectedSettingsFilterProfileNameOption = NoneSettingsProfileNameOption;
+            _isCustomSettingsFilterProfileName = false;
+
+            OnPropertyChanged(nameof(SettingsFilterProfileNameOptions));
+            OnPropertyChanged(nameof(SelectedSettingsFilterProfileNameOption));
+            OnPropertyChanged(nameof(IsCustomSettingsFilterProfileName));
 
             Current = this;
 
@@ -340,7 +360,7 @@ namespace JoesScanner.ViewModels
 
         public async Task LoadSettingsFilterProfilesAsync(bool applySelectedProfile)
         {
-            var profiles = await _settingsFilterProfileStore.GetProfilesAsync(CancellationToken.None);
+            var profiles = await _filterProfileStore.GetProfilesAsync(CancellationToken.None);
 
             _settingsFilterProfiles.Clear();
             foreach (var p in profiles)
@@ -362,7 +382,7 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
                 ApplySettingsProfile(selected);
         }
 
-        public async Task SelectSettingsFilterProfileAsync(SettingsFilterProfile? profile, bool apply)
+        public async Task SelectSettingsFilterProfileAsync(FilterProfile? profile, bool apply)
         {
             SelectedSettingsFilterProfile = profile;
             Preferences.Set(SelectedSettingsFilterProfileIdPreferenceKey, profile?.Id ?? string.Empty);
@@ -371,7 +391,7 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
                 ApplySettingsProfile(profile);
         }
 
-        public async Task<SettingsFilterProfile?> SaveCurrentSettingsFiltersAsync(string name)
+        public async Task<FilterProfile?> SaveCurrentSettingsFiltersAsync(string name)
         {
             name = (name ?? string.Empty).Trim();
             if (string.IsNullOrWhiteSpace(name))
@@ -380,17 +400,18 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
             var existing = _settingsFilterProfiles.FirstOrDefault(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase));
             var profileId = existing?.Id;
 
+            var existingFilters = existing?.Filters ?? new FilterProfileFilters();
             var records = _filterService.GetActiveStateRecords();
 
-            var profile = new SettingsFilterProfile
+            var profile = new FilterProfile
             {
                 Id = profileId ?? string.Empty,
                 Name = name,
-                UpdatedUtc = DateTime.UtcNow,
+                Filters = existingFilters,
                 Rules = records
             };
 
-            await _settingsFilterProfileStore.SaveOrUpdateAsync(profile, CancellationToken.None);
+            await _filterProfileStore.SaveOrUpdateAsync(profile, CancellationToken.None);
             await LoadSettingsFilterProfilesAsync(applySelectedProfile: false);
 
             var saved = _settingsFilterProfiles.FirstOrDefault(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase));
@@ -410,7 +431,7 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
             if (string.IsNullOrWhiteSpace(newName))
                 return false;
 
-            await _settingsFilterProfileStore.RenameAsync(current.Id, newName, CancellationToken.None);
+            await _filterProfileStore.RenameAsync(current.Id, newName, CancellationToken.None);
             await LoadSettingsFilterProfilesAsync(applySelectedProfile: false);
 
             var refreshed = _settingsFilterProfiles.FirstOrDefault(p => string.Equals(p.Id, current.Id, StringComparison.Ordinal));
@@ -426,7 +447,7 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
             if (current == null)
                 return false;
 
-            await _settingsFilterProfileStore.DeleteAsync(current.Id, CancellationToken.None);
+            await _filterProfileStore.DeleteAsync(current.Id, CancellationToken.None);
             Preferences.Set(SelectedSettingsFilterProfileIdPreferenceKey, string.Empty);
             SelectedSettingsFilterProfile = null;
 
@@ -434,7 +455,7 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
             return true;
         }
 
-        private void ApplySettingsProfile(SettingsFilterProfile profile)
+        private void ApplySettingsProfile(FilterProfile profile)
         {
             if (profile == null)
                 return;
@@ -609,6 +630,47 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
 
         public bool IsBasicAuthPasswordHidden => !_isBasicAuthPasswordVisible;
 
+        public bool WindowsAutoConnectOnStart
+        {
+            get => _windowsAutoConnectOnStart;
+            set
+            {
+                if (_windowsAutoConnectOnStart == value)
+                    return;
+
+                _windowsAutoConnectOnStart = value;
+                OnPropertyChanged();
+
+                // Autosave Windows-only behavior immediately.
+                // This setting should not require manual Save or server validation.
+                _settings.WindowsAutoConnectOnStart = value;
+                _savedWindowsAutoConnectOnStart = value;
+
+                UpdateHasChanges();
+            }
+        }
+
+        public bool WindowsStartWithWindows
+        {
+            get => _windowsStartWithWindows;
+            set
+            {
+                if (_windowsStartWithWindows == value)
+                    return;
+
+                _windowsStartWithWindows = value;
+                OnPropertyChanged();
+
+                // Autosave and apply Windows startup registration immediately.
+                // Best effort only. If this fails due to policy restrictions,
+                // keep the toggle state saved and allow the user to try again.
+                _settings.WindowsStartWithWindows = value;
+                _savedWindowsStartWithWindows = value;
+
+                UpdateHasChanges();
+            }
+        }
+
         public string BasicAuthPasswordToggleText =>
             _isBasicAuthPasswordVisible ? "Hide" : "Show";
 
@@ -702,6 +764,90 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
             }
         }
 
+        public IReadOnlyList<BluetoothLabelMapping.Option> BluetoothLabelOptions =>
+            BluetoothLabelMapping.Options;
+
+        private BluetoothLabelMapping.Option _bluetoothLabelArtistOption = BluetoothLabelMapping.Options.First();
+        private BluetoothLabelMapping.Option _bluetoothLabelTitleOption = BluetoothLabelMapping.Options.First();
+        private BluetoothLabelMapping.Option _bluetoothLabelAlbumOption = BluetoothLabelMapping.Options.First();
+        private BluetoothLabelMapping.Option _bluetoothLabelComposerOption = BluetoothLabelMapping.Options.First();
+        private BluetoothLabelMapping.Option _bluetoothLabelGenreOption = BluetoothLabelMapping.Options.First();
+
+        public BluetoothLabelMapping.Option BluetoothLabelArtistOption
+        {
+            get => _bluetoothLabelArtistOption;
+            set
+            {
+                if (value == null || string.Equals(_bluetoothLabelArtistOption?.Key, value.Key, StringComparison.Ordinal))
+                    return;
+
+                _bluetoothLabelArtistOption = value;
+                _bluetoothLabelArtistToken = value.Key;
+                OnPropertyChanged();
+                UpdateHasChanges();
+            }
+        }
+
+        public BluetoothLabelMapping.Option BluetoothLabelTitleOption
+        {
+            get => _bluetoothLabelTitleOption;
+            set
+            {
+                if (value == null || string.Equals(_bluetoothLabelTitleOption?.Key, value.Key, StringComparison.Ordinal))
+                    return;
+
+                _bluetoothLabelTitleOption = value;
+                _bluetoothLabelTitleToken = value.Key;
+                OnPropertyChanged();
+                UpdateHasChanges();
+            }
+        }
+
+        public BluetoothLabelMapping.Option BluetoothLabelAlbumOption
+        {
+            get => _bluetoothLabelAlbumOption;
+            set
+            {
+                if (value == null || string.Equals(_bluetoothLabelAlbumOption?.Key, value.Key, StringComparison.Ordinal))
+                    return;
+
+                _bluetoothLabelAlbumOption = value;
+                _bluetoothLabelAlbumToken = value.Key;
+                OnPropertyChanged();
+                UpdateHasChanges();
+            }
+        }
+
+        public BluetoothLabelMapping.Option BluetoothLabelComposerOption
+        {
+            get => _bluetoothLabelComposerOption;
+            set
+            {
+                if (value == null || string.Equals(_bluetoothLabelComposerOption?.Key, value.Key, StringComparison.Ordinal))
+                    return;
+
+                _bluetoothLabelComposerOption = value;
+                _bluetoothLabelComposerToken = value.Key;
+                OnPropertyChanged();
+                UpdateHasChanges();
+            }
+        }
+
+        public BluetoothLabelMapping.Option BluetoothLabelGenreOption
+        {
+            get => _bluetoothLabelGenreOption;
+            set
+            {
+                if (value == null || string.Equals(_bluetoothLabelGenreOption?.Key, value.Key, StringComparison.Ordinal))
+                    return;
+
+                _bluetoothLabelGenreOption = value;
+                _bluetoothLabelGenreToken = value.Key;
+                OnPropertyChanged();
+                UpdateHasChanges();
+            }
+        }
+
         public bool SortAscending
         {
             get => _sortAscending;
@@ -752,6 +898,46 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
             _savedBasicAuthUsername = _basicAuthUsername;
             _savedBasicAuthPassword = _basicAuthPassword;
 
+            _windowsAutoConnectOnStart = _settings.WindowsAutoConnectOnStart;
+            _savedWindowsAutoConnectOnStart = _windowsAutoConnectOnStart;
+
+            _windowsStartWithWindows = _settings.WindowsStartWithWindows;
+            _savedWindowsStartWithWindows = _windowsStartWithWindows;
+
+            _bluetoothLabelArtistToken = BluetoothLabelMapping.NormalizeToken(
+                _settings.BluetoothLabelArtist,
+                BluetoothLabelMapping.TokenAppName);
+            _bluetoothLabelTitleToken = BluetoothLabelMapping.NormalizeToken(
+                _settings.BluetoothLabelTitle,
+                BluetoothLabelMapping.TokenTranscription);
+            _bluetoothLabelAlbumToken = BluetoothLabelMapping.NormalizeToken(
+                _settings.BluetoothLabelAlbum,
+                BluetoothLabelMapping.TokenTalkgroup);
+            _bluetoothLabelComposerToken = BluetoothLabelMapping.NormalizeToken(
+                _settings.BluetoothLabelComposer,
+                BluetoothLabelMapping.TokenSite);
+            _bluetoothLabelGenreToken = BluetoothLabelMapping.NormalizeToken(
+                _settings.BluetoothLabelGenre,
+                BluetoothLabelMapping.TokenReceiver);
+
+            _savedBluetoothLabelArtistToken = _bluetoothLabelArtistToken;
+            _savedBluetoothLabelTitleToken = _bluetoothLabelTitleToken;
+            _savedBluetoothLabelAlbumToken = _bluetoothLabelAlbumToken;
+            _savedBluetoothLabelComposerToken = _bluetoothLabelComposerToken;
+            _savedBluetoothLabelGenreToken = _bluetoothLabelGenreToken;
+
+            _bluetoothLabelArtistOption = BluetoothLabelOptions.First(o => string.Equals(o.Key, _bluetoothLabelArtistToken, StringComparison.Ordinal));
+            _bluetoothLabelTitleOption = BluetoothLabelOptions.First(o => string.Equals(o.Key, _bluetoothLabelTitleToken, StringComparison.Ordinal));
+            _bluetoothLabelAlbumOption = BluetoothLabelOptions.First(o => string.Equals(o.Key, _bluetoothLabelAlbumToken, StringComparison.Ordinal));
+            _bluetoothLabelComposerOption = BluetoothLabelOptions.First(o => string.Equals(o.Key, _bluetoothLabelComposerToken, StringComparison.Ordinal));
+            _bluetoothLabelGenreOption = BluetoothLabelOptions.First(o => string.Equals(o.Key, _bluetoothLabelGenreToken, StringComparison.Ordinal));
+
+            OnPropertyChanged(nameof(BluetoothLabelArtistOption));
+            OnPropertyChanged(nameof(BluetoothLabelTitleOption));
+            OnPropertyChanged(nameof(BluetoothLabelAlbumOption));
+            OnPropertyChanged(nameof(BluetoothLabelComposerOption));
+            OnPropertyChanged(nameof(BluetoothLabelGenreOption));
+
             var defaultUrl = DefaultServerUrl;
             _useDefaultConnection = string.Equals(_serverUrl, defaultUrl, StringComparison.OrdinalIgnoreCase);
             _savedUseDefaultConnection = _useDefaultConnection;
@@ -794,6 +980,9 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
             _savedUseDefaultConnection = UseDefaultConnection;
             _savedBasicAuthUsername = _basicAuthUsername;
             _savedBasicAuthPassword = _basicAuthPassword;
+            _savedWindowsAutoConnectOnStart = _windowsAutoConnectOnStart;
+            _savedWindowsStartWithWindows = _windowsStartWithWindows;
+            _savedWindowsStartWithWindows = _windowsStartWithWindows;
 
             _showValidationPrefix = false;
             _lastValidationWasAccountValidation = false;
@@ -955,6 +1144,21 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
             _settings.BasicAuthUsername = newUser;
             _settings.BasicAuthPassword = newPass;
 
+            _settings.WindowsAutoConnectOnStart = WindowsAutoConnectOnStart;
+            _settings.WindowsStartWithWindows = WindowsStartWithWindows;
+
+#if WINDOWS
+            try
+            {
+                // Best effort. If this fails (policy restrictions, permissions, etc.),
+                // the setting remains saved and the user can toggle again.
+                WindowsStartupManager.TrySetRunOnLogin(_settings.WindowsStartWithWindows);
+            }
+            catch
+            {
+            }
+#endif
+
             if (credentialsChanged)
             {
                 try
@@ -980,11 +1184,25 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
             _settings.ThemeMode = ThemeMode;
             ApplyTheme(ThemeMode);
 
+            _settings.BluetoothLabelArtist = _bluetoothLabelArtistToken;
+            _settings.BluetoothLabelTitle = _bluetoothLabelTitleToken;
+            _settings.BluetoothLabelAlbum = _bluetoothLabelAlbumToken;
+            _settings.BluetoothLabelComposer = _bluetoothLabelComposerToken;
+            _settings.BluetoothLabelGenre = _bluetoothLabelGenreToken;
+
             _savedServerUrl = _settings.ServerUrl ?? string.Empty;
             _savedAuthServerBaseUrl = _settings.AuthServerBaseUrl ?? string.Empty;
             _savedUseDefaultConnection = UseDefaultConnection;
             _savedBasicAuthUsername = _basicAuthUsername;
             _savedBasicAuthPassword = _basicAuthPassword;
+            _savedWindowsAutoConnectOnStart = _windowsAutoConnectOnStart;
+            _savedWindowsStartWithWindows = _windowsStartWithWindows;
+
+            _savedBluetoothLabelArtistToken = _bluetoothLabelArtistToken;
+            _savedBluetoothLabelTitleToken = _bluetoothLabelTitleToken;
+            _savedBluetoothLabelAlbumToken = _bluetoothLabelAlbumToken;
+            _savedBluetoothLabelComposerToken = _bluetoothLabelComposerToken;
+            _savedBluetoothLabelGenreToken = _bluetoothLabelGenreToken;
 
             HasChanges = false;
 
@@ -1334,7 +1552,14 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
                 || !string.Equals(_authServerBaseUrl, _savedAuthServerBaseUrl, StringComparison.Ordinal)
                 || _useDefaultConnection != _savedUseDefaultConnection
                 || !string.Equals(_basicAuthUsername, _savedBasicAuthUsername, StringComparison.Ordinal)
-                || !string.Equals(_basicAuthPassword, _savedBasicAuthPassword, StringComparison.Ordinal);
+                || !string.Equals(_basicAuthPassword, _savedBasicAuthPassword, StringComparison.Ordinal)
+                || _windowsAutoConnectOnStart != _savedWindowsAutoConnectOnStart
+                || _windowsStartWithWindows != _savedWindowsStartWithWindows
+                || !string.Equals(_bluetoothLabelArtistToken, _savedBluetoothLabelArtistToken, StringComparison.Ordinal)
+                || !string.Equals(_bluetoothLabelTitleToken, _savedBluetoothLabelTitleToken, StringComparison.Ordinal)
+                || !string.Equals(_bluetoothLabelAlbumToken, _savedBluetoothLabelAlbumToken, StringComparison.Ordinal)
+                || !string.Equals(_bluetoothLabelComposerToken, _savedBluetoothLabelComposerToken, StringComparison.Ordinal)
+                || !string.Equals(_bluetoothLabelGenreToken, _savedBluetoothLabelGenreToken, StringComparison.Ordinal);
 
             HasChanges = has;
         }
@@ -1346,6 +1571,26 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
             UseDefaultConnection = _savedUseDefaultConnection;
             BasicAuthUsername = _savedBasicAuthUsername;
             BasicAuthPassword = _savedBasicAuthPassword;
+            WindowsAutoConnectOnStart = _savedWindowsAutoConnectOnStart;
+            WindowsStartWithWindows = _savedWindowsStartWithWindows;
+
+            _bluetoothLabelArtistToken = _savedBluetoothLabelArtistToken;
+            _bluetoothLabelTitleToken = _savedBluetoothLabelTitleToken;
+            _bluetoothLabelAlbumToken = _savedBluetoothLabelAlbumToken;
+            _bluetoothLabelComposerToken = _savedBluetoothLabelComposerToken;
+            _bluetoothLabelGenreToken = _savedBluetoothLabelGenreToken;
+
+            _bluetoothLabelArtistOption = BluetoothLabelOptions.First(o => string.Equals(o.Key, _bluetoothLabelArtistToken, StringComparison.Ordinal));
+            _bluetoothLabelTitleOption = BluetoothLabelOptions.First(o => string.Equals(o.Key, _bluetoothLabelTitleToken, StringComparison.Ordinal));
+            _bluetoothLabelAlbumOption = BluetoothLabelOptions.First(o => string.Equals(o.Key, _bluetoothLabelAlbumToken, StringComparison.Ordinal));
+            _bluetoothLabelComposerOption = BluetoothLabelOptions.First(o => string.Equals(o.Key, _bluetoothLabelComposerToken, StringComparison.Ordinal));
+            _bluetoothLabelGenreOption = BluetoothLabelOptions.First(o => string.Equals(o.Key, _bluetoothLabelGenreToken, StringComparison.Ordinal));
+
+            OnPropertyChanged(nameof(BluetoothLabelArtistOption));
+            OnPropertyChanged(nameof(BluetoothLabelTitleOption));
+            OnPropertyChanged(nameof(BluetoothLabelAlbumOption));
+            OnPropertyChanged(nameof(BluetoothLabelComposerOption));
+            OnPropertyChanged(nameof(BluetoothLabelGenreOption));
             HasChanges = false;
         }
 

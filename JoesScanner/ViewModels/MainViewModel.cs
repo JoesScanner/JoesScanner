@@ -11,6 +11,9 @@ namespace JoesScanner.ViewModels
     // Handles streaming calls, playback, theme, jump-to-live, and global audio enable state.
     public class MainViewModel : BindableObject
     {
+        private const string AppleIosTestAccountEmail = "iostest@joesscanner.com";
+        private const string AppleIosTestAccountEmailLegacy = "iostest@jeosscanner.com";
+
         private readonly ICallStreamService _callStreamService;
         private readonly ISettingsService _settingsService;
         private readonly IAudioPlaybackService _audioPlaybackService;
@@ -22,6 +25,10 @@ namespace JoesScanner.ViewModels
 
         private CancellationTokenSource? _cts;
         private CancellationTokenSource? _audioCts;
+
+        // Set true only when the user explicitly disconnects.
+        // Used to decide whether we should clear the "last connected" intent across restarts.
+        private volatile bool _userRequestedStop;
 
         
         private int _audioToggleSerial;
@@ -203,8 +210,8 @@ namespace JoesScanner.ViewModels
             JumpToLiveCommand = new Command(async () => await JumpToLiveAsync());
 
             ToggleConnectionCommand = new Command(async () => await ToggleConnectionAsync());
-            PlaybackSpeedDownCommand = new Command(DecreasePlaybackSpeedStep);
-            PlaybackSpeedUpCommand = new Command(IncreasePlaybackSpeedStep);
+            PlaybackSpeedDownCommand = new Command(async () => await DecreasePlaybackSpeedStepAsync());
+            PlaybackSpeedUpCommand = new Command(async () => await IncreasePlaybackSpeedStepAsync());
             PreviousCallCommand = new Command(async () => await NavigateToAdjacentCallAsync(1));
             NextCallCommand = new Command(async () => await NavigateToAdjacentCallAsync(-1));
 
@@ -330,8 +337,7 @@ namespace JoesScanner.ViewModels
             });
         }
 
-        private const string LastConnectedPreferenceKey = "LastConnectedOnExit";
-        private const string PlaybackSpeedStepPreferenceKey = "PlaybackSpeedStep";
+        private const string LastConnectedPreferenceKey = "LastConnectedOnExit";        private const string PlaybackSpeedStepPreferenceKey = "PlaybackSpeedStep";
 
         private const string ServiceAuthUsername = "secappass";
         private const string ServiceAuthPassword = "7a65vBLeqLjdRut5bSav4eMYGUJPrmjHhgnPmEji3q3S7tZ3K5aadFZz2EZtbaE7";
@@ -925,7 +931,6 @@ namespace JoesScanner.ViewModels
         {
             if (!IsRunning)
                 return false;
-
             // If audio is off, we are not stabilizing playback, so do not hold calls in pending.
             if (!AudioEnabled)
                 return false;
@@ -942,6 +947,8 @@ namespace JoesScanner.ViewModels
         // When the user is behind live, new incoming calls are held in _pendingCalls so playback remains stable.
         private CallItem? GetNextQueuedCall()
         {
+            var isAppleTestAccount = IsAppleIosTestAccount();
+
             if (Calls.Count == 0)
             {
                 // Nothing visible yet. If we have pending calls, promote the oldest so it can be played.
@@ -994,6 +1001,11 @@ namespace JoesScanner.ViewModels
 
                 if (string.IsNullOrWhiteSpace(candidate.AudioUrl))
                     continue;
+
+                if (isAppleTestAccount)
+                {
+                    return candidate;
+                }
 
                 if (_filterService.ShouldHide(candidate))
                 {
@@ -1123,8 +1135,9 @@ namespace JoesScanner.ViewModels
         }
 
         public string TaglineText => $"Server: {ServerUrl}";
-        public string DonateUrl => "https://www.joesscanner.com/products/one-time-donation/";
-
+        public string DonateUrl => OperatingSystem.IsIOS()
+            ? "https://joesscanner.com"
+            : "https://www.joesscanner.com/products/one-time-donation/";
         public void Start()
         {
             AppLog.Add("User clicked Start Monitoring");
@@ -1135,6 +1148,9 @@ namespace JoesScanner.ViewModels
         {
             if (IsRunning)
                 return;
+
+            // Starting a new monitoring run resets any prior user-stop intent.
+            _userRequestedStop = false;
 
             var serverUrl = _settingsService.ServerUrl ?? string.Empty;
             var isJoesScannerServer = false;
@@ -1199,12 +1215,20 @@ namespace JoesScanner.ViewModels
             SetConnectionStatus(ConnectionStatus.Connecting);
             IsRunning = true;
 
+            if (IsAppleIosTestAccount())
+            {
+                // Ensure Apple review account immediately produces audible playback.
+                AudioEnabled = true;
+                AutoPlay = true;
+            }
+
             await EnsureSystemMediaSessionStartedAsync();
 
             _telemetryService.StartMonitoringHeartbeat(serverUrl);
 
             _currentPlayingCall = null;
             ClearPendingCalls();
+
 
             if (Calls.Count > 0)
             {
@@ -1240,6 +1264,14 @@ namespace JoesScanner.ViewModels
             catch
             {
             }
+        }
+
+        private bool IsAppleIosTestAccount()
+        {
+            var username = _settingsService.BasicAuthUsername ?? string.Empty;
+            username = username.Trim();
+            return string.Equals(username, AppleIosTestAccountEmail, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(username, AppleIosTestAccountEmailLegacy, StringComparison.OrdinalIgnoreCase);
         }
 
 #if ANDROID
@@ -1361,16 +1393,26 @@ namespace JoesScanner.ViewModels
                                         return;
                                     }
 
-                                    // Ensure filter rules exist and apply filters
+                                    var isAppleTestAccount = IsAppleIosTestAccount();
+
+                                    // Ensure filter rules exist and apply filters.
+                                    // For the Apple iOS test account, bypass hide and mute so calls always appear and play.
                                     _filterService.EnsureRulesForCall(call);
 
-                                    if (_filterService.ShouldHide(call))
+                                    if (!isAppleTestAccount)
                                     {
-                                        LastQueueEvent = $"Call dropped by filter at {DateTime.Now:T}";
-                                        return;
-                                    }
+                                        if (_filterService.ShouldHide(call))
+                                        {
+                                            LastQueueEvent = $"Call dropped by filter at {DateTime.Now:T}";
+                                            return;
+                                        }
 
-                                    call.IsMutedByFilter = _filterService.ShouldMute(call);
+                                        call.IsMutedByFilter = _filterService.ShouldMute(call);
+                                    }
+                                    else
+                                    {
+                                        call.IsMutedByFilter = false;
+                                    }
 
                                     // If the user is behind live (replaying from an older point), hold incoming calls as pending.
                                     if (ShouldHoldIncomingCalls())
@@ -1505,7 +1547,12 @@ namespace JoesScanner.ViewModels
                     _telemetryService.StopMonitoringHeartbeat("stream_loop_end");
 
                     IsRunning = false;
-                    Preferences.Default.Set(LastConnectedPreferenceKey, false);
+
+                    // Only clear the reconnect flag when the user explicitly disconnected.
+                    // If the app was terminated or backgrounded while still "connected", we want the next launch
+                    // to auto reconnect.
+                    if (_userRequestedStop)
+                        Preferences.Default.Set(LastConnectedPreferenceKey, false);
 
                     if (_audioPlaybackService != null)
                     {
@@ -1534,6 +1581,9 @@ namespace JoesScanner.ViewModels
         {
             AppLog.Add("User clicked Stop monitoring.");
             _telemetryService.StopMonitoringHeartbeat("user_stop");
+
+            // Explicit user disconnect. This should clear the "auto reconnect" intent.
+            _userRequestedStop = true;
 
             ClearPendingCalls();
 
@@ -1637,6 +1687,8 @@ namespace JoesScanner.ViewModels
 
             try
             {
+                await InterruptAudioForUserActionAsync("User selected call");
+
                 LastQueueEvent = $"Call tapped at {DateTime.Now:T}";
 
                 if (!AudioEnabled)
@@ -1790,6 +1842,7 @@ namespace JoesScanner.ViewModels
                         _lastPlayedCall = null;
                     }
 
+
                     UpdateQueueDerivedState();
                 }
             }
@@ -1866,8 +1919,7 @@ namespace JoesScanner.ViewModels
 
         private void EnforceMaxCalls()
         {
-            var max = MaxCallsToKeep;
-            while (Calls.Count > max)
+            var max = MaxCallsToKeep;            while (Calls.Count > max)
             {
                 var lastIndex = Calls.Count - 1;
                 if (lastIndex >= 0)
@@ -1953,6 +2005,26 @@ namespace JoesScanner.ViewModels
             return string.Join(" | ", parts);
         }
 
+        private NowPlayingMetadata BuildNowPlayingMetadataSnapshot(CallItem item)
+        {
+            const string appName = "Joes Scanner";
+
+            var artistToken = BluetoothLabelMapping.NormalizeToken(_settingsService.BluetoothLabelArtist, BluetoothLabelMapping.TokenAppName);
+            var titleToken = BluetoothLabelMapping.NormalizeToken(_settingsService.BluetoothLabelTitle, BluetoothLabelMapping.TokenTranscription);
+            var albumToken = BluetoothLabelMapping.NormalizeToken(_settingsService.BluetoothLabelAlbum, BluetoothLabelMapping.TokenTalkgroup);
+            var composerToken = BluetoothLabelMapping.NormalizeToken(_settingsService.BluetoothLabelComposer, BluetoothLabelMapping.TokenSite);
+            var genreToken = BluetoothLabelMapping.NormalizeToken(_settingsService.BluetoothLabelGenre, BluetoothLabelMapping.TokenReceiver);
+
+            return new NowPlayingMetadata
+            {
+                Artist = BluetoothLabelMapping.Resolve(item, artistToken, appName),
+                Title = BluetoothLabelMapping.Resolve(item, titleToken, appName),
+                Album = BluetoothLabelMapping.Resolve(item, albumToken, appName),
+                Composer = BluetoothLabelMapping.Resolve(item, composerToken, appName),
+                Genre = BluetoothLabelMapping.Resolve(item, genreToken, appName)
+            };
+        }
+
         private async Task PlaySingleCallWithoutQueueAsync(CallItem item)
         {
             if (item == null || string.IsNullOrWhiteSpace(item.AudioUrl))
@@ -1977,7 +2049,7 @@ namespace JoesScanner.ViewModels
 
                 try
                 {
-                    _systemMediaService.UpdateNowPlaying(item.Talkgroup, BuildNowPlayingSubtitle(item), AudioEnabled);
+                    _systemMediaService.UpdateNowPlaying(BuildNowPlayingMetadataSnapshot(item), AudioEnabled);
                 }
                 catch
                 {
@@ -2115,7 +2187,7 @@ namespace JoesScanner.ViewModels
 
                 try
                 {
-                    _systemMediaService.UpdateNowPlaying(item.Talkgroup, BuildNowPlayingSubtitle(item), AudioEnabled);
+                    _systemMediaService.UpdateNowPlaying(BuildNowPlayingMetadataSnapshot(item), AudioEnabled);
                 }
                 catch
                 {
@@ -2424,6 +2496,40 @@ namespace JoesScanner.ViewModels
             }
         }
 
+        private async Task InterruptAudioForUserActionAsync(string reason)
+        {
+            try
+            {
+                if (_audioCts != null)
+                {
+                    try { _audioCts.Cancel(); } catch { }
+                }
+
+                // Cancellation alone does not always stop platform players immediately.
+                // Stop the player so user actions (next, previous, speed) take effect right away.
+                try { await _audioPlaybackService.StopAsync(); } catch { }
+            }
+            catch
+            {
+            }
+            finally
+            {
+                LastQueueEvent = reason;
+            }
+        }
+
+        private async Task DecreasePlaybackSpeedStepAsync()
+        {
+            await InterruptAudioForUserActionAsync("Speed down requested");
+            DecreasePlaybackSpeedStep();
+        }
+
+        private async Task IncreasePlaybackSpeedStepAsync()
+        {
+            await InterruptAudioForUserActionAsync("Speed up requested");
+            IncreasePlaybackSpeedStep();
+        }
+
         private void DecreasePlaybackSpeedStep()
         {
             if (PlaybackSpeedStep <= 0)
@@ -2470,7 +2576,7 @@ namespace JoesScanner.ViewModels
                 if (!IsPlayable(candidate))
                     continue;
 
-                LastQueueEvent = direction == 1 ? "Previous call" : "Next call";
+                await InterruptAudioForUserActionAsync(direction == 1 ? "Previous call requested" : "Next call requested");
                 await OnCallTappedAsync(candidate);
                 return;
             }

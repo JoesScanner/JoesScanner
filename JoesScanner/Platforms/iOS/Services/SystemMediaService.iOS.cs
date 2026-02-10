@@ -12,6 +12,9 @@ namespace JoesScanner.Services
         // These are the documented Now Playing keys. Using string keys avoids binding differences.
         private static readonly NSString KeyTitle = new NSString("title");
         private static readonly NSString KeyArtist = new NSString("artist");
+        private static readonly NSString KeyAlbumTitle = new NSString("albumTitle");
+        private static readonly NSString KeyComposer = new NSString("composer");
+        private static readonly NSString KeyGenre = new NSString("genre");
         private static readonly NSString KeyPlaybackRate = new NSString("playbackRate");
 
         private partial void PlatformSetHandlers(Func<Task> onPlay, Func<Task> onStop, Func<Task>? onNext, Func<Task>? onPrevious)
@@ -119,15 +122,30 @@ namespace JoesScanner.Services
             return Task.CompletedTask;
         }
 
-        private partial void PlatformUpdateNowPlaying(string title, string subtitle, bool audioEnabled)
+        private partial void PlatformUpdateNowPlaying(NowPlayingMetadata metadata, bool audioEnabled)
         {
             try
             {
                 var info = new NSMutableDictionary();
-                info[KeyTitle] = new NSString(title ?? string.Empty);
+                var title = metadata?.Title ?? string.Empty;
+                var artistRaw = metadata?.Artist ?? string.Empty;
+                var album = metadata?.Album ?? string.Empty;
+                var composer = metadata?.Composer ?? string.Empty;
+                var genre = metadata?.Genre ?? string.Empty;
 
-                var artist = audioEnabled ? (subtitle ?? string.Empty) : ((subtitle ?? string.Empty) + " (Audio Off)");
+                info[KeyTitle] = new NSString(title);
+
+                var artist = audioEnabled ? artistRaw : (artistRaw + " (Audio Off)");
                 info[KeyArtist] = new NSString(artist);
+
+                if (!string.IsNullOrWhiteSpace(album))
+                    info[KeyAlbumTitle] = new NSString(album);
+
+                if (!string.IsNullOrWhiteSpace(composer))
+                    info[KeyComposer] = new NSString(composer);
+
+                if (!string.IsNullOrWhiteSpace(genre))
+                    info[KeyGenre] = new NSString(genre);
                 info[KeyPlaybackRate] = NSNumber.FromDouble(_sessionStarted ? 1.0 : 0.0);
 
                 SetNowPlaying(info);

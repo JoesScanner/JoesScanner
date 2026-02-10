@@ -1,6 +1,9 @@
 using JoesScanner.Models;
 using JoesScanner.Services;
 using JoesScanner.ViewModels;
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Linq;
@@ -14,8 +17,7 @@ namespace JoesScanner.Views
     public partial class SettingsPage : ContentPage
     {
         
-        private bool _isRenamingSettingsProfileName;
-private bool _isProfileDropdownOpen;
+        // Profile UI is managed via a simple Picker plus a Manage menu.
 
         // Default constructor used by XAML.
         // BindingContext is expected to be supplied by DI / Shell.
@@ -23,6 +25,7 @@ private bool _isProfileDropdownOpen;
         {
             InitializeComponent();
             SetAppVersionText();
+            // No per page edit mode state.
         }
 
         // Optional constructor if you ever want to inject the view model.
@@ -31,7 +34,10 @@ private bool _isProfileDropdownOpen;
             InitializeComponent();
             BindingContext = viewModel;
             SetAppVersionText();
+            // No per page edit mode state.
         }
+
+
 
         private void SetAppVersionText()
         {
@@ -129,11 +135,11 @@ private bool _isProfileDropdownOpen;
                 if (!result.Ok)
                     return;
 
-                await DisplayAlertAsync("Log saved", result.Message, "Close");
+                await UiDialogs.AlertAsync("Log saved", result.Message, "Close");
             }
             catch (Exception ex)
             {
-                await DisplayAlertAsync(
+                await UiDialogs.AlertAsync(
                     "Error saving log",
                     $"Could not save the log file:\n{ex.Message}",
                     "Close");
@@ -323,7 +329,7 @@ private bool _isProfileDropdownOpen;
                 copyButton.Clicked += async (_, __) =>
                 {
                     await Clipboard.Default.SetTextAsync(_editor.Text ?? string.Empty);
-                    await DisplayAlertAsync("Copied", "Log copied to clipboard.", "Close");
+                    await UiDialogs.AlertAsync("Copied", "Log copied to clipboard.", "Close");
                 };
 
                 var downloadButton = new Button { Text = "Download" };
@@ -401,239 +407,6 @@ private bool _isProfileDropdownOpen;
             }
         }
 
-
-        private async void OnSettingsProfileTapped(object sender, TappedEventArgs e)
-        {
-            try
-            {
-                if (_isProfileDropdownOpen)
-                    return;
-
-                _isProfileDropdownOpen = true;
-
-                if (BindingContext is not SettingsViewModel vm)
-                    return;
-
-                const string cancel = "Cancel";
-                const string none = "None";
-
-                var list = vm.SettingsFilterProfiles.ToList();
-                var options = new List<string> { none };
-                options.AddRange(list.Select(p => p.Name));
-
-                var choice = await DisplayActionSheet("Profile", cancel, null, options.ToArray());
-                if (string.IsNullOrWhiteSpace(choice) || string.Equals(choice, cancel, StringComparison.Ordinal))
-                    return;
-
-                if (string.Equals(choice, none, StringComparison.Ordinal))
-                {
-                    await vm.SelectSettingsFilterProfileAsync(null, apply: false);
-                    return;
-                }
-
-                var selected = list.FirstOrDefault(p => string.Equals(p.Name, choice, StringComparison.Ordinal));
-                if (selected == null)
-                    return;
-
-                await vm.SelectSettingsFilterProfileAsync(selected, apply: true);
-            }
-            catch
-            {
-            }
-            finally
-            {
-                _isProfileDropdownOpen = false;
-            }
-        }
-
-                private async void OnSaveSettingsProfileClicked(object sender, EventArgs e)
-{
-    try
-    {
-        if (BindingContext is not SettingsViewModel vm)
-            return;
-
-        var option = (vm.SelectedSettingsFilterProfileNameOption ?? string.Empty).Trim();
-                if (_isRenamingSettingsProfileName && !string.Equals(option, "New", StringComparison.Ordinal))
-                {
-                    _isRenamingSettingsProfileName = false;
-                }
-
-
-        if (_isRenamingSettingsProfileName)
-        {
-            var renameTo = (vm.SettingsFilterProfileNameDraft ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(renameTo))
-            {
-                await DisplayAlert("Name required", "Enter a new profile name, then tap Save.", "OK");
-                return;
-            }
-
-            if (string.Equals(renameTo, "None", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(renameTo, "New", StringComparison.OrdinalIgnoreCase))
-            {
-                await DisplayAlert("Invalid name", "Choose a different profile name.", "OK");
-                return;
-            }
-
-            await vm.RenameSelectedSettingsProfileAsync(renameTo);
-            _isRenamingSettingsProfileName = false;
-
-            vm.SelectedSettingsFilterProfileNameOption = renameTo;
-            return;
-        }
-
-        var targetName = option;
-
-        if (string.Equals(option, "None", StringComparison.Ordinal))
-        {
-            await DisplayAlert("Select a profile", "Choose an existing profile to overwrite, or choose New to create a new one.", "OK");
-            return;
-        }
-
-        if (string.Equals(option, "New", StringComparison.Ordinal))
-        {
-            targetName = (vm.SettingsFilterProfileNameDraft ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(targetName))
-            {
-                await DisplayAlert("Name required", "Enter a new profile name, then tap Save.", "OK");
-                return;
-            }
-        }
-
-        if (string.Equals(targetName, "None", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(targetName, "New", StringComparison.OrdinalIgnoreCase))
-        {
-            await DisplayAlert("Invalid name", "Choose a different profile name.", "OK");
-            return;
-        }
-
-        await vm.SaveCurrentSettingsFiltersAsync(targetName);
-    }
-    catch
-    {
-    }
-}
-
-
-private async void OnEditSettingsProfileClicked(object sender, EventArgs e)
-{
-    try
-    {
-        if (BindingContext is not SettingsViewModel vm)
-            return;
-
-        var option = (vm.SelectedSettingsFilterProfileNameOption ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(option) ||
-            string.Equals(option, "None", StringComparison.Ordinal) ||
-            string.Equals(option, "New", StringComparison.Ordinal))
-        {
-            await DisplayAlert("Select a profile", "Select an existing profile to rename.", "OK");
-            return;
-        }
-
-        _isRenamingSettingsProfileName = true;
-        vm.SettingsFilterProfileNameDraft = option;
-        vm.SelectedSettingsFilterProfileNameOption = "New";
-    }
-    catch
-    {
-    }
-}
-		private async void OnDeleteSettingsProfileClicked(object sender, EventArgs e)
-        {
-            try
-            {
-                if (BindingContext is not SettingsViewModel vm)
-                    return;
-
-var option = (vm.SelectedSettingsFilterProfileNameOption ?? string.Empty).Trim();
-                if (string.IsNullOrWhiteSpace(option) ||
-                    string.Equals(option, "None", StringComparison.Ordinal) ||
-                    string.Equals(option, "New", StringComparison.Ordinal))
-                {
-                    await DisplayAlert("Select a profile", "Select an existing profile to delete.", "OK");
-                    return;
-                }
-
-                var confirm = await DisplayAlert("Delete profile?", $"Delete '{option}'?", "Delete", "Cancel");
-                if (!confirm)
-                    return;
-
-                await vm.DeleteSelectedSettingsProfileAsync();
-                await vm.SelectSettingsFilterProfileAsync(null, apply: false);
-            }
-            catch
-            {
-            }
-        }
-
-        private async void OnManageSettingsProfileTapped(object sender, TappedEventArgs e)
-        {
-            try
-            {
-                if (BindingContext is not SettingsViewModel vm)
-                    return;
-
-                var current = vm.SelectedSettingsFilterProfile;
-                if (current == null)
-                {
-                    await DisplayAlert("No profile selected", "Select a profile first.", "OK");
-                    return;
-                }
-
-                const string cancel = "Cancel";
-                const string rename = "Rename";
-                const string delete = "Delete";
-                const string clear = "Clear selection";
-
-                var choice = await DisplayActionSheet("Manage profile", cancel, null, rename, delete, clear);
-                if (string.IsNullOrWhiteSpace(choice) || string.Equals(choice, cancel, StringComparison.Ordinal))
-                    return;
-
-                if (string.Equals(choice, clear, StringComparison.Ordinal))
-                {
-                    await vm.SelectSettingsFilterProfileAsync(null, apply: false);
-                    return;
-                }
-
-                if (string.Equals(choice, rename, StringComparison.Ordinal))
-                {
-                    var newName = (vm.SettingsFilterProfileNameDraft ?? string.Empty).Trim();
-                    if (string.IsNullOrWhiteSpace(newName))
-                    {
-                        await DisplayAlert("Profile name required", "Enter a profile name, then choose Rename.", "OK");
-                        return;
-                    }
-
-                    if (string.Equals(newName, current.Name, StringComparison.Ordinal))
-                        return;
-
-                    var existing = vm.SettingsFilterProfiles.FirstOrDefault(p => string.Equals(p.Name, newName, StringComparison.OrdinalIgnoreCase));
-                    if (existing != null && !string.Equals(existing.Id, current.Id, StringComparison.Ordinal))
-                    {
-                        await DisplayAlert("Name already exists", "Choose a different name.", "OK");
-                        return;
-                    }
-
-                    await vm.RenameSelectedSettingsProfileAsync(newName);
-                    return;
-                }
-
-                if (string.Equals(choice, delete, StringComparison.Ordinal))
-                {
-                    var confirm = await DisplayAlert("Delete profile?", $"Delete '{current.Name}'?", "Delete", "Cancel");
-                    if (!confirm)
-                        return;
-
-                    await vm.DeleteSelectedSettingsProfileAsync();
-                    return;
-                }
-            }
-            catch
-            {
-            }
-        }
 
         // Tap handler for the Mute (M) cell in the Filters grid.
         // Invokes SettingsViewModel.ToggleMuteFilterCommand with the FilterRule.

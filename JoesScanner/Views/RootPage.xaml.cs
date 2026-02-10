@@ -26,8 +26,18 @@ public partial class RootPage : ContentPage
         TabNavigationService.Instance.TabRequested -= OnTabRequested;
         TabNavigationService.Instance.TabRequested += OnTabRequested;
 
-        // Ensure initial content is present.
+        // Ensure content is present.
+        // When the app resumes, ContentHost can already be populated and SwitchTo can early-return.
+        // In that case, we still need the currently hosted page to receive SendAppearing so it can
+        // refresh and run any auto reconnect logic.
+        var hadContent = ContentHost.Content != null;
+
         SwitchTo(_current);
+
+        if (hadContent && _pages.TryGetValue(_current, out var existingPage))
+        {
+            try { existingPage.SendAppearing(); } catch { }
+        }
     }
 
     protected override void OnDisappearing()
@@ -86,7 +96,16 @@ public partial class RootPage : ContentPage
     private void SwitchTo(AppTab tab)
     {
         if (_current == tab && ContentHost.Content != null)
+        {
+            // Even if the user is already on this tab, treat it as a "show" event.
+            // This matters on resume and also if the user taps the selected tab again.
+            if (_pages.TryGetValue(_current, out var currentPage))
+            {
+                try { currentPage.SendAppearing(); } catch { }
+            }
+
             return;
+        }
 
         // Tell the previous "page" it is going away so its timers/handlers can detach.
         if (_pages.TryGetValue(_current, out var oldPage))

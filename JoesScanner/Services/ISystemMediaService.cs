@@ -24,6 +24,9 @@ namespace JoesScanner.Services
         // Update the OS visible now playing card.
         void UpdateNowPlaying(string title, string subtitle, bool audioEnabled);
 
+        // Update the OS visible now playing metadata (Bluetooth controls, lock screen, car UI).
+        void UpdateNowPlaying(NowPlayingMetadata metadata, bool audioEnabled);
+
         // Clear metadata and reset state.
         void Clear();
     }
