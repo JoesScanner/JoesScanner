@@ -48,11 +48,30 @@ namespace JoesScanner.Services
         {
             _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
 
+            // IMPORTANT (Apple platforms + HTTP custom servers)
+            // iOS and MacCatalyst can still surface NSURLErrorDomain -1022 (ATS) for cleartext HTTP
+            // even when Info.plist contains NSAllowsArbitraryLoads, depending on handler/runtime.
+            // For custom (non-HTTPS) Trunking Recorder endpoints, we want a stable long-term path.
+            // Using SocketsHttpHandler forces a managed stack that bypasses NSURLSession/ATS.
+#if IOS || MACCATALYST
+            var socketsHandler = new SocketsHttpHandler
+            {
+                ConnectTimeout = TimeSpan.FromSeconds(5),
+                AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
+            };
+
+            _httpClient = new HttpClient(socketsHandler)
+            {
+                // Fail fast on non-responsive servers so the UI shows an error row.
+                Timeout = TimeSpan.FromSeconds(5)
+            };
+#else
             _httpClient = new HttpClient
             {
                 // Fail fast on non-responsive servers so the UI shows an error row.
                 Timeout = TimeSpan.FromSeconds(5)
             };
+#endif
             _httpClient.DefaultRequestHeaders.Accept.ParseAdd("application/json, text/javascript, */*; q=0.01");
             _httpClient.DefaultRequestHeaders.Add("X-Requested-With", "XMLHttpRequest");
             _httpClient.DefaultRequestHeaders.Add("DNT", "1");
@@ -213,9 +232,26 @@ namespace JoesScanner.Services
 
                 var callsUrl = baseUrl + "/calljson";
 
+                // On iOS/MacCatalyst, cleartext (ws://) WebSockets can still be blocked even when HTTP polling is allowed.
+                // For HTTP custom servers, we intentionally skip WebSockets and rely on calljson polling instead.
+                var allowWebSocket = true;
+                if ((OperatingSystem.IsIOS() || OperatingSystem.IsMacCatalyst()) &&
+                    baseUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+                {
+                    allowWebSocket = false;
+
+                    // Avoid spamming this message continuously.
+                    if (wsDisableUntilUtc == DateTime.MinValue)
+                    {
+                        AppLog.Add("CallStream: INFO - HTTP server detected on Apple platform. WebSocket will be disabled; using polling (calljson).");
+                    }
+
+                    wsDisableUntilUtc = DateTime.UtcNow.AddYears(10);
+                }
+
                 // Prefer the Trunking Recorder WebSocket feed when available.
                 // This reduces polling load and gives us call-level update notifications.
-                if (DateTime.UtcNow >= wsDisableUntilUtc)
+                if (allowWebSocket && DateTime.UtcNow >= wsDisableUntilUtc)
                 {
                     ClientWebSocket? ws = null;
 
@@ -253,7 +289,13 @@ namespace JoesScanner.Services
                             };
                         }
 
-                        await foreach (var item in StreamFromWebSocketWithRecoveryAsync(ws, baseUrl, callsUrl, usernameForLog, cancellationToken))
+                        await foreach (var item in StreamFromWebSocketWithRecoveryAsync(
+                            ws,
+                            baseUrl,
+                            callsUrl,
+                            usernameForLog,
+                            () => wsDisableUntilUtc = DateTime.UtcNow.AddMinutes(2),
+                            cancellationToken))
                         {
                             yield return item;
                         }
@@ -317,13 +359,13 @@ namespace JoesScanner.Services
                     }
                     catch (Exception retryEx)
                     {
-                        errorMessage = ex.Message;
+                        errorMessage = BuildTransportErrorMessage(retryEx);
                         Debug.WriteLine($"[CallStreamService] [HttpRetryFailed] {retryEx}");
                     }
                 }
                 catch (Exception ex)
                 {
-                    errorMessage = ex.Message;
+                    errorMessage = BuildTransportErrorMessage(ex);
                     Debug.WriteLine($"[CallStreamService] [UnexpectedError] {ex}");
                 }
 
@@ -913,6 +955,7 @@ namespace JoesScanner.Services
             string baseUrl,
             string callsUrl,
             string usernameForLog,
+            Action disableWebSocket,
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
             var channel = Channel.CreateUnbounded<CallItem>(new UnboundedChannelOptions
@@ -941,6 +984,8 @@ namespace JoesScanner.Services
                     AppLog.Add(
                         $"CallStream: ERROR - WebSocket closed unexpectedly: {msg} [ServerUrl={baseUrl}, Path=/Calls, Username={usernameForLog}]");
 
+                    try { disableWebSocket(); } catch { }
+
                     // Surface a synthetic error row so the UI can show a transient failure.
                     // The caller loop will retry automatically.
                     await channel.Writer.WriteAsync(
@@ -955,8 +1000,17 @@ namespace JoesScanner.Services
                 }
                 catch (Exception ex)
                 {
+                    var safeMessage = ex.Message;
+                    if (!string.IsNullOrWhiteSpace(safeMessage) &&
+                        safeMessage.Contains("App Transport Security", StringComparison.OrdinalIgnoreCase))
+                    {
+                        safeMessage = "WebSocket blocked by iOS network security for cleartext (ws://) connections. Use HTTPS on the server to enable WebSockets, or continue in polling mode.";
+                    }
+
                     AppLog.Add(
-                        $"CallStream: ERROR - WebSocket stream failed: {ex.Message} [ServerUrl={baseUrl}, Path=/Calls, Username={usernameForLog}]");
+                        $"CallStream: ERROR - WebSocket stream failed: {safeMessage} [ServerUrl={baseUrl}, Path=/Calls, Username={usernameForLog}]");
+
+                    try { disableWebSocket(); } catch { }
                 }
                 finally
                 {
@@ -1717,7 +1771,92 @@ namespace JoesScanner.Services
             return payload;
         }
 
-        // Internal representation of a single call row from the calljson endpoint.
+        
+
+        private static string BuildTransportErrorMessage(Exception ex)
+        {
+            // Default to the exception message, but add diagnostics that help pinpoint the real root cause.
+            // This is intentionally verbose in logs because iOS/MacCatalyst networking failures often surface as generic messages.
+            var sb = new StringBuilder();
+
+            void AppendLine(string s)
+            {
+                if (sb.Length > 0)
+                    sb.Append(" | ");
+                sb.Append(s);
+            }
+
+            AppendLine(ex.Message);
+
+            // Walk inner exceptions for additional signal.
+            var depth = 0;
+            var cur = ex.InnerException;
+            while (cur != null && depth < 6)
+            {
+                AppendLine($"{cur.GetType().FullName}: {cur.Message}");
+                cur = cur.InnerException;
+                depth++;
+            }
+
+#if IOS || MACCATALYST
+            // Try to extract NSError domain/code without taking a direct compile-time dependency.
+            // This works across Xamarin/.NET for iOS where failures often wrap Foundation.NSErrorException.
+            try
+            {
+                object? nserrObj = null;
+
+                // Search the exception chain (including the outer) for a type named *NSErrorException.
+                Exception? scan = ex;
+                while (scan != null)
+                {
+                    var t = scan.GetType();
+                    if (t.FullName != null && t.FullName.EndsWith("NSErrorException", StringComparison.Ordinal))
+                    {
+                        nserrObj = scan;
+                        break;
+                    }
+                    scan = scan.InnerException;
+                }
+
+                if (nserrObj != null)
+                {
+                    var t = nserrObj.GetType();
+                    var errorProp = t.GetProperty("Error");
+                    var err = errorProp?.GetValue(nserrObj);
+                    if (err != null)
+                    {
+                        var errType = err.GetType();
+                        var domain = errType.GetProperty("Domain")?.GetValue(err)?.ToString();
+                        var codeObj = errType.GetProperty("Code")?.GetValue(err);
+                        var code = codeObj != null ? Convert.ToInt64(codeObj, CultureInfo.InvariantCulture) : 0;
+
+                        AppendLine($"NSErrorDomain={domain}, Code={code}");
+
+                        // Try to surface the failing URL if available in UserInfo.
+                        var userInfoObj = errType.GetProperty("UserInfo")?.GetValue(err);
+                        if (userInfoObj is System.Collections.IDictionary dict)
+                        {
+                            foreach (var key in new[] { "NSErrorFailingURLStringKey", "NSErrorFailingURLKey" })
+                            {
+                                if (dict.Contains(key) && dict[key] != null)
+                                {
+                                    AppendLine($"{key}={dict[key]}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Swallow: logging helper must never throw.
+            }
+#endif
+
+            return sb.ToString();
+        }
+
+// Internal representation of a single call row from the calljson endpoint.
         private sealed class CallRow
         {
             public string? DT_RowId { get; set; }

@@ -312,10 +312,25 @@ SyncSettingsProfileNameDropdownFromDraft();
 
             _filterProfileStore = filterProfileStore ?? throw new ArgumentNullException(nameof(filterProfileStore));
 
+            // IMPORTANT (Apple + HTTP): iOS/macOS native networking enforces App Transport Security (ATS).
+            // We support user-configured HTTP custom servers, so for validation requests we force the
+            // managed HTTP stack on Apple to avoid ATS blocks in the native handler.
+#if IOS || MACCATALYST
+            var handler = new SocketsHttpHandler
+            {
+                AllowAutoRedirect = true
+            };
+
+            _httpClient = new HttpClient(handler)
+            {
+                Timeout = TimeSpan.FromSeconds(3)
+            };
+#else
             _httpClient = new HttpClient
             {
                 Timeout = TimeSpan.FromSeconds(3)
             };
+#endif
 
             // Seed the profile name options immediately so the Settings profile picker never renders empty
             // while profiles are still loading.
@@ -1262,6 +1277,16 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
 
             try
             {
+                var hasAuth = !string.IsNullOrWhiteSpace(BasicAuthUsername);
+                AppLog.Add($"Validate: url={url}, isDefault={isDefaultServer}, hasBasicAuth={hasAuth}");
+            }
+            catch
+            {
+            }
+
+
+            try
+            {
                 if (isDefaultServer)
                 {
                     var accountUsername = _settings.BasicAuthUsername;
@@ -1269,9 +1294,11 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
 
                     if (string.IsNullOrWhiteSpace(accountUsername) || string.IsNullOrWhiteSpace(accountPassword))
                     {
+                        // Username/password are only required to validate the Joe's Scanner subscription,
+                        // not to validate basic reachability of the default server URL.
                         ServerValidationMessage =
-                            "Scanner account username and password are not configured. Enter them in the connection box first.";
-                        ServerValidationIsError = true;
+                            "Server saved. Enter your Joe's Scanner username and password to validate your subscription.";
+                        ServerValidationIsError = false;
 
                         _settings.SubscriptionLastStatusOk = false;
                         _settings.AuthSessionToken = string.Empty;
@@ -1279,6 +1306,7 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
                         _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
 
                         UpdateSubscriptionSummaryFromSettings();
+                        IsValidatingServer = false;
                         return;
                     }
 
@@ -1478,6 +1506,14 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
                 {
                     using var request = new HttpRequestMessage(HttpMethod.Head, url);
 
+                    try
+                    {
+                        AppLog.Add($"Validate: sending HEAD to {url}");
+                    }
+                    catch
+                    {
+                    }
+
                     if (!string.IsNullOrWhiteSpace(BasicAuthUsername))
                     {
                         var raw = $"{BasicAuthUsername}:{BasicAuthPassword ?? string.Empty}";
@@ -1489,6 +1525,14 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
                     }
 
                     using var serverResponse = await _httpClient.SendAsync(request);
+
+                    try
+                    {
+                        AppLog.Add($"Validate: response HTTP {(int)serverResponse.StatusCode} {serverResponse.ReasonPhrase}");
+                    }
+                    catch
+                    {
+                    }
 
                     var statusCode = serverResponse.StatusCode;
                     var statusInt = (int)statusCode;
@@ -1526,16 +1570,45 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
             }
             catch (HttpRequestException ex)
             {
+                try
+                {
+                    AppLog.Add($"Validate: HttpRequestException: {ex.Message}");
+                    AppLog.Add(ex.ToString());
+                    if (ex.InnerException != null)
+                        AppLog.Add($"Validate: Inner: {ex.InnerException}");
+                }
+                catch
+                {
+                }
+
                 ServerValidationMessage = $"Could not reach server: {ex.Message}";
                 ServerValidationIsError = true;
             }
-            catch (TaskCanceledException)
+            catch (TaskCanceledException ex)
             {
+                try
+                {
+                    AppLog.Add("Validate: timed out.");
+                    AppLog.Add(ex.ToString());
+                }
+                catch
+                {
+                }
+
                 ServerValidationMessage = "Server did not respond in time (validation timed out).";
                 ServerValidationIsError = true;
             }
             catch (Exception ex)
             {
+                try
+                {
+                    AppLog.Add($"Validate: unexpected exception: {ex.Message}");
+                    AppLog.Add(ex.ToString());
+                }
+                catch
+                {
+                }
+
                 ServerValidationMessage = $"Unexpected error validating server: {ex.Message}";
                 ServerValidationIsError = true;
             }

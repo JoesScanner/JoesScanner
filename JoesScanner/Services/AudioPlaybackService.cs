@@ -18,6 +18,9 @@ using Foundation;
 #endif
 
 using System.IO;
+using System.Net.Http;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace JoesScanner.Services
 {
@@ -39,6 +42,9 @@ namespace JoesScanner.Services
 #if IOS || MACCATALYST
         private AVPlayer? _iosPlayer;
         private NSObject? _iosEndObserver;
+        private NSObject? _iosFailObserver;
+        private NSObject? _iosErrorLogObserver;
+	        private string? _iosTempDownloadedFile;
 #endif
 
         public Task PlayAsync(string audioUrl, CancellationToken cancellationToken = default)
@@ -53,6 +59,14 @@ namespace JoesScanner.Services
 
             if (playbackRate <= 0)
                 playbackRate = 1.0;
+
+            try
+            {
+                AppLog.Add($"Audio: Play requested. url={audioUrl}, rate={playbackRate:0.###}");
+            }
+            catch
+            {
+            }
 
 #if WINDOWS
             await PlayOnWindowsAsync(audioUrl, playbackRate, cancellationToken);
@@ -384,46 +398,132 @@ namespace JoesScanner.Services
                     AVAudioSessionCategoryOptions.AllowBluetooth | AVAudioSessionCategoryOptions.AllowBluetoothA2DP);
                 session.SetActive(true);
 
-                // When audio is downloaded to a local temp file, iOS needs a file URL.
-                // Passing a raw filesystem path into NSUrl.FromString often fails.
-                NSUrl? nsUrl = null;
+	                // When audio is downloaded to a local temp file, iOS needs a file URL.
+	                // Passing a raw filesystem path into NSUrl.FromString often fails.
+	                NSUrl? nsUrl = null;
+	                var requestedUrl = audioUrl;
 
-                try
-                {
-                    if (Uri.TryCreate(audioUrl, UriKind.Absolute, out var uri))
-                    {
-                        if (uri.IsFile)
-                        {
-                            nsUrl = NSUrl.FromFilename(uri.LocalPath);
-                        }
-                        else
-                        {
-                            nsUrl = NSUrl.FromString(audioUrl);
-                        }
-                    }
-                    else
-                    {
-                        if (File.Exists(audioUrl))
-                            nsUrl = NSUrl.FromFilename(audioUrl);
-                        else
-                            nsUrl = NSUrl.FromString(audioUrl);
-                    }
-                }
-                catch
-                {
-                    nsUrl = NSUrl.FromString(audioUrl);
-                }
+	                // IMPORTANT (Apple + HTTP): even with ATS allowances, AVPlayer streaming to http:// URLs
+	                // can still fail on some iOS/macOS builds. For http:// we download via managed HttpClient
+	                // and then play from a local file URL.
+	                if (Uri.TryCreate(audioUrl, UriKind.Absolute, out var requestedUri)
+	                    && string.Equals(requestedUri.Scheme, "http", StringComparison.OrdinalIgnoreCase))
+	                {
+	                    try
+	                    {
+	                        var localPath = await DownloadToTempFileAsync(audioUrl, cancellationToken);
+	                        _iosTempDownloadedFile = localPath;
+	                        requestedUrl = new Uri(localPath).AbsoluteUri;
+	                        nsUrl = NSUrl.FromFilename(localPath);
+	                        AppLog.Add($"Audio(iOS): downloaded http audio to {localPath}");
+	                    }
+	                    catch (Exception ex)
+	                    {
+	                        try { AppLog.Add($"Audio(iOS): http download failed: {ex.Message}"); } catch { }
+	                        // Fall back to streaming attempt.
+	                        nsUrl = NSUrl.FromString(audioUrl);
+	                    }
+	                }
+	                else
+	                {
+	                    try
+	                    {
+	                        if (requestedUri != null && requestedUri.IsFile)
+	                        {
+	                            nsUrl = NSUrl.FromFilename(requestedUri.LocalPath);
+	                        }
+	                        else
+	                        {
+	                            // Ensure the URL is properly escaped (spaces, etc.)
+	                            if (Uri.TryCreate(audioUrl, UriKind.Absolute, out var u))
+	                                requestedUrl = u.AbsoluteUri;
+	                            nsUrl = NSUrl.FromString(requestedUrl);
+	                        }
+	                    }
+	                    catch
+	                    {
+	                        nsUrl = NSUrl.FromString(audioUrl);
+	                    }
+	                }
 
                 if (nsUrl == null)
                     return;
+
+                try
+                {
+                    var scheme = nsUrl.Scheme ?? string.Empty;
+                    var abs = nsUrl.AbsoluteString ?? string.Empty;
+                    AppLog.Add($"Audio(iOS): AVPlayerItem url={abs} scheme={scheme}");
+                }
+                catch
+                {
+                }
 
                 var item = new AVPlayerItem(nsUrl);
                 var player = new AVPlayer(item);
                 _iosPlayer = player;
 
-                _iosEndObserver = NSNotificationCenter.DefaultCenter.AddObserver(
-                    AVPlayerItem.DidPlayToEndTimeNotification,
+	                _iosEndObserver = NSNotificationCenter.DefaultCenter.AddObserver(
+	                    AVPlayerItem.DidPlayToEndTimeNotification,
                     _ => { try { tcs.TrySetResult(); } catch { } },
+                    item);
+
+	                // Some notification constants are missing in certain SDK bindings; use raw names.
+	                var failedToPlayName = new NSString("AVPlayerItemFailedToPlayToEndTimeNotification");
+	                var failedErrorKey = new NSString("AVPlayerItemFailedToPlayToEndTimeErrorKey");
+	                var newErrorLogName = new NSString("AVPlayerItemNewErrorLogEntryNotification");
+
+	                _iosFailObserver = NSNotificationCenter.DefaultCenter.AddObserver(
+	                    failedToPlayName,
+                    n =>
+                    {
+                        try
+                        {
+                            string errText = string.Empty;
+
+	                            if (n?.UserInfo != null && n.UserInfo.ContainsKey(failedErrorKey))
+                            {
+	                                var obj = n.UserInfo[failedErrorKey];
+                                if (obj is NSError nsErr)
+                                    errText = $"{nsErr.Domain} ({(int)nsErr.Code}): {nsErr.LocalizedDescription}";
+                            }
+
+                            if (string.IsNullOrWhiteSpace(errText) && item.Error != null)
+                                errText = $"{item.Error.Domain} ({(int)item.Error.Code}): {item.Error.LocalizedDescription}";
+
+                            if (string.IsNullOrWhiteSpace(errText))
+                                errText = "unknown_error";
+
+                            AppLog.Add($"Audio(iOS): FailedToPlayToEndTime: {errText}");
+                        }
+                        catch
+                        {
+                        }
+
+                        try { tcs.TrySetResult(); } catch { }
+                    },
+                    item);
+
+	                _iosErrorLogObserver = NSNotificationCenter.DefaultCenter.AddObserver(
+	                    newErrorLogName,
+                    _ =>
+                    {
+                        try
+                        {
+	                            var log = item.ErrorLog;
+                            var events = log?.Events;
+                            AVPlayerItemErrorLogEvent? last = null;
+                            if (events != null && events.Length > 0)
+                                last = events[events.Length - 1];
+                            if (last != null)
+                            {
+                                AppLog.Add($"Audio(iOS): ErrorLog: domain={last.ErrorDomain}, code={last.ErrorStatusCode}, comment={last.ErrorComment}");
+                            }
+                        }
+                        catch
+                        {
+                        }
+                    },
                     item);
 
                 player.Play();
@@ -441,9 +541,16 @@ namespace JoesScanner.Services
             {
                 throw;
             }
-            catch
+            catch (Exception ex)
             {
-                // Swallow playback failures
+                try
+                {
+                    AppLog.Add($"Audio(iOS): playback exception: {ex.Message}");
+                    AppLog.Add(ex.ToString());
+                }
+                catch
+                {
+                }
             }
             finally
             {
@@ -451,14 +558,22 @@ namespace JoesScanner.Services
                 {
                     if (_iosEndObserver != null)
                         NSNotificationCenter.DefaultCenter.RemoveObserver(_iosEndObserver);
+                    if (_iosFailObserver != null)
+                        NSNotificationCenter.DefaultCenter.RemoveObserver(_iosFailObserver);
+                    if (_iosErrorLogObserver != null)
+                        NSNotificationCenter.DefaultCenter.RemoveObserver(_iosErrorLogObserver);
                 }
                 catch
                 {
                 }
 
                 _iosEndObserver = null;
+                _iosFailObserver = null;
+                _iosErrorLogObserver = null;
+
             }
         }
+        
 
         private Task StopOnAppleAsync()
         {
@@ -478,16 +593,36 @@ namespace JoesScanner.Services
             {
                 _iosPlayer = null;
 
+	                // Cleanup any temp file we downloaded for http:// playback.
+	                try
+	                {
+	                    if (!string.IsNullOrWhiteSpace(_iosTempDownloadedFile) && File.Exists(_iosTempDownloadedFile))
+	                        File.Delete(_iosTempDownloadedFile);
+	                }
+	                catch
+	                {
+	                }
+	                finally
+	                {
+	                    _iosTempDownloadedFile = null;
+	                }
+
                 try
                 {
                     if (_iosEndObserver != null)
                         NSNotificationCenter.DefaultCenter.RemoveObserver(_iosEndObserver);
+                    if (_iosFailObserver != null)
+                        NSNotificationCenter.DefaultCenter.RemoveObserver(_iosFailObserver);
+                    if (_iosErrorLogObserver != null)
+                        NSNotificationCenter.DefaultCenter.RemoveObserver(_iosErrorLogObserver);
                 }
                 catch
                 {
                 }
 
                 _iosEndObserver = null;
+                _iosFailObserver = null;
+                _iosErrorLogObserver = null;
 
                 // Do not deactivate the shared AVAudioSession here.
                 // The SystemMediaService owns the lifetime of the playback session while monitoring is running.
@@ -497,6 +632,54 @@ namespace JoesScanner.Services
 
             return Task.CompletedTask;
         }
+
+	        private static async Task<string> DownloadToTempFileAsync(string url, CancellationToken cancellationToken)
+	        {
+	            // Use the managed HTTP stack so http:// sources work even when the native stack is constrained.
+	            var handler = new SocketsHttpHandler
+	            {
+	                AllowAutoRedirect = true
+	            };
+
+	            using var http = new HttpClient(handler)
+	            {
+	                Timeout = TimeSpan.FromSeconds(15)
+	            };
+
+	            using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+	            response.EnsureSuccessStatusCode();
+
+	            var tmpRoot = Path.Combine(Path.GetTempPath(), "joesscanner-audio");
+	            Directory.CreateDirectory(tmpRoot);
+
+	            // Stable filename per URL to avoid re-downloading when replaying the same call.
+	            using var sha = SHA256.Create();
+	            var hashBytes = sha.ComputeHash(Encoding.UTF8.GetBytes(url));
+	            var hash = Convert.ToHexString(hashBytes).ToLowerInvariant();
+	
+	            var ext = ".bin";
+	            try
+	            {
+	                var uri = new Uri(url);
+	                var path = uri.AbsolutePath;
+	                var candidate = Path.GetExtension(path);
+	                if (!string.IsNullOrWhiteSpace(candidate) && candidate.Length <= 8)
+	                    ext = candidate;
+	            }
+	            catch
+	            {
+	            }
+
+	            var tmpPath = Path.Combine(tmpRoot, $"{hash}{ext}");
+
+	            await using (var fs = File.Open(tmpPath, FileMode.Create, FileAccess.Write, FileShare.Read))
+	            await using (var stream = await response.Content.ReadAsStreamAsync(cancellationToken))
+	            {
+	                await stream.CopyToAsync(fs, cancellationToken);
+	            }
+
+	            return tmpPath;
+	        }
 #endif
 
         private static async Task WaitWithCleanupAsync(Task task, CancellationToken token, Action cleanup)
