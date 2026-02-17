@@ -68,28 +68,58 @@ namespace JoesScanner.Services
                 env.SchemaVersion = 1;
                 env.UpdatedUtc = DateTime.UtcNow;
 
+                // IMPORTANT:
+                // Never let a disk write crash the app.
+                // iOS can throw IO exceptions (transient locks, low storage, OS-level interruptions)
+                // and we cannot allow Settings navigation to hard-fail because a local JSON save failed.
                 var path = GetSharedProfilesPath();
-                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-
-                // Atomic-ish write: write temp then replace.
-                var tmp = path + ".tmp";
-                var json = JsonSerializer.Serialize(env, JsonOptions);
-                File.WriteAllText(tmp, json, Encoding.UTF8);
-
                 try
                 {
-                    if (File.Exists(path))
+                    var dir = Path.GetDirectoryName(path);
+                    if (!string.IsNullOrWhiteSpace(dir))
+                        Directory.CreateDirectory(dir);
+
+                    // Atomic-ish write: write temp then replace.
+                    var tmp = path + ".tmp";
+                    var json = JsonSerializer.Serialize(env, JsonOptions);
+                    File.WriteAllText(tmp, json, Encoding.UTF8);
+
+                    try
                     {
-                        File.Delete(path);
+                        if (File.Exists(path))
+                        {
+                            try
+                            {
+                                File.Delete(path);
+                            }
+                            catch
+                            {
+                                // If delete fails, we'll try overwrite via copy.
+                            }
+                        }
+
+                        try
+                        {
+                            File.Move(tmp, path);
+                        }
+                        catch
+                        {
+                            // Move can fail if destination exists or is locked.
+                            // Fall back to copy-overwrite then delete temp.
+                            File.Copy(tmp, path, overwrite: true);
+                        }
                     }
-                    File.Move(tmp, path);
+                    finally
+                    {
+                        if (File.Exists(tmp))
+                        {
+                            try { File.Delete(tmp); } catch { }
+                        }
+                    }
                 }
-                finally
+                catch
                 {
-                    if (File.Exists(tmp))
-                    {
-                        try { File.Delete(tmp); } catch { /* ignore */ }
-                    }
+                    // Swallow all IO/serialization exceptions. The in-memory cache will still be updated.
                 }
 
                 _cached = Clone(env);

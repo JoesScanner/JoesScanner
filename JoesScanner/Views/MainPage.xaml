@@ -41,7 +41,7 @@
                 <!-- HEADER PANEL: single merged box (buttons + indicators) -->
                 <Border
                     Grid.Row="0"
-                    
+
                     BackgroundColor="#0D0D28"
                     Padding="2,0"
                     VerticalOptions="Center"
@@ -53,7 +53,7 @@
 
                     <Grid
                         ColumnDefinitions="Auto,Auto"
-                        
+
                         Padding="03"
                         VerticalOptions="Center"
                         HorizontalOptions="Center">

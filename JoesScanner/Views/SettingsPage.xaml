@@ -11,6 +11,27 @@
     Shell.NavBarIsVisible="False"
     Shell.TabBarIsVisible="False"
     BackgroundColor="{StaticResource TabStripNavy}">
+    <ContentPage.Resources>
+        <Style x:Key="CompactSwitchStyle" TargetType="Switch">
+            <Setter Property="Scale">
+                <Setter.Value>
+                    <OnPlatform x:TypeArguments="x:Double" Default="0.9">
+                        <On Platform="WinUI" Value="0.78" />
+                    </OnPlatform>
+                </Setter.Value>
+            </Setter>
+            <Setter Property="Margin" Value="0" />
+            <Setter Property="HorizontalOptions" Value="End" />
+            <Setter Property="VerticalOptions" Value="Center" />
+            <Setter Property="OnColor" Value="{StaticResource Primary}" />
+            <Setter Property="ThumbColor" Value="White" />
+        </Style>
+        <!-- Platform helper resources (avoid WinUI= property assignment which can be trimmed on iOS) -->
+        <OnPlatform x:Key="IsWinUIOnly" x:TypeArguments="x:Boolean" Default="False">
+            <On Platform="WinUI" Value="True" />
+        </OnPlatform>
+    </ContentPage.Resources>
+
 <!-- Scroll so content works on phone and desktop -->
     <Grid Padding="5,0,5,5" RowDefinitions="0,*" RowSpacing="0">
 
@@ -284,52 +305,60 @@
                                     Padding="12"
                                     Margin="0,0,0,12"
                                     BackgroundColor="{AppThemeBinding Light=#ffffff, Dark=#111827}"
-                                    StrokeShape="RoundRectangle 8"
-                                    IsVisible="{OnPlatform WinUI=True, Default=False}">
+                                    StrokeShape="RoundRectangle 8">
 
-                        <VerticalStackLayout Spacing="10">
-                            <Label
-                                            Text="Auto Connect options"
-                                            FontSize="16"
+                                    <Grid
+                                        RowDefinitions="Auto,Auto,Auto"
+                                        ColumnDefinitions="*,Auto"
+                                        RowSpacing="8"
+                                        ColumnSpacing="12"
+                                        HorizontalOptions="FillAndExpand">
+
+                                        <Label
+                                            Grid.Row="0"
+                                            Grid.Column="0"
+                                            Grid.ColumnSpan="2"
+                                            Text="Autoplay options"
+                                            FontSize="14"
                                             FontAttributes="Bold"
-                                            TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                                            TextColor="{AppThemeBinding Light=#111827, Dark=#f9fafb}"
+                                            Margin="0,0,0,6" />
 
-                            <Label
-                                            Text="Choose what happens automatically on Windows."
+                                        <Label
+                                            Grid.Row="1"
+                                            Grid.Column="0"
+                                            Text="Autoplay (start playing calls when app opens)"
                                             FontSize="12"
-                                            Opacity="0.8"
-                                            TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
+                                            LineBreakMode="WordWrap"
+                                            VerticalOptions="Center"
+                                            HorizontalOptions="Fill" />
 
-                            <Grid
-                                            RowDefinitions="Auto,Auto"
-                                            ColumnDefinitions="*,Auto"
-                                            RowSpacing="10"
-                                            ColumnSpacing="12">
+                                        <Switch
+                                            Grid.Row="1"
+                                            Grid.Column="1"
+                                            IsToggled="{Binding AutoPlay}"
+                                            Style="{StaticResource CompactSwitchStyle}" />
 
-                                <Label
-                                                Grid.Row="0"
-                                                Text="Auto start playback when app started"
-                                                FontSize="12"
-                                                VerticalOptions="Center" />
 
-                                <Switch
-                                                Grid.Row="0"
-                                                Grid.Column="1"
-                                                IsToggled="{Binding WindowsAutoConnectOnStart}" />
+                                        <Label
+                                            Grid.Row="2"
+                                            Grid.Column="0"
+                                            Text="Automatically start when Windows loads"
+                                            IsVisible="{StaticResource IsWinUIOnly}"
+                                            FontSize="12"
+                                            LineBreakMode="WordWrap"
+                                            VerticalOptions="Center"
+                                            HorizontalOptions="Fill"
+                                             />
 
-                                <Label
-                                                Grid.Row="1"
-                                                Text="Automatically start when Windows loads"
-                                                FontSize="12"
-                                                VerticalOptions="Center" />
+                                        <Switch
+                                            Grid.Row="2"
+                                            Grid.Column="1"
+                                            IsToggled="{Binding WindowsStartWithWindows}"
+                                            IsVisible="{StaticResource IsWinUIOnly}"
+                                            Style="{StaticResource CompactSwitchStyle}" />
+                                    </Grid>
 
-                                <Switch
-                                                Grid.Row="1"
-                                                Grid.Column="1"
-                                                IsToggled="{Binding WindowsStartWithWindows}" />
-                            </Grid>
-
-                        </VerticalStackLayout>
                     </Border>
 
                     <!-- FILTERS CARD -->
@@ -357,9 +386,9 @@
                                             Opacity="0.8"
                                             TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
 
-                            
 
-                            
+
+
 
 <!-- Table header row -->
                             <Grid

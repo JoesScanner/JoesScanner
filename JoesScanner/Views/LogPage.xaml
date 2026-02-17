@@ -37,9 +37,9 @@
 						<RoundRectangle CornerRadius="10" />
 					</Border.StrokeShape>
 
-					<Grid 
-                        Padding="8,6" 
-                        ColumnDefinitions="*" 
+					<Grid
+                        Padding="8,6"
+                        ColumnDefinitions="*"
                         RowDefinitions="Auto">
 						<HorizontalStackLayout
 							Grid.Row="0"
@@ -81,7 +81,7 @@
 										x:Name="AutoRefreshIntervalLabel"
 										InputTransparent="True"
 										FontSize="13"
-                                        
+
 										TextColor="Black"
 										VerticalOptions="Center"
 										HorizontalOptions="Center" />

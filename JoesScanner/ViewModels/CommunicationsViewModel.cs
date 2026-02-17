@@ -63,7 +63,7 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        
+
         public void MarkAllKnownAsSeenOnNavigate()
         {
             try { _commsBadge.MarkAllKnownAsSeen(); } catch { }

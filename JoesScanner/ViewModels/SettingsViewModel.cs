@@ -1,5 +1,6 @@
 using JoesScanner.Models;
 using JoesScanner.Services;
+using Microsoft.Maui.ApplicationModel;
 using System.Collections.ObjectModel;
 using System.Linq;
 using System.Globalization;
@@ -9,6 +10,9 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Windows.Input;
+using System;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace JoesScanner.ViewModels
 {
@@ -27,6 +31,8 @@ namespace JoesScanner.ViewModels
 
         private readonly ObservableCollection<FilterProfile> _settingsFilterProfiles = new();
         private readonly ObservableCollection<string> _settingsFilterProfileNameOptions = new();
+        private int _pageOpenInProgress;
+
         private string _selectedSettingsFilterProfileNameOption = NoneSettingsProfileNameOption;
         private bool _isCustomSettingsFilterProfileName;
         public ObservableCollection<FilterProfile> SettingsFilterProfiles => _settingsFilterProfiles;
@@ -254,12 +260,18 @@ SyncSettingsProfileNameDropdownFromDraft();
         private bool _savedUseDefaultConnection;
         private bool _hasChanges;
 
-        // Windows-only startup behavior (only acted on in WINDOWS builds).
+                private bool _autoPlay;
+        private bool _savedAutoPlay;
+
+// Windows-only startup behavior (only acted on in WINDOWS builds).
         private bool _windowsAutoConnectOnStart;
         private bool _savedWindowsAutoConnectOnStart;
 
         private bool _windowsStartWithWindows;
         private bool _savedWindowsStartWithWindows;
+
+        private bool _mobileAutoConnectOnStart;
+        private bool _savedMobileAutoConnectOnStart;
 
         // Saved snapshot for settings that are only committed on Save
 
@@ -364,37 +376,60 @@ SyncSettingsProfileNameDropdownFromDraft();
 
         public async Task OnPageOpenedAsync()
         {
+            if (Interlocked.Exchange(ref _pageOpenInProgress, 1) == 1)
+                return;
+
             try
             {
                 await LoadSettingsFilterProfilesAsync(applySelectedProfile: true);
             }
-            catch
+            catch (Exception ex)
             {
+                try
+                {
+                    System.Diagnostics.Debug.WriteLine($"SettingsViewModel.OnPageOpenedAsync failed: {ex}");
+                }
+                catch
+                {
+                }
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _pageOpenInProgress, 0);
             }
         }
 
         public async Task LoadSettingsFilterProfilesAsync(bool applySelectedProfile)
         {
-            var profiles = await _filterProfileStore.GetProfilesAsync(CancellationToken.None);
+            // NOTE:
+            // On iOS (especially when autoplay/monitoring is active), doing synchronous file IO and JSON parsing
+            // on the UI thread during navigation can cause hangs or watchdog kills. The underlying store is sync,
+            // even though it exposes an async signature (Task.FromResult).
+            //
+            // Run the store call on a background thread, then marshal collection updates back to the UI thread.
+            var profiles = await Task.Run(async () => await _filterProfileStore.GetProfilesAsync(CancellationToken.None));
 
-            _settingsFilterProfiles.Clear();
-            foreach (var p in profiles)
-                _settingsFilterProfiles.Add(p);
-
-            
-            RefreshSettingsProfileNameOptions();
-var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, string.Empty);
-            if (string.IsNullOrWhiteSpace(selectedId))
+            await MainThread.InvokeOnMainThreadAsync(() =>
             {
-                SelectedSettingsFilterProfile = null;
-                return;
-            }
+                _settingsFilterProfiles.Clear();
+                foreach (var p in profiles)
+                    _settingsFilterProfiles.Add(p);
 
-            var selected = _settingsFilterProfiles.FirstOrDefault(p => string.Equals(p.Id, selectedId, StringComparison.Ordinal));
-            SelectedSettingsFilterProfile = selected;
+                RefreshSettingsProfileNameOptions();
 
-            if (applySelectedProfile && selected != null)
-                ApplySettingsProfile(selected);
+                var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, string.Empty);
+                if (string.IsNullOrWhiteSpace(selectedId))
+                {
+                    SelectedSettingsFilterProfile = null;
+                    return;
+                }
+
+                var selected = _settingsFilterProfiles.FirstOrDefault(p => string.Equals(p.Id, selectedId, StringComparison.Ordinal));
+                SelectedSettingsFilterProfile = selected;
+
+                if (applySelectedProfile && selected != null)
+                    ApplySettingsProfile(selected);
+            });
         }
 
         public async Task SelectSettingsFilterProfileAsync(FilterProfile? profile, bool apply)
@@ -645,7 +680,37 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
 
         public bool IsBasicAuthPasswordHidden => !_isBasicAuthPasswordVisible;
 
-        public bool WindowsAutoConnectOnStart
+
+        public bool AutoPlay
+        {
+            get => _autoPlay;
+            set
+            {
+                if (_autoPlay == value)
+                    return;
+
+                _autoPlay = value;
+                OnPropertyChanged();
+
+                // Persist immediately so app start can honor it without requiring Save.
+                _settings.AutoPlay = value;
+                _savedAutoPlay = value;
+
+                // Keep main playback behavior consistent. AudioEnabled drives AutoPlay there.
+                try
+                {
+                    if (_mainViewModel != null)
+                        _mainViewModel.AudioEnabled = value;
+                }
+                catch
+                {
+                }
+
+                UpdateHasChanges();
+            }
+        }
+
+public bool WindowsAutoConnectOnStart
         {
             get => _windowsAutoConnectOnStart;
             set
@@ -665,7 +730,27 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
             }
         }
 
-        public bool WindowsStartWithWindows
+
+        public bool MobileAutoConnectOnStart
+        {
+            get => _mobileAutoConnectOnStart;
+            set
+            {
+                if (_mobileAutoConnectOnStart == value)
+                    return;
+
+                _mobileAutoConnectOnStart = value;
+                OnPropertyChanged();
+
+                // Autosave mobile/mac behavior immediately.
+                _settings.MobileAutoConnectOnStart = value;
+                _savedMobileAutoConnectOnStart = value;
+
+                UpdateHasChanges();
+            }
+        }
+
+public bool WindowsStartWithWindows
         {
             get => _windowsStartWithWindows;
             set
@@ -781,6 +866,21 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
 
         public IReadOnlyList<BluetoothLabelMapping.Option> BluetoothLabelOptions =>
             BluetoothLabelMapping.Options;
+
+
+        private BluetoothLabelMapping.Option GetBluetoothOptionOrDefault(string token, string defaultToken)
+        {
+            var key = string.IsNullOrWhiteSpace(token) ? defaultToken : token;
+
+            var opt = BluetoothLabelOptions.FirstOrDefault(o => string.Equals(o.Key, key, StringComparison.Ordinal));
+            if (opt != null)
+                return opt;
+
+            // Fall back to default token if stored token is unknown (corrupt/old settings)
+            opt = BluetoothLabelOptions.FirstOrDefault(o => string.Equals(o.Key, defaultToken, StringComparison.Ordinal));
+            return opt ?? BluetoothLabelOptions.First();
+        }
+
 
         private BluetoothLabelMapping.Option _bluetoothLabelArtistOption = BluetoothLabelMapping.Options.First();
         private BluetoothLabelMapping.Option _bluetoothLabelTitleOption = BluetoothLabelMapping.Options.First();
@@ -913,11 +1013,17 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
             _savedBasicAuthUsername = _basicAuthUsername;
             _savedBasicAuthPassword = _basicAuthPassword;
 
+
+            _autoPlay = _settings.AutoPlay;
+            _savedAutoPlay = _autoPlay;
             _windowsAutoConnectOnStart = _settings.WindowsAutoConnectOnStart;
             _savedWindowsAutoConnectOnStart = _windowsAutoConnectOnStart;
 
             _windowsStartWithWindows = _settings.WindowsStartWithWindows;
             _savedWindowsStartWithWindows = _windowsStartWithWindows;
+
+            _mobileAutoConnectOnStart = _settings.MobileAutoConnectOnStart;
+            _savedMobileAutoConnectOnStart = _mobileAutoConnectOnStart;
 
             _bluetoothLabelArtistToken = BluetoothLabelMapping.NormalizeToken(
                 _settings.BluetoothLabelArtist,
@@ -941,11 +1047,19 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
             _savedBluetoothLabelComposerToken = _bluetoothLabelComposerToken;
             _savedBluetoothLabelGenreToken = _bluetoothLabelGenreToken;
 
-            _bluetoothLabelArtistOption = BluetoothLabelOptions.First(o => string.Equals(o.Key, _bluetoothLabelArtistToken, StringComparison.Ordinal));
-            _bluetoothLabelTitleOption = BluetoothLabelOptions.First(o => string.Equals(o.Key, _bluetoothLabelTitleToken, StringComparison.Ordinal));
-            _bluetoothLabelAlbumOption = BluetoothLabelOptions.First(o => string.Equals(o.Key, _bluetoothLabelAlbumToken, StringComparison.Ordinal));
-            _bluetoothLabelComposerOption = BluetoothLabelOptions.First(o => string.Equals(o.Key, _bluetoothLabelComposerToken, StringComparison.Ordinal));
-            _bluetoothLabelGenreOption = BluetoothLabelOptions.First(o => string.Equals(o.Key, _bluetoothLabelGenreToken, StringComparison.Ordinal));
+            _bluetoothLabelArtistOption = GetBluetoothOptionOrDefault(_bluetoothLabelArtistToken, BluetoothLabelMapping.TokenAppName);
+            _bluetoothLabelTitleOption = GetBluetoothOptionOrDefault(_bluetoothLabelTitleToken, BluetoothLabelMapping.TokenTranscription);
+            _bluetoothLabelAlbumOption = GetBluetoothOptionOrDefault(_bluetoothLabelAlbumToken, BluetoothLabelMapping.TokenTalkgroup);
+            _bluetoothLabelComposerOption = GetBluetoothOptionOrDefault(_bluetoothLabelComposerToken, BluetoothLabelMapping.TokenSite);
+            _bluetoothLabelGenreOption = GetBluetoothOptionOrDefault(_bluetoothLabelGenreToken, BluetoothLabelMapping.TokenReceiver);
+
+            // Ensure tokens match the selected options in case we had to fall back from an unknown stored value.
+            _bluetoothLabelArtistToken = _bluetoothLabelArtistOption.Key;
+            _bluetoothLabelTitleToken = _bluetoothLabelTitleOption.Key;
+            _bluetoothLabelAlbumToken = _bluetoothLabelAlbumOption.Key;
+            _bluetoothLabelComposerToken = _bluetoothLabelComposerOption.Key;
+            _bluetoothLabelGenreToken = _bluetoothLabelGenreOption.Key;
+
 
             OnPropertyChanged(nameof(BluetoothLabelArtistOption));
             OnPropertyChanged(nameof(BluetoothLabelTitleOption));
@@ -997,6 +1111,7 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
             _savedBasicAuthPassword = _basicAuthPassword;
             _savedWindowsAutoConnectOnStart = _windowsAutoConnectOnStart;
             _savedWindowsStartWithWindows = _windowsStartWithWindows;
+            _savedMobileAutoConnectOnStart = _mobileAutoConnectOnStart;
             _savedWindowsStartWithWindows = _windowsStartWithWindows;
 
             _showValidationPrefix = false;
@@ -1212,6 +1327,7 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
             _savedBasicAuthPassword = _basicAuthPassword;
             _savedWindowsAutoConnectOnStart = _windowsAutoConnectOnStart;
             _savedWindowsStartWithWindows = _windowsStartWithWindows;
+            _savedMobileAutoConnectOnStart = _mobileAutoConnectOnStart;
 
             _savedBluetoothLabelArtistToken = _bluetoothLabelArtistToken;
             _savedBluetoothLabelTitleToken = _bluetoothLabelTitleToken;
@@ -1235,8 +1351,39 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
 
         private async Task SaveThenValidateServerUrlAsync()
         {
+            // If the user is changing the TR server URL, we must stop playback/monitoring
+            // after the new server has been validated. The user will explicitly press Play
+            // again from the queue when they are ready.
+            var previousServerUrlSnapshot = _savedServerUrl ?? string.Empty;
+
             await SaveSettingsAsync();
             await ValidateServerUrlAsync();
+
+            // Only stop when validation succeeded and the server actually changed.
+            // Normalize by trimming whitespace and trailing slashes.
+            if (!ServerValidationIsError)
+            {
+                var newServerUrl = _settings.ServerUrl ?? string.Empty;
+
+                if (!string.Equals(
+                        NormalizeUrlForCompare(previousServerUrlSnapshot),
+                        NormalizeUrlForCompare(newServerUrl),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        await _mainViewModel.StopMonitoringAsync();
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+        }
+
+        private static string NormalizeUrlForCompare(string value)
+        {
+            return (value ?? string.Empty).Trim().TrimEnd('/');
         }
 
         private async Task ValidateServerUrlAsync()
@@ -1294,11 +1441,14 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
 
                     if (string.IsNullOrWhiteSpace(accountUsername) || string.IsNullOrWhiteSpace(accountPassword))
                     {
-                        // Username/password are only required to validate the Joe's Scanner subscription,
-                        // not to validate basic reachability of the default server URL.
+                        // Hosted default server requires a valid Joe's Scanner account subscription.
+                        // Do NOT allow a "validated" state without user-entered account credentials.
                         ServerValidationMessage =
-                            "Server saved. Enter your Joe's Scanner username and password to validate your subscription.";
-                        ServerValidationIsError = false;
+                            "Enter your Joe's Scanner username and password, then tap Validate.";
+                        ServerValidationIsError = true;
+
+                        // Do not show the "validated" prefix in the header.
+                        SetShowValidationPrefix(false);
 
                         _settings.SubscriptionLastStatusOk = false;
                         _settings.AuthSessionToken = string.Empty;
@@ -1626,8 +1776,10 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
                 || _useDefaultConnection != _savedUseDefaultConnection
                 || !string.Equals(_basicAuthUsername, _savedBasicAuthUsername, StringComparison.Ordinal)
                 || !string.Equals(_basicAuthPassword, _savedBasicAuthPassword, StringComparison.Ordinal)
+                || _autoPlay != _savedAutoPlay
                 || _windowsAutoConnectOnStart != _savedWindowsAutoConnectOnStart
                 || _windowsStartWithWindows != _savedWindowsStartWithWindows
+                || _mobileAutoConnectOnStart != _savedMobileAutoConnectOnStart
                 || !string.Equals(_bluetoothLabelArtistToken, _savedBluetoothLabelArtistToken, StringComparison.Ordinal)
                 || !string.Equals(_bluetoothLabelTitleToken, _savedBluetoothLabelTitleToken, StringComparison.Ordinal)
                 || !string.Equals(_bluetoothLabelAlbumToken, _savedBluetoothLabelAlbumToken, StringComparison.Ordinal)
@@ -1653,11 +1805,11 @@ var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, s
             _bluetoothLabelComposerToken = _savedBluetoothLabelComposerToken;
             _bluetoothLabelGenreToken = _savedBluetoothLabelGenreToken;
 
-            _bluetoothLabelArtistOption = BluetoothLabelOptions.First(o => string.Equals(o.Key, _bluetoothLabelArtistToken, StringComparison.Ordinal));
-            _bluetoothLabelTitleOption = BluetoothLabelOptions.First(o => string.Equals(o.Key, _bluetoothLabelTitleToken, StringComparison.Ordinal));
-            _bluetoothLabelAlbumOption = BluetoothLabelOptions.First(o => string.Equals(o.Key, _bluetoothLabelAlbumToken, StringComparison.Ordinal));
-            _bluetoothLabelComposerOption = BluetoothLabelOptions.First(o => string.Equals(o.Key, _bluetoothLabelComposerToken, StringComparison.Ordinal));
-            _bluetoothLabelGenreOption = BluetoothLabelOptions.First(o => string.Equals(o.Key, _bluetoothLabelGenreToken, StringComparison.Ordinal));
+            _bluetoothLabelArtistOption = GetBluetoothOptionOrDefault(_bluetoothLabelArtistToken, BluetoothLabelMapping.TokenAppName);
+            _bluetoothLabelTitleOption = GetBluetoothOptionOrDefault(_bluetoothLabelTitleToken, BluetoothLabelMapping.TokenTranscription);
+            _bluetoothLabelAlbumOption = GetBluetoothOptionOrDefault(_bluetoothLabelAlbumToken, BluetoothLabelMapping.TokenTalkgroup);
+            _bluetoothLabelComposerOption = GetBluetoothOptionOrDefault(_bluetoothLabelComposerToken, BluetoothLabelMapping.TokenSite);
+            _bluetoothLabelGenreOption = GetBluetoothOptionOrDefault(_bluetoothLabelGenreToken, BluetoothLabelMapping.TokenReceiver);
 
             OnPropertyChanged(nameof(BluetoothLabelArtistOption));
             OnPropertyChanged(nameof(BluetoothLabelTitleOption));

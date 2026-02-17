@@ -137,25 +137,25 @@ namespace JoesScanner
                 Preferences.Set("WindowX", window.X);
                 Preferences.Set("WindowY", window.Y);
             };
+#endif
 
-            // Windows-only: optional auto-connect on startup.
-            // This does not affect iOS/Android background audio behavior.
+            // Autoplay on app launch (all platforms).
+            // If enabled, start monitoring and ensure the playback pipeline is running.
+            // For Joe's hosted server, require user/pass (website API credentials) before starting.
             try
             {
-                if (_settings.WindowsAutoConnectOnStart)
+                if (_settings.AutoPlay)
                 {
                     MainThread.BeginInvokeOnMainThread(async () =>
                     {
                         try
                         {
-                            // Give the shell a moment to build and bind.
                             await Task.Delay(400);
 
                             var serverUrl = (_settings.ServerUrl ?? string.Empty).Trim();
                             if (!Uri.TryCreate(serverUrl, UriKind.Absolute, out var serverUri))
                                 return;
 
-                            // For Joe's hosted server, require user/pass.
                             if (string.Equals(serverUri.Host, "app.joesscanner.com", StringComparison.OrdinalIgnoreCase))
                             {
                                 var user = (_settings.BasicAuthUsername ?? string.Empty).Trim();
@@ -168,8 +168,7 @@ namespace JoesScanner
                             if (vm == null)
                                 return;
 
-                            // StartMonitoringAsync is already idempotent and handles subscription validation.
-                            await vm.StartMonitoringAsync();
+                            await vm.StartMonitoringWithAutoplayAsync();
                         }
                         catch
                         {
@@ -180,7 +179,7 @@ namespace JoesScanner
             catch
             {
             }
-#endif
+
 
             return window;
         }

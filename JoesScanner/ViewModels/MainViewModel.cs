@@ -30,7 +30,7 @@ namespace JoesScanner.ViewModels
         // Used to decide whether we should clear the "last connected" intent across restarts.
         private volatile bool _userRequestedStop;
 
-        
+
         private int _audioToggleSerial;
 // When true, the live queue continues to run but audio output is suppressed.
         // This is used when the user navigates to the History tab.
@@ -339,7 +339,7 @@ namespace JoesScanner.ViewModels
 
         private const string LastConnectedPreferenceKey = "LastConnectedOnExit";        private const string PlaybackSpeedStepPreferenceKey = "PlaybackSpeedStep";
 
-        private const string ServiceAuthUsername = "secappass";
+        private const string ServiceAuthUsername = "secapppass";
         private const string ServiceAuthPassword = "7a65vBLeqLjdRut5bSav4eMYGUJPrmjHhgnPmEji3q3S7tZ3K5aadFZz2EZtbaE7";
 
         // True when connected to the server stream.
@@ -470,10 +470,13 @@ namespace JoesScanner.ViewModels
             get => _serverUrl;
             set
             {
-                if (_serverUrl == value)
+                var newValue = value ?? string.Empty;
+                if (string.Equals(_serverUrl, newValue, StringComparison.Ordinal))
                     return;
 
-                _serverUrl = value ?? string.Empty;
+                var oldValue = _serverUrl;
+
+                _serverUrl = newValue;
                 _settingsService.ServerUrl = _serverUrl;
 
                 OnPropertyChanged();
@@ -481,6 +484,31 @@ namespace JoesScanner.ViewModels
 
                 // If the server changes, recompute whether we should show the subscription badge.
                 UpdateSubscriptionSummaryFromSettings();
+
+                // Contract: changing servers from Settings must stop queue playback and disconnect.
+                // The user must explicitly press Play again to connect and resume.
+                if (IsRunning)
+                {
+                    _ = StopForServerChangeAsync(oldValue, _serverUrl);
+                }
+            }
+        }
+
+        private async Task StopForServerChangeAsync(string oldServerUrl, string newServerUrl)
+        {
+            try
+            {
+                AppLog.Add($"Server changed in Settings. old={oldServerUrl} new={newServerUrl}. Stopping playback and disconnecting.");
+
+                // Ensure we fully stop the monitoring loop and any in flight audio.
+                await StopMonitoringAsync();
+
+                // Provide a small hint in the queue status so it is obvious what happened.
+                LastQueueEvent = "Server changed. Press Play to reconnect.";
+            }
+            catch (Exception ex)
+            {
+                AppLog.Add($"Error stopping for server change: {ex.Message}");
             }
         }
 
@@ -1169,6 +1197,29 @@ namespace JoesScanner.ViewModels
             {
                 AppLog.Add($"Subscription check: server={serverUrl}, user={username}");
 
+
+
+                var password = _settingsService.BasicAuthPassword ?? string.Empty;
+
+                // Hosted Joe's Scanner server requires a valid website account.
+                // Do not attempt to connect unless the user has entered credentials.
+                if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
+                {
+                    var msg = "Enter your Joe's Scanner username and password in Settings before connecting to the hosted server.";
+                    AppLog.Add("Subscription check blocked: missing credentials for hosted server.");
+
+                    try
+                    {
+                        _settingsService.SubscriptionLastStatusOk = false;
+                        _settingsService.SubscriptionLastMessage = msg;
+                        _settingsService.SubscriptionLastCheckUtc = DateTime.UtcNow;
+                    }
+                    catch { }
+
+                    UpdateSubscriptionSummaryFromSettings();
+                    SetConnectionStatus(ConnectionStatus.AuthFailed, msg);
+                    return;
+                }
                 try
                 {
                     var subResult = await _subscriptionService.EnsureSubscriptionAsync(CancellationToken.None);
@@ -1243,6 +1294,24 @@ namespace JoesScanner.ViewModels
 
             _ = Task.Run(() => RunCallStreamLoopAsync(token));
         }
+
+        public async Task StartMonitoringWithAutoplayAsync()
+        {
+            await StartMonitoringAsync();
+
+            try
+            {
+                if (IsRunning && _audioEnabled && AutoPlay)
+                {
+                    await EnsureQueuePlaybackAsync();
+                }
+            }
+            catch
+            {
+            }
+        }
+
+
 
         private async Task EnsureSystemMediaSessionStartedAsync()
         {

@@ -47,10 +47,12 @@ namespace JoesScanner.Services
             var basicUser = (_settings.BasicAuthUsername ?? string.Empty).Trim();
             var basicPass = (_settings.BasicAuthPassword ?? string.Empty).Trim();
 
-            // Credentials not set means auth is not in use.
+            // Credentials are required for Joe's Scanner hosted servers.
+            // If missing, do not allow connecting.
             if (string.IsNullOrWhiteSpace(basicUser) || string.IsNullOrWhiteSpace(basicPass))
             {
-                return new SubscriptionCheckResult(true, null, "Auth disabled");
+                return new SubscriptionCheckResult(false, "missing_credentials",
+                    "Enter your username and password in Settings before connecting to the default server.");
             }
 
             // Persist the last authenticated username so other services can

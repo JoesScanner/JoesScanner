@@ -1,6 +1,8 @@
 using JoesScanner.Models;
 using JoesScanner.Services;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Maui.Devices;
+using Microsoft.Maui.ApplicationModel;
 
 namespace JoesScanner.Views;
 
@@ -12,6 +14,8 @@ public partial class RootPage : ContentPage
     private readonly Dictionary<AppTab, View> _views = new();
 
     private AppTab _current = AppTab.Main;
+
+    private bool _hasAppearedOnce;
 
     public RootPage(IServiceProvider services)
     {
@@ -26,17 +30,32 @@ public partial class RootPage : ContentPage
         TabNavigationService.Instance.TabRequested -= OnTabRequested;
         TabNavigationService.Instance.TabRequested += OnTabRequested;
 
-        // Ensure content is present.
-        // When the app resumes, ContentHost can already be populated and SwitchTo can early-return.
-        // In that case, we still need the currently hosted page to receive SendAppearing so it can
-        // refresh and run any auto reconnect logic.
-        var hadContent = ContentHost.Content != null;
-
-        SwitchTo(_current);
-
-        if (hadContent && _pages.TryGetValue(_current, out var existingPage))
+        // iOS can tear down native handlers across a kill and relaunch cycle.
+        // Reusing cached hosted views can then crash when MAUI tries to reattach them.
+        // To keep Settings and other tabs stable, recreate the hosted tab content after the first appearance.
+        if (_hasAppearedOnce && DeviceInfo.Platform == DevicePlatform.iOS)
         {
-            try { existingPage.SendAppearing(); } catch { }
+            try
+            {
+                RebuildAllTabs();
+            }
+            catch (Exception ex)
+            {
+                LogNavError($"RootPage.RebuildAllTabs failed: {ex}");
+            }
+        }
+
+        _hasAppearedOnce = true;
+
+        // Do not allow navigation exceptions to kill the app.
+        try
+        {
+            SwitchTo(tab: _current);
+        }
+        catch (Exception ex)
+        {
+            LogNavError($"RootPage.OnAppearing initial SwitchTo({_current}) failed: {ex}");
+            _ = SafeAlertAsync("Navigation error", $"Settings navigation failed: {ex.Message}");
         }
     }
 
@@ -48,7 +67,15 @@ public partial class RootPage : ContentPage
 
     private void OnTabRequested(object? sender, AppTab tab)
     {
-        SwitchTo(tab);
+        try
+        {
+            SwitchTo(tab);
+        }
+        catch (Exception ex)
+        {
+            LogNavError($"RootPage.OnTabRequested({tab}) failed: {ex}");
+            _ = SafeAlertAsync("Navigation error", $"Switching tabs failed: {ex.Message}");
+        }
     }
 
     private ContentPage CreatePage(AppTab tab)
@@ -72,7 +99,6 @@ public partial class RootPage : ContentPage
             return (existingPage, existingView);
 
         var page = CreatePage(tab);
-
         var view = page.Content ?? new ContentView();
 
         // Detach so we can host it inside RootPage.
@@ -95,10 +121,23 @@ public partial class RootPage : ContentPage
 
     private void SwitchTo(AppTab tab)
     {
+        // Guard the entire switch path so a single exception cannot abort the app on iOS.
+        try
+        {
+            SwitchToCore(tab);
+        }
+        catch (Exception ex)
+        {
+            LogNavError($"RootPage.SwitchTo({tab}) failed: {ex}");
+            _ = SafeAlertAsync("Navigation error", $"Unable to open {tab}: {ex.Message}");
+        }
+    }
+
+    private void SwitchToCore(AppTab tab)
+    {
         if (_current == tab && ContentHost.Content != null)
         {
-            // Even if the user is already on this tab, treat it as a "show" event.
-            // This matters on resume and also if the user taps the selected tab again.
+            // Even if the user is already on this tab, treat it as a show event.
             if (_pages.TryGetValue(_current, out var currentPage))
             {
                 try { currentPage.SendAppearing(); } catch { }
@@ -107,7 +146,7 @@ public partial class RootPage : ContentPage
             return;
         }
 
-        // Tell the previous "page" it is going away so its timers/handlers can detach.
+        // Tell the previous page it is going away so it can detach handlers.
         if (_pages.TryGetValue(_current, out var oldPage))
         {
             try { oldPage.SendDisappearing(); } catch { }
@@ -127,7 +166,62 @@ public partial class RootPage : ContentPage
 
         ContentHost.Content = view;
 
-        // Tell the new "page" it is visible so it can attach handlers and refresh data.
+        // Tell the new page it is visible so it can attach handlers and refresh data.
         try { page.SendAppearing(); } catch { }
+    }
+
+    private void RebuildAllTabs()
+    {
+        // Detach current content first to prevent reparenting old views while we clear caches.
+        try
+        {
+            ContentHost.Content = null;
+        }
+        catch
+        {
+        }
+
+        foreach (var kvp in _pages)
+        {
+            try { kvp.Value.SendDisappearing(); } catch { }
+        }
+
+        _pages.Clear();
+        _views.Clear();
+    }
+
+    private static void LogNavError(string message)
+    {
+        try
+        {
+            System.Diagnostics.Debug.WriteLine(message);
+            Console.WriteLine(message);
+        }
+        catch
+        {
+        }
+    }
+
+    private static Task SafeAlertAsync(string title, string message)
+    {
+        try
+        {
+            return MainThread.InvokeOnMainThreadAsync(async () =>
+            {
+                try
+                {
+                    var page = Application.Current?.MainPage;
+                    if (page != null)
+                        await page.DisplayAlert(title, message, "OK");
+                }
+                catch
+                {
+                }
+            });
+        }
+        catch
+        {
+            return Task.CompletedTask;
+        }
     }
 }

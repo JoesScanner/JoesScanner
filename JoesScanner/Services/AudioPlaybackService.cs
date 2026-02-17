@@ -573,7 +573,7 @@ namespace JoesScanner.Services
 
             }
         }
-        
+
 
         private Task StopOnAppleAsync()
         {
@@ -656,7 +656,7 @@ namespace JoesScanner.Services
 	            using var sha = SHA256.Create();
 	            var hashBytes = sha.ComputeHash(Encoding.UTF8.GetBytes(url));
 	            var hash = Convert.ToHexString(hashBytes).ToLowerInvariant();
-	
+
 	            var ext = ".bin";
 	            try
 	            {

@@ -13,9 +13,9 @@
     Shell.NavBarIsVisible="False"
     Shell.TabBarIsVisible="False">
 
-    <Grid 
-        Padding="5,0,5,5" 
-        RowDefinitions="0,*" 
+    <Grid
+        Padding="5,0,5,5"
+        RowDefinitions="0,*"
         RowSpacing="0">
 
         <Border
@@ -29,9 +29,9 @@
                 <RoundRectangle CornerRadius="10" />
             </Border.StrokeShape>
 
-            <Grid 
-                Padding="2" 
-                RowDefinitions="Auto,Auto,Auto,*" 
+            <Grid
+                Padding="2"
+                RowDefinitions="Auto,Auto,Auto,*"
                 RowSpacing="8">
 
                 <!-- Filters -->
@@ -48,7 +48,7 @@
 
 	                    <Grid Padding="8,6" RowDefinitions="Auto,Auto" RowSpacing="8">
 
-                        
+
 
 <Grid Grid.Row="0" ColumnDefinitions="*,*,*" ColumnSpacing="8">
 	                            <VerticalStackLayout Spacing="2">
@@ -403,7 +403,7 @@
                     </CollectionView.ItemTemplate>
                 </CollectionView>
 
-                
+
 
             </Grid>
         </Border>

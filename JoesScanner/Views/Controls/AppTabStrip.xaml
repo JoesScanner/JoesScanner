@@ -130,7 +130,7 @@
                 HorizontalOptions="Center"
                 VerticalOptions="End"
                 WidthRequest="300"
-                
+
                 Margin="0,6,0,4" />
         </Grid>
     </Border>

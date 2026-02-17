@@ -20,9 +20,6 @@ namespace JoesScanner.Services
 
         private int _draw = 1;
 
-        private const string ServiceAuthUsername = "secappass";
-        private const string ServiceAuthPassword = "7a65vBLeqLjdRut5bSav4eMYGUJPrmjHhgnPmEji3q3S7tZ3K5aadFZz2EZtbaE7";
-
         public CallHistoryService(ISettingsService settingsService)
         {
             _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
@@ -304,22 +301,8 @@ namespace JoesScanner.Services
             var serverUrl = _settingsService.ServerUrl ?? string.Empty;
             if (!Uri.TryCreate(serverUrl, UriKind.Absolute, out var serverUri))
                 return;
-
-            var isJoesScannerHost = serverUri.Host.EndsWith("app.joesscanner.com", StringComparison.OrdinalIgnoreCase);
-
-            string username;
-            string password;
-
-            if (isJoesScannerHost)
-            {
-                username = ServiceAuthUsername;
-                password = ServiceAuthPassword;
-            }
-            else
-            {
-                username = _settingsService.BasicAuthUsername;
-                password = _settingsService.BasicAuthPassword ?? string.Empty;
-            }
+            string username = _settingsService.BasicAuthUsername;
+            string password = _settingsService.BasicAuthPassword ?? string.Empty;
 
             if (string.IsNullOrWhiteSpace(username))
                 return;

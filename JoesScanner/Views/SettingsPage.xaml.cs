@@ -7,6 +7,7 @@ using System.Collections.ObjectModel;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Linq;
+using Microsoft.Maui.ApplicationModel;
 
 namespace JoesScanner.Views
 {
@@ -16,7 +17,7 @@ namespace JoesScanner.Views
     // Also provides handlers for filter tap gestures.
     public partial class SettingsPage : ContentPage
     {
-        
+
         // Profile UI is managed via a simple Picker plus a Manage menu.
 
         // Default constructor used by XAML.
@@ -55,15 +56,34 @@ namespace JoesScanner.Views
         }
 
 
-        protected override async void OnAppearing()
+        protected override void OnAppearing()
         {
             base.OnAppearing();
 
             if (BindingContext is SettingsViewModel vm)
             {
-                await vm.OnPageOpenedAsync();
+                // Schedule the load so navigation and layout can complete first.
+                // Always observe exceptions to avoid iOS killing the process.
+                MainThread.BeginInvokeOnMainThread(async () =>
+                {
+                    try
+                    {
+                        await vm.OnPageOpenedAsync();
+                    }
+                    catch (Exception ex)
+                    {
+                        try
+                        {
+                            System.Diagnostics.Debug.WriteLine($"SettingsPage.OnAppearing load failed: {ex}");
+                        }
+                        catch
+                        {
+                        }
+                    }
+                });
             }
         }
+
 
         // Handler for the Close button in the header.
         // Discards unsaved connection changes and then navigates back.

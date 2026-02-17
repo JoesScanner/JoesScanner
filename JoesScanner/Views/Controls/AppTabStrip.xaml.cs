@@ -1,5 +1,6 @@
 using JoesScanner.Models;
 using JoesScanner.Services;
+using Microsoft.Maui.ApplicationModel;
 
 namespace JoesScanner.Views.Controls;
 
@@ -299,7 +300,6 @@ public partial class AppTabStrip : ContentView
         {
         }
 
-        
         // Viewing the Communications tab counts as reading messages, clear unread state immediately.
         if (tab == AppTab.Communications)
         {
@@ -327,7 +327,40 @@ public partial class AppTabStrip : ContentView
             }
         }
 
-TabNavigationService.Instance.Request(tab);
+        try
+        {
+            TabNavigationService.Instance.Request(tab);
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                System.Diagnostics.Debug.WriteLine($"AppTabStrip.NavigateTo({tab}) failed: {ex}");
+                Console.WriteLine($"AppTabStrip.NavigateTo({tab}) failed: {ex}");
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                _ = MainThread.InvokeOnMainThreadAsync(async () =>
+                {
+                    try
+                    {
+                        var page = Application.Current?.MainPage;
+                        if (page != null)
+                            await page.DisplayAlert("Navigation error", $"Unable to open {tab}: {ex.Message}", "OK");
+                    }
+                    catch
+                    {
+                    }
+                });
+            }
+            catch
+            {
+            }
+        }
     }
 
     // TapGestureRecognizer handlers (Border + Image approach)

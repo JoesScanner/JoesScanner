@@ -23,7 +23,13 @@ namespace JoesScanner.Services
         // are present for Joe's hosted server).
         bool WindowsAutoConnectOnStart { get; set; }
 
-        // Windows-only behavior: when enabled, the Windows app will start automatically
+
+
+        // Mobile and Mac behavior: when enabled, the app will automatically connect
+        // and start monitoring on app launch (if the server URL is valid and credentials
+        // are present for Joe's hosted server).
+        bool MobileAutoConnectOnStart { get; set; }
+// Windows-only behavior: when enabled, the Windows app will start automatically
         // when the user signs in to Windows.
         bool WindowsStartWithWindows { get; set; }
 

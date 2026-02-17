@@ -62,7 +62,7 @@ namespace JoesScanner.ViewModels
         private const string SelectedFilterProfileIdPreferenceKey = "ArchiveSelectedFilterProfileId";
 
         private const string CustomProfileNameOption = "New";
-        
+
         private const string NoneProfileNameOption = "None";
 	    private HistoryLookupItem? _selectedReceiver;
         private HistoryLookupItem? _selectedSite;
@@ -83,8 +83,6 @@ namespace JoesScanner.ViewModels
         private const string ArchivePlaybackSpeedStepPreferenceKey = "ArchivePlaybackSpeedStep";
 
         // Service auth used on app.joesscanner.com, consistent with CallStreamService.
-        private const string ServiceAuthUsername = "secappass";
-        private const string ServiceAuthPassword = "7a65vBLeqLjdRut5bSav4eMYGUJPrmjHhgnPmEji3q3S7tZ3K5aadFZz2EZtbaE7";
 
         public event Action<CallItem, ScrollToPosition>? ScrollRequested;
 
@@ -607,26 +605,36 @@ private async Task LoadLookupsAsyncSafe()
 
 public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
         {
-            var profiles = await _filterProfileStore.GetProfilesAsync(CancellationToken.None);
+            // NOTE:
+            // The underlying filter profile store performs synchronous file IO + JSON parsing/migration,
+            // even though it exposes an async signature. If we run it on the UI thread during navigation,
+            // iOS can appear to "hang" when opening Settings / switching tabs.
+            //
+            // Run the store call on a background thread, then marshal collection + selection updates back
+            // to the UI thread.
+            var profiles = await Task.Run(async () => await _filterProfileStore.GetProfilesAsync(CancellationToken.None));
 
-            _filterProfiles.Clear();
-            foreach (var p in profiles)
-                _filterProfiles.Add(p);
-
-            
-            RefreshFilterProfileNameOptions();
-var selectedId = Preferences.Get(SelectedFilterProfileIdPreferenceKey, string.Empty);
-            if (string.IsNullOrWhiteSpace(selectedId))
+            await MainThread.InvokeOnMainThreadAsync(() =>
             {
-                SelectedFilterProfile = null;
-                return;
-            }
+                _filterProfiles.Clear();
+                foreach (var p in profiles)
+                    _filterProfiles.Add(p);
 
-            var selected = _filterProfiles.FirstOrDefault(p => string.Equals(p.Id, selectedId, StringComparison.Ordinal));
-            SelectedFilterProfile = selected;
+                RefreshFilterProfileNameOptions();
 
-            if (applySelectedProfile && selected != null)
-                ApplyProfileToFilters(selected);
+                var selectedId = Preferences.Get(SelectedFilterProfileIdPreferenceKey, string.Empty);
+                if (string.IsNullOrWhiteSpace(selectedId))
+                {
+                    SelectedFilterProfile = null;
+                    return;
+                }
+
+                var selected = _filterProfiles.FirstOrDefault(p => string.Equals(p.Id, selectedId, StringComparison.Ordinal));
+                SelectedFilterProfile = selected;
+
+                if (applySelectedProfile && selected != null)
+                    ApplyProfileToFilters(selected);
+            });
         }
 
         public async Task SelectFilterProfileAsync(FilterProfile? profile, bool apply)
@@ -1742,16 +1750,7 @@ var selectedId = Preferences.Get(SelectedFilterProfileIdPreferenceKey, string.Em
         private void ApplyAudioAuth(HttpRequestMessage req, Uri serverUri)
         {
             try
-            {
-                if (serverUri.Host.Equals("app.joesscanner.com", StringComparison.OrdinalIgnoreCase))
-                {
-                    var raw = $"{ServiceAuthUsername}:{ServiceAuthPassword}";
-                    var token = Convert.ToBase64String(Encoding.UTF8.GetBytes(raw));
-                    req.Headers.Authorization = new AuthenticationHeaderValue("Basic", token);
-                    return;
-                }
-
-                var u = _settingsService.BasicAuthUsername?.Trim() ?? string.Empty;
+            {var u = _settingsService.BasicAuthUsername?.Trim() ?? string.Empty;
                 var p = _settingsService.BasicAuthPassword ?? string.Empty;
                 if (!string.IsNullOrWhiteSpace(u))
                 {

@@ -24,10 +24,10 @@
     <ApplicationId>app.joesscanner.com</ApplicationId>
 
     <!-- Display version is semantic -->
-    <ApplicationDisplayVersion>1.5.1</ApplicationDisplayVersion>
+    <ApplicationDisplayVersion>1.5.2</ApplicationDisplayVersion>
 
     <!-- ApplicationVersion must be an integer and should only ever go up -->
-    <ApplicationVersion>151</ApplicationVersion>
+    <ApplicationVersion>152</ApplicationVersion>
 
     <DefaultLanguage>en-us</DefaultLanguage>
 
@@ -59,7 +59,7 @@
   If you explicitly set RuntimeIdentifier in Visual Studio, these defaults will not override it.
 -->
   <PropertyGroup Condition="'$(TargetFramework)'=='net10.0-ios' And '$(Configuration)'=='Debug' And '$(RuntimeIdentifier)'==''">
-    
+
     <IosAppManifest>Platforms\iOS\Info.plist</IosAppManifest>
     <MtouchPlist>Platforms\iOS\Info.plist</MtouchPlist>
 <RuntimeIdentifier>iossimulator-arm64</RuntimeIdentifier>
@@ -80,6 +80,9 @@
   <PropertyGroup Condition="'$(TargetFramework)'=='net10.0-ios'">
     <MtouchLink>SdkOnly</MtouchLink>
     <MtouchExtraArgs>$(MtouchExtraArgs) --registrar:static</MtouchExtraArgs>
+    <ProvisioningType>manual</ProvisioningType>
+    <CodesignProvision>Joes Scanner Prov</CodesignProvision>
+    <CodesignKey>Apple Distribution: LINDSAY KAY WILLIAMS (G3SJDUVZ9Y)</CodesignKey>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(TargetFramework)'=='net10.0-ios' And '$(Configuration)'=='Debug'">

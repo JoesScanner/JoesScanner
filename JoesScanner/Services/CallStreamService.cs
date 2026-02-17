@@ -16,6 +16,9 @@ namespace JoesScanner.Services
     // to the UI, using server fields for time, receiver, site, talkgroup, transcription, and audio.
     public class CallStreamService : ICallStreamService
     {
+        private const string ServiceAuthUsername = "secappass";
+        private const string ServiceAuthPassword = "7a65vBLeqLjdRut5bSav4eMYGUJPrmjHhgnPmEji3q3S7tZ3K5aadFZz2EZtbaE7";
+
         private const string AppleIosTestAccountEmail = "iostest@joesscanner.com";
         private const string AppleIosTestAccountEmailLegacy = "iostest@jeosscanner.com";
 
@@ -29,9 +32,6 @@ namespace JoesScanner.Services
         // When true, the next GetCallStreamAsync run should preserve the IDs learned
         // during a warm start so we do not re-emit the same recent calls.
         private volatile bool _preserveSeenIdsForNextConnect;
-
-        private const string ServiceAuthUsername = "secappass";
-        private const string ServiceAuthPassword = "7a65vBLeqLjdRut5bSav4eMYGUJPrmjHhgnPmEji3q3S7tZ3K5aadFZz2EZtbaE7";
 
         // Tracks which call IDs have already been surfaced to the UI.
         private readonly HashSet<string> _seenIds = new();
@@ -294,7 +294,7 @@ namespace JoesScanner.Services
                             baseUrl,
                             callsUrl,
                             usernameForLog,
-                            () => wsDisableUntilUtc = DateTime.UtcNow.AddMinutes(2),
+                            isAppleTestAccount,
                             cancellationToken))
                         {
                             yield return item;
@@ -734,7 +734,7 @@ namespace JoesScanner.Services
             // Playback downloads audio with an Authorization header when needed.
             audioUrl = SanitizeAudioUrl(audioUrl);
 
-            if (string.IsNullOrWhiteSpace(audioUrl))
+            if (isNew && string.IsNullOrWhiteSpace(audioUrl))
             {
                 debugInfo = AppendDebug(debugInfo, "No audio URL from server");
                 debugInfo = AppendDebug(debugInfo, "No audio URL built from server data");
@@ -912,30 +912,28 @@ namespace JoesScanner.Services
         {
             try
             {
-                var isJoesScannerHost = serverUri.Host.EndsWith("app.joesscanner.com", StringComparison.OrdinalIgnoreCase);
-
-                string username;
-                string password;
-
-                if (isJoesScannerHost)
+                // Hosted default server: always use the service account for the TR audio/transcript endpoints.
+                if (string.Equals(serverUri.Host, "app.joesscanner.com", StringComparison.OrdinalIgnoreCase))
                 {
-                    // Joe's Scanner hosted servers use the hard coded service account.
-                    username = ServiceAuthUsername;
-                    password = ServiceAuthPassword;
-                }
-                else
-                {
-                    // Custom servers use user configured basic auth credentials, if any.
-                    username = _settingsService.BasicAuthUsername ?? string.Empty;
-                    password = _settingsService.BasicAuthPassword ?? string.Empty;
-
-                    if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
-                        return null;
+                    var username = ServiceAuthUsername;
+                    var password = ServiceAuthPassword;
+                    var rawHosted = $"{username}:{password}";
+                    var bytesHosted = Encoding.ASCII.GetBytes(rawHosted);
+                    var base64Hosted = Convert.ToBase64String(bytesHosted);
+                    return $"Basic {base64Hosted}";
                 }
 
-                var raw = $"{username}:{password}";
+                // Custom servers: only apply Basic Auth if the user provided a username.
+                var usernameCustom = _settingsService.BasicAuthUsername?.Trim() ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(usernameCustom))
+                    return null;
+
+                var passwordCustom = _settingsService.BasicAuthPassword ?? string.Empty;
+
+                var raw = $"{usernameCustom}:{passwordCustom}";
                 var bytes = Encoding.ASCII.GetBytes(raw);
                 var base64 = Convert.ToBase64String(bytes);
+
                 return $"Basic {base64}";
             }
             catch
@@ -944,492 +942,44 @@ namespace JoesScanner.Services
             }
         }
 
-        // Wraps the WebSocket streaming enumerator so that WebSocket exceptions do not
-        // tear down the outer GetCallStreamAsync iterator.
-        //
-        // Important: C# async iterators cannot yield from a try block that has a catch.
-        // We therefore catch exceptions in a background pump task and forward items
-        // through a channel that this iterator reads and yields.
-        private async IAsyncEnumerable<CallItem> StreamFromWebSocketWithRecoveryAsync(
-            ClientWebSocket ws,
-            string baseUrl,
-            string callsUrl,
-            string usernameForLog,
-            Action disableWebSocket,
-            [EnumeratorCancellation] CancellationToken cancellationToken)
+        private void UpdateAuthorizationHeader()
         {
-            var channel = Channel.CreateUnbounded<CallItem>(new UnboundedChannelOptions
-            {
-                SingleReader = true,
-                SingleWriter = true
-            });
-
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await foreach (var item in StreamFromWebSocketAsync(ws, baseUrl, callsUrl, cancellationToken))
-                    {
-                        await channel.Writer.WriteAsync(item, cancellationToken);
-                    }
-                }
-                catch (OperationCanceledException)
-                {
-                    // Normal during Stop or shutdown.
-                }
-                catch (WebSocketException ex)
-                {
-                    var msg = ex.Message;
-
-                    AppLog.Add(
-                        $"CallStream: ERROR - WebSocket closed unexpectedly: {msg} [ServerUrl={baseUrl}, Path=/Calls, Username={usernameForLog}]");
-
-                    try { disableWebSocket(); } catch { }
-
-                    // Surface a synthetic error row so the UI can show a transient failure.
-                    // The caller loop will retry automatically.
-                    await channel.Writer.WriteAsync(
-                        new CallItem
-                        {
-                            Timestamp = DateTime.Now,
-                            Talkgroup = "ERROR",
-                            Transcription = "Live feed disconnected. Reconnecting.",
-                            AudioUrl = string.Empty
-                        },
-                        CancellationToken.None);
-                }
-                catch (Exception ex)
-                {
-                    var safeMessage = ex.Message;
-                    if (!string.IsNullOrWhiteSpace(safeMessage) &&
-                        safeMessage.Contains("App Transport Security", StringComparison.OrdinalIgnoreCase))
-                    {
-                        safeMessage = "WebSocket blocked by iOS network security for cleartext (ws://) connections. Use HTTPS on the server to enable WebSockets, or continue in polling mode.";
-                    }
-
-                    AppLog.Add(
-                        $"CallStream: ERROR - WebSocket stream failed: {safeMessage} [ServerUrl={baseUrl}, Path=/Calls, Username={usernameForLog}]");
-
-                    try { disableWebSocket(); } catch { }
-                }
-                finally
-                {
-                    channel.Writer.TryComplete();
-                }
-            },
-            CancellationToken.None);
-
-            await foreach (var item in channel.Reader.ReadAllAsync(cancellationToken))
-            {
-                yield return item;
-            }
-        }
-
-
-        private async Task<bool> IsServerReachableAsync(string callsUrl, CancellationToken cancellationToken)
-        {
+            // This header is for Trunking Recorder endpoints (calljson, audio download, WS).
+            // Hosted default server uses the service account. Custom server uses user-provided Basic Auth if set.
             try
             {
-                // Use the same calljson payload/auth logic as the rest of the stream.
-                // Length 1 keeps this inexpensive.
-                await FetchLatestAsync(callsUrl, cancellationToken, start: 0, length: 1);
-                return true;
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
+                var baseUrl = (_settingsService.ServerUrl ?? string.Empty).Trim();
+                if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri))
+                {
+                    _httpClient.DefaultRequestHeaders.Authorization = null;
+                    return;
+                }
+
+                var header = BuildBasicAuthHeaderValue(uri);
+                if (string.IsNullOrWhiteSpace(header))
+                {
+                    _httpClient.DefaultRequestHeaders.Authorization = null;
+                    return;
+                }
+
+                // header format: "Basic <token>"
+                var token = header.StartsWith("Basic ", StringComparison.OrdinalIgnoreCase)
+                    ? header.Substring("Basic ".Length).Trim()
+                    : header.Trim();
+
+                _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", token);
             }
             catch
             {
-                return false;
+                _httpClient.DefaultRequestHeaders.Authorization = null;
             }
         }
 
-        private async IAsyncEnumerable<CallItem> StreamFromWebSocketAsync(
-            ClientWebSocket ws,
-            string baseUrl,
+        private async Task<List<CallRow>> FetchLatestAsync(
             string callsUrl,
-            [EnumeratorCancellation] CancellationToken cancellationToken)
+            CancellationToken cancellationToken)
         {
-            var buffer = new byte[32 * 1024];
-            var segment = new ArraySegment<byte>(buffer);
-            var sb = new StringBuilder(64 * 1024);
-
-            // Trunking Recorder only pushes messages when calls arrive or update, so long idle periods are normal.
-            // We must not disconnect simply because the stream is quiet.
-            //
-            // Important platform note: On some platforms (notably Android), cancelling ReceiveAsync can destabilize
-            // the underlying socket. To avoid that, we do not cancel ReceiveAsync for idle timeouts.
-            // Instead, we await ReceiveAsync and periodically run a lightweight HTTP health check while we wait.
-            var receiveSlice = TimeSpan.FromSeconds(30);
-            var healthCheckInterval = TimeSpan.FromSeconds(60);
-
-            var lastHealthCheckUtc = DateTime.UtcNow;
-            var consecutiveHealthFailures = 0;
-            const int maxConsecutiveHealthFailures = 3;
-
-            var fragmentSlices = 0;
-            const int maxFragmentSlices = 4; // 4 x 30s = 120s to finish a fragmented message
-
-            try
-            {
-                while (!cancellationToken.IsCancellationRequested && ws.State == WebSocketState.Open)
-                {
-                    sb.Clear();
-                    fragmentSlices = 0;
-
-                    while (true)
-                    {
-                        // Start a receive and wait either for data or for a "slice" to elapse.
-                        var receiveTask = ws.ReceiveAsync(segment, cancellationToken);
-                        var delayTask = Task.Delay(receiveSlice, cancellationToken);
-
-                        var completed = await Task.WhenAny(receiveTask, delayTask);
-
-                        if (completed != receiveTask)
-                        {
-                            // No data received within this slice. That is normal while idle.
-                            if (sb.Length > 0)
-                            {
-                                // We already have partial data for a message. If the remainder never arrives,
-                                // treat that as a stalled connection.
-                                fragmentSlices++;
-
-                                if (fragmentSlices >= maxFragmentSlices)
-                                {
-                                    try { ws.Abort(); } catch { }
-                                    throw new WebSocketException("WebSocket stalled while assembling a message.");
-                                }
-                            }
-                            else
-                            {
-                                // Fully idle. Periodically verify the server is still reachable so a half-open
-                                // socket does not stall forever.
-                                var nowUtc = DateTime.UtcNow;
-                                if (nowUtc - lastHealthCheckUtc >= healthCheckInterval)
-                                {
-                                    lastHealthCheckUtc = nowUtc;
-
-                                    var ok = await IsServerReachableAsync(callsUrl, cancellationToken);
-                                    if (ok)
-                                    {
-                                        consecutiveHealthFailures = 0;
-                                    }
-                                    else
-                                    {
-                                        consecutiveHealthFailures++;
-
-                                        // Do not drop the socket on a single transient health check failure.
-                                        // Only abort after multiple consecutive failures.
-                                        if (consecutiveHealthFailures >= maxConsecutiveHealthFailures)
-                                        {
-                                            try { ws.Abort(); } catch { }
-                                            throw new WebSocketException("WebSocket appears stalled and server health checks are failing.");
-                                        }
-                                    }
-                                }
-                            }
-
-                            continue;
-                        }
-
-                        // Receive completed.
-                        var result = await receiveTask;
-
-                        // Any successful receive resets stall detection.
-                        consecutiveHealthFailures = 0;
-                        fragmentSlices = 0;
-
-                        if (result.MessageType == WebSocketMessageType.Close)
-                        {
-                            try
-                            {
-                                await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "closed", CancellationToken.None);
-                            }
-                            catch
-                            {
-                            }
-
-                            yield break;
-                        }
-
-                        if (result.Count > 0)
-                        {
-                            sb.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
-                        }
-
-                        if (result.EndOfMessage)
-                            break;
-                    }
-
-                    var message = sb.ToString().Trim();
-                    if (string.IsNullOrWhiteSpace(message))
-                        continue;
-
-                    JsonDocument? doc = null;
-
-                    try
-                    {
-                        doc = JsonDocument.Parse(message);
-                    }
-                    catch
-                    {
-                        // Ignore malformed frames.
-                        continue;
-                    }
-
-                    using (doc)
-                    {
-                        var root = doc.RootElement;
-
-                        if (root.ValueKind == JsonValueKind.Array)
-                        {
-                            foreach (var element in root.EnumerateArray())
-                            {
-                                await foreach (var item in ProcessWebSocketElementAsync(element, baseUrl, callsUrl, cancellationToken))
-                                {
-                                    yield return item;
-                                }
-                            }
-                        }
-                        else if (root.ValueKind == JsonValueKind.Object)
-                        {
-                            await foreach (var item in ProcessWebSocketElementAsync(root, baseUrl, callsUrl, cancellationToken))
-                            {
-                                yield return item;
-                            }
-                        }
-                    }
-                }
-            }
-            finally
-            {
-                try
-                {
-                    ws.Dispose();
-                }
-                catch
-                {
-                }
-            }
-        }
-
-        private async IAsyncEnumerable<CallItem> ProcessWebSocketElementAsync(
-            JsonElement element,
-            string baseUrl,
-            string callsUrl,
-            [EnumeratorCancellation] CancellationToken cancellationToken)
-        {
-            // Update notifications: {"Update": true, "DT_RowId": 123}
-            var isUpdate = false;
-
-            if (TryGetBoolean(element, "Update", out var updateFlag))
-            {
-                isUpdate = updateFlag;
-            }
-
-            var callId = GetString(element, "DT_RowId") ?? GetString(element, "DT_RowID");
-
-            if (isUpdate)
-            {
-                if (string.IsNullOrWhiteSpace(callId))
-                    yield break;
-
-                // Only refresh calls that we have already surfaced to the UI.
-                if (!_seenIds.Contains(callId.Trim()))
-                    yield break;
-
-                var row = await FetchCallByIdAsync(callsUrl, callId.Trim(), cancellationToken);
-                if (row == null)
-                    yield break;
-
-                var updated = BuildCallItemFromRow(row, baseUrl, skipYieldForThisBatch: false);
-                if (updated != null && updated.IsTranscriptionUpdate)
-                {
-                    yield return updated;
-                }
-
-                yield break;
-            }
-
-            // Full row messages: treat as a normal row insert.
-            var parsed = ParseRow(element);
-            var item = BuildCallItemFromRow(parsed, baseUrl, skipYieldForThisBatch: false);
-
-            if (item != null && !item.IsTranscriptionUpdate)
-            {
-                yield return item;
-            }
-        }
-
-        private static bool TryGetBoolean(JsonElement obj, string name, out bool value)
-        {
-            value = false;
-
-            if (obj.TryGetProperty(name, out var prop))
-            {
-                if (prop.ValueKind == JsonValueKind.True)
-                {
-                    value = true;
-                    return true;
-                }
-
-                if (prop.ValueKind == JsonValueKind.False)
-                {
-                    value = false;
-                    return true;
-                }
-
-                if (prop.ValueKind == JsonValueKind.Number && prop.TryGetInt32(out var i))
-                {
-                    value = i != 0;
-                    return true;
-                }
-
-                if (prop.ValueKind == JsonValueKind.String && bool.TryParse(prop.GetString(), out var b))
-                {
-                    value = b;
-                    return true;
-                }
-            }
-
-            // Case-insensitive fallback
-            foreach (var p in obj.EnumerateObject())
-            {
-                if (!string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                var v = p.Value;
-
-                if (v.ValueKind == JsonValueKind.True)
-                {
-                    value = true;
-                    return true;
-                }
-
-                if (v.ValueKind == JsonValueKind.False)
-                {
-                    value = false;
-                    return true;
-                }
-
-                if (v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var ii))
-                {
-                    value = ii != 0;
-                    return true;
-                }
-
-                if (v.ValueKind == JsonValueKind.String && bool.TryParse(v.GetString(), out var bb))
-                {
-                    value = bb;
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
-
-
-
-        private static string SanitizeAudioUrl(string audioUrl)
-        {
-            try
-            {
-                if (string.IsNullOrWhiteSpace(audioUrl))
-                    return audioUrl;
-
-                if (!Uri.TryCreate(audioUrl, UriKind.Absolute, out var uri))
-                    return audioUrl;
-
-                // Always strip embedded credentials.
-                var builder = new UriBuilder(uri)
-                {
-                    UserName = string.Empty,
-                    Password = string.Empty
-                };
-
-                return builder.Uri.ToString();
-            }
-            catch
-            {
-                return audioUrl;
-            }
-        }
-
-        // Embeds basic auth credentials into the audio URL when basic auth is configured
-        // and the audio URL host matches the configured server.
-        private string ApplyBasicAuthToAudioUrl(string audioUrl, string baseUrl)
-        {
-            try
-            {
-                if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var baseUri))
-                    return audioUrl;
-
-                if (!Uri.TryCreate(audioUrl, UriKind.Absolute, out var audioUri))
-                    return audioUrl;
-
-                // Only embed credentials if this audio URL is on the same scheme/host as the configured server.
-                if (!string.Equals(baseUri.Host, audioUri.Host, StringComparison.OrdinalIgnoreCase))
-                    return audioUrl;
-
-                if (!string.Equals(baseUri.Scheme, audioUri.Scheme, StringComparison.OrdinalIgnoreCase))
-                    return audioUrl;
-
-                // Choose which credentials to use:
-                // - For Joe's Scanner hosted servers (joesscanner.com), use the hard coded service account.
-                // - For custom servers, use the user configured basic auth credentials.
-                var isJoesScannerHost = baseUri.Host.EndsWith("app.joesscanner.com", StringComparison.OrdinalIgnoreCase);
-
-                string username;
-                string password;
-
-                if (isJoesScannerHost)
-                {
-                    username = ServiceAuthUsername;
-                    password = ServiceAuthPassword;
-                }
-                else
-                {
-                    username = _settingsService.BasicAuthUsername;
-                    password = _settingsService.BasicAuthPassword ?? string.Empty;
-                }
-
-                // Only do anything if we have a username.
-                if (string.IsNullOrWhiteSpace(username))
-                    return audioUrl;
-
-                var userEscaped = Uri.EscapeDataString(username);
-                var passEscaped = Uri.EscapeDataString(password);
-
-                // Authority already contains "host[:port]" but no user info.
-                var authority = audioUri.Authority;
-
-                var builder = new StringBuilder();
-                builder.Append(audioUri.Scheme);
-                builder.Append("://");
-                builder.Append(userEscaped);
-                builder.Append(':');
-                builder.Append(passEscaped);
-                builder.Append('@');
-                builder.Append(authority);
-                builder.Append(audioUri.PathAndQuery);
-                builder.Append(audioUri.Fragment);
-
-                return builder.ToString();
-            }
-            catch
-            {
-                // On any parsing or edge-case failure, fall back to the original URL so
-                // we never break unprotected/custom servers.
-                return audioUrl;
-            }
-        }
-
-        // Calls the calljson endpoint with the expected DataTables payload and returns parsed rows.
-        private async Task<List<CallRow>> FetchLatestAsync(string callsUrl, CancellationToken cancellationToken)
-        {
-            return await FetchLatestAsync(callsUrl, cancellationToken, start: 0, length: PollBatchSize);
+            return await FetchLatestAsync(callsUrl, cancellationToken, 0, PollBatchSize);
         }
 
         private async Task<List<CallRow>> FetchLatestAsync(
@@ -1438,119 +988,235 @@ namespace JoesScanner.Services
             int start,
             int length)
         {
-            var payload = BuildDataTablesPayload(_draw, start, length);
-            _draw++;
-
-            var jsonPayload = JsonSerializer.Serialize(payload, _jsonOptions);
-
-            // Ensure auth header matches current settings for this request.
-            UpdateAuthorizationHeader();
-
-            // Python uses data=body_json with form content type.
-            // Here we send the JSON string as the body with form content type,
-            // which matches what has been working in your environment.
-            using var content = new StringContent(jsonPayload, Encoding.UTF8, "application/x-www-form-urlencoded");
-            using var response = await _httpClient.PostAsync(callsUrl, content, cancellationToken);
-
-            if (!response.IsSuccessStatusCode)
+            // Attempt JSON body first (works reliably on the hosted gateway in our environment).
+            try
             {
-                var statusCode = response.StatusCode;
-                var statusInt = (int)statusCode;
-                string message;
+                var payload = BuildDataTablesPayload(_draw, start, length);
+                _draw++;
 
-                if (statusCode == HttpStatusCode.Unauthorized || statusCode == HttpStatusCode.Forbidden)
+                UpdateAuthorizationHeader();
+
+                var jsonBody = JsonSerializer.Serialize(payload, _jsonOptions);
+                using var content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
+                using var response = await _httpClient.PostAsync(callsUrl, content, cancellationToken);
+
+                if (!response.IsSuccessStatusCode)
                 {
-                    message =
-                        $"Authentication failed when calling {callsUrl} (HTTP {statusInt} {response.ReasonPhrase}). " +
-                        "Check basic auth username/password and any firewall auth configuration.";
+                    var statusCode = response.StatusCode;
+                    var statusInt = (int)statusCode;
 
-                    Debug.WriteLine($"[CallStreamService] [AuthError] {message}");
-                    throw new CallStreamAuthException(message);
+                    if (statusCode == HttpStatusCode.Unauthorized || statusCode == HttpStatusCode.Forbidden)
+                    {
+                        throw new CallStreamAuthException(
+                            $"Authentication failed when calling {callsUrl} (HTTP {statusInt} {response.ReasonPhrase}).");
+                    }
+
+                    // Fall back to form encoding for servers that do not accept JSON payloads.
+                    throw new HttpRequestException(
+                        $"Server returned HTTP {statusInt} {response.ReasonPhrase} when calling {callsUrl}.");
                 }
 
-                if (statusCode == HttpStatusCode.NotFound)
+                var json = await response.Content.ReadAsStringAsync(cancellationToken);
+                var rows = new List<CallRow>();
+
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+
+                if (root.TryGetProperty("data", out var rowsElement) && rowsElement.ValueKind == JsonValueKind.Array)
                 {
-                    message =
-                        $"The calljson endpoint was not found at {callsUrl} (HTTP {statusInt} {response.ReasonPhrase}). " +
-                        "Verify the Trunking Recorder base URL and path.";
-                    Debug.WriteLine($"[CallStreamService] [ServerError] {message}");
+                    foreach (var item in rowsElement.EnumerateArray())
+                        rows.Add(ParseRow(item));
                 }
-                else
+                else if (root.TryGetProperty("rows", out rowsElement) && rowsElement.ValueKind == JsonValueKind.Array)
                 {
-                    message =
-                        $"Server returned HTTP {statusInt} {response.ReasonPhrase} when calling {callsUrl}.";
-                    Debug.WriteLine($"[CallStreamService] [ServerError] {message}");
+                    foreach (var item in rowsElement.EnumerateArray())
+                        rows.Add(ParseRow(item));
                 }
 
-                throw new HttpRequestException(message);
+                return rows;
             }
-
-            var json = await response.Content.ReadAsStringAsync(cancellationToken);
-
-            var rows = new List<CallRow>();
-
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-
-            if (root.TryGetProperty("data", out var rowsElement) && rowsElement.ValueKind == JsonValueKind.Array)
+            catch (CallStreamAuthException)
             {
-                foreach (var item in rowsElement.EnumerateArray())
-                {
-                    rows.Add(ParseRow(item));
-                }
+                throw;
             }
-            else if (root.TryGetProperty("rows", out rowsElement) && rowsElement.ValueKind == JsonValueKind.Array)
+            catch
             {
-                foreach (var item in rowsElement.EnumerateArray())
-                {
-                    rows.Add(ParseRow(item));
-                }
+                // Fallback: DataTables form encoding.
+                return await FetchLatestFormAsync(callsUrl, cancellationToken, start, length);
             }
-
-            return rows;
         }
 
-
-        // Updates the HttpClient Authorization header based on the current basic auth settings.
-        private void UpdateAuthorizationHeader()
+                private async IAsyncEnumerable<CallItem> StreamFromWebSocketWithRecoveryAsync(
+            ClientWebSocket ws,
+            string baseUrl,
+            string callsUrl,
+            string usernameForLog,
+            bool isAppleTestAccount,
+            [EnumeratorCancellation] CancellationToken cancellationToken)
         {
-            // Clear any previous header first.
-            _httpClient.DefaultRequestHeaders.Authorization = null;
+            // Minimal WS loop: parse message payloads into CallRow and reuse BuildCallItemFromRow.
+            // On some servers, the WS feed may not include transcription updates, so we periodically
+            // poll calljson for any IDs we are still tracking as missing transcription.
+            var buffer = new byte[64 * 1024];
 
-            var serverUrl = _settingsService.ServerUrl ?? string.Empty;
-            if (!Uri.TryCreate(serverUrl, UriKind.Absolute, out var serverUri))
-                return;
+            var nextTranscriptionCatchupUtc = DateTime.UtcNow.AddSeconds(2);
 
-            var isJoesScannerHost = serverUri.Host.EndsWith("app.joesscanner.com", StringComparison.OrdinalIgnoreCase);
-
-            string username;
-            string password;
-
-            if (isJoesScannerHost)
+            while (!cancellationToken.IsCancellationRequested && ws.State == WebSocketState.Open)
             {
-                // Joe's Scanner hosted servers use the hard coded service account.
-                username = ServiceAuthUsername;
-                password = ServiceAuthPassword;
+                WebSocketReceiveResult result;
+                using var ms = new MemoryStream();
+
+                do
+                {
+                    result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
+
+                    if (result.MessageType == WebSocketMessageType.Close)
+                    {
+                        try
+                        {
+                            await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "closing", CancellationToken.None);
+                        }
+                        catch
+                        {
+                        }
+
+                        yield break;
+                    }
+
+                    ms.Write(buffer, 0, result.Count);
+                }
+                while (!result.EndOfMessage);
+
+                var text = Encoding.UTF8.GetString(ms.ToArray());
+                if (!string.IsNullOrWhiteSpace(text))
+                {
+                    List<CallItem> toYield;
+
+                    try
+                    {
+                        toYield = new List<CallItem>();
+
+                        using var doc = JsonDocument.Parse(text);
+                        var root = doc.RootElement;
+
+                        if (root.ValueKind == JsonValueKind.Array)
+                        {
+                            foreach (var item in root.EnumerateArray())
+                            {
+                                if (item.ValueKind != JsonValueKind.Object)
+                                    continue;
+
+                                var row = ParseRow(item);
+                                var call = BuildCallItemFromRow(row, baseUrl, skipYieldForThisBatch: false);
+                                if (call != null)
+                                    toYield.Add(call);
+                            }
+                        }
+                        else if (root.ValueKind == JsonValueKind.Object)
+                        {
+                            // Some feeds wrap rows under a property (for example: "data").
+                            if (root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array)
+                            {
+                                foreach (var item in data.EnumerateArray())
+                                {
+                                    if (item.ValueKind != JsonValueKind.Object)
+                                        continue;
+
+                                    var row = ParseRow(item);
+                                    var call = BuildCallItemFromRow(row, baseUrl, skipYieldForThisBatch: false);
+                                    if (call != null)
+                                        toYield.Add(call);
+                                }
+                            }
+                            else
+                            {
+                                var row = ParseRow(root);
+                                var call = BuildCallItemFromRow(row, baseUrl, skipYieldForThisBatch: false);
+                                if (call != null)
+                                    toYield.Add(call);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"[CallStreamService] [WebSocket] Parse error: {ex}");
+                        // Break out so outer loop can fall back/reconnect.
+                        yield break;
+                    }
+
+                    foreach (var call in toYield)
+                        yield return call;
+                }
+
+                // Transcription catch-up: if WS doesn't deliver the calltext update, polling calljson will.
+                // Keep this lightweight: only do work when we still have IDs in the missing set.
+                if (_idsMissingTranscription.Count > 0 && DateTime.UtcNow >= nextTranscriptionCatchupUtc)
+                {
+                    nextTranscriptionCatchupUtc = DateTime.UtcNow.AddSeconds(2);
+
+                    List<CallItem>? catchupYield = null;
+
+                    try
+                    {
+                        // Grab the newest page and let BuildCallItemFromRow decide if any rows now qualify
+                        // as transcription updates for IDs we were waiting on.
+                        var rows = await FetchLatestAsync(callsUrl, cancellationToken, start: 0, length: 200);
+                        catchupYield = new List<CallItem>();
+
+                        foreach (var r in rows)
+                        {
+                            var call = BuildCallItemFromRow(r, baseUrl, skipYieldForThisBatch: false);
+                            if (call != null && call.IsTranscriptionUpdate)
+                                catchupYield.Add(call);
+                        }
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        yield break;
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"[CallStreamService] [WebSocket] Transcription catch-up failed: {ex.Message}");
+                    }
+
+                    if (catchupYield != null)
+                    {
+                        foreach (var call in catchupYield)
+                            yield return call;
+                    }
+                }
             }
-            else
-            {
-                // Custom servers use user configured basic auth credentials, if any.
-                username = _settingsService.BasicAuthUsername;
-                password = _settingsService.BasicAuthPassword ?? string.Empty;
-            }
-
-            if (string.IsNullOrWhiteSpace(username))
-                return;
-
-            var raw = $"{username}:{password}";
-            var bytes = Encoding.ASCII.GetBytes(raw);
-            var base64 = Convert.ToBase64String(bytes);
-
-            _httpClient.DefaultRequestHeaders.Authorization =
-                new AuthenticationHeaderValue("Basic", base64);
         }
 
-        // Maps a JSON row from the DataTables response into a CallRow object.
+private static string SanitizeAudioUrl(string audioUrl)
+        {
+            if (string.IsNullOrWhiteSpace(audioUrl))
+                return string.Empty;
+
+            try
+            {
+                if (!Uri.TryCreate(audioUrl, UriKind.Absolute, out var uri))
+                    return audioUrl;
+
+                if (!string.IsNullOrEmpty(uri.UserInfo))
+                {
+                    var builder = new UriBuilder(uri)
+                    {
+                        UserName = string.Empty,
+                        Password = string.Empty
+                    };
+                    return builder.Uri.ToString();
+                }
+
+                return audioUrl;
+            }
+            catch
+            {
+                return audioUrl;
+            }
+        }
+
+        // Maps a JSON row from the DataTables response into a CallRow object. from the DataTables response into a CallRow object.
         private static CallRow ParseRow(JsonElement e)
         {
             return new CallRow
@@ -1771,7 +1437,7 @@ namespace JoesScanner.Services
             return payload;
         }
 
-        
+
 
         private static string BuildTransportErrorMessage(Exception ex)
         {

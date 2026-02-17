@@ -14,6 +14,7 @@ namespace JoesScanner.Services
         private const string LastAuthUserKey = "LastAuthUserV1";
         private const string AutoPlayKey = "AutoPlay";
         private const string WindowsAutoConnectOnStartKey = "WindowsAutoConnectOnStart";
+        const string MobileAutoConnectOnStartKey = "MobileAutoConnectOnStart";
         private const string WindowsStartWithWindowsKey = "WindowsStartWithWindows";
         private const string ScrollDirectionKey = "ScrollDirection";
         private const string ReceiverFilterKey = "ReceiverFilter";
@@ -88,7 +89,14 @@ namespace JoesScanner.Services
             set => Preferences.Set(WindowsAutoConnectOnStartKey, value);
         }
 
-        public bool WindowsStartWithWindows
+
+
+        public bool MobileAutoConnectOnStart
+        {
+            get => Preferences.Get(MobileAutoConnectOnStartKey, false);
+            set => Preferences.Set(MobileAutoConnectOnStartKey, value);
+        }
+public bool WindowsStartWithWindows
         {
             get => Preferences.Get(WindowsStartWithWindowsKey, false);
             set => Preferences.Set(WindowsStartWithWindowsKey, value);
