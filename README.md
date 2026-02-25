@@ -48,8 +48,8 @@ Enter these on the Settings screen and use “Test Connection.” When the conne
 
 - Windows  
 - Android  
-- iOS (coming soon)
-- macOS (coming soon)
+- iOS 
+- macOS
 
 The application runs on desktops, laptops, tablets, and mobile devices.
 
@@ -61,10 +61,10 @@ The application runs on desktops, laptops, tablets, and mobile devices.
 2. Open the Settings page  
 3. Enter your server URL  
 4. (Optional) Enter username and password  
-5. Select “Test Connection”  
-6. Save your settings and return to the main screen  
+5. Select “Verify”  
+6. Once verified, return to the main screen  
 
-When configured correctly, call activity will appear automatically.
+When configured correctly, call activity will appear when you press play.
 
 ---
 
@@ -101,8 +101,10 @@ If calls are not displaying or audio does not play:
 
 ## Downloads
 
-The latest builds for each platform are available under GitHub Releases:  
+The latest builds for windows are available under GitHub Releases:  
 https://github.com/JoesScanner/JoesScanner/releases
+Or on the Windows, Android, and iOS stores.
+Search "Joes Scanner"
 
 ---
 
