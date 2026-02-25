@@ -43,7 +43,6 @@
 	                    <Grid Padding="8,6" RowDefinitions="Auto,Auto" RowSpacing="8">
 
 
-
 <Grid Grid.Row="0" ColumnDefinitions="*,*,*" ColumnSpacing="8">
 	                            <VerticalStackLayout Spacing="2">
 	                                <Label Text="Receiver" FontSize="12" TextColor="White" HorizontalTextAlignment="Center" HorizontalOptions="Fill" />
@@ -62,7 +61,7 @@
 	                                    </Border.GestureRecognizers>
 	                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6" VerticalOptions="Center">
 	                                        <Label
-	                                            Text="{Binding SelectedReceiver.Label, TargetNullValue=All}"
+	                                            Text="{Binding SelectedReceiverDisplay}"
 	                                            FontSize="13"
 	                                            TextColor="Black"
 	                                            LineBreakMode="TailTruncation"
@@ -88,7 +87,7 @@
 	                                    </Border.GestureRecognizers>
 	                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6" VerticalOptions="Center">
 	                                        <Label
-	                                            Text="{Binding SelectedSite.Label, TargetNullValue=All}"
+	                                            Text="{Binding SelectedSiteDisplay}"
 	                                            FontSize="13"
 	                                            TextColor="Black"
 	                                            LineBreakMode="TailTruncation"
@@ -114,7 +113,7 @@
 	                                    </Border.GestureRecognizers>
 	                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6" VerticalOptions="Center">
 	                                        <Label
-	                                            Text="{Binding SelectedTalkgroup.Label, TargetNullValue=All}"
+	                                            Text="{Binding SelectedTalkgroupDisplay}"
 	                                            FontSize="13"
 	                                            TextColor="Black"
 	                                            LineBreakMode="TailTruncation"
@@ -124,42 +123,149 @@
 	                            </VerticalStackLayout>
 	                        </Grid>
 
-                        <Grid Grid.Row="1" ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8" VerticalOptions="Center">
+                        <Grid Grid.Row="1" ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto" ColumnSpacing="8" RowSpacing="6" VerticalOptions="Center">
 
-                            <HorizontalStackLayout Grid.Column="0" Spacing="4" VerticalOptions="Center">
+                            <HorizontalStackLayout Grid.Row="0" Grid.Column="0" Spacing="4" VerticalOptions="Center" HorizontalOptions="Center">
                                 <Label
-                                    Text="Click time to specify:"
+                                    Text="Start time:"
                                     FontSize="12"
                                     TextColor="White"
                                     VerticalTextAlignment="Center"
                                     VerticalOptions="Center" />
 
                                 <Border
-                                    BackgroundColor="{StaticResource TabStripNavy}"
+                                    BackgroundColor="White"
                                     Stroke="#1f2937"
                                     StrokeThickness="1"
                                     Padding="0"
                                     HeightRequest="32"
-                                    WidthRequest="104"
+                                    WidthRequest="100"
                                     HorizontalOptions="Start">
 
                                     <Border.StrokeShape>
                                         <RoundRectangle CornerRadius="12" />
                                     </Border.StrokeShape>
 
+                                    <Border.GestureRecognizers>
+                                        <TapGestureRecognizer Tapped="OnTimeBorderTapped" />
+                                    </Border.GestureRecognizers>
+
                                     <Grid>
                                         <Label
                                             Text="{Binding SelectedTimeDisplay}"
                                             FontSize="13"
-                                            TextColor="White"
+                                            TextColor="Black"
                                             HorizontalTextAlignment="Start"
                                             VerticalTextAlignment="Center"
                                             Margin="6,0,0,0" />
 
                                         <!-- Keep the native picker for interaction, but hide its stretched visuals. -->
                                         <TimePicker
+                                            x:Name="HistoryTimePicker"
                                             Time="{Binding SelectedTime, Mode=TwoWay}"
-                                            Format="h:mm tt"
+                                            Format="HH:mm"
+                                            InputTransparent="False"
+                                            Opacity="0.01"
+                                            BackgroundColor="Transparent"
+                                            TextColor="Transparent"
+                                            HorizontalOptions="Fill"
+                                            VerticalOptions="Fill" />
+                                    </Grid>
+                                </Border>
+                            </HorizontalStackLayout>
+
+                            <HorizontalStackLayout
+                                Grid.Row="1"
+                                Grid.Column="0"
+                                Spacing="6"
+                                VerticalOptions="Center"
+                                HorizontalOptions="Center"
+                                IsVisible="{Binding CanPickDateRange}">
+
+                                <Label
+                                    Text="Date:"
+                                    FontSize="12"
+                                    TextColor="White"
+                                    VerticalTextAlignment="Center"
+                                    VerticalOptions="Center" />
+
+                                <Border
+                                    BackgroundColor="White"
+                                    Stroke="#1f2937"
+                                    StrokeThickness="1"
+                                    Padding="0"
+                                    HeightRequest="32"
+                                    WidthRequest="100"
+                                    HorizontalOptions="Start">
+
+                                    <Border.StrokeShape>
+                                        <RoundRectangle CornerRadius="12" />
+                                    </Border.StrokeShape>
+
+                                    <Border.GestureRecognizers>
+                                        <TapGestureRecognizer Tapped="OnDateFromBorderTapped" />
+                                    </Border.GestureRecognizers>
+
+                                    <Grid>
+                                        <Label
+                                            Text="{Binding SelectedDateFromDisplay}"
+                                            FontSize="13"
+                                            TextColor="Black"
+                                            HorizontalTextAlignment="Start"
+                                            VerticalTextAlignment="Center"
+                                            Margin="6,0,0,0" />
+
+                                        <DatePicker
+                                            x:Name="HistoryDateFromPicker"
+                                            Date="{Binding SelectedDateFrom, Mode=TwoWay}"
+                                            Format="M/d/yyyy"
+                                            InputTransparent="False"
+                                            Opacity="0.01"
+                                            BackgroundColor="Transparent"
+                                            TextColor="Transparent"
+                                            HorizontalOptions="Fill"
+                                            VerticalOptions="Fill" />
+                                    </Grid>
+                                </Border>
+
+                                <Label
+                                    Text="to"
+                                    FontSize="12"
+                                    TextColor="White"
+                                    VerticalTextAlignment="Center"
+                                    VerticalOptions="Center" />
+
+                                <Border
+                                    BackgroundColor="White"
+                                    Stroke="#1f2937"
+                                    StrokeThickness="1"
+                                    Padding="0"
+                                    HeightRequest="32"
+                                    WidthRequest="100"
+                                    HorizontalOptions="Start">
+
+                                    <Border.StrokeShape>
+                                        <RoundRectangle CornerRadius="12" />
+                                    </Border.StrokeShape>
+
+                                    <Border.GestureRecognizers>
+                                        <TapGestureRecognizer Tapped="OnDateToBorderTapped" />
+                                    </Border.GestureRecognizers>
+
+                                    <Grid>
+                                        <Label
+                                            Text="{Binding SelectedDateToDisplay}"
+                                            FontSize="13"
+                                            TextColor="Black"
+                                            HorizontalTextAlignment="Start"
+                                            VerticalTextAlignment="Center"
+                                            Margin="6,0,0,0" />
+
+                                        <DatePicker
+                                            x:Name="HistoryDateToPicker"
+                                            Date="{Binding SelectedDateTo, Mode=TwoWay}"
+                                            Format="M/d/yyyy"
+                                            InputTransparent="False"
                                             Opacity="0.01"
                                             BackgroundColor="Transparent"
                                             TextColor="Transparent"
@@ -170,7 +276,9 @@
                             </HorizontalStackLayout>
 
                             <Border
-                                Grid.Column="2"
+                                Grid.Row="0"
+                                Grid.Column="1"
+                                Grid.RowSpan="2"
                                 BackgroundColor="Transparent"
                                 Stroke="White"
                                 StrokeThickness="1"
@@ -226,7 +334,19 @@
                             ToolTipProperties.Text="Previous" />
 
                         <ImageButton
+                            Source="mc_play.png"
+                            IsVisible="{Binding ShowHistoryPlayButton}"
+                            Command="{Binding PlayCommand}"
+                            IsEnabled="{Binding IsPlayEnabled}"
+                            BackgroundColor="Transparent"
+                            HeightRequest="38"
+                            WidthRequest="38"
+                            Padding="0"
+                            ToolTipProperties.Text="Play" />
+
+                        <ImageButton
                             Source="mc_stop.png"
+                            IsVisible="{Binding ShowHistoryStopButton}"
                             Command="{Binding StopCommand}"
                             IsEnabled="{Binding IsStopEnabled}"
                             BackgroundColor="Transparent"
@@ -280,15 +400,14 @@
                     Text="{Binding StatusText}"
                     FontSize="12"
                     TextColor="{AppThemeBinding Light=#374151, Dark=#e5e7eb}"
-                    LineBreakMode="TailTruncation" />
+                    LineBreakMode="WordWrap" />
 
                 <!-- Calls -->
                 <CollectionView
                     x:Name="CallsList"
                     Grid.Row="3"
                     ItemsSource="{Binding Calls}"
-                    SelectionMode="Single"
-                    SelectionChanged="OnCallSelected"
+                    SelectionMode="None"
                     Scrolled="OnCallsScrolled"
                     VerticalScrollBarVisibility="Never">
 
@@ -300,6 +419,10 @@
                                 BackgroundColor="{AppThemeBinding Light=White, Dark=#0b1220}"
                                 Padding="8"
                                 Margin="0,0,0,6">
+
+                                <Border.GestureRecognizers>
+                                    <TapGestureRecognizer Tapped="OnCallTapped" CommandParameter="{Binding .}" />
+                                </Border.GestureRecognizers>
 
                                 <Border.StrokeShape>
                                     <RoundRectangle CornerRadius="14" />
@@ -318,22 +441,30 @@
                                     <Label Grid.Row="0" Grid.Column="0" FontSize="14">
                                         <Label.FormattedText>
                                             <FormattedString>
-                                                <Span Text="{Binding TimeDisplay}" FontAttributes="Bold" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
-                                                <Span Text="  >  " TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
+                                                <Span Text="{Binding TimeOnlyDisplay}" FontAttributes="Bold" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                                                <Span Text=">" TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
                                                 <Span Text="{Binding ReceiverName}" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
-                                                <Span Text="  >  " TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
+                                                <Span Text=">" TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
                                                 <Span Text="{Binding Site}" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
-                                                <Span Text="  >  " TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
+                                                <Span Text=">" TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
                                                 <Span Text="{Binding Talkgroup}" FontAttributes="Bold" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
                                             </FormattedString>
                                         </Label.FormattedText>
                                     </Label>
 
-                                    <Label Grid.Row="0" Grid.Column="1"
-                                           FontSize="12"
-                                           TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
-                                           Text="{Binding DurationDisplay}"
-                                           HorizontalTextAlignment="End" />
+                                    <VerticalStackLayout Grid.Row="0" Grid.Column="1" Spacing="0" HorizontalOptions="End" VerticalOptions="Start">
+                                        <Label
+                                            FontSize="12"
+                                            TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+                                            Text="{Binding DateDisplay}"
+                                            HorizontalTextAlignment="End" />
+
+                                        <Label
+                                            FontSize="12"
+                                            TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+                                            Text="{Binding DurationDisplay}"
+                                            HorizontalTextAlignment="End" />
+                                    </VerticalStackLayout>
 
                                     <Label Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2"
                                            FontSize="12"
@@ -353,7 +484,6 @@
                         </DataTemplate>
                     </CollectionView.ItemTemplate>
                 </CollectionView>
-
 
 
             </Grid>

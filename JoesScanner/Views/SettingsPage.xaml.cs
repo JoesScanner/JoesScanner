@@ -475,5 +475,42 @@ namespace JoesScanner.Views
                 vm.ClearFilterCommand.Execute(rule);
             }
         }
+
+
+        // Validate click handler.
+        // iOS can re-layout and flicker password entries if we push Text updates every keystroke.
+        // We bind the Entry Text updates on Unfocused and force an Unfocus here so the latest
+        // values commit right before we run validation.
+        private async void OnValidateClicked(object sender, EventArgs e)
+        {
+            try
+            {
+                // Force bindings to commit their Text values.
+                ServerUrlEntry?.Unfocus();
+                BasicAuthUsernameEntry?.Unfocus();
+                BasicAuthPasswordEntry?.Unfocus();
+
+                // Give the UI thread a moment to propagate binding updates.
+                await Task.Delay(50);
+
+                if (BindingContext is SettingsViewModel vm && vm.ValidateServerCommand != null)
+                {
+                    if (vm.ValidateServerCommand.CanExecute(null))
+                    {
+                        vm.ValidateServerCommand.Execute(null);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    System.Diagnostics.Debug.WriteLine($"SettingsPage.OnValidateClicked failed: {ex}");
+                }
+                catch
+                {
+                }
+            }
+        }
     }
 }

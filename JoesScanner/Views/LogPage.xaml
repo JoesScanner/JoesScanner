@@ -39,25 +39,20 @@
 
 					<Grid
                         Padding="8,6"
-                        ColumnDefinitions="*"
+                        ColumnDefinitions="*,Auto"
                         RowDefinitions="Auto">
 						<HorizontalStackLayout
 							Grid.Row="0"
+                            Grid.Column="0"
 							Spacing="8"
 							HorizontalOptions="Start">
-                            <Label
-                                Text="Log"
-                                FontSize="15"
-                                FontAttributes="Bold"
-                                TextColor="White"
-                                VerticalOptions="Center" />
-                            <Button
+<Button
 								Text="Load"
 								Style="{StaticResource SecondaryPillButtonStyle}"
 							Clicked="OnLoadClicked" />
                             <Button
 								x:Name="AutoRefreshButton"
-								Text="Auto-refresh"
+								Text="Refresh"
 								Style="{StaticResource SecondaryPillButtonStyle}"
 								Clicked="OnAutoRefreshClicked" />
 
@@ -93,6 +88,26 @@
 								Style="{StaticResource SecondaryPillButtonStyle}"
 								Clicked="OnCopyClicked" />
 						</HorizontalStackLayout>
+
+                            <HorizontalStackLayout
+                                Grid.Row="0"
+                                Grid.Column="1"
+                                Spacing="6"
+                                HorizontalOptions="End"
+                                VerticalOptions="Center">
+                                <Label
+                                    x:Name="LoggingStateLabel"
+                                    FontSize="13"
+                                    TextColor="White"
+                                    VerticalOptions="Center" />
+                                <Switch
+                                    x:Name="LoggingSwitch"
+                                    Scale="0.8"
+                                    OnColor="#3B82F6"
+                                    ThumbColor="White"
+                                    Toggled="OnLoggingToggled"
+                                    VerticalOptions="Center" />
+                            </HorizontalStackLayout>
 					</Grid>
 				</Border>
 

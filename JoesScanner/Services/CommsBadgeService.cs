@@ -2,9 +2,6 @@ namespace JoesScanner.Services
 {
     public sealed class CommsBadgeService : ICommsBadgeService
     {
-        private const string LastSeenIdKey = "CommsLastSeenMessageId";
-        private const string LastKnownIdKey = "CommsLastKnownMessageId";
-
         private readonly ISettingsService _settings;
         private readonly ICommunicationsService _comms;
 
@@ -31,8 +28,8 @@ namespace JoesScanner.Services
             _settings = settings ?? throw new ArgumentNullException(nameof(settings));
             _comms = comms ?? throw new ArgumentNullException(nameof(comms));
 
-            _lastSeenId = Preferences.Get(LastSeenIdKey, 0L);
-            _lastKnownId = Preferences.Get(LastKnownIdKey, 0L);
+            _lastSeenId = AppStateStore.GetLong("comms_last_seen_id", 0L);
+            _lastKnownId = AppStateStore.GetLong("comms_last_known_id", 0L);
 
             RecomputeHasUnread(raiseEvent: false);
         }
@@ -64,13 +61,13 @@ namespace JoesScanner.Services
             if (messageId > _lastSeenId)
             {
                 _lastSeenId = messageId;
-                Preferences.Set(LastSeenIdKey, _lastSeenId);
+                AppStateStore.SetLong("comms_last_seen_id", _lastSeenId);
             }
 
             if (messageId > _lastKnownId)
             {
                 _lastKnownId = messageId;
-                Preferences.Set(LastKnownIdKey, _lastKnownId);
+                AppStateStore.SetLong("comms_last_known_id", _lastKnownId);
             }
 
             RecomputeHasUnread(raiseEvent: true);
@@ -93,7 +90,7 @@ namespace JoesScanner.Services
                 return;
 
             _lastKnownId = messageId;
-            Preferences.Set(LastKnownIdKey, _lastKnownId);
+            AppStateStore.SetLong("comms_last_known_id", _lastKnownId);
             RecomputeHasUnread(raiseEvent: true);
         }
 

@@ -6,11 +6,7 @@ using System.Text.Json.Serialization;
 namespace JoesScanner.Services
 {
     public sealed class SubscriptionService : ISubscriptionService, IDisposable
-    {
-        // Change this number when you want a different grace window
-        private const int SubscriptionGraceDays = 7;
-
-        private const string DefaultAuthServerBaseUrl = "https://joesscanner.com";
+    {        private const string DefaultAuthServerBaseUrl = "https://joesscanner.com";
 
         private readonly ISettingsService _settings;
         private readonly ITelemetryService _telemetryService;
@@ -111,6 +107,8 @@ namespace JoesScanner.Services
                 {
                     _settings.SubscriptionLastCheckUtc = nowUtc;
                     _settings.SubscriptionLastStatusOk = false;
+                    _settings.SubscriptionLastValidatedOnline = false;
+                    _settings.SubscriptionTierLevel = 0;
 
                     var sub = authResponse?.Subscription;
                     var planLabel = (sub?.LevelLabel ?? sub?.Level ?? string.Empty).Trim();
@@ -131,6 +129,8 @@ namespace JoesScanner.Services
                 {
                     _settings.SubscriptionLastCheckUtc = nowUtc;
                     _settings.SubscriptionLastStatusOk = false;
+                    _settings.SubscriptionLastValidatedOnline = false;
+                    _settings.SubscriptionTierLevel = 0;
                     _settings.SubscriptionLastLevel = string.Empty;
                     _settings.SubscriptionExpiresUtc = null;
                     _settings.SubscriptionRenewalUtc = null;
@@ -143,6 +143,8 @@ namespace JoesScanner.Services
                 {
                     _settings.SubscriptionLastCheckUtc = nowUtc;
                     _settings.SubscriptionLastStatusOk = false;
+                    _settings.SubscriptionLastValidatedOnline = false;
+                    _settings.SubscriptionTierLevel = 0;
 
                     var sub = authResponse.Subscription;
                     var planLabel = (sub?.LevelLabel ?? sub?.Level ?? string.Empty).Trim();
@@ -166,6 +168,8 @@ namespace JoesScanner.Services
                 {
                     _settings.SubscriptionLastCheckUtc = nowUtc;
                     _settings.SubscriptionLastStatusOk = false;
+                    _settings.SubscriptionLastValidatedOnline = false;
+                    _settings.SubscriptionTierLevel = 0;
 
                     var planLabel = (subscription.LevelLabel ?? subscription.Level ?? string.Empty).Trim();
                     var priceText = (subscription.PriceId ?? string.Empty).Trim();
@@ -184,12 +188,14 @@ namespace JoesScanner.Services
                 // Success
                 _settings.SubscriptionLastCheckUtc = nowUtc;
                 _settings.SubscriptionLastStatusOk = true;
+                _settings.SubscriptionLastValidatedOnline = true;
 
                 var level = (subscription?.LevelLabel ?? subscription?.Level ?? string.Empty).Trim();
                 var price = (subscription?.PriceId ?? string.Empty).Trim();
 
                 _settings.SubscriptionLastLevel = level;
                 _settings.SubscriptionPriceId = price;
+                _settings.SubscriptionTierLevel = subscription?.TierLevel ?? 0;
 
                 _settings.SubscriptionExpiresUtc = TryParseUtc(subscription?.ExpiresAt);
 
@@ -237,48 +243,48 @@ namespace JoesScanner.Services
             catch
             {
                 // Unreachable auth server.
-                // Policy:
-                // - If the cached subscription is still current, do NOT deauthorize.
-                // - If the cached subscription is no longer current, allow a 7-day grace period.
-                // - If grace is exceeded, deny.
+                // Policy (strict):
+                // - If the cached subscription has a known validity end date and it is still current, allow.
+                // - If the cached subscription is expired, deny (do not connect to the default server).
+                // - If no validity end date is available, deny until the auth server can be contacted again.
 
                 var nowUtc = DateTime.UtcNow;
+
+                // Strict gating: offline cached access is allowed for connecting, but it is not considered
+                // a validated online state for premium feature unlocks.
+                _settings.SubscriptionLastValidatedOnline = false;
 
                 if (_settings.SubscriptionLastStatusOk)
                 {
                     var validUntilUtc = GetCachedValidUntilUtc();
 
-                    // If we have an explicit validity date, prefer it.
                     if (validUntilUtc.HasValue)
                     {
                         if (nowUtc <= validUntilUtc.Value)
                         {
-                            _settings.SubscriptionLastMessage = BuildOfflineMessage(validUntilUtc.Value, isGrace: false);
+                            _settings.SubscriptionLastMessage = BuildOfflineMessage(validUntilUtc.Value);
                             return new SubscriptionCheckResult(true, "offline_cached", _settings.SubscriptionLastMessage);
                         }
 
-                        if (nowUtc <= validUntilUtc.Value.AddDays(SubscriptionGraceDays))
-                        {
-                            _settings.SubscriptionLastMessage = BuildOfflineMessage(validUntilUtc.Value, isGrace: true);
-                            return new SubscriptionCheckResult(true, "grace", _settings.SubscriptionLastMessage);
-                        }
+                        var localDate = DateTime.SpecifyKind(validUntilUtc.Value, DateTimeKind.Utc).ToLocalTime().ToString("yyyy-MM-dd");
+                        _settings.SubscriptionLastMessage = $"Auth server unreachable and cached subscription is expired (expired {localDate}).";
+                        _settings.SubscriptionLastCheckUtc = nowUtc;
+                        _settings.SubscriptionLastStatusOk = false;
+                        _settings.SubscriptionTierLevel = 0;
+                        return new SubscriptionCheckResult(false, "expired_offline", _settings.SubscriptionLastMessage);
                     }
-                    else
-                    {
-                        // If the server did not provide a clear validity date, allow a conservative grace window
-                        // based on the last successful contact.
-                        if (_settings.SubscriptionLastCheckUtc.HasValue &&
-                            (nowUtc - _settings.SubscriptionLastCheckUtc.Value) <= TimeSpan.FromDays(SubscriptionGraceDays))
-                        {
-                            _settings.SubscriptionLastMessage = "Auth server unreachable. Using cached subscription (grace period).";
-                            return new SubscriptionCheckResult(true, "grace", _settings.SubscriptionLastMessage);
-                        }
-                    }
+
+                    _settings.SubscriptionLastMessage = "Auth server unreachable and cached subscription has no validity date. Reconnect when online to verify your subscription.";
+                    _settings.SubscriptionLastCheckUtc = nowUtc;
+                    _settings.SubscriptionLastStatusOk = false;
+                    _settings.SubscriptionTierLevel = 0;
+                    return new SubscriptionCheckResult(false, "no_validity_offline", _settings.SubscriptionLastMessage);
                 }
 
                 _settings.SubscriptionLastCheckUtc = nowUtc;
                 _settings.SubscriptionLastStatusOk = false;
-                _settings.SubscriptionLastMessage = "Auth server unreachable and cached subscription is not current.";
+                _settings.SubscriptionTierLevel = 0;
+                _settings.SubscriptionLastMessage = "Auth server unreachable and no valid cached subscription is available.";
 
                 return new SubscriptionCheckResult(false, "unreachable", _settings.SubscriptionLastMessage);
             }
@@ -297,13 +303,10 @@ namespace JoesScanner.Services
             return null;
         }
 
-        private static string BuildOfflineMessage(DateTime validUntilUtc, bool isGrace)
+        private static string BuildOfflineMessage(DateTime validUntilUtc)
         {
             var localDate = DateTime.SpecifyKind(validUntilUtc, DateTimeKind.Utc).ToLocalTime().ToString("yyyy-MM-dd");
-            if (!isGrace)
-                return $"Auth server unreachable. Using cached subscription (valid until {localDate}).";
-
-            return $"Auth server unreachable. Using grace period (cached subscription expired {localDate}).";
+            return $"Auth server unreachable. Using cached subscription (valid until {localDate}).";
         }
 
         private static string BuildPlanSummary(AuthSubscriptionDto? sub)
@@ -433,6 +436,10 @@ namespace JoesScanner.Services
             [JsonPropertyName("price_id")]
             public string? PriceId { get; set; }
 
+            [JsonPropertyName("tier_level")]
+            [JsonConverter(typeof(FlexibleIntConverter))]
+            public int TierLevel { get; set; }
+
             [JsonPropertyName("period_end_at")]
             public string? PeriodEndAt { get; set; }
 
@@ -441,6 +448,64 @@ namespace JoesScanner.Services
 
             [JsonPropertyName("expires_at")]
             public string? ExpiresAt { get; set; }
+        }
+
+        // Some deployments may serialize numeric fields as strings.
+        // Accept both JSON number and JSON string for tier level.
+        private sealed class FlexibleIntConverter : JsonConverter<int>
+        {
+            public override int Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+            {
+                try
+                {
+                    if (reader.TokenType == JsonTokenType.Number)
+                    {
+                        if (reader.TryGetInt32(out var n))
+                            return n;
+
+                        // Fall back to a wider parse if needed.
+                        var l = reader.GetInt64();
+                        if (l > int.MaxValue)
+                            return int.MaxValue;
+                        if (l < int.MinValue)
+                            return int.MinValue;
+                        return (int)l;
+                    }
+
+                    if (reader.TokenType == JsonTokenType.String)
+                    {
+                        var s = (reader.GetString() ?? string.Empty).Trim();
+                        if (int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n))
+                            return n;
+
+                        if (long.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var l))
+                        {
+                            if (l > int.MaxValue)
+                                return int.MaxValue;
+                            if (l < int.MinValue)
+                                return int.MinValue;
+                            return (int)l;
+                        }
+
+                        return 0;
+                    }
+
+                    if (reader.TokenType == JsonTokenType.Null)
+                        return 0;
+                }
+                catch
+                {
+                }
+
+                // Unknown token type or parse failure.
+                try { reader.Skip(); } catch { }
+                return 0;
+            }
+
+            public override void Write(Utf8JsonWriter writer, int value, JsonSerializerOptions options)
+            {
+                writer.WriteNumberValue(value);
+            }
         }
     }
 }

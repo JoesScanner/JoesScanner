@@ -29,8 +29,9 @@ namespace JoesScanner.Views
             {
                 await _viewModel.OnPageOpenedAsync();
             }
-            catch
+            catch (Exception ex)
             {
+                AppLog.Add(() => $"HistoryPage: OnAppearing failed. ex={ex.GetType().Name}: {ex.Message}");
             }
         }
 
@@ -44,8 +45,9 @@ namespace JoesScanner.Views
             {
                 _ = _viewModel.OnPageClosedAsync();
             }
-            catch
+            catch (Exception ex)
             {
+                AppLog.Add(() => $"HistoryPage: OnDisappearing failed. ex={ex.GetType().Name}: {ex.Message}");
             }
         }
 
@@ -90,11 +92,36 @@ namespace JoesScanner.Views
             }
         }
 
+        private void OnCallTapped(object sender, TappedEventArgs e)
+        {
+            try
+            {
+                var selected = e.Parameter as CallItem;
+                if (selected == null)
+                    return;
+
+                if (BindingContext is HistoryViewModel vm)
+                {
+                    var cmd = vm.PlayFromCallCommand;
+                    if (cmd != null && cmd.CanExecute(selected))
+                        cmd.Execute(selected);
+                }
+            }
+            catch
+            {
+            }
+        }
+
         private void OnCallsScrolled(object sender, ItemsViewScrolledEventArgs e)
         {
             try
             {
                 if (BindingContext is not HistoryViewModel vm)
+                    return;
+
+                // While playback is running we do not trigger any paging or list maintenance.
+                // Users can scroll freely, but the dataset is frozen for the active search.
+                if (vm.IsHistoryPlaybackRunning)
                     return;
 
                 if (_ignoreNextScrollEvents > 0)
@@ -151,7 +178,16 @@ namespace JoesScanner.Views
 
                 var items = getItems()?.ToList();
                 if (items == null || items.Count == 0)
-                    return;
+                {
+                    AppLog.Add(() => $"History: dropdown '{title}' had 0 items. Triggering lookup load.");
+                    await _viewModel.EnsureLookupsLoadedAsync(forceReload: true);
+                    items = getItems()?.ToList();
+                    if (items == null || items.Count == 0)
+                    {
+                        AppLog.Add(() => $"History: dropdown '{title}' still has 0 items after reload.");
+                        return;
+                    }
+                }
 
                 _isDropdownOpen = true;
 
@@ -178,6 +214,29 @@ namespace JoesScanner.Views
             {
                 _isDropdownOpen = false;
             }
+        }
+
+        // iOS: the near-transparent native pickers can be hard to reliably tap.
+        // We explicitly focus them when the styled border is tapped.
+        private void OnTimeBorderTapped(object sender, TappedEventArgs e)
+        {
+            try { HistoryTimePicker?.Focus(); } catch { }
+        }
+
+        private void OnDateFromBorderTapped(object sender, TappedEventArgs e)
+        {
+            if (_viewModel?.CanPickDateRange != true)
+                return;
+
+            try { HistoryDateFromPicker?.Focus(); } catch { }
+        }
+
+        private void OnDateToBorderTapped(object sender, TappedEventArgs e)
+        {
+            if (_viewModel?.CanPickDateRange != true)
+                return;
+
+            try { HistoryDateToPicker?.Focus(); } catch { }
         }
 
     }

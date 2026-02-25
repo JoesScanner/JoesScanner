@@ -84,7 +84,10 @@ public partial class RootPage : ContentPage
         {
             AppTab.Main => _services.GetRequiredService<MainPage>(),
             AppTab.History => _services.GetRequiredService<HistoryPage>(),
-            AppTab.Archive => _services.GetRequiredService<ArchivePage>(),
+            // Archive is intentionally mapped to History for now.
+            // We keep the enum and route so we can later switch this to a longer range
+            // without reworking tab navigation.
+            AppTab.Archive => _services.GetRequiredService<HistoryPage>(),
             AppTab.Stats => _services.GetRequiredService<StatsPage>(),
             AppTab.Communications => _services.GetRequiredService<CommunicationsPage>(),
             AppTab.Log => _services.GetRequiredService<LogPage>(),

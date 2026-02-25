@@ -1,19 +1,23 @@
-﻿using System.Text;
+using System.Globalization;
+using System.Text;
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
 
 namespace JoesScanner.Services
 {
     public sealed class UnregisteredSessionReporter : IUnregisteredSessionReporter
     {
-        private const string QueueFileName = "unregistered-session-events.json";
-        private const string ActiveSessionIdKey = "UnregisteredActiveSessionId";
+                private const string QueueTable = "unregistered_session_queue";
         private static readonly TimeSpan MaxAge = TimeSpan.FromDays(7);
 
         private readonly ISettingsService _settings;
         private readonly HttpClient _httpClient;
+        private readonly string _dbPath;
 
-        public UnregisteredSessionReporter(ISettingsService settings)
+        public UnregisteredSessionReporter(ISettingsService settings, IDatabasePathProvider dbPathProvider)
         {
+            _dbPath = (dbPathProvider ?? throw new ArgumentNullException(nameof(dbPathProvider))).DbPath;
+
             _settings = settings ?? throw new ArgumentNullException(nameof(settings));
             _httpClient = new HttpClient
             {
@@ -29,13 +33,13 @@ namespace JoesScanner.Services
             var nowUtc = DateTime.UtcNow;
 
             // If we already have an active session id, do not create another start.
-            var existingSessionId = Preferences.Get(ActiveSessionIdKey, string.Empty);
+            var existingSessionId = AppStateStore.GetString("unregistered_active_session_id", string.Empty);
             if (!string.IsNullOrWhiteSpace(existingSessionId))
                 return;
 
             var sessionId = Guid.NewGuid().ToString();
 
-            Preferences.Set(ActiveSessionIdKey, sessionId);
+            AppStateStore.SetString("unregistered_active_session_id", sessionId);
 
             EnqueueEvent(new SessionEvent
             {
@@ -53,12 +57,12 @@ namespace JoesScanner.Services
 
             var nowUtc = DateTime.UtcNow;
 
-            var sessionId = Preferences.Get(ActiveSessionIdKey, string.Empty);
+            var sessionId = AppStateStore.GetString("unregistered_active_session_id", string.Empty);
             if (string.IsNullOrWhiteSpace(sessionId))
                 return;
 
             // Clear first so a crash during write does not block future sessions.
-            Preferences.Set(ActiveSessionIdKey, string.Empty);
+            AppStateStore.SetString("unregistered_active_session_id", string.Empty);
 
             EnqueueEvent(new SessionEvent
             {
@@ -76,34 +80,23 @@ namespace JoesScanner.Services
 
             try
             {
-                var queue = LoadQueue();
-                if (queue.Count == 0)
-                    return;
-
                 // Drop old events first.
-                var cutoff = DateTime.UtcNow - MaxAge;
-                queue = queue.Where(x => x.CreatedUtc >= cutoff).ToList();
-                SaveQueue(queue);
+                PurgeOldRows();
 
-                if (queue.Count == 0)
-                    return;
-
-                // Attempt to send in order. Stop on first failure.
-                var sentCount = 0;
-                foreach (var item in queue)
+                while (true)
                 {
-                    var ok = await TrySendEventAsync(item, cancellationToken).ConfigureAwait(false);
+                    var next = TryDequeueNext();
+                    if (next == null)
+                        return;
+
+                    var (rowId, ev) = next.Value;
+
+                    var ok = await TrySendEventAsync(ev, cancellationToken).ConfigureAwait(false);
                     if (!ok)
-                        break;
+                        return;
 
-                    sentCount++;
+                    DeleteRow(rowId);
                 }
-
-                if (sentCount <= 0)
-                    return;
-
-                queue.RemoveRange(0, sentCount);
-                SaveQueue(queue);
             }
             catch
             {
@@ -170,10 +163,10 @@ namespace JoesScanner.Services
                 app_build = appBuild,
 
                 event_type = ev.Kind,
-                event_time_utc = ev.CreatedUtc.ToString("o"),
+                event_time_utc = ev.CreatedUtc.ToString("o", CultureInfo.InvariantCulture),
                 session_id = ev.SessionId,
-                session_started_utc = ev.StartedUtc?.ToString("o"),
-                session_ended_utc = ev.EndedUtc?.ToString("o")
+                session_started_utc = ev.StartedUtc?.ToString("o", CultureInfo.InvariantCulture),
+                session_ended_utc = ev.EndedUtc?.ToString("o", CultureInfo.InvariantCulture)
             };
         }
 
@@ -209,54 +202,77 @@ namespace JoesScanner.Services
             return manufacturer + " " + model;
         }
 
-        private string GetQueuePath()
+        private SqliteConnection OpenConnection()
         {
-            return Path.Combine(FileSystem.AppDataDirectory, QueueFileName);
+            var connection = new SqliteConnection($"Data Source={_dbPath}");
+            connection.Open();
+            DbBootstrapper.EnsureInitialized(connection);
+            return connection;
         }
 
-        private List<SessionEvent> LoadQueue()
+        private void PurgeOldRows()
         {
-            var path = GetQueuePath();
-            if (!File.Exists(path))
-                return new List<SessionEvent>();
+            var cutoff = DateTime.UtcNow - MaxAge;
+
+            using var conn = OpenConnection();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"DELETE FROM {QueueTable} WHERE created_utc < $cutoff;";
+            cmd.Parameters.AddWithValue("$cutoff", cutoff.ToString("o", CultureInfo.InvariantCulture));
+            cmd.ExecuteNonQuery();
+        }
+
+        private (long rowId, SessionEvent ev)? TryDequeueNext()
+        {
+            using var conn = OpenConnection();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"SELECT id, payload_json FROM {QueueTable} ORDER BY id ASC LIMIT 1;";
+
+            using var reader = cmd.ExecuteReader();
+            if (!reader.Read())
+                return null;
+
+            var id = reader.GetInt64(0);
+            var json = reader.IsDBNull(1) ? string.Empty : reader.GetString(1);
 
             try
             {
-                var json = File.ReadAllText(path);
-                var items = JsonSerializer.Deserialize<List<SessionEvent>>(json) ?? new List<SessionEvent>();
-                return items;
+                var ev = JsonSerializer.Deserialize<SessionEvent>(json) ?? new SessionEvent();
+                return (id, ev);
             }
             catch
             {
-                return new List<SessionEvent>();
+                // If an item is corrupt, drop it and continue.
+                DeleteRow(id);
+                return null;
             }
         }
 
-        private void SaveQueue(List<SessionEvent> items)
+        private void DeleteRow(long rowId)
         {
-            try
-            {
-                var path = GetQueuePath();
-                var json = JsonSerializer.Serialize(items);
-                File.WriteAllText(path, json);
-            }
-            catch
-            {
-            }
+            using var conn = OpenConnection();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"DELETE FROM {QueueTable} WHERE id = $id;";
+            cmd.Parameters.AddWithValue("$id", rowId);
+            cmd.ExecuteNonQuery();
         }
 
         private void EnqueueEvent(SessionEvent ev)
         {
             try
             {
-                var queue = LoadQueue();
+                var json = JsonSerializer.Serialize(ev);
 
-                // Drop old items before adding.
-                var cutoff = DateTime.UtcNow - MaxAge;
-                queue = queue.Where(x => x.CreatedUtc >= cutoff).ToList();
+                using var conn = OpenConnection();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = $@"
+INSERT INTO {QueueTable} (created_utc, payload_json)
+VALUES ($c, $p);";
+                cmd.Parameters.AddWithValue("$c", (ev.CreatedUtc == default ? DateTime.UtcNow : ev.CreatedUtc).ToString("o", CultureInfo.InvariantCulture));
+                cmd.Parameters.AddWithValue("$p", json ?? "{}");
+                cmd.ExecuteNonQuery();
 
-                queue.Add(ev);
-                SaveQueue(queue);
+                // Keep table from growing without bound.
+                PurgeOldRows();
             }
             catch
             {

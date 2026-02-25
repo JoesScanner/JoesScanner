@@ -24,10 +24,10 @@
     <ApplicationId>app.joesscanner.com</ApplicationId>
 
     <!-- Display version is semantic -->
-    <ApplicationDisplayVersion>1.5.2</ApplicationDisplayVersion>
+    <ApplicationDisplayVersion>1.5.3</ApplicationDisplayVersion>
 
     <!-- ApplicationVersion must be an integer and should only ever go up -->
-    <ApplicationVersion>152</ApplicationVersion>
+    <ApplicationVersion>153</ApplicationVersion>
 
     <DefaultLanguage>en-us</DefaultLanguage>
 
@@ -52,21 +52,37 @@
     <GenerateTemporaryStoreCertificate>True</GenerateTemporaryStoreCertificate>
     <HoursBetweenUpdateChecks>0</HoursBetweenUpdateChecks>
   </PropertyGroup>
-  <!--
-  iOS runtime selection
-  - Simulator builds must use a single RuntimeIdentifier (iossimulator-arm64 on Apple Silicon Macs).
-  - Device builds should use ios-arm64.
-  If you explicitly set RuntimeIdentifier in Visual Studio, these defaults will not override it.
--->
-  <PropertyGroup Condition="'$(TargetFramework)'=='net10.0-ios' And '$(Configuration)'=='Debug' And '$(RuntimeIdentifier)'==''">
 
+  <!--
+    iOS configuration
+    - Simulator builds should not use device signing settings.
+    - Default simulator RID on Apple Silicon: iossimulator-arm64
+    - Default device RID: ios-arm64
+  -->
+  <PropertyGroup Condition="'$(TargetFramework)'=='net10.0-ios'">
     <IosAppManifest>Platforms\iOS\Info.plist</IosAppManifest>
     <MtouchPlist>Platforms\iOS\Info.plist</MtouchPlist>
-<RuntimeIdentifier>iossimulator-arm64</RuntimeIdentifier>
+
+    <!-- Work around occasional simulator builds failing in the generated registrar -->
+    <MtouchLink>SdkOnly</MtouchLink>
+    <MtouchExtraArgs>$(MtouchExtraArgs) --registrar:static</MtouchExtraArgs>
+    <CodesignProvision>test</CodesignProvision>
+    <ProvisioningType>automatic</ProvisioningType>
+    <CodesignKey>iPhone Distribution</CodesignKey>
+  </PropertyGroup>
+
+  <!-- iOS runtime selection -->
+  <PropertyGroup Condition="'$(TargetFramework)'=='net10.0-ios' And '$(Configuration)'=='Debug' And '$(RuntimeIdentifier)'==''">
+    <RuntimeIdentifier>iossimulator-arm64</RuntimeIdentifier>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(TargetFramework)'=='net10.0-ios' And '$(Configuration)'=='Release' And '$(RuntimeIdentifier)'==''">
     <RuntimeIdentifier>ios-arm64</RuntimeIdentifier>
+  </PropertyGroup>
+
+  <!-- Debug extras -->
+  <PropertyGroup Condition="'$(TargetFramework)'=='net10.0-ios' And '$(Configuration)'=='Debug'">
+    <MtouchUseLlvm>true</MtouchUseLlvm>
   </PropertyGroup>
 
   <!-- Only apply signing settings for device builds (not simulator). -->
@@ -76,24 +92,15 @@
     <CodesignProvision>JoesScannerProvision</CodesignProvision>
   </PropertyGroup>
 
-  <!-- Work around occasional simulator builds failing in the generated registrar -->
-  <PropertyGroup Condition="'$(TargetFramework)'=='net10.0-ios'">
-    <MtouchLink>SdkOnly</MtouchLink>
-    <MtouchExtraArgs>$(MtouchExtraArgs) --registrar:static</MtouchExtraArgs>
-    <ProvisioningType>manual</ProvisioningType>
-    <CodesignProvision>Joes Scanner Prov</CodesignProvision>
-    <CodesignKey>Apple Distribution: LINDSAY KAY WILLIAMS (G3SJDUVZ9Y)</CodesignKey>
-  </PropertyGroup>
-
-  <PropertyGroup Condition="'$(TargetFramework)'=='net10.0-ios' And '$(Configuration)'=='Debug'">
-    <MtouchUseLlvm>true</MtouchUseLlvm>
-  </PropertyGroup>
-
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="10.0.0" />
     <!-- Explicit MAUI Controls reference to satisfy MA002 and keep package graph stable -->
     <PackageReference Include="Microsoft.Maui.Controls" Version="10.0.1" />
     <PackageReference Include="Plugin.Maui.Audio" Version="4.0.0" />
+
+    <!-- Local SQLite storage (cross-platform) -->
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.2" />
+    <PackageReference Include="SQLitePCLRaw.bundle_green" Version="2.1.10" />
 
     <!-- Android media stack for Bluetooth routing, media controls, and future proofing -->
     <PackageReference Include="Xamarin.AndroidX.Media3.Common" Version="1.8.0" Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'" />
@@ -124,7 +131,6 @@
       <Generator>MSBuild:Compile</Generator>
     </MauiXaml>
   </ItemGroup>
-
 
   <PropertyGroup Condition="'$(TargetFramework)'=='net10.0-maccatalyst'">
     <MtouchPlist>Platforms\MacCatalyst\Info.plist</MtouchPlist>

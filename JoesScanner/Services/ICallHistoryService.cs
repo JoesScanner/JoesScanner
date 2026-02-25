@@ -24,6 +24,7 @@ namespace JoesScanner.Services
 
     public sealed class HistorySearchFilters
     {
+        public string? GlobalSearch { get; init; }
         public HistoryLookupItem? System { get; init; }
         public HistoryLookupItem? Receiver { get; init; }
         public HistoryLookupItem? Site { get; init; }
@@ -68,6 +69,16 @@ namespace JoesScanner.Services
             int windowSize,
             CancellationToken cancellationToken = default);
 
+        // Same as SearchAroundAsync, but constrains results to the given local date range when provided.
+        Task<HistorySearchResult> SearchAroundAsync(
+            DateTime targetLocalTime,
+            HistorySearchFilters filters,
+            int windowSize,
+            DateTime? dateFromLocal,
+            DateTime? dateToLocal,
+            CancellationToken cancellationToken = default);
+
+
         // Fetches a slice of calls from the full filtered result set.
         // Calls are returned newest first.
         Task<HistoryCallsPage> GetCallsPageAsync(
@@ -75,5 +86,15 @@ namespace JoesScanner.Services
             int length,
             HistorySearchFilters filters,
             CancellationToken cancellationToken = default);
+
+        // Same as GetCallsPageAsync, but constrains results to the given local date range when provided.
+        Task<HistoryCallsPage> GetCallsPageAsync(
+            int start,
+            int length,
+            HistorySearchFilters filters,
+            DateTime? dateFromLocal,
+            DateTime? dateToLocal,
+            CancellationToken cancellationToken = default);
+
     }
 }

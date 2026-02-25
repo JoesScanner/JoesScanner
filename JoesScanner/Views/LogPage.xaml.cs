@@ -24,6 +24,9 @@ namespace JoesScanner.Views
         {
             InitializeComponent();
 
+            LoggingSwitch.IsToggled = AppLog.IsEnabled;
+            SyncLoggingState();
+
             SyncIntervalLabel();
             UpdateAutoRefreshButtonVisual();
         }
@@ -49,6 +52,12 @@ namespace JoesScanner.Views
         {
             try
             {
+                if (!AppLog.IsEnabled)
+                {
+                    LogEditor.Text = "Logging is disabled.";
+                    return;
+                }
+
                 var lines = AppLog.GetSnapshot(MaxLines);
                 LogEditor.Text = string.Join(Environment.NewLine, lines);
 
@@ -124,6 +133,12 @@ namespace JoesScanner.Views
 
             try
             {
+                if (!AppLog.IsEnabled)
+                {
+                    LogEditor.Text = "Logging is disabled.";
+                    return;
+                }
+
                 _autoRefreshTimer.Tick -= OnAutoRefreshTick;
                 _autoRefreshTimer.Stop();
             }
@@ -187,15 +202,42 @@ namespace JoesScanner.Views
 
         private void UpdateAutoRefreshButtonVisual()
         {
-            AutoRefreshButton.Text = "Auto-refresh";
+            AutoRefreshButton.Text = "Refresh";
             AutoRefreshButton.TextColor = Colors.White;
             AutoRefreshButton.BackgroundColor = _autoRefreshEnabled ? Color.FromArgb("#16A34A") : Color.FromArgb("#64748B");
+        }
+
+        private void OnLoggingToggled(object sender, ToggledEventArgs e)
+        {
+            AppLog.SetEnabled(e.Value);
+            SyncLoggingState();
+
+            if (!e.Value)
+            {
+                _autoRefreshEnabled = false;
+                UpdateAutoRefreshButtonVisual();
+                StopAutoRefreshTimer();
+            }
+
+            RefreshLog();
+        }
+
+        private void SyncLoggingState()
+        {
+            // The Switch provides the visual state; this label provides explicit text.
+            LoggingStateLabel.Text = AppLog.IsEnabled ? "Enabled" : "Disabled";
         }
 
         private async void OnCopyClicked(object sender, EventArgs e)
         {
             try
             {
+                if (!AppLog.IsEnabled)
+                {
+                    LogEditor.Text = "Logging is disabled.";
+                    return;
+                }
+
                 var text = LogEditor.Text ?? string.Empty;
                 await Clipboard.Default.SetTextAsync(text);
                 await UiDialogs.AlertAsync("Copied", "Log copied to clipboard.", "OK");

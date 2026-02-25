@@ -1,30 +1,80 @@
-using JoesScanner.Models;
+using System.Globalization;
 using System.Text.Json;
+using JoesScanner.Models;
+using Microsoft.Data.Sqlite;
+using Microsoft.Maui.Storage;
 
 namespace JoesScanner.Services
 {
-    // Single shared profile store used by History, Archive, and Settings.
-    // This intentionally does not read any older profile files.
+    // DB-backed shared profile store used by History, Archive, and Settings.
+    // No legacy file migration is supported.
     public sealed class LocalFilterProfileStore : IFilterProfileStore
     {
-        private const string ProfilesFileName = "filter_profiles_v2.json";
+        private const string DbFileName = "joesscanner.db";
+        private const string TableName = "filter_profiles";
 
         private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
         {
-            WriteIndented = true
+            WriteIndented = false
         };
 
         private readonly SemaphoreSlim _gate = new(1, 1);
 
-        private string FilePath => Path.Combine(FileSystem.AppDataDirectory, ProfilesFileName);
+        private static string DbPath => Path.Combine(FileSystem.AppDataDirectory, DbFileName);
+
+        private static SqliteConnection OpenConnection()
+        {
+            var conn = new SqliteConnection($"Data Source={DbPath};Cache=Shared");
+            conn.Open();
+            DbBootstrapper.EnsureInitialized(conn);
+            EnsureTable(conn);
+            return conn;
+        }
+
+        private static void EnsureTable(SqliteConnection conn)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = $@"
+CREATE TABLE IF NOT EXISTS {TableName} (
+  profile_id   TEXT PRIMARY KEY,
+  name         TEXT NOT NULL,
+  created_utc  TEXT NOT NULL,
+  updated_utc  TEXT NOT NULL,
+  filters_json TEXT NOT NULL,
+  rules_json   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_filter_profiles_name ON {TableName}(name);
+";
+            cmd.ExecuteNonQuery();
+        }
 
         public async Task<IReadOnlyList<FilterProfile>> GetProfilesAsync(CancellationToken cancellationToken = default)
         {
-            var envelope = await ReadEnvelopeAsync(cancellationToken);
-            return envelope.Profiles
-                .Where(p => p != null)
-                .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
-                .ToList();
+            await _gate.WaitAsync(cancellationToken);
+            try
+            {
+                await using var conn = OpenConnection();
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = $@"
+SELECT profile_id, name, created_utc, updated_utc, filters_json, rules_json
+FROM {TableName}
+ORDER BY name COLLATE NOCASE;";
+
+                var list = new List<FilterProfile>();
+                await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var p = ReadProfileRow(reader);
+                    if (p != null)
+                        list.Add(p);
+                }
+
+                return list;
+            }
+            finally
+            {
+                _gate.Release();
+            }
         }
 
         public async Task<FilterProfile?> GetProfileAsync(string profileId, CancellationToken cancellationToken = default)
@@ -32,8 +82,28 @@ namespace JoesScanner.Services
             if (string.IsNullOrWhiteSpace(profileId))
                 return null;
 
-            var envelope = await ReadEnvelopeAsync(cancellationToken);
-            return envelope.Profiles.FirstOrDefault(p => string.Equals(p.Id, profileId, StringComparison.Ordinal));
+            await _gate.WaitAsync(cancellationToken);
+            try
+            {
+                await using var conn = OpenConnection();
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = $@"
+SELECT profile_id, name, created_utc, updated_utc, filters_json, rules_json
+FROM {TableName}
+WHERE profile_id = $id
+LIMIT 1;";
+                cmd.Parameters.AddWithValue("$id", profileId);
+
+                await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                if (!await reader.ReadAsync(cancellationToken))
+                    return null;
+
+                return ReadProfileRow(reader);
+            }
+            finally
+            {
+                _gate.Release();
+            }
         }
 
         public async Task SaveOrUpdateAsync(FilterProfile profile, CancellationToken cancellationToken = default)
@@ -44,54 +114,44 @@ namespace JoesScanner.Services
             await _gate.WaitAsync(cancellationToken);
             try
             {
-                var envelope = await ReadEnvelopeInternal_NoLockAsync(cancellationToken);
-                var list = envelope.Profiles ?? new List<FilterProfile>();
-
                 var id = (profile.Id ?? string.Empty).Trim();
                 if (string.IsNullOrWhiteSpace(id))
                     id = Guid.NewGuid().ToString("N");
 
+                var name = (profile.Name ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(name))
+                    name = "Profile";
+
                 var now = DateTime.UtcNow;
 
-                var existingIndex = list.FindIndex(p => string.Equals(p.Id, id, StringComparison.Ordinal));
-                if (existingIndex >= 0)
-                {
-                    var existing = list[existingIndex];
-                    var created = existing?.CreatedUtc ?? now;
+                await using var conn = OpenConnection();
 
-                    list[existingIndex] = new FilterProfile
-                    {
-                        Id = id,
-                        Name = (profile.Name ?? string.Empty).Trim(),
-                        Filters = profile.Filters ?? new FilterProfileFilters(),
-                        Rules = profile.Rules ?? new List<FilterRuleStateRecord>(),
-                        CreatedUtc = created,
-                        UpdatedUtc = now
-                    };
-                }
-                else
-                {
-                    list.Add(new FilterProfile
-                    {
-                        Id = id,
-                        Name = (profile.Name ?? string.Empty).Trim(),
-                        Filters = profile.Filters ?? new FilterProfileFilters(),
-                        Rules = profile.Rules ?? new List<FilterRuleStateRecord>(),
-                        CreatedUtc = now,
-                        UpdatedUtc = now
-                    });
-                }
+                // Preserve created_utc if existing.
+                var createdUtc = await GetCreatedUtcAsync(conn, id, cancellationToken) ?? (profile.CreatedUtc == default ? now : profile.CreatedUtc);
 
-                var updated = new FilterProfileStoreEnvelope
-                {
-                    SchemaVersion = 2,
-                    Profiles = list
-                        .Where(p => p != null)
-                        .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
-                        .ToList()
-                };
+                var filters = profile.Filters ?? new FilterProfileFilters();
+                var rules = profile.Rules ?? new List<FilterRuleStateRecord>();
 
-                await WriteEnvelopeInternal_NoLockAsync(updated, cancellationToken);
+                var filtersJson = JsonSerializer.Serialize(filters, JsonOptions);
+                var rulesJson = JsonSerializer.Serialize(rules, JsonOptions);
+
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = $@"
+INSERT INTO {TableName} (profile_id, name, created_utc, updated_utc, filters_json, rules_json)
+VALUES ($id, $name, $c, $u, $fj, $rj)
+ON CONFLICT(profile_id) DO UPDATE SET
+  name = excluded.name,
+  updated_utc = excluded.updated_utc,
+  filters_json = excluded.filters_json,
+  rules_json = excluded.rules_json;";
+                cmd.Parameters.AddWithValue("$id", id);
+                cmd.Parameters.AddWithValue("$name", name);
+                cmd.Parameters.AddWithValue("$c", createdUtc.ToString("o", CultureInfo.InvariantCulture));
+                cmd.Parameters.AddWithValue("$u", now.ToString("o", CultureInfo.InvariantCulture));
+                cmd.Parameters.AddWithValue("$fj", filtersJson);
+                cmd.Parameters.AddWithValue("$rj", rulesJson);
+
+                await cmd.ExecuteNonQueryAsync(cancellationToken);
             }
             finally
             {
@@ -107,21 +167,11 @@ namespace JoesScanner.Services
             await _gate.WaitAsync(cancellationToken);
             try
             {
-                var envelope = await ReadEnvelopeInternal_NoLockAsync(cancellationToken);
-                var list = envelope.Profiles ?? new List<FilterProfile>();
-
-                list.RemoveAll(p => string.Equals(p.Id, profileId, StringComparison.Ordinal));
-
-                var updated = new FilterProfileStoreEnvelope
-                {
-                    SchemaVersion = 2,
-                    Profiles = list
-                        .Where(p => p != null)
-                        .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
-                        .ToList()
-                };
-
-                await WriteEnvelopeInternal_NoLockAsync(updated, cancellationToken);
+                await using var conn = OpenConnection();
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = $"DELETE FROM {TableName} WHERE profile_id = $id;";
+                cmd.Parameters.AddWithValue("$id", profileId);
+                await cmd.ExecuteNonQueryAsync(cancellationToken);
             }
             finally
             {
@@ -141,36 +191,17 @@ namespace JoesScanner.Services
             await _gate.WaitAsync(cancellationToken);
             try
             {
-                var envelope = await ReadEnvelopeInternal_NoLockAsync(cancellationToken);
-                var list = envelope.Profiles ?? new List<FilterProfile>();
-
-                var idx = list.FindIndex(p => string.Equals(p.Id, profileId, StringComparison.Ordinal));
-                if (idx < 0)
-                    return;
-
-                var existing = list[idx];
-                var now = DateTime.UtcNow;
-
-                list[idx] = new FilterProfile
-                {
-                    Id = existing.Id,
-                    Name = name,
-                    Filters = existing.Filters ?? new FilterProfileFilters(),
-                    Rules = existing.Rules ?? new List<FilterRuleStateRecord>(),
-                    CreatedUtc = existing.CreatedUtc,
-                    UpdatedUtc = now
-                };
-
-                var updated = new FilterProfileStoreEnvelope
-                {
-                    SchemaVersion = 2,
-                    Profiles = list
-                        .Where(p => p != null)
-                        .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
-                        .ToList()
-                };
-
-                await WriteEnvelopeInternal_NoLockAsync(updated, cancellationToken);
+                await using var conn = OpenConnection();
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = $@"
+UPDATE {TableName}
+SET name = $name,
+    updated_utc = $u
+WHERE profile_id = $id;";
+                cmd.Parameters.AddWithValue("$id", profileId);
+                cmd.Parameters.AddWithValue("$name", name);
+                cmd.Parameters.AddWithValue("$u", DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
+                await cmd.ExecuteNonQueryAsync(cancellationToken);
             }
             finally
             {
@@ -180,11 +211,12 @@ namespace JoesScanner.Services
 
         public async Task<FilterProfileStoreEnvelope> ExportAsync(CancellationToken cancellationToken = default)
         {
-            var envelope = await ReadEnvelopeAsync(cancellationToken);
+            var profiles = await GetProfilesAsync(cancellationToken);
+            // Produce a stable payload.
             return new FilterProfileStoreEnvelope
             {
                 SchemaVersion = 2,
-                Profiles = envelope.Profiles
+                Profiles = profiles
                     .Where(p => p != null)
                     .Select(p => new FilterProfile
                     {
@@ -208,13 +240,16 @@ namespace JoesScanner.Services
             await _gate.WaitAsync(cancellationToken);
             try
             {
+                await using var conn = OpenConnection();
+
+                if (!merge)
+                {
+                    await using var clear = conn.CreateCommand();
+                    clear.CommandText = $"DELETE FROM {TableName};";
+                    await clear.ExecuteNonQueryAsync(cancellationToken);
+                }
+
                 var incoming = envelope.Profiles ?? new List<FilterProfile>();
-                var current = await ReadEnvelopeInternal_NoLockAsync(cancellationToken);
-
-                var list = merge
-                    ? (current.Profiles ?? new List<FilterProfile>())
-                    : new List<FilterProfile>();
-
                 foreach (var p in incoming)
                 {
                     if (p == null)
@@ -224,35 +259,34 @@ namespace JoesScanner.Services
                     if (string.IsNullOrWhiteSpace(id))
                         id = Guid.NewGuid().ToString("N");
 
-                    var existingIndex = list.FindIndex(x => string.Equals(x.Id, id, StringComparison.Ordinal));
+                    var name = (p.Name ?? string.Empty).Trim();
+                    if (string.IsNullOrWhiteSpace(name))
+                        name = "Profile";
+
                     var now = DateTime.UtcNow;
+                    var created = p.CreatedUtc == default ? now : p.CreatedUtc;
 
-                    var normalized = new FilterProfile
-                    {
-                        Id = id,
-                        Name = (p.Name ?? string.Empty).Trim(),
-                        Filters = p.Filters ?? new FilterProfileFilters(),
-                        Rules = p.Rules ?? new List<FilterRuleStateRecord>(),
-                        CreatedUtc = p.CreatedUtc == default ? now : p.CreatedUtc,
-                        UpdatedUtc = now
-                    };
+                    var filtersJson = JsonSerializer.Serialize(p.Filters ?? new FilterProfileFilters(), JsonOptions);
+                    var rulesJson = JsonSerializer.Serialize(p.Rules ?? new List<FilterRuleStateRecord>(), JsonOptions);
 
-                    if (existingIndex >= 0)
-                        list[existingIndex] = normalized;
-                    else
-                        list.Add(normalized);
+                    await using var cmd = conn.CreateCommand();
+                    cmd.CommandText = $@"
+INSERT INTO {TableName} (profile_id, name, created_utc, updated_utc, filters_json, rules_json)
+VALUES ($id, $name, $c, $u, $fj, $rj)
+ON CONFLICT(profile_id) DO UPDATE SET
+  name = excluded.name,
+  created_utc = excluded.created_utc,
+  updated_utc = excluded.updated_utc,
+  filters_json = excluded.filters_json,
+  rules_json = excluded.rules_json;";
+                    cmd.Parameters.AddWithValue("$id", id);
+                    cmd.Parameters.AddWithValue("$name", name);
+                    cmd.Parameters.AddWithValue("$c", created.ToString("o", CultureInfo.InvariantCulture));
+                    cmd.Parameters.AddWithValue("$u", now.ToString("o", CultureInfo.InvariantCulture));
+                    cmd.Parameters.AddWithValue("$fj", filtersJson);
+                    cmd.Parameters.AddWithValue("$rj", rulesJson);
+                    await cmd.ExecuteNonQueryAsync(cancellationToken);
                 }
-
-                var updated = new FilterProfileStoreEnvelope
-                {
-                    SchemaVersion = 2,
-                    Profiles = list
-                        .Where(p => p != null)
-                        .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
-                        .ToList()
-                };
-
-                await WriteEnvelopeInternal_NoLockAsync(updated, cancellationToken);
             }
             finally
             {
@@ -260,67 +294,57 @@ namespace JoesScanner.Services
             }
         }
 
-        private async Task<FilterProfileStoreEnvelope> ReadEnvelopeAsync(CancellationToken cancellationToken)
+        private static async Task<DateTime?> GetCreatedUtcAsync(SqliteConnection conn, string id, CancellationToken ct)
         {
-            await _gate.WaitAsync(cancellationToken);
-            try
-            {
-                return await ReadEnvelopeInternal_NoLockAsync(cancellationToken);
-            }
-            finally
-            {
-                _gate.Release();
-            }
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = $"SELECT created_utc FROM {TableName} WHERE profile_id = $id LIMIT 1;";
+            cmd.Parameters.AddWithValue("$id", id);
+            var obj = await cmd.ExecuteScalarAsync(ct);
+            if (obj == null || obj == DBNull.Value)
+                return null;
+
+            var raw = Convert.ToString(obj, CultureInfo.InvariantCulture);
+            if (string.IsNullOrWhiteSpace(raw))
+                return null;
+
+            return DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var dt) ? dt : null;
         }
 
-        private async Task<FilterProfileStoreEnvelope> ReadEnvelopeInternal_NoLockAsync(CancellationToken cancellationToken)
+        private static FilterProfile? ReadProfileRow(SqliteDataReader reader)
         {
             try
             {
-                if (!File.Exists(FilePath))
-                    return new FilterProfileStoreEnvelope { SchemaVersion = 2, Profiles = new List<FilterProfile>() };
+                var id = reader.GetString(0);
+                var name = reader.GetString(1);
+                var createdRaw = reader.GetString(2);
+                var updatedRaw = reader.GetString(3);
+                var filtersJson = reader.GetString(4);
+                var rulesJson = reader.GetString(5);
 
-                var json = await File.ReadAllTextAsync(FilePath, cancellationToken);
-                if (string.IsNullOrWhiteSpace(json))
-                    return new FilterProfileStoreEnvelope { SchemaVersion = 2, Profiles = new List<FilterProfile>() };
+                var created = DateTime.TryParse(createdRaw, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var c) ? c : DateTime.UtcNow;
+                var updated = DateTime.TryParse(updatedRaw, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var u) ? u : created;
 
-                var parsed = JsonSerializer.Deserialize<FilterProfileStoreEnvelope>(json, JsonOptions);
-                if (parsed == null)
-                    return new FilterProfileStoreEnvelope { SchemaVersion = 2, Profiles = new List<FilterProfile>() };
+                var filters = string.IsNullOrWhiteSpace(filtersJson)
+                    ? new FilterProfileFilters()
+                    : (JsonSerializer.Deserialize<FilterProfileFilters>(filtersJson, JsonOptions) ?? new FilterProfileFilters());
 
-                // Enforce our schema, ignore anything else.
-                return new FilterProfileStoreEnvelope
+                var rules = string.IsNullOrWhiteSpace(rulesJson)
+                    ? new List<FilterRuleStateRecord>()
+                    : (JsonSerializer.Deserialize<List<FilterRuleStateRecord>>(rulesJson, JsonOptions) ?? new List<FilterRuleStateRecord>());
+
+                return new FilterProfile
                 {
-                    SchemaVersion = 2,
-                    Profiles = (parsed.Profiles ?? new List<FilterProfile>())
-                        .Where(p => p != null)
-                        .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
-                        .ToList()
+                    Id = id,
+                    Name = name,
+                    Filters = filters,
+                    Rules = rules,
+                    CreatedUtc = created,
+                    UpdatedUtc = updated
                 };
             }
-            catch (Exception ex)
+            catch
             {
-                AppLog.Add($"Filter profiles read failed: {ex.Message} ({FilePath})");
-                return new FilterProfileStoreEnvelope { SchemaVersion = 2, Profiles = new List<FilterProfile>() };
-            }
-        }
-
-        private async Task WriteEnvelopeInternal_NoLockAsync(FilterProfileStoreEnvelope envelope, CancellationToken cancellationToken)
-        {
-            try
-            {
-                var dir = Path.GetDirectoryName(FilePath);
-                if (!string.IsNullOrWhiteSpace(dir) && !Directory.Exists(dir))
-                    Directory.CreateDirectory(dir);
-
-                var json = JsonSerializer.Serialize(envelope ?? new FilterProfileStoreEnvelope(), JsonOptions);
-                await File.WriteAllTextAsync(FilePath, json, cancellationToken);
-                AppLog.Add($"Filter profiles saved ({(envelope?.Profiles?.Count ?? 0)}) -> {FilePath}");
-            }
-            catch (Exception ex)
-            {
-                AppLog.Add($"Filter profiles write failed: {ex.Message} ({FilePath})");
-                throw;
+                return null;
             }
         }
     }

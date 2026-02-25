@@ -2,6 +2,7 @@ using Android.App;
 using Android.Content.PM;
 using Android.OS;
 using AndroidX.Activity;
+using JoesScanner.Services;
 
 namespace JoesScanner;
 
@@ -20,8 +21,8 @@ namespace JoesScanner;
 public class MainActivity : MauiAppCompatActivity
 {
     // Handles the Android back button without using the deprecated OnBackPressed override.
-    // If AudioEnabled is true, the task is moved to the background so audio can continue.
-    // If AudioEnabled is false, normal back behavior runs (closes the activity and app).
+    // If audio is enabled, the task is moved to the background so audio can continue.
+    // If audio is disabled, normal back behavior runs (closes the activity and app).
     private sealed class AudioBackPressedCallback : OnBackPressedCallback
     {
         private readonly MainActivity _activity;
@@ -34,7 +35,7 @@ public class MainActivity : MauiAppCompatActivity
 
         public override void HandleOnBackPressed()
         {
-            var audioEnabled = Preferences.Get("AudioEnabled", true);
+            var audioEnabled = AppStateStore.GetBool("audio_enabled", true);
 
             if (audioEnabled)
             {

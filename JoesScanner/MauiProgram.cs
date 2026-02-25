@@ -1,6 +1,7 @@
 using JoesScanner.Services;
 using JoesScanner.ViewModels;
 using JoesScanner.Views;
+using SQLitePCL;
 
 namespace JoesScanner;
 
@@ -9,6 +10,10 @@ public static class MauiProgram
     public static MauiApp CreateMauiApp()
     {
         var builder = MauiApp.CreateBuilder();
+
+        // SQLitePCL must be initialized once before any Microsoft.Data.Sqlite usage.
+        // bundle_green provides cross-platform native SQLite in MAUI.
+        Batteries_V2.Init();
 
         builder
             .UseMauiApp<App>()
@@ -19,12 +24,19 @@ public static class MauiProgram
 
         // Services
         builder.Services.AddSingleton<ISettingsService, SettingsService>();
+        builder.Services.AddSingleton<IDatabasePathProvider, DatabasePathProvider>();
+        builder.Services.AddSingleton<ILocalCallsRepository, LocalCallsRepository>();
+        builder.Services.AddSingleton<IHistoryLookupsRepository, HistoryLookupsRepository>();
         builder.Services.AddSingleton<ICallStreamService, CallStreamService>();
         builder.Services.AddSingleton<ICallHistoryService, CallHistoryService>();
+        builder.Services.AddSingleton<IHistoryLookupsCacheService, HistoryLookupsCacheService>();
         builder.Services.AddSingleton<IAudioPlaybackService, AudioPlaybackService>();
         builder.Services.AddSingleton<ISystemMediaService, SystemMediaService>();
         builder.Services.AddSingleton<ISubscriptionService, SubscriptionService>();
         builder.Services.AddSingleton<ITelemetryService, TelemetryService>();
+
+        // Centralized playback policy evaluation.
+        builder.Services.AddSingleton<IPlaybackCoordinator, PlaybackCoordinator>();
 
         // Use separate HttpClient instances for services that need them.
         // Keeping HttpClient transient here avoids shared state issues (BaseAddress, headers, timeout).
@@ -37,21 +49,15 @@ public static class MauiProgram
         // Local filter profile storage (device only).
         builder.Services.AddSingleton<IFilterProfileStore, LocalFilterProfileStore>();
 
-        // Local Settings filter profile storage (device only).
-        // Unified profiles are provided by IFilterProfileStore (shared across History, Archive, Settings)
-
         // View models
         builder.Services.AddSingleton<MainViewModel>();
         builder.Services.AddSingleton<HistoryViewModel>();
-        builder.Services.AddSingleton<ArchiveViewModel>();
         builder.Services.AddSingleton<SettingsViewModel>();
-
         builder.Services.AddSingleton<CommunicationsViewModel>();
 
         // Pages
         builder.Services.AddTransient<MainPage>();
         builder.Services.AddTransient<HistoryPage>();
-        builder.Services.AddTransient<ArchivePage>();
         builder.Services.AddTransient<StatsPage>();
         builder.Services.AddTransient<CommunicationsPage>();
         builder.Services.AddTransient<LogPage>();

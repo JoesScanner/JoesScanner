@@ -9,6 +9,7 @@ using System.Threading;
 
 #if IOS
 using UIKit;
+using Foundation;
 #endif
 
 namespace JoesScanner.Views
@@ -681,5 +682,81 @@ namespace JoesScanner.Views
             base.OnDisappearing();
             DetachAutoFollowHandlers();
         }
-    }
+    
+
+        private void OnCallTapped(object? sender, TappedEventArgs e)
+        {
+            if (e?.Parameter is CallItem call)
+            {
+                if (_viewModel.PlayAudioCommand?.CanExecute(call) == true)
+                {
+                    _viewModel.PlayAudioCommand.Execute(call);
+                }
+            }
+
+#if IOS
+            ClearIosCallCellHighlight();
+#endif
+        }
+
+#if IOS
+        private void ClearIosCallCellHighlight()
+        {
+            try
+            {
+                if (CallsView?.Handler?.PlatformView is not UICollectionView cv)
+                    return;
+
+                // Prevent iOS from leaving the cell in a selected state.
+                cv.AllowsSelection = false;
+                cv.AllowsMultipleSelection = false;
+
+                var selected = cv.GetIndexPathsForSelectedItems();
+                if (selected != null)
+                {
+                    foreach (var ip in selected)
+                        cv.DeselectItem(ip, false);
+                }
+
+                foreach (var cell in cv.VisibleCells)
+                {
+                    try
+                    {
+                        cell.SelectedBackgroundView = new UIView { BackgroundColor = UIColor.Clear };
+                    }
+                    catch
+                    {
+                        // Some bindings do not expose SelectedBackgroundView; use KVC as a fallback.
+                        cell.SetValueForKey(new UIView { BackgroundColor = UIColor.Clear }, new NSString("selectedBackgroundView"));
+                    }
+
+                    // Also clear any highlight/background views iOS may apply while the user taps.
+                    try
+                    {
+                        cell.BackgroundView = new UIView { BackgroundColor = UIColor.Clear };
+                    }
+                    catch
+                    {
+                    }
+
+                    try
+                    {
+                        cell.BackgroundColor = UIColor.Clear;
+                        cell.ContentView.BackgroundColor = UIColor.Clear;
+                    }
+                    catch
+                    {
+                    }
+
+                    cell.Selected = false;
+                    cell.Highlighted = false;
+                }
+            }
+            catch
+            {
+                // Ignore: this is a cosmetic-only cleanup.
+            }
+        }
+#endif
+}
 }

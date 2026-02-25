@@ -62,6 +62,8 @@ namespace JoesScanner.Models
                 _timestamp = value;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(TimeDisplay));
+                OnPropertyChanged(nameof(TimeOnlyDisplay));
+                OnPropertyChanged(nameof(DateDisplay));
                 OnPropertyChanged(nameof(AccessibilitySummary));
                 OnPropertyChanged(nameof(AccessibilityAnnouncement));
             }
@@ -254,7 +256,19 @@ namespace JoesScanner.Models
         public string TimeDisplay =>
             Timestamp == default
                 ? string.Empty
-                : Timestamp.ToString("h:mm:ss tt");
+                : Timestamp.ToString("M/d/yyyy HH:mm:ss");
+
+        // Time-only display (used in History cards so the header doesn't get too wide).
+        public string TimeOnlyDisplay =>
+            Timestamp == default
+                ? string.Empty
+                : Timestamp.ToString("HH:mm:ss");
+
+        // Date display used in the call card header area.
+        public string DateDisplay =>
+            Timestamp == default
+                ? string.Empty
+                : Timestamp.ToString("M/d/yyyy");
 
         // Duration label used in the UI, derived from CallDurationSeconds.
         public string DurationDisplay =>

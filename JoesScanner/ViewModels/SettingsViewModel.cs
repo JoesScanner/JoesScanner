@@ -106,8 +106,6 @@ namespace JoesScanner.ViewModels
 
         public string SelectedSettingsFilterProfileDisplay =>
             SelectedSettingsFilterProfile?.Name ?? string.Empty;
-
-        private const string SelectedSettingsFilterProfileIdPreferenceKey = "SelectedSettingsFilterProfileIdV1";
         private const string NoneSettingsProfileNameOption = "";
 
         private void RefreshSettingsProfileNameOptions()
@@ -417,7 +415,7 @@ SyncSettingsProfileNameDropdownFromDraft();
 
                 RefreshSettingsProfileNameOptions();
 
-                var selectedId = Preferences.Get(SelectedSettingsFilterProfileIdPreferenceKey, string.Empty);
+                var selectedId = AppStateStore.GetString("settings_selected_filter_profile_id", string.Empty);
                 if (string.IsNullOrWhiteSpace(selectedId))
                 {
                     SelectedSettingsFilterProfile = null;
@@ -435,7 +433,7 @@ SyncSettingsProfileNameDropdownFromDraft();
         public async Task SelectSettingsFilterProfileAsync(FilterProfile? profile, bool apply)
         {
             SelectedSettingsFilterProfile = profile;
-            Preferences.Set(SelectedSettingsFilterProfileIdPreferenceKey, profile?.Id ?? string.Empty);
+            AppStateStore.SetString("settings_selected_filter_profile_id", profile?.Id ?? string.Empty);
 
             if (apply && profile != null)
                 ApplySettingsProfile(profile);
@@ -498,7 +496,7 @@ SyncSettingsProfileNameDropdownFromDraft();
                 return false;
 
             await _filterProfileStore.DeleteAsync(current.Id, CancellationToken.None);
-            Preferences.Set(SelectedSettingsFilterProfileIdPreferenceKey, string.Empty);
+            AppStateStore.SetString("settings_selected_filter_profile_id", string.Empty);
             SelectedSettingsFilterProfile = null;
 
             await LoadSettingsFilterProfilesAsync(applySelectedProfile: false);
@@ -630,6 +628,36 @@ SyncSettingsProfileNameDropdownFromDraft();
                     OnPropertyChanged(nameof(UseDefaultConnection));
                 }
 
+
+
+                // Changing the server URL must clear user/pass in the UI immediately.
+                // If this URL was used before, pull cached credentials for convenience.
+                var normalized = (newValue ?? string.Empty).Trim();
+
+                _basicAuthUsername = string.Empty;
+                _basicAuthPassword = string.Empty;
+
+                if (!string.IsNullOrWhiteSpace(normalized))
+                {
+                    try
+                    {
+                        if (_settings.TryGetServerCredentials(normalized, out var cachedUser, out var cachedPass))
+                        {
+                            _basicAuthUsername = cachedUser ?? string.Empty;
+                            _basicAuthPassword = cachedPass ?? string.Empty;
+                        }
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                OnPropertyChanged(nameof(BasicAuthUsername));
+                OnPropertyChanged(nameof(BasicAuthPassword));
+
+                // Server change invalidates any prior validation badge until Validate is pressed.
+                SetShowValidationPrefix(false);
+
                 UpdateHasChanges();
             }
         }
@@ -695,17 +723,6 @@ SyncSettingsProfileNameDropdownFromDraft();
                 // Persist immediately so app start can honor it without requiring Save.
                 _settings.AutoPlay = value;
                 _savedAutoPlay = value;
-
-                // Keep main playback behavior consistent. AudioEnabled drives AutoPlay there.
-                try
-                {
-                    if (_mainViewModel != null)
-                        _mainViewModel.AudioEnabled = value;
-                }
-                catch
-                {
-                }
-
                 UpdateHasChanges();
             }
         }
@@ -802,8 +819,6 @@ public bool WindowsStartWithWindows
                 UpdateHasChanges();
             }
         }
-
-
 
 
         public string ThemeMode
@@ -1002,125 +1017,60 @@ public bool WindowsStartWithWindows
 
         private void InitializeFromSettings()
         {
-            _serverUrl = _settings.ServerUrl ?? string.Empty;
-            _savedServerUrl = _serverUrl;
-
+            // Load persisted settings into local view model fields.
+            // This keeps the Settings UI in sync with the DB (single source of truth).
             _authServerBaseUrl = _settings.AuthServerBaseUrl ?? string.Empty;
-            _savedAuthServerBaseUrl = _authServerBaseUrl;
+            _serverUrl = _settings.ServerUrl ?? string.Empty;
 
             _basicAuthUsername = _settings.BasicAuthUsername ?? string.Empty;
             _basicAuthPassword = _settings.BasicAuthPassword ?? string.Empty;
-            _savedBasicAuthUsername = _basicAuthUsername;
-            _savedBasicAuthPassword = _basicAuthPassword;
-
 
             _autoPlay = _settings.AutoPlay;
             _savedAutoPlay = _autoPlay;
+
             _windowsAutoConnectOnStart = _settings.WindowsAutoConnectOnStart;
             _savedWindowsAutoConnectOnStart = _windowsAutoConnectOnStart;
-
-            _windowsStartWithWindows = _settings.WindowsStartWithWindows;
-            _savedWindowsStartWithWindows = _windowsStartWithWindows;
 
             _mobileAutoConnectOnStart = _settings.MobileAutoConnectOnStart;
             _savedMobileAutoConnectOnStart = _mobileAutoConnectOnStart;
 
-            _bluetoothLabelArtistToken = BluetoothLabelMapping.NormalizeToken(
-                _settings.BluetoothLabelArtist,
-                BluetoothLabelMapping.TokenAppName);
-            _bluetoothLabelTitleToken = BluetoothLabelMapping.NormalizeToken(
-                _settings.BluetoothLabelTitle,
-                BluetoothLabelMapping.TokenTranscription);
-            _bluetoothLabelAlbumToken = BluetoothLabelMapping.NormalizeToken(
-                _settings.BluetoothLabelAlbum,
-                BluetoothLabelMapping.TokenTalkgroup);
-            _bluetoothLabelComposerToken = BluetoothLabelMapping.NormalizeToken(
-                _settings.BluetoothLabelComposer,
-                BluetoothLabelMapping.TokenSite);
-            _bluetoothLabelGenreToken = BluetoothLabelMapping.NormalizeToken(
-                _settings.BluetoothLabelGenre,
-                BluetoothLabelMapping.TokenReceiver);
+            _windowsStartWithWindows = _settings.WindowsStartWithWindows;
+            _savedWindowsStartWithWindows = _windowsStartWithWindows;
 
+            _bluetoothLabelArtistToken = _settings.BluetoothLabelArtist ?? string.Empty;
             _savedBluetoothLabelArtistToken = _bluetoothLabelArtistToken;
+
+            _bluetoothLabelTitleToken = _settings.BluetoothLabelTitle ?? string.Empty;
             _savedBluetoothLabelTitleToken = _bluetoothLabelTitleToken;
+
+            _bluetoothLabelAlbumToken = _settings.BluetoothLabelAlbum ?? string.Empty;
             _savedBluetoothLabelAlbumToken = _bluetoothLabelAlbumToken;
+
+            _bluetoothLabelComposerToken = _settings.BluetoothLabelComposer ?? string.Empty;
             _savedBluetoothLabelComposerToken = _bluetoothLabelComposerToken;
+
+            _bluetoothLabelGenreToken = _settings.BluetoothLabelGenre ?? string.Empty;
             _savedBluetoothLabelGenreToken = _bluetoothLabelGenreToken;
 
-            _bluetoothLabelArtistOption = GetBluetoothOptionOrDefault(_bluetoothLabelArtistToken, BluetoothLabelMapping.TokenAppName);
-            _bluetoothLabelTitleOption = GetBluetoothOptionOrDefault(_bluetoothLabelTitleToken, BluetoothLabelMapping.TokenTranscription);
-            _bluetoothLabelAlbumOption = GetBluetoothOptionOrDefault(_bluetoothLabelAlbumToken, BluetoothLabelMapping.TokenTalkgroup);
-            _bluetoothLabelComposerOption = GetBluetoothOptionOrDefault(_bluetoothLabelComposerToken, BluetoothLabelMapping.TokenSite);
-            _bluetoothLabelGenreOption = GetBluetoothOptionOrDefault(_bluetoothLabelGenreToken, BluetoothLabelMapping.TokenReceiver);
-
-            // Ensure tokens match the selected options in case we had to fall back from an unknown stored value.
-            _bluetoothLabelArtistToken = _bluetoothLabelArtistOption.Key;
-            _bluetoothLabelTitleToken = _bluetoothLabelTitleOption.Key;
-            _bluetoothLabelAlbumToken = _bluetoothLabelAlbumOption.Key;
-            _bluetoothLabelComposerToken = _bluetoothLabelComposerOption.Key;
-            _bluetoothLabelGenreToken = _bluetoothLabelGenreOption.Key;
-
-
-            OnPropertyChanged(nameof(BluetoothLabelArtistOption));
-            OnPropertyChanged(nameof(BluetoothLabelTitleOption));
-            OnPropertyChanged(nameof(BluetoothLabelAlbumOption));
-            OnPropertyChanged(nameof(BluetoothLabelComposerOption));
-            OnPropertyChanged(nameof(BluetoothLabelGenreOption));
-
-            var defaultUrl = DefaultServerUrl;
-            _useDefaultConnection = string.Equals(_serverUrl, defaultUrl, StringComparison.OrdinalIgnoreCase);
-            _savedUseDefaultConnection = _useDefaultConnection;
-
-
-            var rawTheme = _settings.ThemeMode;
-            if (string.IsNullOrWhiteSpace(rawTheme)
-                || (!string.Equals(rawTheme, "System", StringComparison.OrdinalIgnoreCase)
-                    && !string.Equals(rawTheme, "Light", StringComparison.OrdinalIgnoreCase)
-                    && !string.Equals(rawTheme, "Dark", StringComparison.OrdinalIgnoreCase)))
-            {
-                _themeMode = "System";
-                _settings.ThemeMode = "System";
-            }
-            else
-            {
-                _themeMode = rawTheme;
-            }
-
-            _disabledKeys.Clear();
-            var rawDisabled = _settings.ReceiverFilter ?? string.Empty;
-            if (!string.IsNullOrWhiteSpace(rawDisabled))
-            {
-                var entries = rawDisabled.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries);
-                foreach (var entry in entries)
-                {
-                    var trimmed = entry.Trim();
-                    if (trimmed.Length == 0)
-                        continue;
-
-                    if (!trimmed.Contains('|'))
-                        continue;
-
-                    _disabledKeys.Add(trimmed);
-                }
-            }
-
-            _savedServerUrl = _settings.ServerUrl ?? string.Empty;
-            _savedAuthServerBaseUrl = _settings.AuthServerBaseUrl ?? string.Empty;
+            // Snapshots used by HasUnsavedSettings comparisons.
+            _savedAuthServerBaseUrl = _authServerBaseUrl;
             _savedUseDefaultConnection = UseDefaultConnection;
-            _savedBasicAuthUsername = _basicAuthUsername;
-            _savedBasicAuthPassword = _basicAuthPassword;
-            _savedWindowsAutoConnectOnStart = _windowsAutoConnectOnStart;
-            _savedWindowsStartWithWindows = _windowsStartWithWindows;
-            _savedMobileAutoConnectOnStart = _mobileAutoConnectOnStart;
-            _savedWindowsStartWithWindows = _windowsStartWithWindows;
 
-            _showValidationPrefix = false;
-            _lastValidationWasAccountValidation = false;
             HasChanges = false;
+
+            OnPropertyChanged(nameof(AuthServerBaseUrl));
+            OnPropertyChanged(nameof(ServerUrl));
+            OnPropertyChanged(nameof(BasicAuthUsername));
+            OnPropertyChanged(nameof(BasicAuthPassword));
+            OnPropertyChanged(nameof(AutoPlay));
+
+            OnPropertyChanged(nameof(WindowsAutoConnectOnStart));
+            OnPropertyChanged(nameof(MobileAutoConnectOnStart));
+            OnPropertyChanged(nameof(WindowsStartWithWindows));
+
 
             OnPropertyChanged(nameof(HasUnsavedSettings));
             OnPropertyChanged(nameof(ConnectionNeedsValidation));
-            OnPropertyChanged(nameof(ValidationSuccessHeaderText));
 
             UpdateSubscriptionSummaryFromSettings();
         }
@@ -1249,33 +1199,12 @@ public bool WindowsStartWithWindows
 
         private async Task SaveSettingsAsync()
         {
-            if (UseDefaultConnection)
-            {
-                _settings.ServerUrl = DefaultServerUrl;
-                _mainViewModel.ServerUrl = _settings.ServerUrl;
-            }
-            else
-            {
-                _settings.ServerUrl = ServerUrl;
-                _mainViewModel.ServerUrl = ServerUrl;
-            }
-
-            var priorUser = (_settings.BasicAuthUsername ?? string.Empty).Trim();
-            var priorPass = (_settings.BasicAuthPassword ?? string.Empty).Trim();
-            var priorSessionToken = (_settings.AuthSessionToken ?? string.Empty).Trim();
-
-            var newUser = (BasicAuthUsername ?? string.Empty).Trim();
-            var newPass = (BasicAuthPassword ?? string.Empty).Trim();
-
-            var credentialsChanged =
-                !string.Equals(priorUser, newUser, StringComparison.Ordinal) ||
-                !string.Equals(priorPass, newPass, StringComparison.Ordinal);
-
-            _settings.BasicAuthUsername = newUser;
-            _settings.BasicAuthPassword = newPass;
+            // IMPORTANT: Connection credentials and active server selection are persisted only by Validate.
+            // Save is for non-connection settings.
 
             _settings.WindowsAutoConnectOnStart = WindowsAutoConnectOnStart;
             _settings.WindowsStartWithWindows = WindowsStartWithWindows;
+            _settings.MobileAutoConnectOnStart = MobileAutoConnectOnStart;
 
 #if WINDOWS
             try
@@ -1289,28 +1218,6 @@ public bool WindowsStartWithWindows
             }
 #endif
 
-            if (credentialsChanged)
-            {
-                try
-                {
-                    await _telemetryService.ResetSessionAsync("credentials_changed", CancellationToken.None);
-                }
-                catch
-                {
-                }
-
-                try
-                {
-                    await _mainViewModel.RestartMonitoringIfRunningAsync();
-                }
-                catch
-                {
-                }
-            }
-
-
-
-
             _settings.ThemeMode = ThemeMode;
             ApplyTheme(ThemeMode);
 
@@ -1320,11 +1227,9 @@ public bool WindowsStartWithWindows
             _settings.BluetoothLabelComposer = _bluetoothLabelComposerToken;
             _settings.BluetoothLabelGenre = _bluetoothLabelGenreToken;
 
-            _savedServerUrl = _settings.ServerUrl ?? string.Empty;
             _savedAuthServerBaseUrl = _settings.AuthServerBaseUrl ?? string.Empty;
             _savedUseDefaultConnection = UseDefaultConnection;
-            _savedBasicAuthUsername = _basicAuthUsername;
-            _savedBasicAuthPassword = _basicAuthPassword;
+
             _savedWindowsAutoConnectOnStart = _windowsAutoConnectOnStart;
             _savedWindowsStartWithWindows = _windowsStartWithWindows;
             _savedMobileAutoConnectOnStart = _mobileAutoConnectOnStart;
@@ -1347,6 +1252,9 @@ public bool WindowsStartWithWindows
         {
             ServerUrl = DefaultServerUrl;
             UseDefaultConnection = true;
+
+            BasicAuthUsername = string.Empty;
+            BasicAuthPassword = string.Empty;
         }
 
         private async Task SaveThenValidateServerUrlAsync()
@@ -1358,6 +1266,16 @@ public bool WindowsStartWithWindows
 
             await SaveSettingsAsync();
             await ValidateServerUrlAsync();
+
+            if (!ServerValidationIsError)
+            {
+                _savedServerUrl = _settings.ServerUrl ?? string.Empty;
+                _savedBasicAuthUsername = _settings.BasicAuthUsername ?? string.Empty;
+                _savedBasicAuthPassword = _settings.BasicAuthPassword ?? string.Empty;
+
+                HasChanges = false;
+                OnPropertyChanged(nameof(ConnectionNeedsValidation));
+            }
 
             // Only stop when validation succeeded and the server actually changed.
             // Normalize by trimming whitespace and trailing slashes.
@@ -1425,7 +1343,7 @@ public bool WindowsStartWithWindows
             try
             {
                 var hasAuth = !string.IsNullOrWhiteSpace(BasicAuthUsername);
-                AppLog.Add($"Validate: url={url}, isDefault={isDefaultServer}, hasBasicAuth={hasAuth}");
+                AppLog.Add(() => $"Validate: url={url}, isDefault={isDefaultServer}, hasBasicAuth={hasAuth}");
             }
             catch
             {
@@ -1436,8 +1354,8 @@ public bool WindowsStartWithWindows
             {
                 if (isDefaultServer)
                 {
-                    var accountUsername = _settings.BasicAuthUsername;
-                    var accountPassword = _settings.BasicAuthPassword;
+                    var accountUsername = (BasicAuthUsername ?? string.Empty).Trim();
+                    var accountPassword = (BasicAuthPassword ?? string.Empty).Trim();
 
                     if (string.IsNullOrWhiteSpace(accountUsername) || string.IsNullOrWhiteSpace(accountPassword))
                     {
@@ -1454,6 +1372,8 @@ public bool WindowsStartWithWindows
                         _settings.AuthSessionToken = string.Empty;
                         _settings.SubscriptionLastMessage = ServerValidationMessage;
                         _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
+
+                        try { _settings.ClearServerCredentials(DefaultServerUrl); } catch { }
 
                         UpdateSubscriptionSummaryFromSettings();
                         IsValidatingServer = false;
@@ -1506,6 +1426,14 @@ public bool WindowsStartWithWindows
                         _settings.AuthSessionToken = string.Empty;
                         _settings.SubscriptionLastMessage = ServerValidationMessage;
                         _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
+
+                        try { _settings.ClearServerCredentials(DefaultServerUrl); } catch { }
+
+                        try { _settings.ClearServerCredentials(DefaultServerUrl); } catch { }
+
+                        try { _settings.ClearServerCredentials(DefaultServerUrl); } catch { }
+
+                        try { _settings.ClearServerCredentials(DefaultServerUrl); } catch { }
 
                         UpdateSubscriptionSummaryFromSettings();
                         return;
@@ -1649,46 +1577,70 @@ public bool WindowsStartWithWindows
                     _settings.AuthSessionToken = authResponse.SessionToken ?? string.Empty;
                     await _telemetryService.AdoptSessionTokenAsync(authResponse.SessionToken ?? string.Empty, "settings_validate_auth_success", CancellationToken.None);
 
+                    
+
+                    // Persist active server and credentials only after a successful account validation.
+                    _settings.ServerUrl = DefaultServerUrl;
+                    _settings.BasicAuthUsername = accountUsername;
+                    _settings.BasicAuthPassword = accountPassword;
+                    _settings.SetServerCredentials(DefaultServerUrl, accountUsername, accountPassword);
+                    _settings.LastAuthUsername = accountUsername;
+
+                    _mainViewModel.ServerUrl = DefaultServerUrl;
+
                     SetShowValidationPrefix(true);
                     UpdateSubscriptionSummaryFromSettings();
                 }
                 else
                 {
-                    using var request = new HttpRequestMessage(HttpMethod.Head, url);
+                    var userProvidedAnyAuth =
+                        !string.IsNullOrWhiteSpace(BasicAuthUsername) || !string.IsNullOrWhiteSpace(BasicAuthPassword);
+
+                    async Task<HttpResponseMessage> SendHeadAsync(bool includeAuth)
+                    {
+                        var req = new HttpRequestMessage(HttpMethod.Head, url);
+
+                        try
+                        {
+                            AppLog.Add(() => $"Validate: sending HEAD to {url} (auth={includeAuth})");
+                        }
+                        catch
+                        {
+                        }
+
+                        if (includeAuth)
+                        {
+                            var u = (BasicAuthUsername ?? string.Empty).Trim();
+                            var p = (BasicAuthPassword ?? string.Empty).Trim();
+
+                            if (!string.IsNullOrWhiteSpace(u) || !string.IsNullOrWhiteSpace(p))
+                            {
+                                var raw = $"{u}:{p}";
+                                var bytes = Encoding.ASCII.GetBytes(raw);
+                                var base64 = Convert.ToBase64String(bytes);
+
+                                req.Headers.Authorization = new AuthenticationHeaderValue("Basic", base64);
+                            }
+                        }
+
+                        return await _httpClient.SendAsync(req);
+                    }
+
+                    // For custom servers, always try without basic auth first.
+                    using var noAuthResponse = await SendHeadAsync(includeAuth: false);
 
                     try
                     {
-                        AppLog.Add($"Validate: sending HEAD to {url}");
+                        AppLog.Add(() => $"Validate: response (no auth) HTTP {(int)noAuthResponse.StatusCode} {noAuthResponse.ReasonPhrase}");
                     }
                     catch
                     {
                     }
 
-                    if (!string.IsNullOrWhiteSpace(BasicAuthUsername))
-                    {
-                        var raw = $"{BasicAuthUsername}:{BasicAuthPassword ?? string.Empty}";
-                        var bytes = Encoding.ASCII.GetBytes(raw);
-                        var base64 = Convert.ToBase64String(bytes);
-
-                        request.Headers.Authorization =
-                            new AuthenticationHeaderValue("Basic", base64);
-                    }
-
-                    using var serverResponse = await _httpClient.SendAsync(request);
-
-                    try
-                    {
-                        AppLog.Add($"Validate: response HTTP {(int)serverResponse.StatusCode} {serverResponse.ReasonPhrase}");
-                    }
-                    catch
-                    {
-                    }
-
-                    var statusCode = serverResponse.StatusCode;
+                    var statusCode = noAuthResponse.StatusCode;
                     var statusInt = (int)statusCode;
 
-                    if (serverResponse.IsSuccessStatusCode
-                        || statusCode == HttpStatusCode.NotImplemented)
+                    if (noAuthResponse.IsSuccessStatusCode || statusCode == HttpStatusCode.NotImplemented)
                     {
                         if (statusCode == HttpStatusCode.NotImplemented)
                         {
@@ -1697,23 +1649,113 @@ public bool WindowsStartWithWindows
                         else
                         {
                             ServerValidationMessage =
-                                $"Server reachable (HTTP {statusInt} {serverResponse.ReasonPhrase}).";
+                                $"Server reachable (HTTP {statusInt} {noAuthResponse.ReasonPhrase}).";
+                        }
+
+                        // If the server is reachable without auth, clear any user-entered credentials.
+                        if (userProvidedAnyAuth)
+                        {
+                            BasicAuthUsername = string.Empty;
+                            BasicAuthPassword = string.Empty;
+
+                            try
+                            {
+                                await UiDialogs.AlertAsync(
+                                    "Credentials cleared",
+                                    "This server responded without requiring basic auth. Username and password were cleared.",
+                                    "OK");
+                            }
+                            catch
+                            {
+                            }
                         }
 
                         ServerValidationIsError = false;
+
+                        var finalUrl = url.Trim();
+                        _settings.ServerUrl = finalUrl;
+
+                        // Persist what we actually used (blank for no-auth success).
+                        var effectiveUser = string.Empty;
+                        var effectivePass = string.Empty;
+
+                        _settings.BasicAuthUsername = effectiveUser;
+                        _settings.BasicAuthPassword = effectivePass;
+                        _settings.SetServerCredentials(finalUrl, effectiveUser, effectivePass);
+
+                        _mainViewModel.ServerUrl = finalUrl;
                     }
-                    else if (statusCode == HttpStatusCode.Unauthorized
-                             || statusCode == HttpStatusCode.Forbidden)
+                    else if (statusCode == HttpStatusCode.Unauthorized || statusCode == HttpStatusCode.Forbidden)
                     {
-                        ServerValidationMessage =
-                            $"Authentication failed (HTTP {statusInt} {serverResponse.ReasonPhrase}). " +
-                            "Check basic auth username and password and that the server or firewall is configured to allow this client.";
-                        ServerValidationIsError = true;
+                        // If auth is required and the user provided credentials, retry with basic auth.
+                        if (!userProvidedAnyAuth)
+                        {
+                            ServerValidationMessage =
+                                $"Authentication required (HTTP {statusInt} {noAuthResponse.ReasonPhrase}). " +
+                                "Enter a basic auth username and password, then tap Validate.";
+                            ServerValidationIsError = true;
+                        }
+                        else
+                        {
+                            // Retry with auth.
+                            using var authResponse = await SendHeadAsync(includeAuth: true);
+
+                            try
+                            {
+                                AppLog.Add(() => $"Validate: response (with auth) HTTP {(int)authResponse.StatusCode} {authResponse.ReasonPhrase}");
+                            }
+                            catch
+                            {
+                            }
+
+                            var authStatus = authResponse.StatusCode;
+                            var authStatusInt = (int)authStatus;
+
+                            if (authResponse.IsSuccessStatusCode || authStatus == HttpStatusCode.NotImplemented)
+                            {
+                                if (authStatus == HttpStatusCode.NotImplemented)
+                                {
+                                    ServerValidationMessage = "Server reachable. Connection looks good.";
+                                }
+                                else
+                                {
+                                    ServerValidationMessage =
+                                        $"Server reachable (HTTP {authStatusInt} {authResponse.ReasonPhrase}).";
+                                }
+
+                                ServerValidationIsError = false;
+
+                                var finalUrl = url.Trim();
+                                _settings.ServerUrl = finalUrl;
+
+                                var effectiveUser = (BasicAuthUsername ?? string.Empty).Trim();
+                                var effectivePass = (BasicAuthPassword ?? string.Empty).Trim();
+
+                                _settings.BasicAuthUsername = effectiveUser;
+                                _settings.BasicAuthPassword = effectivePass;
+                                _settings.SetServerCredentials(finalUrl, effectiveUser, effectivePass);
+
+                                _mainViewModel.ServerUrl = finalUrl;
+                            }
+                            else if (authStatus == HttpStatusCode.Unauthorized || authStatus == HttpStatusCode.Forbidden)
+                            {
+                                ServerValidationMessage =
+                                    $"Authentication failed (HTTP {authStatusInt} {authResponse.ReasonPhrase}). " +
+                                    "Check basic auth username and password and that the server or firewall is configured to allow this client.";
+                                ServerValidationIsError = true;
+                            }
+                            else
+                            {
+                                ServerValidationMessage =
+                                    $"Server responded with HTTP {authStatusInt} {authResponse.ReasonPhrase}.";
+                                ServerValidationIsError = true;
+                            }
+                        }
                     }
                     else
                     {
                         ServerValidationMessage =
-                            $"Server responded with HTTP {statusInt} {serverResponse.ReasonPhrase}.";
+                            $"Server responded with HTTP {statusInt} {noAuthResponse.ReasonPhrase}.";
                         ServerValidationIsError = true;
                     }
                 }
@@ -1722,10 +1764,10 @@ public bool WindowsStartWithWindows
             {
                 try
                 {
-                    AppLog.Add($"Validate: HttpRequestException: {ex.Message}");
-                    AppLog.Add(ex.ToString());
+                    AppLog.Add(() => $"Validate: HttpRequestException: {ex.Message}");
+                    AppLog.Add(() => ex.ToString());
                     if (ex.InnerException != null)
-                        AppLog.Add($"Validate: Inner: {ex.InnerException}");
+                        AppLog.Add(() => $"Validate: Inner: {ex.InnerException}");
                 }
                 catch
                 {
@@ -1738,8 +1780,8 @@ public bool WindowsStartWithWindows
             {
                 try
                 {
-                    AppLog.Add("Validate: timed out.");
-                    AppLog.Add(ex.ToString());
+                    AppLog.Add(() => "Validate: timed out.");
+                    AppLog.Add(() => ex.ToString());
                 }
                 catch
                 {
@@ -1752,8 +1794,8 @@ public bool WindowsStartWithWindows
             {
                 try
                 {
-                    AppLog.Add($"Validate: unexpected exception: {ex.Message}");
-                    AppLog.Add(ex.ToString());
+                    AppLog.Add(() => $"Validate: unexpected exception: {ex.Message}");
+                    AppLog.Add(() => ex.ToString());
                 }
                 catch
                 {

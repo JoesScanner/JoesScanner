@@ -12,17 +12,11 @@
     Shell.TabBarIsVisible="False"
     BackgroundColor="{StaticResource TabStripNavy}">
     <ContentPage.Resources>
-        <Style x:Key="CompactSwitchStyle" TargetType="Switch">
-            <Setter Property="Scale">
-                <Setter.Value>
-                    <OnPlatform x:TypeArguments="x:Double" Default="0.9">
-                        <On Platform="WinUI" Value="0.78" />
-                    </OnPlatform>
-                </Setter.Value>
-            </Setter>
-            <Setter Property="Margin" Value="0" />
+        <Style x:Key="CompactToggleStyle" TargetType="controls:CompactToggleSwitch">
             <Setter Property="HorizontalOptions" Value="End" />
             <Setter Property="VerticalOptions" Value="Center" />
+            <Setter Property="WidthRequest" Value="56" />
+            <Setter Property="HeightRequest" Value="20" />
             <Setter Property="OnColor" Value="{StaticResource Primary}" />
             <Setter Property="ThumbColor" Value="White" />
         </Style>
@@ -214,8 +208,9 @@
                     VerticalOptions="Center" />
 
                                     <Entry
+                    x:Name="ServerUrlEntry"
                     Grid.Column="1"
-                    Text="{Binding ServerUrl}"
+                    Text="{Binding ServerUrl, UpdateSourceEventName=Unfocused}"
                     Placeholder="https://app.joesscanner.com"
                     FontSize="12"
                     VerticalOptions="Center" />
@@ -232,7 +227,7 @@
 
                                         <Button
                         Text="Validate"
-                        Command="{Binding ValidateServerCommand}"
+                        Clicked="OnValidateClicked"
                         Style="{StaticResource PillButtonStyle}">
                                             <Button.Triggers>
                                                 <DataTrigger
@@ -261,9 +256,10 @@
                     TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
 
                                     <Entry
+                    x:Name="BasicAuthUsernameEntry"
                     Grid.Column="1"
-                    Text="{Binding BasicAuthUsername}"
-                    Placeholder="username for restricted servers"
+                    Text="{Binding BasicAuthUsername, UpdateSourceEventName=Unfocused}"
+                    Placeholder="username"
                     FontSize="12"
                     HeightRequest="30" />
 
@@ -275,9 +271,10 @@
                     TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
 
                                     <Entry
+                    x:Name="BasicAuthPasswordEntry"
                     Grid.Column="3"
-                    Text="{Binding BasicAuthPassword}"
-                    Placeholder="password for restricted servers"
+                    Text="{Binding BasicAuthPassword, UpdateSourceEventName=Unfocused}"
+                    Placeholder="password"
                     IsPassword="{Binding IsBasicAuthPasswordHidden}"
                     FontSize="12"
                     HeightRequest="30"
@@ -333,11 +330,11 @@
                                             VerticalOptions="Center"
                                             HorizontalOptions="Fill" />
 
-                                        <Switch
+                                        <controls:CompactToggleSwitch
                                             Grid.Row="1"
                                             Grid.Column="1"
                                             IsToggled="{Binding AutoPlay}"
-                                            Style="{StaticResource CompactSwitchStyle}" />
+                                            Style="{StaticResource CompactToggleStyle}" />
 
 
                                         <Label
@@ -351,12 +348,12 @@
                                             HorizontalOptions="Fill"
                                              />
 
-                                        <Switch
+                                        <controls:CompactToggleSwitch
                                             Grid.Row="2"
                                             Grid.Column="1"
                                             IsToggled="{Binding WindowsStartWithWindows}"
                                             IsVisible="{StaticResource IsWinUIOnly}"
-                                            Style="{StaticResource CompactSwitchStyle}" />
+                                            Style="{StaticResource CompactToggleStyle}" />
                                     </Grid>
 
                     </Border>

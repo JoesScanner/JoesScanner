@@ -12,6 +12,13 @@ namespace JoesScanner.Services
         string BasicAuthUsername { get; set; }
         string BasicAuthPassword { get; set; }
 
+
+        // Per-server stored credentials (used for custom servers and Joe's hosted server account creds).
+        // Validate is responsible for persisting credentials. Play/connect should read from storage only.
+        bool TryGetServerCredentials(string serverUrl, out string username, out string password);
+        void SetServerCredentials(string serverUrl, string username, string password);
+        void ClearServerCredentials(string serverUrl);
+
         // Last non-empty username used for Auth API checks. Helps features that need to know
         // which account was used even when the scanner stream itself uses a service account.
         string LastAuthUsername { get; set; }
@@ -43,8 +50,18 @@ namespace JoesScanner.Services
 
         DateTime? SubscriptionLastCheckUtc { get; set; }
         bool SubscriptionLastStatusOk { get; set; }
+        // True only when the app successfully contacted the Auth API and received an OK response.
+        // This is used for strict feature gating where offline-cached access is not sufficient.
+        bool SubscriptionLastValidatedOnline { get; set; }
         string SubscriptionLastLevel { get; set; }
         string SubscriptionPriceId { get; set; }
+
+        // Subscription tier level returned by the Auth API.
+        // Convention:
+        // 0 = no access
+        // 1 = standard
+        // 2 = premium
+        int SubscriptionTierLevel { get; set; }
 
         DateTime? SubscriptionExpiresUtc { get; set; }
         DateTime? SubscriptionRenewalUtc { get; set; }

@@ -210,8 +210,7 @@
                     Grid.Row="1"
                     x:Name="CallsView"
                     ItemsSource="{Binding Calls}"
-                    SelectionMode="Single"
-                    SelectionChanged="OnCallSelectionChanged"
+                    SelectionMode="None"
                     ItemsUpdatingScrollMode="KeepScrollOffset"
                     ItemSizingStrategy="MeasureAllItems"
                     HorizontalScrollBarVisibility="Never"
@@ -230,6 +229,10 @@
                                 BackgroundColor="{AppThemeBinding Light=White, Dark=#111827}"
                                 StrokeThickness="1"
                                 StrokeShape="RoundRectangle 8">
+
+                                <Border.GestureRecognizers>
+                                    <TapGestureRecognizer Tapped="OnCallTapped" CommandParameter="{Binding .}" />
+                                </Border.GestureRecognizers>
 
                                 <Border.Stroke>
                                     <SolidColorBrush Color="{AppThemeBinding Light=#374151, Dark=#1f2937}" />
@@ -267,7 +270,7 @@
                                         <Label.FormattedText>
                                             <FormattedString>
                                                 <Span
-                                                    Text="{Binding TimeDisplay}"
+                                                    Text="{Binding TimeOnlyDisplay}"
                                                     FontAttributes="Bold"
                                                     TextColor="{AppThemeBinding Light=#111827, Dark=White}" />
                                                 <Span Text=" > " />

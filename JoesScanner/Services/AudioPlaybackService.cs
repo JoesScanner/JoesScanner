@@ -62,7 +62,7 @@ namespace JoesScanner.Services
 
             try
             {
-                AppLog.Add($"Audio: Play requested. url={audioUrl}, rate={playbackRate:0.###}");
+                AppLog.Add(() => $"Audio: Play requested. url={audioUrl}, rate={playbackRate:0.###}");
             }
             catch
             {
@@ -415,11 +415,11 @@ namespace JoesScanner.Services
 	                        _iosTempDownloadedFile = localPath;
 	                        requestedUrl = new Uri(localPath).AbsoluteUri;
 	                        nsUrl = NSUrl.FromFilename(localPath);
-	                        AppLog.Add($"Audio(iOS): downloaded http audio to {localPath}");
+	                        AppLog.Add(() => $"Audio(iOS): downloaded http audio to {localPath}");
 	                    }
 	                    catch (Exception ex)
 	                    {
-	                        try { AppLog.Add($"Audio(iOS): http download failed: {ex.Message}"); } catch { }
+	                        try { AppLog.Add(() => $"Audio(iOS): http download failed: {ex.Message}"); } catch { }
 	                        // Fall back to streaming attempt.
 	                        nsUrl = NSUrl.FromString(audioUrl);
 	                    }
@@ -453,7 +453,7 @@ namespace JoesScanner.Services
                 {
                     var scheme = nsUrl.Scheme ?? string.Empty;
                     var abs = nsUrl.AbsoluteString ?? string.Empty;
-                    AppLog.Add($"Audio(iOS): AVPlayerItem url={abs} scheme={scheme}");
+                    AppLog.Add(() => $"Audio(iOS): AVPlayerItem url={abs} scheme={scheme}");
                 }
                 catch
                 {
@@ -494,7 +494,7 @@ namespace JoesScanner.Services
                             if (string.IsNullOrWhiteSpace(errText))
                                 errText = "unknown_error";
 
-                            AppLog.Add($"Audio(iOS): FailedToPlayToEndTime: {errText}");
+                            AppLog.Add(() => $"Audio(iOS): FailedToPlayToEndTime: {errText}");
                         }
                         catch
                         {
@@ -517,7 +517,7 @@ namespace JoesScanner.Services
                                 last = events[events.Length - 1];
                             if (last != null)
                             {
-                                AppLog.Add($"Audio(iOS): ErrorLog: domain={last.ErrorDomain}, code={last.ErrorStatusCode}, comment={last.ErrorComment}");
+                                AppLog.Add(() => $"Audio(iOS): ErrorLog: domain={last.ErrorDomain}, code={last.ErrorStatusCode}, comment={last.ErrorComment}");
                             }
                         }
                         catch
@@ -545,8 +545,8 @@ namespace JoesScanner.Services
             {
                 try
                 {
-                    AppLog.Add($"Audio(iOS): playback exception: {ex.Message}");
-                    AppLog.Add(ex.ToString());
+                    AppLog.Add(() => $"Audio(iOS): playback exception: {ex.Message}");
+                    AppLog.Add(() => ex.ToString());
                 }
                 catch
                 {

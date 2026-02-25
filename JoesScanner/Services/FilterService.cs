@@ -9,13 +9,10 @@ namespace JoesScanner.Services
     // Owns the rules list, persists it, and answers filter decisions.
     internal sealed class FilterService
     {
-        private const string FiltersPreferenceKey = "FilterRulesV1";
 
-        // Windows LocalSettings has a relatively small per-value limit.
-        // Store the rule payload in a file when it is large or when running on Windows.
-        private const string FiltersFileName = "filter_rules_v1.json";
-        private const string FiltersStoredInFileMarker = "FILE";
-        private const int MaxPreferenceChars = 6000;
+        // DB key used for the new DB-backed filter persistence.
+        private const string FiltersDbKey = "filter_rules_v1";
+
         public event EventHandler? RulesChanged;
 
         private readonly ObservableCollection<FilterRule> _rules = [];
@@ -100,7 +97,7 @@ namespace JoesScanner.Services
                 }
             }
 
-            SaveToPreferences();
+            SaveToStorage();
             OnRulesChanged();
         }
 
@@ -112,7 +109,7 @@ namespace JoesScanner.Services
 
         private FilterService()
         {
-            LoadFromPreferences();
+            LoadFromStorage();
             PruneInvalidRules(saveIfChanged: true);
         }
 
@@ -151,7 +148,7 @@ namespace JoesScanner.Services
                 rule.IsMuted = newMuted;
             }
 
-            SaveToPreferences();
+            SaveToStorage();
             OnRulesChanged();
         }
 
@@ -190,7 +187,7 @@ namespace JoesScanner.Services
                 rule.IsDisabled = newDisabled;
             }
 
-            SaveToPreferences();
+            SaveToStorage();
             OnRulesChanged();
         }
 
@@ -208,7 +205,7 @@ namespace JoesScanner.Services
 
             if (removed)
             {
-                SaveToPreferences();
+                SaveToStorage();
                 OnRulesChanged();
             }
         }
@@ -429,7 +426,7 @@ namespace JoesScanner.Services
 
             if (added)
             {
-                SaveToPreferences();
+                SaveToStorage();
                 OnRulesChanged();
             }
         }
@@ -546,7 +543,7 @@ namespace JoesScanner.Services
         {
             if (sender is FilterRule)
             {
-                SaveToPreferences();
+                SaveToStorage();
                 OnRulesChanged();
             }
         }
@@ -631,74 +628,14 @@ namespace JoesScanner.Services
             public DateTime LastSeenUtc { get; set; }
         }
 
-        private static string GetFiltersFilePath()
-        {
-            try
-            {
-                var dir = FileSystem.AppDataDirectory;
-                return Path.Combine(dir, FiltersFileName);
-            }
-            catch
-            {
-                return FiltersFileName;
-            }
-        }
-
-        private static string? TryReadFiltersFile()
-        {
-            try
-            {
-                var path = GetFiltersFilePath();
-                if (!File.Exists(path))
-                    return null;
-
-                return File.ReadAllText(path);
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        private static void TryWriteFiltersFile(string json)
-        {
-            try
-            {
-                var path = GetFiltersFilePath();
-                var dir = Path.GetDirectoryName(path);
-                if (!string.IsNullOrWhiteSpace(dir) && !Directory.Exists(dir))
-                    Directory.CreateDirectory(dir);
-
-                File.WriteAllText(path, json);
-            }
-            catch
-            {
-            }
-        }
-
-        private void LoadFromPreferences()
+        private void LoadFromStorage()
         {
             try
             {
                 string json = string.Empty;
 
-                // Prefer the file when present.
-                var filePath = GetFiltersFilePath();
-                if (File.Exists(filePath))
-                {
-                    json = File.ReadAllText(filePath);
-                }
-                else
-                {
-                    json = Preferences.Get(FiltersPreferenceKey, string.Empty);
-                    if (string.Equals(json, FiltersStoredInFileMarker, StringComparison.OrdinalIgnoreCase))
-                    {
-                        if (File.Exists(filePath))
-                            json = File.ReadAllText(filePath);
-                        else
-                            json = string.Empty;
-                    }
-                }
+                // 1) DB is the source of truth.
+                json = AppStateStore.GetString(FiltersDbKey, string.Empty);
 
                 if (string.IsNullOrWhiteSpace(json))
                     return;
@@ -723,25 +660,21 @@ namespace JoesScanner.Services
                         var rule = new FilterRule
                         {
                             Level = dto.Level,
-                            Receiver = dto.Receiver,
-                            Site = dto.Site,
-                            Talkgroup = dto.Talkgroup,
+                            Receiver = receiver,
+                            Site = site,
+                            Talkgroup = tg,
                             IsMuted = dto.IsMuted,
                             IsDisabled = dto.IsDisabled,
                             LastSeenUtc = dto.LastSeenUtc
                         };
 
-                        rule.PropertyChanged += OnRulePropertyChanged;
-                        InsertRuleSorted_NoYield(rule);
+                        _rules.Add(rule);
                     }
                 }
             }
             catch
             {
-                lock (_rulesGate)
-                {
-                    _rules.Clear();
-                }
+                // Ignore load failures. Filter rules will rebuild naturally from live traffic.
             }
         }
 
@@ -769,12 +702,12 @@ namespace JoesScanner.Services
 
             if (changed && saveIfChanged)
             {
-                SaveToPreferences();
+                SaveToStorage();
                 OnRulesChanged();
             }
         }
 
-        private void SaveToPreferences()
+        private void SaveToStorage()
         {
             try
             {
@@ -796,50 +729,13 @@ namespace JoesScanner.Services
 
                 var json = JsonSerializer.Serialize(dtoList);
 
-                var useFile = OperatingSystem.IsWindows() || json.Length > MaxPreferenceChars;
-
-                if (useFile)
-                {
-                    var filePath = GetFiltersFilePath();
-                    File.WriteAllText(filePath, json);
-                    Preferences.Set(FiltersPreferenceKey, FiltersStoredInFileMarker);
-                    return;
-                }
-
-                Preferences.Set(FiltersPreferenceKey, json);
+                AppStateStore.SetString(FiltersDbKey, json);
             }
             catch
             {
-                // If we fail to persist to Preferences (for example, Windows size limits),
-                // fall back to the file so the app can continue operating normally.
-                try
-                {
-                    List<FilterRuleDto> dtoList;
-
-                    lock (_rulesGate)
-                    {
-                        dtoList = _rules.Select(r => new FilterRuleDto
-                        {
-                            Level = r.Level,
-                            Receiver = r.Receiver,
-                            Site = r.Site,
-                            Talkgroup = r.Talkgroup,
-                            IsMuted = r.IsMuted,
-                            IsDisabled = r.IsDisabled,
-                            LastSeenUtc = r.LastSeenUtc
-                        }).ToList();
-                    }
-
-                    var json = JsonSerializer.Serialize(dtoList);
-                    var filePath = GetFiltersFilePath();
-                    File.WriteAllText(filePath, json);
-                    Preferences.Set(FiltersPreferenceKey, FiltersStoredInFileMarker);
-                }
-                catch
-                {
-                }
             }
         }
+
 
     }
 }

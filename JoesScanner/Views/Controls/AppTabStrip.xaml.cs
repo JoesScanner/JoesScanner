@@ -103,13 +103,16 @@ public partial class AppTabStrip : ContentView
         // If we only attempt DI resolution once, the comms badge may never attach, which prevents
         // the button background from updating when new messages arrive.
         Loaded += (_, _) => BeginAttachCommsBadge();
+        Loaded += (_, _) => StartHistoryIconWatcher();
         Unloaded += (_, _) =>
         {
             StopAttachCommsBadge();
+            StopHistoryIconWatcher();
             DetachCommsBadge();
         };
 
         HandlerChanged += (_, _) => BeginAttachCommsBadge();
+        HandlerChanged += (_, _) => StartHistoryIconWatcher();
 
         // Keep the hooks in place in case you ever re-enable AutoSizeEnabled,
         // but UpdateSizing will apply static sizing when AutoSizeEnabled is false.
@@ -122,6 +125,11 @@ public partial class AppTabStrip : ContentView
     private CancellationTokenSource? _attachCts;
 
     private ICommsBadgeService? _commsBadge;
+
+    private ISettingsService? _settingsService;
+
+    private CancellationTokenSource? _historyIconCts;
+    private string _lastHistoryIcon = string.Empty;
 
     private void BeginAttachCommsBadge()
     {
@@ -263,7 +271,7 @@ public partial class AppTabStrip : ContentView
             return;
         }
 
-        const int tabCount = 7;
+        const int tabCount = 6;
         const double minSize = 50d;
         const double maxSize = 70d;
 
@@ -284,7 +292,7 @@ public partial class AppTabStrip : ContentView
         {
             "//main" => AppTab.Main,
             "//history" => AppTab.History,
-            "//archive" => AppTab.Archive,
+            "//archive" => AppTab.History,
             "//stats" => AppTab.Stats,
             "//communications" => AppTab.Communications,
             "//log" => AppTab.Log,
@@ -366,7 +374,7 @@ public partial class AppTabStrip : ContentView
     // TapGestureRecognizer handlers (Border + Image approach)
     private void OnMainTapped(object sender, TappedEventArgs e) => NavigateTo("//main");
     private void OnHistoryTapped(object sender, TappedEventArgs e) => NavigateTo("//history");
-    private void OnArchiveTapped(object sender, TappedEventArgs e) => NavigateTo("//archive");
+    private void OnArchiveTapped(object sender, TappedEventArgs e) => NavigateTo("//history");
     private void OnStatsTapped(object sender, TappedEventArgs e) => NavigateTo("//stats");
     private void OnCommunicationsTapped(object sender, TappedEventArgs e) => NavigateTo("//communications");
     private void OnLogTapped(object sender, TappedEventArgs e) => NavigateTo("//log");
@@ -375,9 +383,113 @@ public partial class AppTabStrip : ContentView
     // Legacy Clicked handlers (kept in case anything else still wires to them)
     private void OnMainClicked(object sender, EventArgs e) => NavigateTo("//main");
     private void OnHistoryClicked(object sender, EventArgs e) => NavigateTo("//history");
-    private void OnArchiveClicked(object sender, EventArgs e) => NavigateTo("//archive");
+    private void OnArchiveClicked(object sender, EventArgs e) => NavigateTo("//history");
     private void OnStatsClicked(object sender, EventArgs e) => NavigateTo("//stats");
     private void OnCommunicationsClicked(object sender, EventArgs e) => NavigateTo("//communications");
     private void OnLogClicked(object sender, EventArgs e) => NavigateTo("//log");
     private void OnSettingsClicked(object sender, EventArgs e) => NavigateTo("//settings");
+
+
+    private void StartHistoryIconWatcher()
+    {
+        try
+        {
+            if (_historyIconCts != null)
+                return;
+
+            if (Handler?.MauiContext?.Services == null)
+                return;
+
+            _settingsService ??= Handler.MauiContext.Services.GetService<ISettingsService>();
+            if (_settingsService == null)
+                return;
+
+            _historyIconCts = new CancellationTokenSource();
+            _ = RunHistoryIconLoopAsync(_historyIconCts.Token);
+        }
+        catch
+        {
+        }
+    }
+
+    private void StopHistoryIconWatcher()
+    {
+        try
+        {
+            _historyIconCts?.Cancel();
+            _historyIconCts?.Dispose();
+        }
+        catch
+        {
+        }
+        finally
+        {
+            _historyIconCts = null;
+        }
+    }
+
+    private async Task RunHistoryIconLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                UpdateHistoryIcon();
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(1), ct);
+            }
+            catch
+            {
+                break;
+            }
+        }
+    }
+
+    private void UpdateHistoryIcon()
+    {
+        if (HistoryButton == null || _settingsService == null)
+            return;
+
+        var isHosted = IsHostedJoeServerSelected(_settingsService.ServerUrl);
+
+        // Custom servers are always treated as full access.
+        var isFullAccess = !isHosted || _settingsService.SubscriptionTierLevel >= 2;
+
+        var desired = isFullAccess ? "mc_history_full.png" : "mc_history.png";
+        if (string.Equals(desired, _lastHistoryIcon, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        _lastHistoryIcon = desired;
+
+        MainThread.BeginInvokeOnMainThread(() =>
+        {
+            try
+            {
+                if (HistoryButton != null)
+                    HistoryButton.Source = desired;
+            }
+            catch
+            {
+            }
+        });
+    }
+
+    private static bool IsHostedJoeServerSelected(string? serverUrl)
+    {
+        var raw = (serverUrl ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(raw))
+            return false;
+
+        if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri))
+            return false;
+
+        return string.Equals(uri.Host, "app.joesscanner.com", StringComparison.OrdinalIgnoreCase);
+    }
+
 }

@@ -1,14 +1,11 @@
 using System.Text;
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
 
 namespace JoesScanner.Services
 {
     public sealed class TelemetryService : ITelemetryService, IDisposable
     {
-        private const string QueueFileName = "telemetry-events.json";
-        private const string LastSessionTokenKey = "TelemetryLastSessionToken";
-        private const string SessionStartUtcKey = "TelemetrySessionStartUtc";
-
         private static readonly TimeSpan MaxAge = TimeSpan.FromDays(7);
         private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(60);
 
@@ -24,8 +21,11 @@ namespace JoesScanner.Services
         private string _lastStreamServerUrl = string.Empty;
         private bool _lastStreamServerIsHosted;
 
-        public TelemetryService(ISettingsService settings)
+        public TelemetryService(ISettingsService settings, IDatabasePathProvider dbPathProvider)
         {
+            _dbPath = (dbPathProvider ?? throw new ArgumentNullException(nameof(dbPathProvider))).DbPath;
+            CleanupLegacyTelemetryQueueFile();
+
             _settings = settings ?? throw new ArgumentNullException(nameof(settings));
 
             _httpClient = new HttpClient
@@ -128,7 +128,7 @@ namespace JoesScanner.Services
 
             UpdateLastStreamServer(streamServerUrl, isHostedServer);
 
-            EnqueueEvent(new TelemetryEvent
+            _ = EnqueueEventAsync(new TelemetryEvent
             {
                 CreatedUtc = DateTime.UtcNow,
                 EventType = "stream_connect_attempt",
@@ -137,7 +137,7 @@ namespace JoesScanner.Services
                     ["stream_server_url"] = streamServerUrl ?? string.Empty,
                     ["stream_server_is_hosted"] = isHostedServer ? "true" : "false"
                 }
-            });
+            }, CancellationToken.None);
 
             _ = Task.Run(async () =>
             {
@@ -167,12 +167,12 @@ namespace JoesScanner.Services
             if (!string.IsNullOrWhiteSpace(detailMessage))
                 data["detail"] = detailMessage;
 
-            EnqueueEvent(new TelemetryEvent
+            _ = EnqueueEventAsync(new TelemetryEvent
             {
                 CreatedUtc = DateTime.UtcNow,
                 EventType = "connection_status",
                 Data = data
-            });
+            }, CancellationToken.None);
 
             _ = Task.Run(async () =>
             {
@@ -293,8 +293,8 @@ namespace JoesScanner.Services
 
             _settings.AuthSessionToken = newSessionToken;
 
-            Preferences.Set(LastSessionTokenKey, newSessionToken);
-            Preferences.Set(SessionStartUtcKey, DateTime.UtcNow.ToString("o"));
+            AppStateStore.SetString("telemetry_last_session_token", newSessionToken);
+            AppStateStore.SetString("telemetry_session_start_utc", DateTime.UtcNow.ToString("o"));
 
             try
             {
@@ -311,35 +311,32 @@ namespace JoesScanner.Services
             await _flushLock.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                var queue = LoadQueue();
+                await TrimQueueAsync(cancellationToken).ConfigureAwait(false);
+
+                var queue = await LoadQueueAsync(cancellationToken).ConfigureAwait(false);
                 if (queue.Count == 0)
                     return;
 
-                var cutoff = DateTime.UtcNow - MaxAge;
-                queue = queue.Where(x => x.CreatedUtc >= cutoff).ToList();
-                SaveQueue(queue);
-
-                if (queue.Count == 0)
+                                if (queue.Count == 0)
                     return;
 
-                var sentCount = 0;
+                var sentIds = new List<long>();
 
-                foreach (var item in queue)
+                foreach (var row in queue)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    var ok = await TrySendEventAsync(item, cancellationToken).ConfigureAwait(false);
+                    var ok = await TrySendEventAsync(row.Event, cancellationToken).ConfigureAwait(false);
                     if (!ok)
                         break;
 
-                    sentCount++;
+                    sentIds.Add(row.Id);
                 }
 
-                if (sentCount <= 0)
+                if (sentIds.Count <= 0)
                     return;
 
-                queue.RemoveRange(0, sentCount);
-                SaveQueue(queue);
+                await DeleteQueueRowsAsync(sentIds, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
@@ -384,8 +381,8 @@ namespace JoesScanner.Services
 
             _settings.AuthSessionToken = newToken;
 
-            Preferences.Set(LastSessionTokenKey, newToken);
-            Preferences.Set(SessionStartUtcKey, DateTime.UtcNow.ToString("o"));
+            AppStateStore.SetString("telemetry_last_session_token", newToken);
+            AppStateStore.SetString("telemetry_session_start_utc", DateTime.UtcNow.ToString("o"));
         }
 
 
@@ -395,8 +392,8 @@ namespace JoesScanner.Services
 
             _settings.AuthSessionToken = newToken;
 
-            Preferences.Set(LastSessionTokenKey, newToken);
-            Preferences.Set(SessionStartUtcKey, DateTime.UtcNow.ToString("o"));
+            AppStateStore.SetString("telemetry_last_session_token", newToken);
+            AppStateStore.SetString("telemetry_session_start_utc", DateTime.UtcNow.ToString("o"));
         }
 
 
@@ -528,13 +525,13 @@ namespace JoesScanner.Services
             return new
             {
                 reason = reason ?? string.Empty,
-                started_utc = Preferences.Get(SessionStartUtcKey, DateTime.UtcNow.ToString("o"))
+                started_utc = AppStateStore.GetString("telemetry_session_start_utc", DateTime.UtcNow.ToString("o"))
             };
         }
 
         private object BuildSessionEndPayload(string sessionToken)
         {
-            var started = Preferences.Get(SessionStartUtcKey, string.Empty);
+            var started = AppStateStore.GetString("telemetry_session_start_utc", string.Empty);
             return new
             {
                 session_token = sessionToken,
@@ -574,57 +571,154 @@ namespace JoesScanner.Services
             return manufacturer + " " + model;
         }
 
-        private string GetQueuePath()
+        
+        private const string TableTelemetryQueue = "telemetry_queue";
+                private readonly string _dbPath;
+private async Task EnqueueEventAsync(TelemetryEvent ev, CancellationToken cancellationToken)
         {
-            return Path.Combine(FileSystem.AppDataDirectory, QueueFileName);
-        }
-
-        private List<TelemetryEvent> LoadQueue()
-        {
-            var path = GetQueuePath();
-            if (!File.Exists(path))
-                return new List<TelemetryEvent>();
-
             try
             {
-                var json = File.ReadAllText(path);
-                return JsonSerializer.Deserialize<List<TelemetryEvent>>(json) ?? new List<TelemetryEvent>();
+                using var conn = new SqliteConnection($"Data Source={_dbPath}");
+                await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+                await DbBootstrapper.EnsureInitializedAsync(conn, cancellationToken).ConfigureAwait(false);
+
+                // Best-effort retention trim at insert time.
+                var cutoff = DateTime.UtcNow - MaxAge;
+                using (var trim = conn.CreateCommand())
+                {
+                    trim.CommandText = $"DELETE FROM {TableTelemetryQueue} WHERE created_utc < $cutoff;";
+                    trim.Parameters.AddWithValue("$cutoff", cutoff.ToString("O"));
+                    await trim.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                var json = JsonSerializer.Serialize(ev);
+
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = $@"
+INSERT INTO {TableTelemetryQueue} (created_utc, event_type, json_payload)
+VALUES ($created, $type, $json);";
+                cmd.Parameters.AddWithValue("$created", ev.CreatedUtc.ToString("O"));
+                cmd.Parameters.AddWithValue("$type", ev.EventType ?? string.Empty);
+                cmd.Parameters.AddWithValue("$json", json);
+
+                await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
             catch
             {
-                return new List<TelemetryEvent>();
             }
         }
 
-        private void SaveQueue(List<TelemetryEvent> items)
+        
+        private static void CleanupLegacyTelemetryQueueFile()
         {
             try
             {
-                var path = GetQueuePath();
-                var json = JsonSerializer.Serialize(items);
-                File.WriteAllText(path, json);
+                var legacyPath = Path.Combine(FileSystem.AppDataDirectory, "telemetry-events.json");
+                if (File.Exists(legacyPath))
+                    File.Delete(legacyPath);
             }
             catch
             {
             }
         }
 
-        private void EnqueueEvent(TelemetryEvent ev)
+private async Task<List<TelemetryQueueRow>> LoadQueueAsync(CancellationToken cancellationToken)
         {
             try
             {
-                var queue = LoadQueue();
+                using var conn = new SqliteConnection($"Data Source={_dbPath}");
+                await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+                await DbBootstrapper.EnsureInitializedAsync(conn, cancellationToken).ConfigureAwait(false);
+
+                var list = new List<TelemetryQueueRow>();
+
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = $@"
+SELECT id, json_payload
+FROM {TableTelemetryQueue}
+ORDER BY created_utc ASC, id ASC;";
+
+                using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+                while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    var id = reader.GetInt64(0);
+                    var json = reader.GetString(1);
+
+                    try
+                    {
+                        var ev = JsonSerializer.Deserialize<TelemetryEvent>(json);
+                        if (ev != null)
+                            list.Add(new TelemetryQueueRow(id, ev));
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                return list;
+            }
+            catch
+            {
+                return new List<TelemetryQueueRow>();
+            }
+        }
+
+        private async Task TrimQueueAsync(CancellationToken cancellationToken)
+        {
+            try
+            {
+                using var conn = new SqliteConnection($"Data Source={_dbPath}");
+                await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+                await DbBootstrapper.EnsureInitializedAsync(conn, cancellationToken).ConfigureAwait(false);
 
                 var cutoff = DateTime.UtcNow - MaxAge;
-                queue = queue.Where(x => x.CreatedUtc >= cutoff).ToList();
 
-                queue.Add(ev);
-                SaveQueue(queue);
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = $"DELETE FROM {TableTelemetryQueue} WHERE created_utc < $cutoff;";
+                cmd.Parameters.AddWithValue("$cutoff", cutoff.ToString("O"));
+
+                await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
             catch
             {
             }
         }
+
+        private async Task DeleteQueueRowsAsync(List<long> ids, CancellationToken cancellationToken)
+        {
+            if (ids == null || ids.Count == 0)
+                return;
+
+            try
+            {
+                using var conn = new SqliteConnection($"Data Source={_dbPath}");
+                await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+                await DbBootstrapper.EnsureInitializedAsync(conn, cancellationToken).ConfigureAwait(false);
+
+                using var tx = conn.BeginTransaction();
+
+                using var cmd = conn.CreateCommand();
+                cmd.Transaction = tx;
+
+                cmd.CommandText = $"DELETE FROM {TableTelemetryQueue} WHERE id = $id;";
+                var p = cmd.CreateParameter();
+                p.ParameterName = "$id";
+                cmd.Parameters.Add(p);
+
+                foreach (var id in ids)
+                {
+                    p.Value = id;
+                    await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                tx.Commit();
+            }
+            catch
+            {
+            }
+        }
+
+        private sealed record TelemetryQueueRow(long Id, TelemetryEvent Event);
 
         private sealed class TelemetryEvent
         {

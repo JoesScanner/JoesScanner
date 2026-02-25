@@ -6,6 +6,10 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using System.Linq;
+using JoesScanner.Data;
+using System.Threading;
+using System.Net.Http;
 
 namespace JoesScanner.Services
 {
@@ -15,26 +19,38 @@ namespace JoesScanner.Services
     public sealed class CallHistoryService : ICallHistoryService
     {
         private readonly ISettingsService _settingsService;
+        private readonly ILocalCallsRepository _localCallsRepository;
+        private readonly IHistoryLookupsRepository _lookupsRepository;
         private readonly HttpClient _httpClient;
         private readonly JsonSerializerOptions _jsonOptions;
 
         private int _draw = 1;
 
-        public CallHistoryService(ISettingsService settingsService)
+        
+        private static readonly SemaphoreSlim _persistSemaphore = new SemaphoreSlim(1, 1);
+public CallHistoryService(
+            ISettingsService settingsService,
+            ILocalCallsRepository localCallsRepository,
+            IHistoryLookupsRepository lookupsRepository)
         {
             _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
+            _localCallsRepository = localCallsRepository ?? throw new ArgumentNullException(nameof(localCallsRepository));
+            _lookupsRepository = lookupsRepository ?? throw new ArgumentNullException(nameof(lookupsRepository));
 
+            // Important: some mobile stacks can behave poorly with Brotli auto-decompression.
+            // We explicitly keep this to gzip/deflate to avoid hangs on certain Android builds.
             var handler = new HttpClientHandler
             {
                 AutomaticDecompression =
                     DecompressionMethods.GZip |
-                    DecompressionMethods.Deflate |
-                    DecompressionMethods.Brotli
+                    DecompressionMethods.Deflate
             };
 
             _httpClient = new HttpClient(handler)
             {
-                Timeout = TimeSpan.FromSeconds(12)
+                Timeout = TimeSpan.FromSeconds(12),
+                DefaultRequestVersion = HttpVersion.Version11,
+                DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower
             };
 
             _httpClient.DefaultRequestHeaders.Accept.ParseAdd("application/json, text/javascript, */*; q=0.01");
@@ -42,7 +58,7 @@ namespace JoesScanner.Services
             _httpClient.DefaultRequestHeaders.Add("DNT", "1");
             _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36");
-            _httpClient.DefaultRequestHeaders.TryAddWithoutValidation("Accept-Encoding", "gzip, deflate, br");
+            _httpClient.DefaultRequestHeaders.TryAddWithoutValidation("Accept-Encoding", "gzip, deflate");
 
             _jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web)
             {
@@ -57,6 +73,7 @@ namespace JoesScanner.Services
             // optionally filter children by the selected Site.
 
             var baseUrl = NormalizeBaseUrl(_settingsService.ServerUrl);
+            AppLog.Add(() => $"History: lookups baseUrl={baseUrl}");
             if (string.IsNullOrWhiteSpace(baseUrl))
             {
                 return new HistoryLookupData
@@ -74,23 +91,52 @@ namespace JoesScanner.Services
             var sitesEndpoint = new Uri(baseUrl + "/sitesjson");
             var talkgroupsEndpoint = new Uri(baseUrl + "/talkgroupsjson");
 
+            AppLog.Add(() => $"History: lookup endpoints receivers={receiversEndpoint} sites={sitesEndpoint} talkgroups={talkgroupsEndpoint}");
+
             var receivers = await FetchLookupAsync(receiversEndpoint, cancellationToken);
             var sites = await FetchLookupAsync(sitesEndpoint, cancellationToken);
             var (talkgroups, groups) = await FetchTalkgroupsAsync(talkgroupsEndpoint, cancellationToken);
 
-            return new HistoryLookupData
+            AppLog.Add(() => $"History: lookup counts receivers={receivers.Count} sites={sites.Count} talkgroups={talkgroups.Count} groups={groups.Count}");
+
+            var result = new HistoryLookupData
             {
                 Receivers = PrependAll(receivers),
                 Sites = PrependAll(sites),
                 Talkgroups = PrependAll(talkgroups),
                 TalkgroupGroups = groups
             };
+
+            // Best-effort cache write per server. Never blocks the UI if it fails.
+            try
+            {
+                var serverKey = NormalizeServerKey(_settingsService.ServerUrl);
+                if (!string.IsNullOrWhiteSpace(serverKey))
+                    await _lookupsRepository.UpsertAsync(serverKey, result, DateTime.UtcNow, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                AppLog.Add(() => $"History: lookup cache write failed. ex={ex.GetType().Name}: {ex.Message}");
+            }
+
+            return result;
+        }
+
+        public Task<HistorySearchResult> SearchAroundAsync(
+            DateTime targetLocalTime,
+            HistorySearchFilters filters,
+            int windowSize,
+            CancellationToken cancellationToken = default)
+        {
+            return SearchAroundAsync(targetLocalTime, filters, windowSize, null, null, cancellationToken);
         }
 
         public async Task<HistorySearchResult> SearchAroundAsync(
             DateTime targetLocalTime,
             HistorySearchFilters filters,
             int windowSize,
+            DateTime? dateFromLocal,
+            DateTime? dateToLocal,
             CancellationToken cancellationToken = default)
         {
             windowSize = Math.Clamp(windowSize, 5, 100);
@@ -99,6 +145,8 @@ namespace JoesScanner.Services
                 start: 0,
                 length: 1,
                 filters: filters,
+                dateFromLocal: dateFromLocal,
+                dateToLocal: dateToLocal,
                 cancellationToken: cancellationToken);
 
             var total = head.TotalMatches;
@@ -121,7 +169,7 @@ namespace JoesScanner.Services
                 cancellationToken.ThrowIfCancellationRequested();
 
                 var mid = low + ((high - low) / 2);
-                var midCall = await FetchCallAtIndexAsync(mid, filters, cancellationToken);
+                var midCall = await FetchCallAtIndexAsync(mid, filters, dateFromLocal, dateToLocal, cancellationToken);
                 if (midCall == null)
                     break;
 
@@ -148,10 +196,10 @@ namespace JoesScanner.Services
             CallItem? callB = null;
 
             if (candidateA >= 0 && candidateA < total)
-                callA = await FetchCallAtIndexAsync(candidateA, filters, cancellationToken);
+                callA = await FetchCallAtIndexAsync(candidateA, filters, dateFromLocal, dateToLocal, cancellationToken);
 
             if (candidateB >= 0 && candidateB < total)
-                callB = await FetchCallAtIndexAsync(candidateB, filters, cancellationToken);
+                callB = await FetchCallAtIndexAsync(candidateB, filters, dateFromLocal, dateToLocal, cancellationToken);
 
             var bestIndex = 0;
             if (callA != null && callB != null)
@@ -178,7 +226,7 @@ namespace JoesScanner.Services
             if (start > maxStart)
                 start = maxStart;
 
-            var page = await FetchCallsPageAsync(start, windowSize, filters, cancellationToken);
+            var page = await FetchCallsPageAsync(start, windowSize, filters, dateFromLocal, dateToLocal, cancellationToken);
             var anchorIndex = bestIndex - start;
             if (anchorIndex < 0)
                 anchorIndex = 0;
@@ -195,33 +243,57 @@ namespace JoesScanner.Services
             };
         }
 
-        public async Task<HistoryCallsPage> GetCallsPageAsync(
+        public Task<HistoryCallsPage> GetCallsPageAsync(
             int start,
             int length,
             HistorySearchFilters filters,
             CancellationToken cancellationToken = default)
         {
-            var page = await FetchCallsPageAsync(start, length, filters, cancellationToken);
-            return new HistoryCallsPage
+            return GetCallsPageAsync(start, length, filters, null, null, cancellationToken);
+        }
+
+        public async Task<HistoryCallsPage> GetCallsPageAsync(
+            int start,
+            int length,
+            HistorySearchFilters filters,
+            DateTime? dateFromLocal,
+            DateTime? dateToLocal,
+            CancellationToken cancellationToken = default)
+        {
+            try
             {
-                Calls = page.Calls,
-                TotalMatches = page.TotalMatches
-            };
+                var page = await FetchCallsPageAsync(start, length, filters, dateFromLocal, dateToLocal, cancellationToken);
+                return new HistoryCallsPage
+                {
+                    Calls = page.Calls,
+                    TotalMatches = page.TotalMatches
+                };
+            }
+            catch (Exception ex)
+            {
+            AppLog.Add(() => $"History: GetCallsPageAsync failed. start={start} length={length} search={filters.GlobalSearch ?? string.Empty} ex={ex.GetType().Name}: {ex.Message}");
+                throw;
+            }
         }
 
-        private sealed class CallsPage
-        {
-            public List<CallItem> Calls { get; init; } = new();
-            public int TotalMatches { get; init; }
-        }
+        
+private async Task<CallItem?> FetchCallAtIndexAsync(
+    int globalIndex,
+    HistorySearchFilters filters,
+    DateTime? dateFromLocal,
+    DateTime? dateToLocal,
+    CancellationToken cancellationToken)
+{
+    if (globalIndex < 0)
+    {
+        return null;
+    }
 
-        private async Task<CallItem?> FetchCallAtIndexAsync(int index, HistorySearchFilters filters, CancellationToken cancellationToken)
-        {
-            var page = await FetchCallsPageAsync(index, 1, filters, cancellationToken);
-            return page.Calls.Count > 0 ? page.Calls[0] : null;
-        }
+    var page = await GetCallsPageAsync(globalIndex, 1, filters, dateFromLocal, dateToLocal, cancellationToken).ConfigureAwait(false);
+    return page.Calls.FirstOrDefault();
+}
 
-        private async Task<CallsPage> FetchCallsPageAsync(int start, int length, HistorySearchFilters filters, CancellationToken cancellationToken)
+private async Task<CallsPage> FetchCallsPageAsync(int start, int length, HistorySearchFilters filters, DateTime? dateFromLocal, DateTime? dateToLocal, CancellationToken cancellationToken)
         {
             start = Math.Max(0, start);
             length = Math.Clamp(length, 0, 200);
@@ -233,27 +305,98 @@ namespace JoesScanner.Services
             UpdateAuthorizationHeader();
 
             var callsUrl = baseUrl + "/calljson";
-            var payload = BuildDataTablesPayload(_draw, start, length, filters);
+            var payload = BuildDataTablesPayload(_draw, start, length, filters, dateFromLocal, dateToLocal);
             _draw++;
 
+            HttpResponseMessage? response = null;
+            string body;
+
+            // Trunking Recorder /calljson expects a DataTables payload; on Joe's hosted setup we must also
+            // mimic the browser's request headers closely (Content-Type and Referer), otherwise Cloudflare can return 502.
+            var dateColumnSearch = string.Empty;
+            try
+            {
+                if (payload.Columns != null)
+                {
+                    // Payload.Columns may be IEnumerable; materialize so Count and indexing are reliable.
+                    var cols = payload.Columns as IList<DataTablesColumn> ?? payload.Columns.ToList();
+                    if (cols.Count > 2)
+                        dateColumnSearch = cols[2].Search?.Value ?? string.Empty;
+                }
+            }
+            catch
+            {
+                dateColumnSearch = string.Empty;
+            }
+
+            AppLog.Add(() => $"History: calljson request. url={callsUrl} start={start} length={length} dateColumnSearch='{dateColumnSearch}'");
+
+            using var request = new HttpRequestMessage(HttpMethod.Post, callsUrl);
+
+            // Force HTTP/1.1 for calljson on Android to avoid rare hangs with some HTTP/2 stacks.
+            request.Version = HttpVersion.Version11;
+            request.VersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
+            request.Headers.ConnectionClose = true;
+
+            // Mirror browser headers that the hosted edge expects.
+            request.Headers.TryAddWithoutValidation("Accept", "application/json, text/javascript, */*; q=0.01");
+            request.Headers.TryAddWithoutValidation("X-Requested-With", "XMLHttpRequest");
+
+            if (dateFromLocal.HasValue)
+            {
+                var from = dateFromLocal.Value.Date;
+                var to = dateToLocal?.Date ?? from.AddDays(1);
+                if (to <= from)
+                    to = from.AddDays(1);
+
+                var dateStart = from.ToString("yyyy-MM-dd 00:00:00", CultureInfo.InvariantCulture);
+                var dateEnd = to.ToString("yyyy-MM-dd 00:00:00", CultureInfo.InvariantCulture);
+
+                var referer = $"{baseUrl}/?DateStart={WebUtility.UrlEncode(dateStart)}&DateEnd={WebUtility.UrlEncode(dateEnd)}";
+                if (Uri.TryCreate(referer, UriKind.Absolute, out var refererUri))
+                    request.Headers.Referrer = refererUri;
+            }
+
             var jsonPayload = JsonSerializer.Serialize(payload, _jsonOptions);
-            using var content = new StringContent(jsonPayload, Encoding.UTF8, "application/x-www-form-urlencoded");
-            using var response = await _httpClient.PostAsync(callsUrl, content, cancellationToken);
+
+            // TR's UI often posts JSON while declaring form encoding.
+            // Use the same content-type to keep the hosted edge happy.
+            var content = new StringContent(jsonPayload, Encoding.UTF8);
+            content.Headers.ContentType = new MediaTypeHeaderValue("application/x-www-form-urlencoded");
+            content.Headers.ContentType.CharSet = "UTF-8";
+            request.Content = content;
+
+            // Enforce a hard per-request timeout in addition to HttpClient.Timeout.
+            // This guards against rare platform-level hangs where HttpClient.Timeout is not honored.
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(TimeSpan.FromSeconds(15));
+
+            try
+            {
+                response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeoutCts.Token).ConfigureAwait(false);
+                AppLog.Add(() => $"History: calljson response headers received. url={callsUrl} status={(int)response.StatusCode} {response.ReasonPhrase ?? string.Empty}");
+                body = await response.Content.ReadAsStringAsync(timeoutCts.Token).ConfigureAwait(false);
+                AppLog.Add(() => $"History: calljson body read. url={callsUrl} bytes={body?.Length ?? 0}");
+            }
+            catch (OperationCanceledException)
+            {
+                AppLog.Add(() => $"History: calljson timed out/canceled. url={callsUrl} start={start} length={length}");
+                throw;
+            }
 
             if (!response.IsSuccessStatusCode)
             {
                 var statusInt = (int)response.StatusCode;
+
                 if (response.StatusCode == HttpStatusCode.Unauthorized || response.StatusCode == HttpStatusCode.Forbidden)
                     throw new InvalidOperationException($"History auth failed (HTTP {statusInt} {response.ReasonPhrase}).");
 
-                var raw = string.Empty;
-                try { raw = await response.Content.ReadAsStringAsync(cancellationToken); } catch { }
+                AppLog.Add(() => $"History: calljson failed. url={callsUrl} status={statusInt} reason={response.ReasonPhrase ?? string.Empty} body={Truncate(body, 500)}");
 
                 throw new InvalidOperationException(
-                    $"History calljson failed (HTTP {statusInt} {response.ReasonPhrase}). Body={Truncate(raw, 400)}");
+                    $"History calljson failed (HTTP {statusInt} {response.ReasonPhrase}). Body={Truncate(body, 400)}");
             }
 
-            var body = await response.Content.ReadAsStringAsync(cancellationToken);
             if (string.IsNullOrWhiteSpace(body))
                 return new CallsPage();
 
@@ -272,12 +415,61 @@ namespace JoesScanner.Services
             var result = new List<CallItem>();
             if (root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array)
             {
+                var rowsToPersist = new List<DbCallRecord>();
+
                 foreach (var e in data.EnumerateArray())
                 {
                     var row = ParseRow(e);
+
+                    // Persist the raw call properties for offline history (per-server retention is enforced in the repository).
+                    var record = MapToDbRecord(row, baseUrl);
+                    if (record != null)
+                        rowsToPersist.Add(record);
+
                     var call = ConvertRowToCallItem(row, baseUrl);
                     if (call != null)
                         result.Add(call);
+                }
+
+                try
+                {
+                    if (rowsToPersist.Count > 0)
+                    {
+                        var persistUrl = baseUrl;
+                        var persistRows = rowsToPersist;
+
+                        _ = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                using var waitCts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+                                await _persistSemaphore.WaitAsync(waitCts.Token).ConfigureAwait(false);
+                            }
+                            catch
+                            {
+                                // Skip persistence if we cannot acquire the lock quickly.
+                                return;
+                            }
+
+                            try
+                            {
+                                using var persistCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                                await _localCallsRepository.UpsertCallsAsync(persistUrl, persistRows, persistCts.Token).ConfigureAwait(false);
+                            }
+                            catch
+                            {
+                                // Best effort only.
+                            }
+                            finally
+                            {
+                                try { _persistSemaphore.Release(); } catch { }
+                            }
+                        });
+                    }
+                }
+                catch
+                {
+                    // Never let local persistence break history browsing.
                 }
             }
 
@@ -294,15 +486,75 @@ namespace JoesScanner.Services
             return baseUrl.TrimEnd('/');
         }
 
+        private static string NormalizeServerKey(string? serverUrl)
+        {
+            if (string.IsNullOrWhiteSpace(serverUrl))
+                return string.Empty;
+
+            var raw = serverUrl.Trim().TrimEnd('/');
+
+            try
+            {
+                if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri))
+                    return raw;
+
+                var builder = new UriBuilder(uri)
+                {
+                    Path = string.Empty,
+                    Query = string.Empty,
+                    Fragment = string.Empty,
+                    Port = uri.IsDefaultPort ? -1 : uri.Port
+                };
+
+                return builder.Uri.ToString().TrimEnd('/');
+            }
+            catch
+            {
+                return raw;
+            }
+        }
+
         private void UpdateAuthorizationHeader()
         {
             _httpClient.DefaultRequestHeaders.Authorization = null;
 
-            var serverUrl = _settingsService.ServerUrl ?? string.Empty;
-            if (!Uri.TryCreate(serverUrl, UriKind.Absolute, out var serverUri))
+            var serverUrlRaw = _settingsService.ServerUrl ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(serverUrlRaw))
                 return;
-            string username = _settingsService.BasicAuthUsername;
-            string password = _settingsService.BasicAuthPassword ?? string.Empty;
+
+            var serverKey = NormalizeBaseUrl(serverUrlRaw);
+            if (string.IsNullOrWhiteSpace(serverKey))
+                return;
+
+            var hostedJoe = string.Equals(serverKey.TrimEnd('/'), "https://app.joesscanner.com", StringComparison.OrdinalIgnoreCase);
+            var useServiceCreds = false;
+
+            // Only use the hosted Trunking Recorder service credentials after the user's account has been validated
+            // via the Auth server AND that validation is still valid (not expired).
+            if (hostedJoe)
+            {
+                var ok = _settingsService.SubscriptionLastStatusOk;
+                var expires = _settingsService.SubscriptionExpiresUtc;
+                var tier = _settingsService.SubscriptionTierLevel;
+
+                if (ok && tier >= 1 && expires.HasValue && expires.Value.ToUniversalTime() > DateTime.UtcNow)
+                {
+                    useServiceCreds = true;
+                    AppLog.Add(() => "History: auth applied (hosted service creds).");
+                }
+                else
+                {
+                    AppLog.Add(() => $"History: hosted auth NOT applied. ok={ok} tier={tier} expiresUtc={(expires.HasValue ? expires.Value.ToUniversalTime().ToString("O") : "null")}");
+                    return;
+                }
+            }
+
+            // Hosted gateway uses built-in service credentials.
+            const string serviceUser = "secappass";
+            const string servicePass = "7a65vBLeqLjdRut5bSav4eMYGUJPrmjHhgnPmEji3q3S7tZ3K5aadFZz2EZtbaE7";
+
+            var username = useServiceCreds ? serviceUser : (_settingsService.BasicAuthUsername ?? string.Empty).Trim();
+            var password = useServiceCreds ? servicePass : (_settingsService.BasicAuthPassword ?? string.Empty);
 
             if (string.IsNullOrWhiteSpace(username))
                 return;
@@ -312,9 +564,7 @@ namespace JoesScanner.Services
             var base64 = Convert.ToBase64String(bytes);
 
             _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", base64);
-        }
-
-        private static string Truncate(string? value, int maxChars)
+        }private static string Truncate(string? value, int maxChars)
         {
             if (string.IsNullOrEmpty(value))
                 return string.Empty;
@@ -340,17 +590,26 @@ namespace JoesScanner.Services
             try
             {
                 using var response = await _httpClient.GetAsync(uri, cancellationToken);
-                if (!response.IsSuccessStatusCode)
-                    return Array.Empty<HistoryLookupItem>();
-
                 var body = await response.Content.ReadAsStringAsync(cancellationToken);
+
+                if (!response.IsSuccessStatusCode)
+                {
+            AppLog.Add(() => $"History: lookup failed. url={uri} status={(int)response.StatusCode} reason={response.ReasonPhrase ?? string.Empty} body={Truncate(body, 500)}");
+                    return Array.Empty<HistoryLookupItem>();
+                }
+
                 if (string.IsNullOrWhiteSpace(body))
                     return Array.Empty<HistoryLookupItem>();
 
-                return ParseLookupBody(body);
+                var items = ParseLookupBody(body);
+
+                try { AppLog.Add(() => $"History: lookup ok. url={uri} count={items.Count}"); } catch { }
+
+                return items;
             }
-            catch
+            catch (Exception ex)
             {
+            AppLog.Add(() => $"History: lookup threw. url={uri} ex={ex.GetType().Name}: {ex.Message}");
                 return Array.Empty<HistoryLookupItem>();
             }
         }
@@ -362,10 +621,14 @@ namespace JoesScanner.Services
             try
             {
                 using var response = await _httpClient.GetAsync(uri, cancellationToken);
-                if (!response.IsSuccessStatusCode)
-                    return (Array.Empty<HistoryLookupItem>(), new Dictionary<string, IReadOnlyList<HistoryLookupItem>>(StringComparer.OrdinalIgnoreCase));
 
                 var body = await response.Content.ReadAsStringAsync(cancellationToken);
+
+                if (!response.IsSuccessStatusCode)
+                {
+            AppLog.Add(() => $"History: talkgroups lookup failed. url={uri} status={(int)response.StatusCode} reason={response.ReasonPhrase ?? string.Empty} body={Truncate(body, 500)}");
+                    return (Array.Empty<HistoryLookupItem>(), new Dictionary<string, IReadOnlyList<HistoryLookupItem>>(StringComparer.OrdinalIgnoreCase));
+                }
                 if (string.IsNullOrWhiteSpace(body))
                     return (Array.Empty<HistoryLookupItem>(), new Dictionary<string, IReadOnlyList<HistoryLookupItem>>(StringComparer.OrdinalIgnoreCase));
 
@@ -442,8 +705,9 @@ namespace JoesScanner.Services
                 // Fallback to the generic parser.
                 return (ParseLookupBody(body), new Dictionary<string, IReadOnlyList<HistoryLookupItem>>(StringComparer.OrdinalIgnoreCase));
             }
-            catch
+            catch (Exception ex)
             {
+            AppLog.Add(() => $"History: talkgroups lookup threw. url={uri} ex={ex.GetType().Name}: {ex.Message}");
                 return (Array.Empty<HistoryLookupItem>(), new Dictionary<string, IReadOnlyList<HistoryLookupItem>>(StringComparer.OrdinalIgnoreCase));
             }
         }
@@ -668,6 +932,13 @@ namespace JoesScanner.Services
 
                 if (el.ValueKind == JsonValueKind.Object)
                 {
+                    // Select2 style group wrappers: { text, id:null, children:[{id,text}...] }
+                    if (el.TryGetProperty("children", out var children) && children.ValueKind == JsonValueKind.Array)
+                    {
+                        items.AddRange(ParseJsonArray(children));
+                        continue;
+                    }
+
                     var label = CleanDisplayLabel((GetFirstString(el,
                             "label", "Label", "text", "Text", "name", "Name",
                             "SystemName", "SiteLabel", "TargetLabel", "Talkgroup", "TalkGroup", "TalkgroupLabel", "TalkgroupName", "Description"
@@ -709,6 +980,25 @@ namespace JoesScanner.Services
             }
 
             return null;
+        }
+
+
+        private static string EscapeUrlPathSegments(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url))
+                return string.Empty;
+
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var u))
+                return url.Replace(" ", "%20");
+
+            var b = new UriBuilder(u);
+
+            var segments = u.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries)
+                .Select(Uri.EscapeDataString);
+
+            b.Path = "/" + string.Join("/", segments);
+
+            return b.Uri.ToString();
         }
 
         private static string NormalizeGroupKey(string input)
@@ -758,7 +1048,7 @@ namespace JoesScanner.Services
                 .ToList();
         }
 
-        private static DataTablesPayload BuildDataTablesPayload(int draw, int start, int length, HistorySearchFilters filters)
+        private static DataTablesPayload BuildDataTablesPayload(int draw, int start, int length, HistorySearchFilters filters, DateTime? dateFromLocal, DateTime? dateToLocal)
         {
             // Match the Trunking Recorder /calljson DataTables column schema.
             // Filters are applied via per-column search values, which is what TR expects.
@@ -804,6 +1094,33 @@ namespace JoesScanner.Services
                 Col("AudioFilename", "Filename", false)
             };
 
+            
+            // Date filter: Trunking Recorder expects this via the Date column's per-column search value.
+            // The server-side schema uses the formatted Date string (e.g. 2/22/2026) rather than StartTime.
+            if (dateFromLocal.HasValue)
+            {
+                var from = dateFromLocal.Value;
+                var to = dateToLocal ?? from.AddDays(1);
+
+                if (to <= from)
+                    to = from.AddSeconds(1);
+
+                // Trunking Recorder accepts a date range in the format:
+                //   yyyy-MM-dd HH:mm:ss|yyyy-MM-dd HH:mm:ss
+                // Using the full timestamp lets History freeze results at the moment search is performed.
+                var dateLower = from.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+                var dateUpper = to.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+
+                columns[2].Search.Value = $"{dateLower}|{dateUpper}";
+                columns[2].Search.Regex = false;
+            }
+// Default sort: Date then Time (descending)
+            var order = new[]
+            {
+                new DataTablesOrder { Column = 2, Dir = "desc" },
+                new DataTablesOrder { Column = 1, Dir = "desc" }
+            };
+
             // Apply dropdown filters via column search values.
             // Talkgroup: TR example uses TargetID search = "14410-ICAWIN".
             if (!string.IsNullOrWhiteSpace(talkgroupValue))
@@ -846,22 +1163,71 @@ namespace JoesScanner.Services
                 Start = start,
                 Length = length,
                 Search = new DataTablesSearch { Value = globalSearch, Regex = false },
-                Order = Array.Empty<DataTablesOrder>(),
+                Order = order,
                 Columns = columns.ToArray(),
                 SmartSort = false
             };
 
-            static DataTablesColumn Col(object? data, string name, bool orderable)
+        }
+
+        // Flattens the DataTables payload into classic form-encoded key/value pairs.
+        private static IEnumerable<KeyValuePair<string, string>> FlattenDataTablesPayload(DataTablesPayload payload)
+        {
+            var list = new List<KeyValuePair<string, string>>
             {
-                return new DataTablesColumn
+                new("draw", payload.Draw.ToString(CultureInfo.InvariantCulture)),
+                new("start", payload.Start.ToString(CultureInfo.InvariantCulture)),
+                new("length", payload.Length.ToString(CultureInfo.InvariantCulture)),
+                new("search[value]", payload.Search?.Value ?? string.Empty),
+                new("search[regex]", (payload.Search?.Regex ?? false) ? "true" : "false"),
+                new("SmartSort", payload.SmartSort ? "true" : "false")
+            };
+
+            if (payload.Order != null)
+            {
+                for (var i = 0; i < payload.Order.Length; i++)
                 {
-                    Data = data,
-                    Name = name,
-                    Searchable = true,
-                    Orderable = orderable,
-                    Search = new DataTablesSearch { Value = string.Empty, Regex = false }
-                };
+                    list.Add(new($"order[{i}][column]", payload.Order[i].Column.ToString(CultureInfo.InvariantCulture)));
+                    list.Add(new($"order[{i}][dir]", payload.Order[i].Dir ?? "desc"));
+                }
             }
+
+            if (payload.Columns != null)
+            {
+                for (var i = 0; i < payload.Columns.Length; i++)
+                {
+                    var c = payload.Columns[i];
+                    list.Add(new($"columns[{i}][data]", c.Data?.ToString() ?? string.Empty));
+                    list.Add(new($"columns[{i}][name]", c.Name ?? string.Empty));
+                    list.Add(new($"columns[{i}][searchable]", c.Searchable ? "true" : "false"));
+                    list.Add(new($"columns[{i}][orderable]", c.Orderable ? "true" : "false"));
+                    list.Add(new($"columns[{i}][search][value]", c.Search?.Value ?? string.Empty));
+                    list.Add(new($"columns[{i}][search][regex]", (c.Search?.Regex ?? false) ? "true" : "false"));
+                }
+            }
+
+            return list;
+        }
+
+        // Class-scope helper (in addition to the local function above) so builds succeed even if
+        // local functions are disabled by language settings.
+        private static DataTablesColumn Col(object? data, string name, bool orderable)
+        {
+            return new DataTablesColumn
+            {
+                Data = data,
+                Name = name,
+                Searchable = true,
+                Orderable = orderable,
+                Search = new DataTablesSearch { Value = string.Empty, Regex = false }
+            };
+        }
+
+
+        private sealed class CallsPage
+        {
+            public List<CallItem> Calls { get; init; } = new();
+            public int TotalMatches { get; init; }
         }
 
         private sealed class DataTablesPayload
@@ -930,13 +1296,25 @@ namespace JoesScanner.Services
             public string? DT_RowId { get; set; }
             public string? StartTime { get; set; }
             public string? StartTimeUTC { get; set; }
+            public string? Time { get; set; }
+            public string? Date { get; set; }
             public string? TargetID { get; set; }
             public string? TargetLabel { get; set; }
+            public string? TargetTag { get; set; }
             public string? SourceID { get; set; }
             public string? SourceLabel { get; set; }
+            public string? SourceTag { get; set; }
+            public string? LCN { get; set; }
+            public string? Frequency { get; set; }
+            public string? CallAudioType { get; set; }
+            public string? SystemID { get; set; }
+            public string? SystemLabel { get; set; }
+            public string? SystemType { get; set; }
+            public string? AudioStartPos { get; set; }
             public string? SiteID { get; set; }
             public string? SiteLabel { get; set; }
             public string? VoiceReceiver { get; set; }
+            public string? CallType { get; set; }
             public string? CallText { get; set; }
             public string? Transcript { get; set; }
             public string? Transcription { get; set; }
@@ -951,13 +1329,25 @@ namespace JoesScanner.Services
                 DT_RowId = GetString(e, "DT_RowId"),
                 StartTime = GetString(e, "StartTime"),
                 StartTimeUTC = GetString(e, "StartTimeUTC"),
+                Time = GetString(e, "Time"),
+                Date = GetString(e, "Date"),
                 TargetID = GetString(e, "TargetID"),
                 TargetLabel = GetString(e, "TargetLabel"),
+                TargetTag = GetString(e, "TargetTag"),
                 SourceID = GetString(e, "SourceID"),
                 SourceLabel = GetString(e, "SourceLabel"),
+                SourceTag = GetString(e, "SourceTag"),
+                LCN = GetString(e, "LCN"),
+                Frequency = GetString(e, "Frequency"),
+                CallAudioType = GetString(e, "CallAudioType"),
+                SystemID = GetString(e, "SystemID"),
+                SystemLabel = GetString(e, "SystemLabel"),
+                SystemType = GetString(e, "SystemType"),
+                AudioStartPos = GetString(e, "AudioStartPos"),
                 SiteID = GetString(e, "SiteID"),
                 SiteLabel = GetString(e, "SiteLabel"),
                 VoiceReceiver = GetString(e, "VoiceReceiver"),
+                CallType = GetString(e, "CallType"),
                 CallText = GetString(e, "CallText"),
                 Transcript = GetString(e, "Transcript"),
                 Transcription = GetString(e, "Transcription"),
@@ -1040,6 +1430,83 @@ namespace JoesScanner.Services
             return DateTime.Now;
         }
 
+        private static string? CapTextRaw(string? text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return null;
+
+            var s = text.Trim();
+            const int maxChars = 20000;
+            if (s.Length > maxChars)
+                s = s.Substring(0, maxChars);
+            return s;
+        }
+
+        private static string? CanonicalTranscription(CallRow r)
+        {
+            // Phase 1 rule: Transcription > Transcript > CallText
+            var s = (r.Transcription ?? r.Transcript ?? r.CallText ?? string.Empty).Trim();
+            return CapTextRaw(s);
+        }
+
+        private static DbCallRecord? MapToDbRecord(CallRow r, string serverKey)
+        {
+            var rawId = r.DT_RowId?.Trim();
+            if (string.IsNullOrWhiteSpace(rawId))
+                return null;
+
+            int? lcn = null;
+            if (!string.IsNullOrWhiteSpace(r.LCN) && int.TryParse(r.LCN, NumberStyles.Integer, CultureInfo.InvariantCulture, out var lcnValue))
+                lcn = lcnValue;
+
+            double? frequency = null;
+            if (!string.IsNullOrWhiteSpace(r.Frequency) && double.TryParse(r.Frequency, NumberStyles.Float, CultureInfo.InvariantCulture, out var freqValue))
+                frequency = freqValue;
+
+            double? audioStartPos = null;
+            if (!string.IsNullOrWhiteSpace(r.AudioStartPos) && double.TryParse(r.AudioStartPos, NumberStyles.Float, CultureInfo.InvariantCulture, out var posValue))
+                audioStartPos = posValue;
+
+            double? durationSeconds = null;
+            if (!string.IsNullOrWhiteSpace(r.CallDuration) && double.TryParse(r.CallDuration, NumberStyles.Float, CultureInfo.InvariantCulture, out var dur))
+                durationSeconds = dur;
+
+            var startUtc = !string.IsNullOrWhiteSpace(r.StartTimeUTC) ? r.StartTimeUTC : r.StartTime;
+            var now = DateTimeOffset.UtcNow;
+
+            return new DbCallRecord
+            {
+                ServerKey = (serverKey ?? string.Empty).Trim().TrimEnd('/'),
+                BackendId = rawId,
+                StartTimeUtc = CapTextRaw(startUtc),
+                TimeText = CapTextRaw(r.Time),
+                DateText = CapTextRaw(r.Date),
+                TargetId = CapTextRaw(r.TargetID),
+                TargetLabel = CapTextRaw(r.TargetLabel),
+                TargetTag = CapTextRaw(r.TargetTag),
+                SourceId = CapTextRaw(r.SourceID),
+                SourceLabel = CapTextRaw(r.SourceLabel),
+                SourceTag = CapTextRaw(r.SourceTag),
+                Lcn = lcn,
+                Frequency = frequency,
+                CallAudioType = CapTextRaw(r.CallAudioType),
+                CallType = CapTextRaw(r.CallType),
+                SystemId = CapTextRaw(r.SystemID),
+                SystemLabel = CapTextRaw(r.SystemLabel),
+                SystemType = CapTextRaw(r.SystemType),
+                SiteId = CapTextRaw(r.SiteID),
+                SiteLabel = CapTextRaw(r.SiteLabel),
+                VoiceReceiver = CapTextRaw(r.VoiceReceiver),
+                AudioFilename = CapTextRaw(r.AudioFilename),
+                AudioStartPos = audioStartPos,
+                CallDurationSeconds = durationSeconds,
+                CallText = CapTextRaw(r.CallText),
+                Transcription = CanonicalTranscription(r),
+                ReceivedAtUtc = now,
+                UpdatedAtUtc = now
+            };
+        }
+
         private static CallItem? ConvertRowToCallItem(CallRow r, string baseUrl)
         {
             try
@@ -1081,14 +1548,28 @@ namespace JoesScanner.Services
                 var audioToken = ExtractFirstUrlOrPath(r.AudioFilename);
                 if (!string.IsNullOrWhiteSpace(audioToken))
                 {
-                    if (audioToken.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
-                        audioToken.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                    try
                     {
-                        audioUrl = audioToken;
+                        if (audioToken.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                            audioToken.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                        {
+                            // Ensure any spaces/special chars in TR-generated paths are properly escaped.
+                            audioUrl = EscapeUrlPathSegments(audioToken);
+                        }
+                        else
+                        {
+                            var baseUri = new Uri(baseUrl.EndsWith("/", StringComparison.Ordinal) ? baseUrl : (baseUrl + "/"));
+                            audioUrl = EscapeUrlPathSegments(new Uri(baseUri, audioToken.TrimStart('/')).ToString());
+                        }
                     }
-                    else
+                    catch
                     {
-                        audioUrl = $"{baseUrl}/{audioToken.TrimStart('/')}";
+                        // Fallback to best-effort string concat.
+                        if (audioToken.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                            audioToken.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                            audioUrl = audioToken;
+                        else
+                            audioUrl = $"{baseUrl}/{audioToken.TrimStart('/')}";
                     }
                 }
 

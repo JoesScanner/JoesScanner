@@ -22,6 +22,8 @@ namespace JoesScanner.ViewModels
         private readonly FilterService _filterService = FilterService.Instance;
         private readonly ISubscriptionService _subscriptionService;
         private readonly ITelemetryService _telemetryService;
+        private readonly IHistoryLookupsCacheService _historyLookupsCacheService;
+		private readonly IPlaybackCoordinator _playbackCoordinator;
 
         private CancellationTokenSource? _cts;
         private CancellationTokenSource? _audioCts;
@@ -32,7 +34,7 @@ namespace JoesScanner.ViewModels
 
 
         private int _audioToggleSerial;
-// When true, the live queue continues to run but audio output is suppressed.
+        // When true, the live queue continues to run but audio output is suppressed.
         // This is used when the user navigates to the History tab.
         private volatile bool _isMainAudioSoftMuted;
 
@@ -56,6 +58,15 @@ namespace JoesScanner.ViewModels
 
         // True while we are playing through the backlog.
         private bool _isQueuePlaybackRunning;
+
+        // True when we should resume playback after a temporary soft mute (History tab, etc.).
+        // This prevents the UI from starting playback when AutoPlay is off and nothing was playing.
+        private bool _resumePlaybackAfterSoftMute;
+
+        // When the user explicitly starts monitoring (presses Play/Start Monitoring), keep queue playback alive
+        // even if AutoPlay is off. Otherwise calls can arrive and scroll but never advance audio unless the
+        // user taps each call.
+        private bool _userRunShouldDriveQueue;
 
         // New calls received while the user is behind live are stored here so the backlog can play in order.
         // Newest pending call is stored at index 0.
@@ -152,7 +163,10 @@ namespace JoesScanner.ViewModels
             ISettingsService settingsService,
             IAudioPlaybackService audioPlaybackService,
             ISystemMediaService systemMediaService,
-            ISubscriptionService subscriptionService, ITelemetryService telemetryService)
+            ISubscriptionService subscriptionService,
+            ITelemetryService telemetryService,
+			IHistoryLookupsCacheService historyLookupsCacheService,
+			IPlaybackCoordinator playbackCoordinator)
         {
             _callStreamService = callStreamService ?? throw new ArgumentNullException(nameof(callStreamService));
             _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
@@ -160,6 +174,8 @@ namespace JoesScanner.ViewModels
             _systemMediaService = systemMediaService ?? throw new ArgumentNullException(nameof(systemMediaService));
             _subscriptionService = subscriptionService ?? throw new ArgumentNullException(nameof(subscriptionService));
             _telemetryService = telemetryService ?? throw new ArgumentNullException(nameof(telemetryService));
+            _historyLookupsCacheService = historyLookupsCacheService ?? throw new ArgumentNullException(nameof(historyLookupsCacheService));
+			_playbackCoordinator = playbackCoordinator ?? throw new ArgumentNullException(nameof(playbackCoordinator));
 
             _audioHttpClient = new HttpClient
             {
@@ -168,28 +184,25 @@ namespace JoesScanner.ViewModels
                 Timeout = Timeout.InfiniteTimeSpan
             };
 
-            // Initialize server URL from settings or default.
-            var initialServerUrl = _settingsService.ServerUrl;
-            if (string.IsNullOrWhiteSpace(initialServerUrl))
-            {
-                initialServerUrl = SettingsViewModel.DefaultServerUrl;
-                _settingsService.ServerUrl = initialServerUrl;
-            }
-
-            _serverUrl = initialServerUrl;
+            // Initialize server URL from settings.
+            // IMPORTANT: Do not force a default URL into storage here.
+            // If the user has not configured a server, _serverUrl stays blank and
+            // StartMonitoringAsync will prompt them to set one in Settings.
+            _serverUrl = _settingsService.ServerUrl ?? string.Empty;
 
             // Global audio flag persisted across runs.
             // Default is true so a fresh install behaves like a radio.
-            _audioEnabled = Preferences.Get("AudioEnabled", true);
+            _audioEnabled = AppStateStore.GetBool("audio_enabled", true);
 
-            // AutoPlay is tied to AudioEnabled.
-            _autoPlay = _audioEnabled;
-            _settingsService.AutoPlay = _autoPlay;
+			// AutoPlay is an explicit user setting (independent from AudioEnabled).
+			// Do not cache it here; it must reflect the Settings page immediately.
+			_autoPlay = _settingsService.AutoPlay;
             // Call retention is now fixed after removing queue call control settings.
             // MaxCallsToKeep is enforced when calls are inserted.
 
-            // Restore playback speed step (0 = 1x, 1 = 1.5x, 2 = 2x).
-            var savedSpeed = Preferences.Get(PlaybackSpeedStepPreferenceKey, 0.0);
+            // Restore playback speed step.
+            // V2 steps: 0=1x, 1=1.25x, 2=1.5x, 3=1.75x, 4=2x
+            var savedSpeed = AppStateStore.GetDouble("playback_speed_step", 0.0);
             PlaybackSpeedStep = savedSpeed;
 
             // Always show newest calls at the top now.
@@ -284,6 +297,12 @@ namespace JoesScanner.ViewModels
 
             if (isMuted)
             {
+                // Only resume when unmuted if something was already playing.
+                _resumePlaybackAfterSoftMute =
+                    IsRunning &&
+                    AudioEnabled &&
+                    (_isQueuePlaybackRunning || _currentPlayingCall != null);
+
                 // Cancel any in-flight playback immediately, but do not reset queue state.
                 if (_audioCts != null)
                 {
@@ -294,11 +313,15 @@ namespace JoesScanner.ViewModels
                 return;
             }
 
-            // Unmuted: if the queue is running and audio is enabled, resume playback.
-            if (IsRunning && AudioEnabled)
+			// Unmuted: never start new playback when nothing was playing.
+			if (_resumePlaybackAfterSoftMute && IsRunning && AudioEnabled)
             {
-                _ = EnsureQueuePlaybackAsync();
+                _resumePlaybackAfterSoftMute = false;
+				_ = RequestQueuePlaybackAsync("SoftMuteUnmuteResume", true);
+                return;
             }
+
+            _resumePlaybackAfterSoftMute = false;
         }
 
         private Task SystemPlayAsync()
@@ -307,7 +330,10 @@ namespace JoesScanner.ViewModels
             {
                 if (!IsRunning)
                     await StartMonitoringAsync();
-            });
+            
+                    if (IsRunning && AudioEnabled)
+                        _ = RequestQueuePlaybackAsync("UserPlay", true);
+});
         }
 
         private Task SystemStopAsync()
@@ -336,8 +362,6 @@ namespace JoesScanner.ViewModels
                     await NavigateToAdjacentCallAsync(1);
             });
         }
-
-        private const string LastConnectedPreferenceKey = "LastConnectedOnExit";        private const string PlaybackSpeedStepPreferenceKey = "PlaybackSpeedStep";
 
         private const string ServiceAuthUsername = "secapppass";
         private const string ServiceAuthPassword = "7a65vBLeqLjdRut5bSav4eMYGUJPrmjHhgnPmEji3q3S7tZ3K5aadFZz2EZtbaE7";
@@ -382,10 +406,7 @@ namespace JoesScanner.ViewModels
                 OnPropertyChanged(nameof(AudioButtonBackground));
                 OnPropertyChanged(nameof(IsSpeedButtonsEnabled));
 
-                // AutoPlay is tied to AudioEnabled.
-                AutoPlay = value;
-
-                Preferences.Set("AudioEnabled", value);
+                AppStateStore.SetBool("audio_enabled", value);
 
                 // Refresh UI state immediately, then do any heavier work on the UI thread.
                 UpdateQueueDerivedState();
@@ -444,13 +465,41 @@ namespace JoesScanner.ViewModels
                     {
                     }
 
-                    if (IsRunning && _audioEnabled && AutoPlay)
-                    {
-                        _ = EnsureQueuePlaybackAsync();
-                    }
+					if (IsRunning && _audioEnabled && (_settingsService.AutoPlay || _userRunShouldDriveQueue))
+						_ = RequestQueuePlaybackAsync("AudioEnabledOn", userInitiated: _userRunShouldDriveQueue);
                 });
             }
         }
+
+		private Task RequestQueuePlaybackAsync(string reason, bool userInitiated)
+		{
+			return MainThread.InvokeOnMainThreadAsync(async () =>
+			{
+				try
+				{
+					// Always pull AutoPlay from the settings service so the Settings page is the single source of truth.
+					_autoPlay = _settingsService.AutoPlay;
+					var canStart = _playbackCoordinator.CanStartQueuePlayback(
+						reason,
+						_settingsService.ServerUrl,
+						userInitiated: userInitiated,
+						isRunning: IsRunning,
+						audioEnabled: AudioEnabled,
+						isMainAudioSoftMuted: _isMainAudioSoftMuted,
+						isAlreadyPlaying: _currentPlayingCall != null,
+						isQueuePlaybackRunning: _isQueuePlaybackRunning,
+						visibleQueueCount: Calls.Count);
+
+					if (!canStart)
+						return;
+
+					await EnsureQueuePlaybackAsync();
+				}
+				catch
+				{
+				}
+			});
+		}
 
 
         // Text shown on the main page audio button.
@@ -498,7 +547,7 @@ namespace JoesScanner.ViewModels
         {
             try
             {
-                AppLog.Add($"Server changed in Settings. old={oldServerUrl} new={newServerUrl}. Stopping playback and disconnecting.");
+                AppLog.Add(() => $"Server changed in Settings. old={oldServerUrl} new={newServerUrl}. Stopping playback and disconnecting.");
 
                 // Ensure we fully stop the monitoring loop and any in flight audio.
                 await StopMonitoringAsync();
@@ -508,7 +557,7 @@ namespace JoesScanner.ViewModels
             }
             catch (Exception ex)
             {
-                AppLog.Add($"Error stopping for server change: {ex.Message}");
+                AppLog.Add(() => $"Error stopping for server change: {ex.Message}");
             }
         }
 
@@ -634,7 +683,7 @@ namespace JoesScanner.ViewModels
                 _lastQueueEvent = value ?? string.Empty;
                 OnPropertyChanged();
 
-                AppLog.Add(_lastQueueEvent);
+                AppLog.Add(() => _lastQueueEvent);
             }
         }
 
@@ -788,7 +837,7 @@ namespace JoesScanner.ViewModels
             OnPropertyChanged(nameof(IsMediaButtonsEnabled));
             OnPropertyChanged(nameof(IsSpeedButtonsEnabled));
 
-            AppLog.Add($"Connection status changed to {status} ({text})");
+            AppLog.Add(() => $"Connection status changed to {status} ({text})");
 
             try
             {
@@ -1126,7 +1175,7 @@ namespace JoesScanner.ViewModels
             {
                 var clamped = value;
                 if (clamped < 0) clamped = 0;
-                if (clamped > 2) clamped = 2;
+                if (clamped > 4) clamped = 4;
                 clamped = Math.Round(clamped);
 
                 if (Math.Abs(_playbackSpeedStep - clamped) < 0.001)
@@ -1136,24 +1185,32 @@ namespace JoesScanner.ViewModels
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(PlaybackSpeedLabel));
 
-                Preferences.Set(PlaybackSpeedStepPreferenceKey, _playbackSpeedStep);
+                AppStateStore.SetDouble("playback_speed_step", _playbackSpeedStep);
             }
         }
 
         public string PlaybackSpeedLabel =>
             _playbackSpeedStep switch
             {
-                1 => "1.5x",
-                2 => "2x",
+                1 => "1.25x",
+                2 => "1.5x",
+                3 => "1.75x",
+                4 => "2x",
                 _ => "1x"
             };
 
         public bool AutoPlay
         {
-            get => _autoPlay;
+			get
+			{
+				// Always reflect the latest value from the Settings DB.
+				// This prevents stale values from forcing autoplay after the user turns it off in Settings.
+				_autoPlay = _settingsService.AutoPlay;
+				return _autoPlay;
+			}
             set
             {
-                if (_autoPlay == value)
+				if (_settingsService.AutoPlay == value && _autoPlay == value)
                     return;
 
                 _autoPlay = value;
@@ -1168,8 +1225,25 @@ namespace JoesScanner.ViewModels
             : "https://www.joesscanner.com/products/one-time-donation/";
         public void Start()
         {
-            AppLog.Add("User clicked Start Monitoring");
-            _ = StartMonitoringAsync();
+            AppLog.Add(() => "User clicked Start Monitoring");
+
+            // Cross-platform: user explicitly started monitoring, so the run should drive queue playback
+            // even when AutoPlay is off.
+            _userRunShouldDriveQueue = true;
+
+            _ = MainThread.InvokeOnMainThreadAsync(async () =>
+            {
+                try
+                {
+                    await StartMonitoringAsync();
+
+                    if (IsRunning && AudioEnabled && (_settingsService.AutoPlay || _userRunShouldDriveQueue))
+                        _ = RequestQueuePlaybackAsync("UserStartMonitoring", userInitiated: _userRunShouldDriveQueue);
+                }
+                catch
+                {
+                }
+            });
         }
 
         public async Task StartMonitoringAsync()
@@ -1181,6 +1255,15 @@ namespace JoesScanner.ViewModels
             _userRequestedStop = false;
 
             var serverUrl = _settingsService.ServerUrl ?? string.Empty;
+
+            if (string.IsNullOrWhiteSpace(serverUrl) || !Uri.TryCreate(serverUrl, UriKind.Absolute, out _))
+            {
+                var msg = "Select a server in Settings and press Validate before connecting.";
+                try { AppLog.Add(() => $"Connect blocked: missing or invalid server url: '{serverUrl}'"); } catch { }
+                SetConnectionStatus(ConnectionStatus.Error, msg);
+                return;
+            }
+
             var isJoesScannerServer = false;
 
             if (Uri.TryCreate(serverUrl, UriKind.Absolute, out var serverUri))
@@ -1195,8 +1278,7 @@ namespace JoesScanner.ViewModels
 
             if (isJoesScannerServer)
             {
-                AppLog.Add($"Subscription check: server={serverUrl}, user={username}");
-
+                AppLog.Add(() => $"Subscription check: server={serverUrl}, user={username}");
 
 
                 var password = _settingsService.BasicAuthPassword ?? string.Empty;
@@ -1206,7 +1288,7 @@ namespace JoesScanner.ViewModels
                 if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
                 {
                     var msg = "Enter your Joe's Scanner username and password in Settings before connecting to the hosted server.";
-                    AppLog.Add("Subscription check blocked: missing credentials for hosted server.");
+                    AppLog.Add(() => "Subscription check blocked: missing credentials for hosted server.");
 
                     try
                     {
@@ -1225,7 +1307,7 @@ namespace JoesScanner.ViewModels
                     var subResult = await _subscriptionService.EnsureSubscriptionAsync(CancellationToken.None);
                     if (!subResult.IsAllowed)
                     {
-                        AppLog.Add($"Subscription check failed: {subResult.ErrorCode} {subResult.Message}");
+                        AppLog.Add(() => $"Subscription check failed: {subResult.ErrorCode} {subResult.Message}");
 
                         SetConnectionStatus(ConnectionStatus.AuthFailed,
                             subResult.Message ?? "Subscription not active");
@@ -1233,19 +1315,19 @@ namespace JoesScanner.ViewModels
                         return;
                     }
 
-                    AppLog.Add("Subscription check passed, starting stream.");
+                    AppLog.Add(() => "Subscription check passed, starting stream.");
                     UpdateSubscriptionSummaryFromSettings();
                 }
                 catch (Exception ex)
                 {
-                    AppLog.Add($"Subscription check error: {ex.Message}");
+                    AppLog.Add(() => $"Subscription check error: {ex.Message}");
                     SetConnectionStatus(ConnectionStatus.Error, "Subscription check error");
                     return;
                 }
             }
             else
             {
-                AppLog.Add($"Custom server detected ({serverUrl}), skipping Joe's Scanner subscription check.");
+                AppLog.Add(() => $"Custom server detected ({serverUrl}), skipping Joe's Scanner subscription check.");
                 ShowSubscriptionSummary = false;
                 SubscriptionSummary = string.Empty;
             }
@@ -1261,7 +1343,7 @@ namespace JoesScanner.ViewModels
             _cts = new CancellationTokenSource();
             var token = _cts.Token;
 
-            Preferences.Set(LastConnectedPreferenceKey, true);
+            AppStateStore.SetBool("last_connected_on_exit", true);
 
             SetConnectionStatus(ConnectionStatus.Connecting);
             IsRunning = true;
@@ -1293,24 +1375,32 @@ namespace JoesScanner.ViewModels
             UpdateQueueDerivedState();
 
             _ = Task.Run(() => RunCallStreamLoopAsync(token));
+
+            // Best-effort preload of History lookups. Never blocks connecting.
+            // If it fails, History page can still load lookups on demand and cache later.
+            _ = Task.Run(() => _historyLookupsCacheService.PreloadAsync(
+                forceReload: false,
+                reason: "connect",
+                cancellationToken: CancellationToken.None));
         }
 
         public async Task StartMonitoringWithAutoplayAsync()
         {
             await StartMonitoringAsync();
 
+            // Autoplay connect still counts as an active monitoring run.
+            _userRunShouldDriveQueue = true;
+
             try
             {
-                if (IsRunning && _audioEnabled && AutoPlay)
-                {
-                    await EnsureQueuePlaybackAsync();
-                }
+				if (IsRunning && _audioEnabled && _settingsService.AutoPlay)
+					await RequestQueuePlaybackAsync("ConnectAutoplay", false);
             }
             catch
             {
             }
-        }
 
+        }
 
 
         private async Task EnsureSystemMediaSessionStartedAsync()
@@ -1500,11 +1590,22 @@ namespace JoesScanner.ViewModels
                                         UpdateQueueDerivedState();
                                     }
 
-                                    // If audio is enabled and autoplay is enabled, keep playback running
-                                    if (AudioEnabled && AutoPlay)
+								// Keep queue playback running when appropriate.
+								// - AutoPlay keeps playback alive.
+								// - A user-initiated monitoring run should also keep playback alive even when AutoPlay is off.
+								if (AudioEnabled)
+								{
+                                    if (_settingsService.AutoPlay || _userRunShouldDriveQueue)
                                     {
-                                        _ = EnsureQueuePlaybackAsync();
+                                        _ = RequestQueuePlaybackAsync("NewCallInserted", userInitiated: _userRunShouldDriveQueue);
                                     }
+                                    else if (IsRunning && _currentPlayingCall == null && !_isQueuePlaybackRunning && CallsWaiting > 0)
+                                    {
+                                        // If the user has started monitoring and audio is enabled, ensure the queue begins playback
+                                        // even when AutoPlay is off (otherwise calls can accumulate silently).
+                                        _ = RequestQueuePlaybackAsync("NewCallInserted", userInitiated: true);
+                                    }
+								}
                                 });
                             }
                             catch (Exception ex)
@@ -1581,7 +1682,7 @@ namespace JoesScanner.ViewModels
                     if (token.IsCancellationRequested)
                         break;
 
-                    AppLog.Add($"Call stream loop guard caught exception: {ex.Message}");
+                    AppLog.Add(() => $"Call stream loop guard caught exception: {ex.Message}");
 
                     try
                     {
@@ -1621,7 +1722,7 @@ namespace JoesScanner.ViewModels
                     // If the app was terminated or backgrounded while still "connected", we want the next launch
                     // to auto reconnect.
                     if (_userRequestedStop)
-                        Preferences.Default.Set(LastConnectedPreferenceKey, false);
+                        AppStateStore.SetBool("last_connected_on_exit", false);
 
                     if (_audioPlaybackService != null)
                     {
@@ -1648,7 +1749,7 @@ namespace JoesScanner.ViewModels
 
         public async Task StopMonitoringAsync()
         {
-            AppLog.Add("User clicked Stop monitoring.");
+            AppLog.Add(() => "User clicked Stop monitoring.");
             _telemetryService.StopMonitoringHeartbeat("user_stop");
 
             // Explicit user disconnect. This should clear the "auto reconnect" intent.
@@ -1673,6 +1774,8 @@ namespace JoesScanner.ViewModels
             }
 
             IsRunning = false;
+
+            _userRunShouldDriveQueue = false;
 
             try
             {
@@ -1701,7 +1804,7 @@ namespace JoesScanner.ViewModels
             _lastPlayedCall = null;
             UpdateQueueDerivedState();
 
-            Preferences.Set(LastConnectedPreferenceKey, false);
+            AppStateStore.SetBool("last_connected_on_exit", false);
         }
 
         public async Task RestartMonitoringIfRunningAsync()
@@ -1779,10 +1882,10 @@ namespace JoesScanner.ViewModels
 
                 await PlayAudioAsync(item, allowMutedPlayback: true);
 
-                if (AudioEnabled && IsRunning && AutoPlay && CallsWaiting > 0)
+				if (AudioEnabled && IsRunning && (_settingsService.AutoPlay || _userRunShouldDriveQueue) && CallsWaiting > 0)
                 {
                     LastQueueEvent = "Tapped call finished; restarting queue";
-                    _ = EnsureQueuePlaybackAsync();
+					_ = RequestQueuePlaybackAsync("TappedCallFinished", true);
                 }
                 else
                 {
@@ -1863,10 +1966,10 @@ namespace JoesScanner.ViewModels
 
                 await PlayAudioAsync(newest);
 
-                if (AudioEnabled && IsRunning && AutoPlay && CallsWaiting > 0)
+				if (AudioEnabled && IsRunning && _settingsService.AutoPlay && CallsWaiting > 0)
                 {
                     LastQueueEvent = "Jump to live finished; restarting queue";
-                    _ = EnsureQueuePlaybackAsync();
+					_ = RequestQueuePlaybackAsync("JumpToLiveFinished", true);
                 }
                 else
                 {
@@ -1887,8 +1990,6 @@ namespace JoesScanner.ViewModels
             try
             {
                 AudioEnabled = newValue;
-
-                AutoPlay = newValue;
 
                 LastQueueEvent = newValue ? "Audio toggled ON" : "Audio toggled OFF";
 
@@ -1980,15 +2081,17 @@ namespace JoesScanner.ViewModels
             return step switch
             {
                 0 => 1.0,
-                1 => 1.5,
-                2 => 2.0,
+                1 => 1.25,
+                2 => 1.5,
+                3 => 1.75,
+                4 => 2.0,
                 _ => 1.0
             };
         }
 
         private void EnforceMaxCalls()
         {
-            var max = MaxCallsToKeep;            while (Calls.Count > max)
+            var max = MaxCallsToKeep; while (Calls.Count > max)
             {
                 var lastIndex = Calls.Count - 1;
                 if (lastIndex >= 0)
@@ -2455,7 +2558,7 @@ namespace JoesScanner.ViewModels
 
         public async Task TryAutoReconnectAsync()
         {
-            var shouldReconnect = Preferences.Get(LastConnectedPreferenceKey, false);
+            var shouldReconnect = AppStateStore.GetBool("last_connected_on_exit", false);
 
             if (!shouldReconnect)
                 return;
@@ -2610,7 +2713,7 @@ namespace JoesScanner.ViewModels
 
         private void IncreasePlaybackSpeedStep()
         {
-            if (PlaybackSpeedStep >= 2)
+            if (PlaybackSpeedStep >= 4)
                 return;
 
             PlaybackSpeedStep = PlaybackSpeedStep + 1;

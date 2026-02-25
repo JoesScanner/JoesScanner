@@ -113,10 +113,10 @@ namespace JoesScanner
             const double minWidth = 430;
             const double minHeight = 500;
 
-            var width = Preferences.Get("WindowWidth", defaultWidth);
-            var height = Preferences.Get("WindowHeight", defaultHeight);
-            var x = Preferences.Get("WindowX", double.NaN);
-            var y = Preferences.Get("WindowY", double.NaN);
+            var width = AppStateStore.GetDouble("window_width", defaultWidth);
+            var height = AppStateStore.GetDouble("window_height", defaultHeight);
+            var x = AppStateStore.GetDouble("window_x", double.NaN);
+            var y = AppStateStore.GetDouble("window_y", double.NaN);
 
             window.Width = width;
             window.Height = height;
@@ -132,10 +132,10 @@ namespace JoesScanner
 
             window.SizeChanged += (_, _) =>
             {
-                Preferences.Set("WindowWidth", window.Width);
-                Preferences.Set("WindowHeight", window.Height);
-                Preferences.Set("WindowX", window.X);
-                Preferences.Set("WindowY", window.Y);
+                AppStateStore.SetDouble("window_width", window.Width);
+                AppStateStore.SetDouble("window_height", window.Height);
+                AppStateStore.SetDouble("window_x", window.X);
+                AppStateStore.SetDouble("window_y", window.Y);
             };
 #endif
 

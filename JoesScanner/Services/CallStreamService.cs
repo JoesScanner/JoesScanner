@@ -9,6 +9,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Channels;
+using JoesScanner.Data;
 
 namespace JoesScanner.Services
 {
@@ -23,6 +24,7 @@ namespace JoesScanner.Services
         private const string AppleIosTestAccountEmailLegacy = "iostest@jeosscanner.com";
 
         private readonly ISettingsService _settingsService;
+        private readonly ILocalCallsRepository _localCallsRepository;
         private readonly HttpClient _httpClient;
         private readonly JsonSerializerOptions _jsonOptions;
 
@@ -44,9 +46,10 @@ namespace JoesScanner.Services
         private int _draw = 1;
 
         // Creates a new call stream service with an HttpClient configured for the calljson endpoint.
-        public CallStreamService(ISettingsService settingsService)
+        public CallStreamService(ISettingsService settingsService, ILocalCallsRepository localCallsRepository)
         {
             _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
+            _localCallsRepository = localCallsRepository ?? throw new ArgumentNullException(nameof(localCallsRepository));
 
             // IMPORTANT (Apple platforms + HTTP custom servers)
             // iOS and MacCatalyst can still surface NSURLErrorDomain -1022 (ATS) for cleartext HTTP
@@ -169,7 +172,7 @@ namespace JoesScanner.Services
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
             var isAppleTestAccount = IsAppleIosTestAccount();
-            AppLog.Add($"AppleTest: enabled={isAppleTestAccount}, user={_settingsService.BasicAuthUsername}");
+            AppLog.Add(() => $"AppleTest: enabled={isAppleTestAccount}, user={_settingsService.BasicAuthUsername}");
 
             // New connection: by default clear any previously seen IDs and suppress the first batch
             // so we only show calls that arrive after the user connects.
@@ -215,7 +218,7 @@ namespace JoesScanner.Services
 
                 if (string.IsNullOrWhiteSpace(baseUrl))
                 {
-                    AppLog.Add("CallStream: No Server URL configured in settings. Username is not applicable.");
+                    AppLog.Add(() => "CallStream: No Server URL configured in settings. Username is not applicable.");
 
                     // No server configured yet.
                     yield return new CallItem
@@ -243,7 +246,7 @@ namespace JoesScanner.Services
                     // Avoid spamming this message continuously.
                     if (wsDisableUntilUtc == DateTime.MinValue)
                     {
-                        AppLog.Add("CallStream: INFO - HTTP server detected on Apple platform. WebSocket will be disabled; using polling (calljson).");
+                        AppLog.Add(() => "CallStream: INFO - HTTP server detected on Apple platform. WebSocket will be disabled; using polling (calljson).");
                     }
 
                     wsDisableUntilUtc = DateTime.UtcNow.AddYears(10);
@@ -277,8 +280,7 @@ namespace JoesScanner.Services
                         {
                             hasReportedIdleConnection = true;
 
-                            AppLog.Add(
-                                $"CallStream: WEBSOCKET CONNECTED. [ServerUrl={baseUrl}, Path=/Calls, Username={usernameForLog}]");
+                            AppLog.Add(() => $"CallStream: WEBSOCKET CONNECTED. [ServerUrl={baseUrl}, Path=/Calls, Username={usernameForLog}]");
 
                             yield return new CallItem
                             {
@@ -379,8 +381,7 @@ namespace JoesScanner.Services
                           "Verify the basic auth username/password and any firewall authentication."
                         : $"Error talking to {callsUrl}: {errorMessage}";
 
-                    AppLog.Add(
-                        $"CallStream: {talkgroup} - {transcription} [ServerUrl={callsUrl}, Username={usernameForLog}]");
+                    AppLog.Add(() => $"CallStream: {talkgroup} - {transcription} [ServerUrl={callsUrl}, Username={usernameForLog}]");
 
                     // Clear error row for the UI.
                     yield return new CallItem
@@ -405,8 +406,7 @@ namespace JoesScanner.Services
                     {
                         hasReportedIdleConnection = true;
 
-                        AppLog.Add(
-                            $"CallStream: HEARTBEAT - connected to server, waiting for calls. " +
+                        AppLog.Add(() => $"CallStream: HEARTBEAT - connected to server, waiting for calls. " +
                             $"[ServerUrl={baseUrl}/calljson, Username={usernameForLog}]");
 
                         yield return new CallItem
@@ -434,8 +434,7 @@ namespace JoesScanner.Services
                     {
                         hasReportedIdleConnection = true;
 
-                        AppLog.Add(
-                            $"CallStream: HEARTBEAT - connected to server, waiting for calls. " +
+                        AppLog.Add(() => $"CallStream: HEARTBEAT - connected to server, waiting for calls. " +
                             $"[ServerUrl={baseUrl}/calljson, Username={usernameForLog}]");
 
                         yield return new CallItem
@@ -449,6 +448,25 @@ namespace JoesScanner.Services
 
                     skipYieldForThisBatch = true;
                     skipInitialBatch = false;
+                }
+
+                // Persist every received row in one batch (fast, avoids UI jank).
+                try
+                {
+                    var toPersist = new List<DbCallRecord>(rows.Count);
+                    foreach (var r in rows)
+                    {
+                        var record = MapToDbRecord(r, baseUrl);
+                        if (record != null)
+                            toPersist.Add(record);
+                    }
+
+                    if (toPersist.Count > 0)
+                        await _localCallsRepository.UpsertCallsAsync(baseUrl, toPersist, cancellationToken);
+                }
+                catch
+                {
+                    // Never let local persistence break streaming.
                 }
 
                 foreach (var r in rows)
@@ -485,7 +503,7 @@ namespace JoesScanner.Services
             var callsUrl = baseUrl + "/calljson";
 
             // Use a 2 hour window to satisfy the review goal.
-            AppLog.Add("AppleTest: starting 2 hour backfill");
+            AppLog.Add(() => "AppleTest: starting 2 hour backfill");
             var cutoffUtc = DateTimeOffset.UtcNow.AddHours(-2);
 
             var rows = new List<CallRow>();
@@ -516,13 +534,13 @@ namespace JoesScanner.Services
                     }
                     catch (Exception ex2)
                     {
-                        AppLog.Add($"AppleTest: backfill failed: {ex2.Message}");
+                        AppLog.Add(() => $"AppleTest: backfill failed: {ex2.Message}");
                         yield break;
                     }
                 }
                 catch (Exception ex)
                 {
-                    AppLog.Add($"AppleTest: backfill failed: {ex.Message}");
+                    AppLog.Add(() => $"AppleTest: backfill failed: {ex.Message}");
                     yield break;
                 }
 
@@ -550,7 +568,7 @@ namespace JoesScanner.Services
                 .Select(x => x.Row)
                 .ToList();
 
-            AppLog.Add($"AppleTest: backfill rows={filtered.Count}");
+            AppLog.Add(() => $"AppleTest: backfill rows={filtered.Count}");
 
             foreach (var r in filtered)
             {
@@ -815,6 +833,106 @@ namespace JoesScanner.Services
             return sb.ToString().Trim();
         }
 
+        private static string? CapTextRaw(string? text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return null;
+
+            var s = text.Trim();
+            const int maxChars = 20000;
+            if (s.Length > maxChars)
+                s = s.Substring(0, maxChars);
+            return s;
+        }
+
+        private DbCallRecord? MapToDbRecord(CallRow r, string serverKey)
+        {
+            var rawId = r.DT_RowId?.Trim();
+            if (string.IsNullOrWhiteSpace(rawId))
+                return null;
+
+            // Canonical transcription for Phase 1: for call stream rows, CallText is the best available.
+            var normalizedTranscription = NormalizeCallText(r.CallText);
+            var transcription = string.IsNullOrWhiteSpace(normalizedTranscription) ? null : normalizedTranscription;
+
+            int? lcn = null;
+            if (!string.IsNullOrWhiteSpace(r.LCN) && int.TryParse(r.LCN, NumberStyles.Integer, CultureInfo.InvariantCulture, out var lcnValue))
+                lcn = lcnValue;
+
+            double? frequency = null;
+            if (!string.IsNullOrWhiteSpace(r.Frequency) && double.TryParse(r.Frequency, NumberStyles.Float, CultureInfo.InvariantCulture, out var freqValue))
+                frequency = freqValue;
+
+            double? audioStartPos = null;
+            if (!string.IsNullOrWhiteSpace(r.AudioStartPos) && double.TryParse(r.AudioStartPos, NumberStyles.Float, CultureInfo.InvariantCulture, out var posValue))
+                audioStartPos = posValue;
+
+            double? durationSeconds = null;
+            if (!string.IsNullOrWhiteSpace(r.CallDuration) && double.TryParse(r.CallDuration, NumberStyles.Float, CultureInfo.InvariantCulture, out var dur))
+                durationSeconds = dur;
+
+            // Prefer StartTimeUTC if present; fall back to StartTime (some endpoints only include StartTime).
+            var startUtc = !string.IsNullOrWhiteSpace(r.StartTimeUTC) ? r.StartTimeUTC : r.StartTime;
+
+            var now = DateTimeOffset.UtcNow;
+
+            return new DbCallRecord
+            {
+                ServerKey = (serverKey ?? string.Empty).Trim().TrimEnd('/'),
+                BackendId = rawId,
+                StartTimeUtc = CapTextRaw(startUtc),
+                TimeText = CapTextRaw(r.Time),
+                DateText = CapTextRaw(r.Date),
+                TargetId = CapTextRaw(r.TargetID),
+                TargetLabel = CapTextRaw(r.TargetLabel),
+                TargetTag = CapTextRaw(r.TargetTag),
+                SourceId = CapTextRaw(r.SourceID),
+                SourceLabel = CapTextRaw(r.SourceLabel),
+                SourceTag = CapTextRaw(r.SourceTag),
+                Lcn = lcn,
+                Frequency = frequency,
+                CallAudioType = CapTextRaw(r.CallAudioType),
+                CallType = CapTextRaw(r.CallType),
+                SystemId = CapTextRaw(r.SystemID),
+                SystemLabel = CapTextRaw(r.SystemLabel),
+                SystemType = CapTextRaw(r.SystemType),
+                SiteId = CapTextRaw(r.SiteID),
+                SiteLabel = CapTextRaw(r.SiteLabel),
+                VoiceReceiver = CapTextRaw(r.VoiceReceiver),
+                AudioFilename = CapTextRaw(r.AudioFilename),
+                AudioStartPos = audioStartPos,
+                CallDurationSeconds = durationSeconds,
+                CallText = CapTextRaw(r.CallText),
+                Transcription = transcription,
+                ReceivedAtUtc = now,
+                UpdatedAtUtc = now
+            };
+        }
+
+        private async Task PersistWebSocketRowAsync(CallRow row, string serverKey, CancellationToken cancellationToken)
+        {
+            try
+            {
+                var rawId = row.DT_RowId?.Trim();
+                if (string.IsNullOrWhiteSpace(rawId))
+                    return;
+
+                if (row.IsUpdateNotification)
+                {
+                    await _localCallsRepository.MarkTranscriptionUpdateNotifiedAsync(serverKey, rawId, cancellationToken);
+                    return;
+                }
+
+                var record = MapToDbRecord(row, serverKey);
+                if (record != null)
+                    await _localCallsRepository.UpsertCallsAsync(serverKey, new[] { record }, cancellationToken);
+            }
+            catch
+            {
+                // Never let local persistence break streaming.
+            }
+        }
+
         private async Task<CallRow?> FetchCallByIdAsync(string callsUrl, string callId, CancellationToken cancellationToken)
         {
             const int pageSize = 200;
@@ -912,35 +1030,65 @@ namespace JoesScanner.Services
         {
             try
             {
-                // Hosted default server: always use the service account for the TR audio/transcript endpoints.
+                // Hosted Joe's Scanner server: Trunking Recorder endpoints use a service account,
+                // but ONLY after the user has a currently valid authorization via the Auth API.
                 if (string.Equals(serverUri.Host, "app.joesscanner.com", StringComparison.OrdinalIgnoreCase))
                 {
-                    var username = ServiceAuthUsername;
-                    var password = ServiceAuthPassword;
-                    var rawHosted = $"{username}:{password}";
-                    var bytesHosted = Encoding.ASCII.GetBytes(rawHosted);
-                    var base64Hosted = Convert.ToBase64String(bytesHosted);
-                    return $"Basic {base64Hosted}";
+                    if (_settingsService.SubscriptionTierLevel < 1)
+                    {
+                        AppLog.Add(() => "CallStream: WS auth not applied (hosted). reason=tier<1");
+                        return null;
+                    }
+
+                    var ok = _settingsService.SubscriptionLastStatusOk;
+                    var expires = _settingsService.SubscriptionExpiresUtc;
+
+                    if (!ok)
+                    {
+                        AppLog.Add(() => "CallStream: WS auth not applied (hosted). reason=sub_status_not_ok");
+                        return null;
+                    }
+
+                    if (!expires.HasValue)
+                    {
+                        AppLog.Add(() => "CallStream: WS auth not applied (hosted). reason=no_expiry");
+                        return null;
+                    }
+
+                    if (expires.Value.ToUniversalTime() <= DateTime.UtcNow)
+                    {
+                        AppLog.Add(() => $"CallStream: WS auth not applied (hosted). reason=expired expiresUtc={expires.Value:o}");
+                        return null;
+                    }
+
+                    // NOTE: These are the hard-coded service credentials for app.joesscanner.com and must not be changed.
+                    const string serviceUser = "secappass";
+                    const string servicePass = "7a65vBLeqLjdRut5bSav4eMYGUJPrmjHhgnPmEji3q3S7tZ3K5aadFZz2EZtbaE7";
+                    var serviceToken = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{serviceUser}:{servicePass}"));
+                    AppLog.Add(() => "CallStream: WS auth applied (hosted service creds).");
+                    return $"Basic {serviceToken}";
                 }
 
-                // Custom servers: only apply Basic Auth if the user provided a username.
-                var usernameCustom = _settingsService.BasicAuthUsername?.Trim() ?? string.Empty;
-                if (string.IsNullOrWhiteSpace(usernameCustom))
+                // Custom servers: only apply Basic Auth if user provided a username.
+                var user = (_settingsService.BasicAuthUsername ?? string.Empty).Trim();
+                var pass = (_settingsService.BasicAuthPassword ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(user))
+                {
+                    AppLog.Add(() => "CallStream: WS auth not applied (custom). reason=username_blank");
                     return null;
+                }
 
-                var passwordCustom = _settingsService.BasicAuthPassword ?? string.Empty;
-
-                var raw = $"{usernameCustom}:{passwordCustom}";
-                var bytes = Encoding.ASCII.GetBytes(raw);
-                var base64 = Convert.ToBase64String(bytes);
-
-                return $"Basic {base64}";
+                var token = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{user}:{pass}"));
+                AppLog.Add(() => "CallStream: WS auth applied (custom creds).");
+                return $"Basic {token}";
             }
-            catch
+            catch (Exception ex)
             {
+                AppLog.Add(() => $"CallStream: BuildBasicAuthHeaderValue failed. ex={ex.GetType().Name}: {ex.Message}");
                 return null;
             }
         }
+
 
         private void UpdateAuthorizationHeader()
         {
@@ -1107,9 +1255,15 @@ namespace JoesScanner.Services
                                     continue;
 
                                 var row = ParseRow(item);
-                                var call = BuildCallItemFromRow(row, baseUrl, skipYieldForThisBatch: false);
-                                if (call != null)
-                                    toYield.Add(call);
+
+                                await PersistWebSocketRowAsync(row, baseUrl, cancellationToken);
+
+                                if (!row.IsUpdateNotification)
+                                {
+                                    var call = BuildCallItemFromRow(row, baseUrl, skipYieldForThisBatch: false);
+                                    if (call != null)
+                                        toYield.Add(call);
+                                }
                             }
                         }
                         else if (root.ValueKind == JsonValueKind.Object)
@@ -1123,17 +1277,29 @@ namespace JoesScanner.Services
                                         continue;
 
                                     var row = ParseRow(item);
-                                    var call = BuildCallItemFromRow(row, baseUrl, skipYieldForThisBatch: false);
-                                    if (call != null)
-                                        toYield.Add(call);
+
+                                    await PersistWebSocketRowAsync(row, baseUrl, cancellationToken);
+
+                                    if (!row.IsUpdateNotification)
+                                    {
+                                        var call = BuildCallItemFromRow(row, baseUrl, skipYieldForThisBatch: false);
+                                        if (call != null)
+                                            toYield.Add(call);
+                                    }
                                 }
                             }
                             else
                             {
                                 var row = ParseRow(root);
-                                var call = BuildCallItemFromRow(row, baseUrl, skipYieldForThisBatch: false);
-                                if (call != null)
-                                    toYield.Add(call);
+
+                                await PersistWebSocketRowAsync(row, baseUrl, cancellationToken);
+
+                                if (!row.IsUpdateNotification)
+                                {
+                                    var call = BuildCallItemFromRow(row, baseUrl, skipYieldForThisBatch: false);
+                                    if (call != null)
+                                        toYield.Add(call);
+                                }
                             }
                         }
                     }
@@ -1222,19 +1388,42 @@ private static string SanitizeAudioUrl(string audioUrl)
             return new CallRow
             {
                 DT_RowId = GetString(e, "DT_RowId"),
+                IsUpdateNotification = IsTruthy(GetString(e, "Update")),
                 StartTime = GetString(e, "StartTime"),
                 StartTimeUTC = GetString(e, "StartTimeUTC"),
+                Time = GetString(e, "Time"),
+                Date = GetString(e, "Date"),
                 TargetID = GetString(e, "TargetID"),
                 TargetLabel = GetString(e, "TargetLabel"),
+                TargetTag = GetString(e, "TargetTag"),
                 SourceID = GetString(e, "SourceID"),
                 SourceLabel = GetString(e, "SourceLabel"),
+                SourceTag = GetString(e, "SourceTag"),
+                LCN = GetString(e, "LCN"),
+                Frequency = GetString(e, "Frequency"),
+                CallAudioType = GetString(e, "CallAudioType"),
+                SystemID = GetString(e, "SystemID"),
+                SystemLabel = GetString(e, "SystemLabel"),
+                SystemType = GetString(e, "SystemType"),
+                AudioStartPos = GetString(e, "AudioStartPos"),
                 SiteID = GetString(e, "SiteID"),
                 SiteLabel = GetString(e, "SiteLabel"),
                 VoiceReceiver = GetString(e, "VoiceReceiver"),
+                CallType = GetString(e, "CallType"),
                 CallText = GetString(e, "CallText"),
                 AudioFilename = GetString(e, "AudioFilename"),
                 CallDuration = GetString(e, "CallDuration")
             };
+        }
+
+        private static bool IsTruthy(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return false;
+            value = value.Trim();
+            return string.Equals(value, "true", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(value, "1", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase);
         }
 
         // Parses timestamps from either ISO 8601 or Unix seconds and converts them to local time.
@@ -1526,15 +1715,28 @@ private static string SanitizeAudioUrl(string audioUrl)
         private sealed class CallRow
         {
             public string? DT_RowId { get; set; }
+            public bool IsUpdateNotification { get; set; }
             public string? StartTime { get; set; }
             public string? StartTimeUTC { get; set; }
+            public string? Time { get; set; }
+            public string? Date { get; set; }
             public string? TargetID { get; set; }
             public string? TargetLabel { get; set; }
+            public string? TargetTag { get; set; }
             public string? SourceID { get; set; }
             public string? SourceLabel { get; set; }
+            public string? SourceTag { get; set; }
+            public string? LCN { get; set; }
+            public string? Frequency { get; set; }
+            public string? CallAudioType { get; set; }
+            public string? SystemID { get; set; }
+            public string? SystemLabel { get; set; }
+            public string? SystemType { get; set; }
+            public string? AudioStartPos { get; set; }
             public string? SiteID { get; set; }
             public string? SiteLabel { get; set; }
             public string? VoiceReceiver { get; set; }
+            public string? CallType { get; set; }
             public string? CallText { get; set; }
             public string? AudioFilename { get; set; }
             public string? CallDuration { get; set; }
