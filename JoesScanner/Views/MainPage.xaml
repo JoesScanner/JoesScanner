@@ -485,7 +485,7 @@
                     Grid.Row="2"
                     Padding="20,5,20,5"
                     RowDefinitions="Auto"
-                    ColumnDefinitions="Auto,Auto">
+                    ColumnDefinitions="*,Auto">
 
                     <!-- Desktop only label -->
                     <Label
@@ -508,6 +508,7 @@
                         Text="{OnPlatform iOS='About the developer', Default='Donate to the app developer'}"
                         Style="{StaticResource SecondaryPillButtonStyle}"
                         FontSize="10"
+                        HorizontalOptions="End"
                         Command="{Binding OpenDonateCommand}" />
                 </Grid>
 
