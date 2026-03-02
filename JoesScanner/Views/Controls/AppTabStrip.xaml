@@ -70,15 +70,6 @@
                         AutomationProperties.Name="History"
                         ToolTipProperties.Text="History" />
 
-                    <ImageButton
-                        Style="{StaticResource TabButtonStyle}"
-                        Source="mc_stats.png"
-                        HeightRequest="{Binding TabIconSize, Source={x:Reference Root}}"
-                        WidthRequest="{Binding TabIconSize, Source={x:Reference Root}}"
-                        Clicked="OnStatsClicked"
-                        AutomationId="TabStats"
-                        AutomationProperties.Name="Stats"
-                        ToolTipProperties.Text="Stats" />
 
                     <ImageButton
                         Style="{StaticResource TabButtonStyle}"
@@ -91,15 +82,6 @@
                         AutomationProperties.Name="Communications"
                         ToolTipProperties.Text="Communications" />
 
-                    <ImageButton
-                        Style="{StaticResource TabButtonStyle}"
-                        Source="mc_log.png"
-                        HeightRequest="{Binding TabIconSize, Source={x:Reference Root}}"
-                        WidthRequest="{Binding TabIconSize, Source={x:Reference Root}}"
-                        Clicked="OnLogClicked"
-                        AutomationId="TabLog"
-                        AutomationProperties.Name="Log"
-                        ToolTipProperties.Text="Log" />
 
                     <ImageButton
                         Style="{StaticResource TabButtonStyle}"

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage
+    x:Class="JoesScanner.Views.AudioMenuPage"
+    xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    BackgroundColor="#80000000"
+    Padding="24">
+
+    <Grid RowDefinitions="Auto" VerticalOptions="Center" HorizontalOptions="Center">
+        <Border
+            StrokeThickness="0"
+            BackgroundColor="{AppThemeBinding Light=#FFFFFF, Dark=#1E1E1E}"
+            StrokeShape="RoundRectangle 18"
+            Padding="18"
+            WidthRequest="300">
+
+            <VerticalStackLayout Spacing="10">
+                <Label
+                    Text="Audio"
+                    FontSize="18"
+                    FontAttributes="Bold"
+                    HorizontalOptions="Center" />
+
+                <Button Text="Off" Clicked="OnOffClicked" />
+                <Button Text="1x" Clicked="On1xClicked" />
+                <Button Text="1.25x" Clicked="On125xClicked" />
+                <Button Text="1.5x" Clicked="On15xClicked" />
+                <Button Text="1.75x" Clicked="On175xClicked" />
+                <Button Text="2x" Clicked="On2xClicked" />
+
+                <BoxView HeightRequest="1" Opacity="0.2" />
+
+                <Button Text="Cancel" Clicked="OnCancelClicked" />
+            </VerticalStackLayout>
+
+        </Border>
+    </Grid>
+</ContentPage>

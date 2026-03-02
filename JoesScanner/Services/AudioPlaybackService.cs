@@ -21,6 +21,7 @@ using System.IO;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
+using System.Linq;
 
 namespace JoesScanner.Services
 {
@@ -29,6 +30,25 @@ namespace JoesScanner.Services
     // otherwise the queue will advance and "skip" calls.
     public class AudioPlaybackService : IAudioPlaybackService
     {
+        private readonly IAudioFilterService _audioFilterService;
+        private readonly IToneAlertService _toneAlertService;
+
+        // Global interrupt token: ensures Stop/Skip actions cancel *all* in-flight work immediately,
+        // including: filter preparation, downloads, and platform playback.
+        // This is intentionally independent from the caller-provided CancellationToken.
+        private readonly object _interruptLock = new object();
+        private CancellationTokenSource _interruptCts = new CancellationTokenSource();
+
+#if IOS || MACCATALYST
+        private string? _iosTempDownloadedFile;
+#endif
+
+        public AudioPlaybackService(IAudioFilterService audioFilterService, IToneAlertService toneAlertService)
+        {
+            _audioFilterService = audioFilterService;
+            _toneAlertService = toneAlertService;
+        }
+
 #if WINDOWS
         private WinMediaPlayer? _windowsPlayer;
 #endif
@@ -44,7 +64,6 @@ namespace JoesScanner.Services
         private NSObject? _iosEndObserver;
         private NSObject? _iosFailObserver;
         private NSObject? _iosErrorLogObserver;
-	        private string? _iosTempDownloadedFile;
 #endif
 
         public Task PlayAsync(string audioUrl, CancellationToken cancellationToken = default)
@@ -60,27 +79,146 @@ namespace JoesScanner.Services
             if (playbackRate <= 0)
                 playbackRate = 1.0;
 
+            // Link the caller token with the global interrupt token so Stop/Skip actions take effect
+            // immediately even if the caller token isn't canceled yet.
+            CancellationToken linkedToken;
+            CancellationTokenSource? linkedCts = null;
             try
             {
-                AppLog.Add(() => $"Audio: Play requested. url={audioUrl}, rate={playbackRate:0.###}");
+                CancellationToken interruptToken;
+                lock (_interruptLock)
+                {
+                    interruptToken = _interruptCts.Token;
+                }
+
+                if (cancellationToken.CanBeCanceled)
+                {
+                    linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, interruptToken);
+                    linkedToken = linkedCts.Token;
+                }
+                else
+                {
+                    linkedCts = CancellationTokenSource.CreateLinkedTokenSource(interruptToken);
+                    linkedToken = linkedCts.Token;
+                }
+            }
+            catch
+            {
+                // If linking fails for any reason, fall back to the caller token.
+                linkedToken = cancellationToken;
+            }
+
+            try
+            {
+                // Phase 2+: when audio filters are enabled, ensure we have a local file URL.
+                // Phase 3: carry static filter fade hints without altering queue behavior.
+                PreparedAudio prepared;
+                try
+                {
+                    prepared = await _audioFilterService.PrepareForPlaybackAsync(audioUrl, linkedToken);
+                }
+                catch (global::System.OperationCanceledException)
+                {
+                    throw;
+                }
+                catch
+                {
+                    prepared = new PreparedAudio(audioUrl);
+                }
+
+
+            try
+            {
+                if (prepared.StaticFilterEnabled || prepared.ToneFilterEnabled)
+                {
+                    var duckSummary = prepared.ToneDuckSegments != null && prepared.ToneDuckSegments.Count > 0
+                        ? string.Join(",", prepared.ToneDuckSegments.Select(s => $"{s.StartMs}-{s.EndMs}"))
+                        : "(none)";
+
+                    AppLog.Add(() => $"AudioPrep: cache={prepared.PreparedFromCache} prepMs={prepared.PreparationElapsedMs} dlMs={prepared.DownloadElapsedMs} dlBytes={prepared.DownloadBytes} toneMs={prepared.ToneDetectionElapsedMs} toneScanMs={prepared.ToneScanWindowMs} toneDetected={prepared.ToneDetected} freq={prepared.ToneDetectedFrequencyHz} duck={duckSummary}");
+                }
+            }
+            catch
+            {
+            }
+
+            var preparedUrl = prepared.Url;
+
+            if (prepared.ToneDetected)
+            {
+                try
+                {
+                    AppLog.Add(() => $"AudioTone: tone flag set for this call (freq={prepared.ToneDetectedFrequencyHz}Hz).");
+                }
+                catch { }
+
+                try
+                {
+                    _toneAlertService.NotifyToneDetected(audioUrl);
+                }
+                catch
+                {
+                }
+            }
+
+            if (!string.Equals(preparedUrl, audioUrl, StringComparison.Ordinal))
+            {
+                try { AppLog.Add(() => "Audio: using locally prepared audio (Audio filters enabled)." ); } catch { }
+            }
+
+            if (prepared.StaticFilterEnabled && (0 > 0 || 0 > 0))
+            {
+                try
+                {
+                    AppLog.Add(() => $"AudioStatic: attenuator vol={prepared.StaticAttenuatorVolume} segments={prepared.StaticSegments.Count}");
+                }
+                catch { }
+            }
+
+            try
+            {
+                AppLog.Add(() => $"Audio: Play requested. url={preparedUrl}, rate={playbackRate:0.###}");
             }
             catch
             {
             }
 
 #if WINDOWS
-            await PlayOnWindowsAsync(audioUrl, playbackRate, cancellationToken);
+                await PlayOnWindowsAsync(prepared, playbackRate, linkedToken);
 #elif ANDROID
-            await PlayOnAndroidAsync(audioUrl, playbackRate, cancellationToken);
+                await PlayOnAndroidAsync(prepared, playbackRate, linkedToken);
 #elif IOS || MACCATALYST
-            await PlayOnAppleAsync(audioUrl, playbackRate, cancellationToken);
+                await PlayOnAppleAsync(prepared, playbackRate, linkedToken);
 #else
-            await Task.CompletedTask;
+                await Task.CompletedTask;
 #endif
+            }
+            finally
+            {
+                try { linkedCts?.Dispose(); } catch { }
+            }
         }
 
         public async Task StopAsync()
         {
+            // Cancel any in-flight PlayAsync (including preparation/download). This is the piece that
+            // makes Stop/Skip feel instant under slow I/O.
+            CancellationTokenSource? toCancel;
+            lock (_interruptLock)
+            {
+                toCancel = _interruptCts;
+                _interruptCts = new CancellationTokenSource();
+            }
+
+            try
+            {
+                try { toCancel.Cancel(); } catch { }
+                try { toCancel.Dispose(); } catch { }
+            }
+            catch
+            {
+            }
+
 #if WINDOWS
             await StopOnWindowsAsync();
 #elif ANDROID
@@ -93,7 +231,7 @@ namespace JoesScanner.Services
         }
 
 #if WINDOWS
-        private Task PlayOnWindowsAsync(string audioUrl, double playbackRate, CancellationToken cancellationToken)
+        private Task PlayOnWindowsAsync(PreparedAudio prepared, double playbackRate, CancellationToken cancellationToken)
         {
             _windowsPlayer ??= new WinMediaPlayer();
 
@@ -114,9 +252,17 @@ namespace JoesScanner.Services
                 _windowsPlayer.MediaEnded += OnEnded;
                 _windowsPlayer.MediaFailed += OnFailed;
 
-                _windowsPlayer.Source = MediaSource.CreateFromUri(new global::System.Uri(audioUrl));
+                _windowsPlayer.Source = MediaSource.CreateFromUri(new global::System.Uri(prepared.Url));
                 _windowsPlayer.PlaybackSession.PlaybackRate = playbackRate;
+
+                if (prepared.StaticFilterEnabled && 0 > 0)
+                {
+                    try { _windowsPlayer.Volume = Clamp01(1.0); } catch { }
+                }
                 _windowsPlayer.Play();
+
+                if (prepared.StaticFilterEnabled || (prepared.ToneFilterEnabled && prepared.ToneDuckSegments.Count > 0))
+                    _ = ApplyDynamicVolumeWindowsAsync(prepared, cancellationToken);
             }
             catch
             {
@@ -147,10 +293,71 @@ namespace JoesScanner.Services
 
             return Task.CompletedTask;
         }
+
+        private async Task ApplyDynamicVolumeWindowsAsync(PreparedAudio prepared, CancellationToken cancellationToken)
+        {
+            var player = _windowsPlayer;
+            if (player == null)
+                return;
+
+            var durationMs = TryGetWindowsDurationMs(player);
+            if (durationMs <= 0)
+                durationMs = 0;
+
+            // Unified volume scheduler (static fade plus tone ducking).
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                if (_windowsPlayer == null)
+                    return;
+
+                var posMs = 0;
+                try
+                {
+                    posMs = (int)Math.Round(player.PlaybackSession.Position.TotalMilliseconds);
+                }
+                catch
+                {
+                    posMs = 0;
+                }
+
+                if (durationMs <= 0)
+                {
+                    var d2 = TryGetWindowsDurationMs(player);
+                    if (d2 > 0)
+                        durationMs = d2;
+                }
+
+                var vol = ComputeDynamicVolume(prepared, posMs, durationMs);
+                try { player.Volume = vol; } catch { }
+
+                if (durationMs > 0 && posMs >= durationMs)
+                    return;
+
+                try { await Task.Delay(50, cancellationToken); } catch { return; }
+            }
+        }
+
+        private static int TryGetWindowsDurationMs(WinMediaPlayer player)
+        {
+            try
+            {
+                var d = player.PlaybackSession?.NaturalDuration ?? TimeSpan.Zero;
+                if (d <= TimeSpan.Zero)
+                    return 0;
+                var ms = (long)d.TotalMilliseconds;
+                if (ms <= 0 || ms > int.MaxValue)
+                    return 0;
+                return (int)ms;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
 #endif
 
 #if ANDROID
-        private async Task PlayOnAndroidAsync(string audioUrl, double playbackRate, CancellationToken cancellationToken)
+        private async Task PlayOnAndroidAsync(PreparedAudio prepared, double playbackRate, CancellationToken cancellationToken)
         {
             await StopOnAndroidAsync();
 
@@ -200,6 +407,18 @@ namespace JoesScanner.Services
                         {
                         }
 
+                        if (prepared.StaticFilterEnabled && 0 > 0)
+                        {
+                            try
+                            {
+                                var v = (float)Clamp01(1.0);
+                                player.SetVolume(v, v);
+                            }
+                            catch
+                            {
+                            }
+                        }
+
                         player.Start();
                     }
                     catch
@@ -221,7 +440,7 @@ namespace JoesScanner.Services
                     try { finishedTcs.TrySetResult(); } catch { }
                 };
 
-                var src = audioUrl.Trim();
+                var src = prepared.Url.Trim();
 
                 if (LooksLikeNetworkOrContentUri(src))
                 {
@@ -245,6 +464,9 @@ namespace JoesScanner.Services
 
                 // Wait until the player is actually started (or canceled)
                 await startedTcs.Task.WaitAsync(cancellationToken);
+
+                if (prepared.StaticFilterEnabled || (prepared.ToneFilterEnabled && prepared.ToneDuckSegments.Count > 0))
+                    _ = ApplyDynamicVolumeAndroidAsync(prepared, player, cancellationToken);
 
                 // Primary completion path: Completion or Error event.
                 // Secondary safety: poll IsPlaying so we do not "finish instantly" due to event quirks.
@@ -381,10 +603,40 @@ namespace JoesScanner.Services
                 }
             }
         }
+
+        private async Task ApplyDynamicVolumeAndroidAsync(PreparedAudio prepared, Android.Media.MediaPlayer player, CancellationToken cancellationToken)
+        {
+            var durationMs = 0;
+            try { durationMs = player.Duration; } catch { durationMs = 0; }
+	            var currentVol = 1.0;
+
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                if (_androidPlayer == null)
+                    return;
+
+                var posMs = 0;
+                try { posMs = player.CurrentPosition; } catch { posMs = 0; }
+
+	                if (durationMs <= 0)
+	                {
+	                    try { durationMs = player.Duration; } catch { durationMs = 0; }
+	                }
+
+                var target = ComputeDynamicVolume(prepared, posMs, durationMs);
+                currentVol = SmoothVolume(currentVol, target, 50);
+                try { player.SetVolume((float)currentVol, (float)currentVol); } catch { }
+
+                if (durationMs > 0 && posMs >= durationMs)
+                    return;
+
+                try { await Task.Delay(50, cancellationToken); } catch { return; }
+            }
+        }
 #endif
 
 #if IOS || MACCATALYST
-        private async Task PlayOnAppleAsync(string audioUrl, double playbackRate, CancellationToken cancellationToken)
+        private async Task PlayOnAppleAsync(PreparedAudio prepared, double playbackRate, CancellationToken cancellationToken)
         {
             await StopOnAppleAsync();
 
@@ -401,6 +653,7 @@ namespace JoesScanner.Services
 	                // When audio is downloaded to a local temp file, iOS needs a file URL.
 	                // Passing a raw filesystem path into NSUrl.FromString often fails.
 	                NSUrl? nsUrl = null;
+	                var audioUrl = prepared.Url;
 	                var requestedUrl = audioUrl;
 
 	                // IMPORTANT (Apple + HTTP): even with ATS allowances, AVPlayer streaming to http:// URLs
@@ -462,6 +715,11 @@ namespace JoesScanner.Services
                 var item = new AVPlayerItem(nsUrl);
                 var player = new AVPlayer(item);
                 _iosPlayer = player;
+
+                if (prepared.StaticFilterEnabled && 0 > 0)
+                {
+                    try { player.Volume = (float)Clamp01(1.0); } catch { }
+                }
 
 	                _iosEndObserver = NSNotificationCenter.DefaultCenter.AddObserver(
 	                    AVPlayerItem.DidPlayToEndTimeNotification,
@@ -529,6 +787,9 @@ namespace JoesScanner.Services
                 player.Play();
 
                 try { player.Rate = (float)playbackRate; } catch { }
+
+                if (prepared.StaticFilterEnabled || (prepared.ToneFilterEnabled && prepared.ToneDuckSegments.Count > 0))
+                    _ = ApplyDynamicVolumeAppleAsync(prepared, player, cancellationToken);
 
                 using var reg = cancellationToken.Register(() =>
                 {
@@ -680,6 +941,169 @@ namespace JoesScanner.Services
 
 	            return tmpPath;
 	        }
+#endif
+
+        
+        private static double SmoothVolume(double current, double target, int tickMs)
+        {
+            // Fast drop (attack), slower rise (release) to avoid chattering.
+            var attackMs = 80.0;
+            var releaseMs = 160.0;
+
+            var tau = (target < current) ? attackMs : releaseMs;
+            var alpha = tickMs / (tau + tickMs);
+
+            return Clamp01(current + ((target - current) * alpha));
+        }
+
+private static double Clamp01(double v)
+        {
+            if (v < 0) return 0;
+            if (v > 1) return 1;
+            return v;
+        }
+
+        private static double ComputeDynamicVolume(PreparedAudio prepared, int positionMs, int durationMs)
+        {
+            var baseVol = 1.0;
+
+            if (prepared.StaticFilterEnabled && prepared.StaticAttenuatorVolume > 0 && prepared.StaticSegments.Count > 0)
+            {
+                var inStatic = false;
+                foreach (var seg in prepared.StaticSegments)
+                {
+                    if (positionMs >= seg.StartMs && positionMs <= seg.EndMs)
+                    {
+                        inStatic = true;
+                        break;
+                    }
+                }
+
+                if (inStatic)
+                {
+                    // Volume 0..100 maps to 1.0..0.05
+                    var v = prepared.StaticAttenuatorVolume / 100.0;
+                    var target = 1.0 - (0.95 * v);
+                    baseVol = Clamp01(target);
+                }
+            }
+
+            var toneFactor = 1.0;
+            if (prepared.ToneFilterEnabled && prepared.ToneDuckSegments.Count > 0)
+            {
+                var strength = prepared.ToneStrength;
+                if (strength < 0) strength = 0;
+                if (strength > 100) strength = 100;
+
+                // Strength 0..100 maps to a volume multiplier of 1.0..0.15
+                var target = 1.0 - ((1.0 - 0.15) * (strength / 100.0));
+
+                foreach (var seg in prepared.ToneDuckSegments)
+                {
+                    if (positionMs >= seg.StartMs && positionMs <= seg.EndMs)
+                    {
+                        toneFactor = Math.Min(toneFactor, target);
+                        break;
+                    }
+                }
+            }
+
+            return Clamp01(baseVol * toneFactor);
+        }
+
+        private static async Task FadeVolumeAsync(Action<double> setVolume, double from, double to, int durationMs, CancellationToken cancellationToken)
+        {
+            if (durationMs <= 0)
+            {
+                try { setVolume(Clamp01(to)); } catch { }
+                return;
+            }
+
+            from = Clamp01(from);
+            to = Clamp01(to);
+
+            const int stepMs = 50;
+            var steps = Math.Max(1, durationMs / stepMs);
+            for (var i = 0; i <= steps; i++)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                    return;
+
+                var t = (double)i / steps;
+                var v = from + ((to - from) * t);
+                try { setVolume(Clamp01(v)); } catch { }
+
+                if (i < steps)
+                {
+                    try { await Task.Delay(stepMs, cancellationToken); } catch { return; }
+                }
+            }
+        }
+
+#if IOS || MACCATALYST
+        private async Task ApplyDynamicVolumeAppleAsync(PreparedAudio prepared, AVPlayer player, CancellationToken cancellationToken)
+        {
+            var durationMs = TryGetAppleDurationMs(player);
+
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                if (_iosPlayer == null)
+                    return;
+
+                var posMs = 0;
+                try
+                {
+                    var time = player.CurrentTime;
+                    posMs = (int)Math.Round(time.Seconds * 1000.0);
+                }
+                catch
+                {
+                    posMs = 0;
+                }
+
+                if (durationMs <= 0)
+                {
+                    var d2 = TryGetAppleDurationMs(player);
+                    if (d2 > 0)
+                        durationMs = d2;
+                }
+
+                var vol = ComputeDynamicVolume(prepared, posMs, durationMs);
+                try { player.Volume = (float)vol; } catch { }
+
+                if (durationMs > 0 && posMs >= durationMs)
+                    return;
+
+                try { await Task.Delay(50, cancellationToken); } catch { return; }
+            }
+        }
+
+        private static int TryGetAppleDurationMs(AVPlayer player)
+        {
+            try
+            {
+                var item = player.CurrentItem;
+                if (item == null)
+                    return 0;
+
+                var dur = item.Duration;
+                if (dur.IsIndefinite)
+                    return 0;
+
+                var seconds = dur.Seconds;
+                if (double.IsNaN(seconds) || double.IsInfinity(seconds) || seconds <= 0)
+                    return 0;
+
+                var ms = (long)(seconds * 1000.0);
+                if (ms <= 0 || ms > int.MaxValue)
+                    return 0;
+                return (int)ms;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
 #endif
 
         private static async Task WaitWithCleanupAsync(Task task, CancellationToken token, Action cleanup)

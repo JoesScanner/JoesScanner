@@ -16,8 +16,20 @@ namespace JoesScanner.Models
         private bool _isHistory;
         private bool _isPlaying;
         private bool _isMutedByFilter;
+        private bool _isToneHot;
         private string _backendId = string.Empty;
         private bool _isTranscriptionUpdate;
+
+        private string _detectedAddress = string.Empty;
+                private int _addressDetectionAppliedHash;
+private int _detectedAddressConfidencePercent;
+        private string _detectedAddressCandidates = string.Empty;
+
+        private string _what3WordsAddress = string.Empty;
+        private int _what3WordsAppliedHash;
+        private string _what3WordsNormalized = string.Empty;
+        private double? _what3WordsLatitude;
+        private double? _what3WordsLongitude;
 
         // Stable identifier for this call from the server (for example DT_RowId).
         public string BackendId
@@ -37,6 +49,157 @@ namespace JoesScanner.Models
 
         // True when this item represents an update to an existing call
         // (used for refreshing transcription without inserting a new row).
+
+        // Address detection: best match (if any) extracted from the transcription.
+        public string DetectedAddress
+        {
+            get => _detectedAddress;
+            set
+            {
+                var newValue = value ?? string.Empty;
+                if (_detectedAddress == newValue)
+                    return;
+
+                _detectedAddress = newValue;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(HasDetectedAddress));
+                OnPropertyChanged(nameof(AccessibilitySummary));
+                OnPropertyChanged(nameof(AccessibilityAnnouncement));
+            }
+        }
+
+        // Address detection: confidence score for DetectedAddress (0-100).
+        public int DetectedAddressConfidencePercent
+        {
+            get => _detectedAddressConfidencePercent;
+            set
+            {
+                if (_detectedAddressConfidencePercent == value)
+                    return;
+
+                _detectedAddressConfidencePercent = value;
+                OnPropertyChanged();
+            }
+        }
+
+        // Address detection: a simple, display-friendly list of other candidates.
+        // Stored as a newline-delimited string to keep XAML binding simple.
+        public string DetectedAddressCandidates
+        {
+            get => _detectedAddressCandidates;
+            set
+            {
+                var newValue = value ?? string.Empty;
+                if (_detectedAddressCandidates == newValue)
+                    return;
+
+                _detectedAddressCandidates = newValue;
+                OnPropertyChanged();
+            }
+        }
+
+
+        // Address detection: internal hash used to avoid rescanning the same transcription repeatedly.
+        // This is not a UI-bound property.
+        public int AddressDetectionAppliedHash
+        {
+            get => _addressDetectionAppliedHash;
+            set => _addressDetectionAppliedHash = value;
+        }
+
+        public bool HasDetectedAddress => !string.IsNullOrWhiteSpace(_detectedAddress);
+
+// what3words: first detected address in transcription, formatted as ///word.word.word
+public string What3WordsAddress
+{
+    get => _what3WordsAddress;
+    set
+    {
+        var newValue = value ?? string.Empty;
+        if (_what3WordsAddress == newValue)
+            return;
+
+        _what3WordsAddress = newValue;
+
+        // Reset resolved coordinates whenever the words change.
+        _what3WordsNormalized = string.Empty;
+        _what3WordsLatitude = null;
+        _what3WordsLongitude = null;
+
+        OnPropertyChanged();
+        OnPropertyChanged(nameof(HasWhat3WordsAddress));
+        OnPropertyChanged(nameof(HasWhat3WordsCoordinates));
+        OnPropertyChanged(nameof(What3WordsCoordinatesText));
+        OnPropertyChanged(nameof(AccessibilitySummary));
+        OnPropertyChanged(nameof(AccessibilityAnnouncement));
+    }
+}
+
+// what3words: internal hash used to avoid rescanning the same transcription repeatedly.
+// This is not a UI-bound property.
+public int What3WordsAppliedHash
+{
+    get => _what3WordsAppliedHash;
+    set => _what3WordsAppliedHash = value;
+}
+
+public bool HasWhat3WordsAddress => !string.IsNullOrWhiteSpace(_what3WordsAddress);
+
+// Internal: normalized words without leading ///
+public string What3WordsNormalized
+{
+    get => _what3WordsNormalized;
+    set
+    {
+        var newValue = value ?? string.Empty;
+        if (_what3WordsNormalized == newValue)
+            return;
+        _what3WordsNormalized = newValue;
+        OnPropertyChanged();
+    }
+}
+
+public double? What3WordsLatitude
+{
+    get => _what3WordsLatitude;
+    set
+    {
+        if (_what3WordsLatitude == value)
+            return;
+        _what3WordsLatitude = value;
+        OnPropertyChanged();
+        OnPropertyChanged(nameof(HasWhat3WordsCoordinates));
+        OnPropertyChanged(nameof(What3WordsCoordinatesText));
+    }
+}
+
+public double? What3WordsLongitude
+{
+    get => _what3WordsLongitude;
+    set
+    {
+        if (_what3WordsLongitude == value)
+            return;
+        _what3WordsLongitude = value;
+        OnPropertyChanged();
+        OnPropertyChanged(nameof(HasWhat3WordsCoordinates));
+        OnPropertyChanged(nameof(What3WordsCoordinatesText));
+    }
+}
+
+public bool HasWhat3WordsCoordinates => _what3WordsLatitude.HasValue && _what3WordsLongitude.HasValue;
+
+public string What3WordsCoordinatesText
+{
+    get
+    {
+        if (!HasWhat3WordsCoordinates)
+            return string.Empty;
+        return $"{_what3WordsLatitude.Value:F6}, {_what3WordsLongitude.Value:F6}";
+    }
+}
+
+
         public bool IsTranscriptionUpdate
         {
             get => _isTranscriptionUpdate;
@@ -66,6 +229,7 @@ namespace JoesScanner.Models
                 OnPropertyChanged(nameof(DateDisplay));
                 OnPropertyChanged(nameof(AccessibilitySummary));
                 OnPropertyChanged(nameof(AccessibilityAnnouncement));
+                OnPropertyChanged(nameof(HeaderLine));
             }
         }
 
@@ -98,8 +262,10 @@ namespace JoesScanner.Models
 
                 _talkgroup = value ?? string.Empty;
                 OnPropertyChanged();
+                OnPropertyChanged(nameof(ToneHotKey));
                 OnPropertyChanged(nameof(AccessibilitySummary));
                 OnPropertyChanged(nameof(AccessibilityAnnouncement));
+                OnPropertyChanged(nameof(HeaderLine));
             }
         }
 
@@ -117,6 +283,7 @@ namespace JoesScanner.Models
                 OnPropertyChanged(nameof(ReceiverName));
                 OnPropertyChanged(nameof(AccessibilitySummary));
                 OnPropertyChanged(nameof(AccessibilityAnnouncement));
+                OnPropertyChanged(nameof(HeaderLine));
             }
         }
 
@@ -132,8 +299,26 @@ namespace JoesScanner.Models
                 _site = value ?? string.Empty;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(SystemName));
+                OnPropertyChanged(nameof(ToneHotKey));
                 OnPropertyChanged(nameof(AccessibilitySummary));
                 OnPropertyChanged(nameof(AccessibilityAnnouncement));
+                OnPropertyChanged(nameof(HeaderLine));
+            }
+        }
+
+        // Tone alerts use a stable per talkgroup key for a 5 minute highlight window.
+        public string ToneHotKey => $"{SystemName}|{Talkgroup}";
+
+        public bool IsToneHot
+        {
+            get => _isToneHot;
+            set
+            {
+                if (_isToneHot == value)
+                    return;
+
+                _isToneHot = value;
+                OnPropertyChanged();
             }
         }
 
@@ -151,6 +336,7 @@ namespace JoesScanner.Models
                 OnPropertyChanged(nameof(ReceiverName));
                 OnPropertyChanged(nameof(AccessibilitySummary));
                 OnPropertyChanged(nameof(AccessibilityAnnouncement));
+                OnPropertyChanged(nameof(HeaderLine));
             }
         }
 
@@ -269,6 +455,23 @@ namespace JoesScanner.Models
             Timestamp == default
                 ? string.Empty
                 : Timestamp.ToString("M/d/yyyy");
+
+        // Single-line header used in call cards (avoids FormattedString spans in item templates).
+        public string HeaderLine
+        {
+            get
+            {
+                var time = TimeOnlyDisplay;
+                var receiver = ReceiverName;
+                var system = SystemName;
+                var tg = Talkgroup;
+
+                if (string.IsNullOrWhiteSpace(time))
+                    return string.Empty;
+
+                return $"{time} > {receiver} > {system} > {tg}";
+            }
+        }
 
         // Duration label used in the UI, derived from CallDurationSeconds.
         public string DurationDisplay =>

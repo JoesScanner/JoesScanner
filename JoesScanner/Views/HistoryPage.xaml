@@ -26,7 +26,7 @@
                 <RoundRectangle CornerRadius="10" />
             </Border.StrokeShape>
 
-            <Grid Padding="2" RowDefinitions="Auto,Auto,Auto,*" RowSpacing="8">
+            <Grid Padding="2" RowDefinitions="Auto,Auto,Auto,Auto,*" RowSpacing="8">
 
                 <!-- Filters -->
                 <Border
@@ -43,7 +43,7 @@
 	                    <Grid Padding="8,6" RowDefinitions="Auto,Auto" RowSpacing="8">
 
 
-<Grid Grid.Row="0" ColumnDefinitions="*,*,*" ColumnSpacing="8">
+<Grid Grid.Row="0" ColumnDefinitions="*,*,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto" ColumnSpacing="8">
 	                            <VerticalStackLayout Spacing="2">
 	                                <Label Text="Receiver" FontSize="12" TextColor="White" HorizontalTextAlignment="Center" HorizontalOptions="Fill" />
 	                                <Border
@@ -400,12 +400,10 @@
                     Text="{Binding StatusText}"
                     FontSize="12"
                     TextColor="{AppThemeBinding Light=#374151, Dark=#e5e7eb}"
-                    LineBreakMode="WordWrap" />
-
-                <!-- Calls -->
+                    LineBreakMode="WordWrap" /><!-- Calls -->
                 <CollectionView
                     x:Name="CallsList"
-                    Grid.Row="3"
+                    Grid.Row="4"
                     ItemsSource="{Binding Calls}"
                     SelectionMode="None"
                     Scrolled="OnCallsScrolled"
@@ -420,15 +418,16 @@
                                 Padding="8"
                                 Margin="0,0,0,6">
 
-                                <Border.GestureRecognizers>
-                                    <TapGestureRecognizer Tapped="OnCallTapped" CommandParameter="{Binding .}" />
-                                </Border.GestureRecognizers>
-
                                 <Border.StrokeShape>
                                     <RoundRectangle CornerRadius="14" />
                                 </Border.StrokeShape>
 
                                 <Border.Triggers>
+                                    <DataTrigger TargetType="Border" Binding="{Binding IsToneHot}" Value="True">
+                                        <Setter Property="StrokeThickness" Value="2" />
+                                        <Setter Property="Stroke" Value="#ef4444" />
+                                    </DataTrigger>
+
                                     <DataTrigger TargetType="Border" Binding="{Binding IsPlaying}" Value="True">
                                         <Setter Property="StrokeThickness" Value="2" />
                                         <Setter Property="Stroke" Value="#22c55e" />
@@ -436,9 +435,12 @@
                                     </DataTrigger>
                                 </Border.Triggers>
 
-                                <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="*,Auto" ColumnSpacing="8" RowSpacing="2">
+                                <Grid RowDefinitions="Auto,Auto,Auto" ColumnDefinitions="*,Auto" ColumnSpacing="8" RowSpacing="2">
 
                                     <Label Grid.Row="0" Grid.Column="0" FontSize="14">
+                                        <Label.GestureRecognizers>
+                                            <TapGestureRecognizer Tapped="OnCallPrimaryTapped" CommandParameter="{Binding .}" />
+                                        </Label.GestureRecognizers>
                                         <Label.FormattedText>
                                             <FormattedString>
                                                 <Span Text="{Binding TimeOnlyDisplay}" FontAttributes="Bold" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
@@ -471,12 +473,135 @@
                                            TextColor="{AppThemeBinding Light=#374151, Dark=#cbd5e1}"
                                            LineBreakMode="WordWrap"
                                            Text="{Binding Transcription}">
+                                        <Label.GestureRecognizers>
+                                            <TapGestureRecognizer Tapped="OnCallPrimaryTapped" CommandParameter="{Binding .}" />
+                                        </Label.GestureRecognizers>
                                         <Label.Triggers>
                                             <DataTrigger TargetType="Label" Binding="{Binding Transcription}" Value="">
                                                 <Setter Property="IsVisible" Value="False" />
                                             </DataTrigger>
                                         </Label.Triggers>
                                     </Label>
+<Grid
+    Grid.Row="3"
+    Grid.Column="0"
+    Grid.ColumnSpan="2"
+    Margin="0,2,0,0"
+    ColumnDefinitions="*,Auto"
+    RowDefinitions="Auto"
+    IsVisible="{Binding HasDetectedAddress}">
+
+    <Label
+        Grid.Column="0"
+        FontSize="12"
+        TextColor="{AppThemeBinding Light=#1d4ed8, Dark=#60a5fa}"
+        TextDecorations="Underline"
+        LineBreakMode="WordWrap"
+        Text="{Binding DetectedAddress}">
+        <Label.GestureRecognizers>
+            <TapGestureRecognizer
+                Tapped="OnAddressLinkTapped"
+                CommandParameter="{Binding .}" />
+        </Label.GestureRecognizers>
+        <Label.Triggers>
+            <DataTrigger TargetType="Label" Binding="{Binding DetectedAddress}" Value="">
+                <Setter Property="IsVisible" Value="False" />
+            </DataTrigger>
+        </Label.Triggers>
+    </Label>
+
+    <Label
+        Grid.Column="1"
+        Margin="8,0,0,0"
+        VerticalTextAlignment="Center"
+        FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
+        FontAutoScalingEnabled="False"
+        TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+        LineBreakMode="NoWrap"
+        MaxLines="1"
+        Text="{Binding DetectedAddressConfidencePercent, StringFormat='{0}%'}" />
+</Grid>
+
+<VerticalStackLayout Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="2" Spacing="1">
+    <VerticalStackLayout.Triggers>
+        <DataTrigger TargetType="VerticalStackLayout" Binding="{Binding What3WordsAddress}" Value="">
+            <Setter Property="IsVisible" Value="False" />
+        </DataTrigger>
+        <DataTrigger TargetType="VerticalStackLayout" Binding="{Binding Source={x:Reference Page}, Path=BindingContext.What3WordsLinksEnabled}" Value="False">
+            <Setter Property="IsVisible" Value="False" />
+        </DataTrigger>
+    </VerticalStackLayout.Triggers>
+
+    <Label
+        FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
+        FontAutoScalingEnabled="False"
+        TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+        LineBreakMode="NoWrap"
+        MaxLines="1"
+        Text="what3words" />
+
+    
+    <HorizontalStackLayout Spacing="10">
+        <Label
+            FontSize="12"
+            TextColor="{AppThemeBinding Light=#2563eb, Dark=#60a5fa}"
+            TextDecorations="Underline"
+            LineBreakMode="WordWrap"
+            Text="{Binding What3WordsAddress}">
+            <Label.GestureRecognizers>
+                <TapGestureRecognizer
+                    Tapped="OnWhat3WordsLinkTapped"
+                    CommandParameter="{Binding .}" />
+            </Label.GestureRecognizers>
+        </Label>
+
+        <Label
+            FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
+            FontAutoScalingEnabled="False"
+            TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+            TextDecorations="Underline"
+            VerticalOptions="Center"
+            Text="Copy">
+            <Label.GestureRecognizers>
+                <TapGestureRecognizer
+                    Tapped="OnWhat3WordsCopyTapped"
+                    CommandParameter="{Binding .}" />
+            </Label.GestureRecognizers>
+        </Label>
+    </HorizontalStackLayout>
+
+
+    
+    <HorizontalStackLayout
+        IsVisible="{Binding HasWhat3WordsCoordinates}"
+        Spacing="10">
+
+        <Label
+            FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
+            FontAutoScalingEnabled="False"
+            TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+            LineBreakMode="NoWrap"
+            MaxLines="1"
+            Text="{Binding What3WordsCoordinatesText}" />
+
+        <Label
+            FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
+            FontAutoScalingEnabled="False"
+            TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+            TextDecorations="Underline"
+            VerticalOptions="Center"
+            Text="Copy coords">
+            <Label.GestureRecognizers>
+                <TapGestureRecognizer
+                    Tapped="OnWhat3WordsCoordsCopyTapped"
+                    CommandParameter="{Binding .}" />
+            </Label.GestureRecognizers>
+        </Label>
+
+    </HorizontalStackLayout>
+
+</VerticalStackLayout>
+
 
                                 </Grid>
 
@@ -488,5 +613,91 @@
 
             </Grid>
         </Border>
-    </Grid>
+    
+<!-- Address alert stack (max 3). Tap to jump to call, swipe or X to dismiss. -->
+<VerticalStackLayout
+    Grid.Row="1"
+    Margin="8"
+    VerticalOptions="End"
+    HorizontalOptions="Fill"
+    Spacing="6"
+    ZIndex="99"
+    IsVisible="{Binding HasAddressAlerts}">
+
+        <VerticalStackLayout
+        BindableLayout.ItemsSource="{Binding AddressAlerts}"
+        Spacing="6">
+
+        <BindableLayout.ItemTemplate>
+            <DataTemplate x:DataType="models:CallItem">
+                <SwipeView>
+                    <SwipeView.RightItems>
+                        <SwipeItems Mode="Execute">
+                            <SwipeItem
+                                Text="Dismiss"
+                                BackgroundColor="{AppThemeBinding Light=#ef4444, Dark=#b91c1c}"
+                                Invoked="OnAlertDismissInvoked"
+                                CommandParameter="{Binding .}" />
+                        </SwipeItems>
+                    </SwipeView.RightItems>
+
+                    <Border
+                        Padding="10"
+                        BackgroundColor="{AppThemeBinding Light=#f8fafc, Dark=#0b1220}"
+                        Stroke="{AppThemeBinding Light=#cbd5e1, Dark=#334155}"
+                        StrokeThickness="1">
+                        <Border.StrokeShape>
+                            <RoundRectangle CornerRadius="10" />
+                        </Border.StrokeShape>
+
+                        <Border.GestureRecognizers>
+                            <TapGestureRecognizer Tapped="OnAlertTapped" CommandParameter="{Binding .}" />
+                        </Border.GestureRecognizers>
+
+                        <Grid RowDefinitions="Auto,Auto">
+                            <Label
+                                Grid.Row="0"
+                                FontSize="{OnPlatform WinUI=12, MacCatalyst=12, Android=11, iOS=11}"
+                                FontAutoScalingEnabled="False"
+                                LineBreakMode="TailTruncation"
+                                MaxLines="2"
+                                TextColor="{AppThemeBinding Light=#0f172a, Dark=#e5e7eb}"
+                                Margin="0,0,22,0"
+                                Text="{Binding DetectedAddress}" />
+
+                            <Label
+                                Grid.Row="1"
+                                FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
+                                FontAutoScalingEnabled="False"
+                                LineBreakMode="TailTruncation"
+                                MaxLines="1"
+                                TextColor="{AppThemeBinding Light=#475569, Dark=#9ca3af}"
+                                Margin="0,0,22,0"
+                                Text="{Binding Talkgroup}" />
+
+                            <Label
+                                Grid.Row="0"
+                                Grid.RowSpan="2"
+                                FontSize="16"
+                                FontAutoScalingEnabled="False"
+                                TextColor="{AppThemeBinding Light=#64748b, Dark=#9ca3af}"
+                                HorizontalTextAlignment="Center"
+                                VerticalTextAlignment="Center"
+                                HorizontalOptions="End"
+                                VerticalOptions="Start"
+                                Margin="0,-2,-2,0"
+                                Text="✕">
+                                <Label.GestureRecognizers>
+                                    <TapGestureRecognizer Tapped="OnAlertDismissTapped" CommandParameter="{Binding .}" />
+                                </Label.GestureRecognizers>
+                            </Label>
+                        </Grid>
+                    </Border>
+                </SwipeView>
+            </DataTemplate>
+        </BindableLayout.ItemTemplate>
+    </VerticalStackLayout>
+</VerticalStackLayout>
+
+</Grid>
 </ContentPage>

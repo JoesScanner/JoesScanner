@@ -90,7 +90,6 @@ public partial class RootPage : ContentPage
             AppTab.Archive => _services.GetRequiredService<HistoryPage>(),
             AppTab.Stats => _services.GetRequiredService<StatsPage>(),
             AppTab.Communications => _services.GetRequiredService<CommunicationsPage>(),
-            AppTab.Log => _services.GetRequiredService<LogPage>(),
             AppTab.Settings => _services.GetRequiredService<SettingsPage>(),
             _ => _services.GetRequiredService<MainPage>()
         };
@@ -152,6 +151,15 @@ public partial class RootPage : ContentPage
         // Tell the previous page it is going away so it can detach handlers.
         if (_pages.TryGetValue(_current, out var oldPage))
         {
+            try
+            {
+                if (oldPage is ITabHidingAware hidingAware)
+                    hidingAware.OnTabHiding();
+            }
+            catch
+            {
+            }
+
             try { oldPage.SendDisappearing(); } catch { }
         }
 
@@ -197,8 +205,7 @@ public partial class RootPage : ContentPage
     {
         try
         {
-            System.Diagnostics.Debug.WriteLine(message);
-            Console.WriteLine(message);
+            AppLog.DebugWriteLine(message);
         }
         catch
         {

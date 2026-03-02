@@ -1,7 +1,9 @@
 ﻿using JoesScanner.Models;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Threading;
 using System.Text.Json;
+using Microsoft.Maui.ApplicationModel;
 
 namespace JoesScanner.Services
 {
@@ -111,6 +113,55 @@ namespace JoesScanner.Services
         {
             LoadFromStorage();
             PruneInvalidRules(saveIfChanged: true);
+        }
+        private static void InvokeOnMainThreadSync(Action action)
+        {
+            if (action == null)
+                return;
+
+            if (MainThread.IsMainThread)
+            {
+                action();
+                return;
+            }
+
+            Exception? captured = null;
+            using var gate = new ManualResetEventSlim(false);
+
+            MainThread.BeginInvokeOnMainThread(() =>
+            {
+                try
+                {
+                    action();
+                }
+                catch (Exception ex)
+                {
+                    captured = ex;
+                }
+                finally
+                {
+                    gate.Set();
+                }
+            });
+
+            gate.Wait();
+
+            if (captured != null)
+                throw captured;
+        }
+
+        private static void InvokeOnMainThreadAsync(Action action)
+        {
+            if (action == null)
+                return;
+
+            if (MainThread.IsMainThread)
+            {
+                action();
+                return;
+            }
+
+            MainThread.BeginInvokeOnMainThread(action);
         }
 
         public void ToggleMute(FilterRule rule)
@@ -347,53 +398,53 @@ namespace JoesScanner.Services
             if (!IsRuleValid(level, normReceiver, normSite, normTalkgroup))
                 return;
 
-            var added = false;
+            // IMPORTANT: iOS CollectionView requires that ObservableCollection changes
+            // and BindableObject property changes occur on the main thread. Calls can arrive
+            // on background threads, so we:
+            //   - detect existing rules under lock without mutating state
+            //   - marshal all mutations (inserts + LastSeenUtc updates) to the main thread
+            FilterRule? existing;
 
             lock (_rulesGate)
             {
-                var existing = _rules.FirstOrDefault(r =>
+                existing = _rules.FirstOrDefault(r =>
                     r.Level == level &&
                     string.Equals(Normalize(r.Receiver), normReceiver, StringComparison.OrdinalIgnoreCase) &&
                     string.Equals(Normalize(r.Site), normSite, StringComparison.OrdinalIgnoreCase) &&
                     string.Equals(Normalize(r.Talkgroup), normTalkgroup, StringComparison.OrdinalIgnoreCase));
+            }
 
-                if (existing != null)
+            if (existing != null)
+            {
+                // Keep timestamps fresh, but do it on the UI thread.
+                InvokeOnMainThreadAsync(() => existing.LastSeenUtc = nowUtc);
+                return;
+            }
+
+            // New rule: insert on UI thread so bound controls update safely on iOS.
+            InvokeOnMainThreadSync(() =>
+            {
+                lock (_rulesGate)
                 {
-                    existing.LastSeenUtc = nowUtc;
-                    return;
-                }
-
-                // New rules must inherit the current receiver or site state.
-                // This ensures that new talkgroups discovered after a higher level mute or disable
-                // remain muted or disabled until explicitly overridden.
-                var inheritedMuted = false;
-                var inheritedDisabled = false;
-
-                if (level == FilterLevel.Site)
-                {
-                    var receiverRule = _rules.FirstOrDefault(r =>
-                        r.Level == FilterLevel.Receiver &&
-                        string.Equals(Normalize(r.Receiver), normReceiver, StringComparison.OrdinalIgnoreCase));
-
-                    if (receiverRule != null)
-                    {
-                        inheritedMuted = receiverRule.IsMuted;
-                        inheritedDisabled = receiverRule.IsDisabled;
-                    }
-                }
-                else if (level == FilterLevel.Talkgroup)
-                {
-                    var siteRule = _rules.FirstOrDefault(r =>
-                        r.Level == FilterLevel.Site &&
+                    var alreadyThere = _rules.FirstOrDefault(r =>
+                        r.Level == level &&
                         string.Equals(Normalize(r.Receiver), normReceiver, StringComparison.OrdinalIgnoreCase) &&
-                        string.Equals(Normalize(r.Site), normSite, StringComparison.OrdinalIgnoreCase));
+                        string.Equals(Normalize(r.Site), normSite, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(Normalize(r.Talkgroup), normTalkgroup, StringComparison.OrdinalIgnoreCase));
 
-                    if (siteRule != null)
+                    if (alreadyThere != null)
                     {
-                        inheritedMuted = siteRule.IsMuted;
-                        inheritedDisabled = siteRule.IsDisabled;
+                        alreadyThere.LastSeenUtc = nowUtc;
+                        return;
                     }
-                    else
+
+                    // New rules must inherit the current receiver or site state.
+                    // This ensures that new talkgroups discovered after a higher level mute or disable
+                    // remain muted or disabled until explicitly overridden.
+                    var inheritedMuted = false;
+                    var inheritedDisabled = false;
+
+                    if (level == FilterLevel.Site)
                     {
                         var receiverRule = _rules.FirstOrDefault(r =>
                             r.Level == FilterLevel.Receiver &&
@@ -405,30 +456,51 @@ namespace JoesScanner.Services
                             inheritedDisabled = receiverRule.IsDisabled;
                         }
                     }
+                    else if (level == FilterLevel.Talkgroup)
+                    {
+                        var siteRule = _rules.FirstOrDefault(r =>
+                            r.Level == FilterLevel.Site &&
+                            string.Equals(Normalize(r.Receiver), normReceiver, StringComparison.OrdinalIgnoreCase) &&
+                            string.Equals(Normalize(r.Site), normSite, StringComparison.OrdinalIgnoreCase));
+
+                        if (siteRule != null)
+                        {
+                            inheritedMuted = siteRule.IsMuted;
+                            inheritedDisabled = siteRule.IsDisabled;
+                        }
+                        else
+                        {
+                            var receiverRule = _rules.FirstOrDefault(r =>
+                                r.Level == FilterLevel.Receiver &&
+                                string.Equals(Normalize(r.Receiver), normReceiver, StringComparison.OrdinalIgnoreCase));
+
+                            if (receiverRule != null)
+                            {
+                                inheritedMuted = receiverRule.IsMuted;
+                                inheritedDisabled = receiverRule.IsDisabled;
+                            }
+                        }
+                    }
+
+                    var rule = new FilterRule
+                    {
+                        Level = level,
+                        Receiver = receiver,
+                        Site = site,
+                        Talkgroup = talkgroup,
+                        IsMuted = inheritedMuted,
+                        IsDisabled = inheritedDisabled,
+                        LastSeenUtc = nowUtc
+                    };
+
+                    rule.PropertyChanged += OnRulePropertyChanged;
+
+                    InsertRuleSorted_NoYield(rule);
                 }
 
-                var rule = new FilterRule
-                {
-                    Level = level,
-                    Receiver = receiver,
-                    Site = site,
-                    Talkgroup = talkgroup,
-                    IsMuted = inheritedMuted,
-                    IsDisabled = inheritedDisabled,
-                    LastSeenUtc = nowUtc
-                };
-
-                rule.PropertyChanged += OnRulePropertyChanged;
-
-                InsertRuleSorted_NoYield(rule);
-                added = true;
-            }
-
-            if (added)
-            {
                 SaveToStorage();
                 OnRulesChanged();
-            }
+            });
         }
 
         // Caller must hold _rulesGate.

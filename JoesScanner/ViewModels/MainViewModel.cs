@@ -11,6 +11,10 @@ namespace JoesScanner.ViewModels
     // Handles streaming calls, playback, theme, jump-to-live, and global audio enable state.
     public class MainViewModel : BindableObject
     {
+        // View hint: "Jump to live" is a user action and should force the main queue list
+        // to visually snap back to the newest call even if the user had scrolled into history.
+        public event Action? RequestJumpToLiveScroll;
+
         private const string AppleIosTestAccountEmail = "iostest@joesscanner.com";
         private const string AppleIosTestAccountEmailLegacy = "iostest@jeosscanner.com";
 
@@ -23,7 +27,10 @@ namespace JoesScanner.ViewModels
         private readonly ISubscriptionService _subscriptionService;
         private readonly ITelemetryService _telemetryService;
         private readonly IHistoryLookupsCacheService _historyLookupsCacheService;
-		private readonly IPlaybackCoordinator _playbackCoordinator;
+			        private readonly IAddressDetectionService _addressDetectionService;
+			        private readonly IWhat3WordsService _what3WordsService;
+        private readonly IToneAlertService _toneAlertService;
+private readonly IPlaybackCoordinator _playbackCoordinator;
 
         private CancellationTokenSource? _cts;
         private CancellationTokenSource? _audioCts;
@@ -41,6 +48,7 @@ namespace JoesScanner.ViewModels
         private bool _isRunning;
         private string _serverUrl = string.Empty;
         private bool _autoPlay;
+        private bool _what3WordsLinksEnabled = true;
         private const int MaxCallsToKeep = 100;
         private bool _audioEnabled;
         private int _totalCallsReceived;
@@ -123,6 +131,14 @@ namespace JoesScanner.ViewModels
         // Live collection of calls shown in the UI.
         public ObservableCollection<CallItem> Calls { get; } = new();
 
+        public ObservableCollection<CallItem> AddressAlerts { get; } = new();
+        public bool HasAddressAlerts => AddressAlerts.Count > 0;
+
+        // We only show up to 3 alerts at once, but we keep older ones queued until dismissed.
+        // This avoids losing alerts when multiple address hits come in quickly.
+        private readonly List<CallItem> _hiddenAddressAlerts = new();
+
+
         // Command to start the call stream. Bound to the Connect button.
         public ICommand StartCommand { get; }
 
@@ -166,7 +182,10 @@ namespace JoesScanner.ViewModels
             ISubscriptionService subscriptionService,
             ITelemetryService telemetryService,
 			IHistoryLookupsCacheService historyLookupsCacheService,
-			IPlaybackCoordinator playbackCoordinator)
+			IPlaybackCoordinator playbackCoordinator,
+            IAddressDetectionService addressDetectionService,
+            IWhat3WordsService what3WordsService,
+            IToneAlertService toneAlertService)
         {
             _callStreamService = callStreamService ?? throw new ArgumentNullException(nameof(callStreamService));
             _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
@@ -176,6 +195,14 @@ namespace JoesScanner.ViewModels
             _telemetryService = telemetryService ?? throw new ArgumentNullException(nameof(telemetryService));
             _historyLookupsCacheService = historyLookupsCacheService ?? throw new ArgumentNullException(nameof(historyLookupsCacheService));
 			_playbackCoordinator = playbackCoordinator ?? throw new ArgumentNullException(nameof(playbackCoordinator));
+			_addressDetectionService = addressDetectionService ?? throw new ArgumentNullException(nameof(addressDetectionService));
+			_what3WordsService = what3WordsService ?? throw new ArgumentNullException(nameof(what3WordsService));
+			_toneAlertService = toneAlertService ?? throw new ArgumentNullException(nameof(toneAlertService));
+
+			_toneAlertService.ToneDetected += OnToneDetected;
+			_toneAlertService.HotTalkgroupsChanged += OnHotTalkgroupsChanged;
+
+            AddressAlerts.CollectionChanged += (_, __) => OnPropertyChanged(nameof(HasAddressAlerts));
 
             _audioHttpClient = new HttpClient
             {
@@ -197,6 +224,7 @@ namespace JoesScanner.ViewModels
 			// AutoPlay is an explicit user setting (independent from AudioEnabled).
 			// Do not cache it here; it must reflect the Settings page immediately.
 			_autoPlay = _settingsService.AutoPlay;
+            What3WordsLinksEnabled = _settingsService.What3WordsLinksEnabled;
             // Call retention is now fixed after removing queue call control settings.
             // MaxCallsToKeep is enforced when calls are inserted.
 
@@ -230,6 +258,22 @@ namespace JoesScanner.ViewModels
 
             // React when filters change (mute / disable / clear).
             _filterService.RulesChanged += FilterServiceOnRulesChanged;
+
+            try
+            {
+                if (_settingsService is SettingsService concrete)
+                {
+                    concrete.AddressDetectionSettingsChanged += (_, __) => OnAddressDetectionSettingsChanged();
+                    concrete.What3WordsSettingsChanged += (_, __) =>
+                    {
+                        try { What3WordsLinksEnabled = _settingsService.What3WordsLinksEnabled; } catch { }
+                    };
+                }
+            }
+            catch
+            {
+            }
+
 
             // Initialize subscription badge from any cached subscription data.
             UpdateSubscriptionSummaryFromSettings();
@@ -479,6 +523,7 @@ namespace JoesScanner.ViewModels
 				{
 					// Always pull AutoPlay from the settings service so the Settings page is the single source of truth.
 					_autoPlay = _settingsService.AutoPlay;
+            What3WordsLinksEnabled = _settingsService.What3WordsLinksEnabled;
 					var canStart = _playbackCoordinator.CanStartQueuePlayback(
 						reason,
 						_settingsService.ServerUrl,
@@ -1199,6 +1244,19 @@ namespace JoesScanner.ViewModels
                 _ => "1x"
             };
 
+        public bool What3WordsLinksEnabled
+        {
+            get => _what3WordsLinksEnabled;
+            private set
+            {
+                if (_what3WordsLinksEnabled == value)
+                    return;
+
+                _what3WordsLinksEnabled = value;
+                OnPropertyChanged();
+            }
+        }
+
         public bool AutoPlay
         {
 			get
@@ -1206,6 +1264,7 @@ namespace JoesScanner.ViewModels
 				// Always reflect the latest value from the Settings DB.
 				// This prevents stale values from forcing autoplay after the user turns it off in Settings.
 				_autoPlay = _settingsService.AutoPlay;
+            What3WordsLinksEnabled = _settingsService.What3WordsLinksEnabled;
 				return _autoPlay;
 			}
             set
@@ -1527,7 +1586,26 @@ namespace JoesScanner.ViewModels
                                             {
                                                 existing.Transcription = call.Transcription;
 
-                                                if (!string.IsNullOrWhiteSpace(existing.DebugInfo))
+                                                
+                                                // Carry address detection results over when we receive the transcription update payload.
+                                                // The stream produces update items separately, so we must copy these fields onto the existing UI item.
+                                                if (call.HasDetectedAddress)
+                                                {
+                                                    var hadAddress = existing.HasDetectedAddress;
+
+                                                    existing.DetectedAddress = call.DetectedAddress;
+                                                    existing.DetectedAddressConfidencePercent = call.DetectedAddressConfidencePercent;
+                                                    existing.DetectedAddressCandidates = call.DetectedAddressCandidates;
+
+                                                    if (!hadAddress && existing.HasDetectedAddress)
+                                                        AddAddressAlertIfNew(existing);
+                                                }
+if (call.HasWhat3WordsAddress)
+{
+    existing.What3WordsAddress = call.What3WordsAddress;
+}
+
+if (!string.IsNullOrWhiteSpace(existing.DebugInfo))
                                                 {
                                                     var cleaned = existing.DebugInfo
                                                         .Replace("No transcription from server", string.Empty, StringComparison.OrdinalIgnoreCase)
@@ -1573,6 +1651,22 @@ namespace JoesScanner.ViewModels
                                         call.IsMutedByFilter = false;
                                     }
 
+                                    // Address detection and what3words should be applied for brand new calls too.
+                                    // On iOS, the stream often sends the final transcription on the initial item,
+                                    // so relying on later transcription update items can prevent alerts from ever appearing.
+                                    try
+                                    {
+                                        var hadAddress = call.HasDetectedAddress;
+                                        try { _addressDetectionService.Apply(call); } catch { }
+                                        if (!hadAddress && call.HasDetectedAddress)
+                                            AddAddressAlertIfNew(call);
+
+                                        try { _ = _what3WordsService.ResolveCoordinatesIfNeededAsync(call, CancellationToken.None); } catch { }
+                                    }
+                                    catch
+                                    {
+                                    }
+
                                     // If the user is behind live (replaying from an older point), hold incoming calls as pending.
                                     if (ShouldHoldIncomingCalls())
                                     {
@@ -1610,7 +1704,7 @@ namespace JoesScanner.ViewModels
                             }
                             catch (Exception ex)
                             {
-                                System.Diagnostics.Debug.WriteLine($"Error updating UI for call: {ex}");
+                                AppLog.DebugWriteLine($"Error updating UI for call: {ex}");
                             }
                         }
 
@@ -1636,7 +1730,7 @@ namespace JoesScanner.ViewModels
                     }
                     catch (Exception ex)
                     {
-                        System.Diagnostics.Debug.WriteLine($"Error in call stream loop: {ex}");
+                        AppLog.DebugWriteLine($"Error in call stream loop: {ex}");
 
                         try
                         {
@@ -1807,6 +1901,50 @@ namespace JoesScanner.ViewModels
             AppStateStore.SetBool("last_connected_on_exit", false);
         }
 
+        // Clears the visible main queue (Calls), any pending calls, and any address alerts.
+        // Used when the user validates a different server so we don't show calls from the prior server.
+        public async Task ClearQueueForServerSwitchAsync()
+        {
+            try
+            {
+                ClearPendingCalls();
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                await MainThread.InvokeOnMainThreadAsync(() =>
+                {
+                    try
+                    {
+                        Calls.Clear();
+                    }
+                    catch
+                    {
+                    }
+
+                    try
+                    {
+                        AddressAlerts.Clear();
+                        _hiddenAddressAlerts.Clear();
+                        OnPropertyChanged(nameof(HasAddressAlerts));
+                    }
+                    catch
+                    {
+                    }
+                });
+            }
+            catch
+            {
+            }
+
+            _currentPlayingCall = null;
+            _lastPlayedCall = null;
+            UpdateQueueDerivedState();
+        }
+
         public async Task RestartMonitoringIfRunningAsync()
         {
             if (!IsRunning)
@@ -1832,7 +1970,7 @@ namespace JoesScanner.ViewModels
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error stopping audio: {ex}");
+                AppLog.DebugWriteLine($"Error stopping audio: {ex}");
             }
 
             foreach (var call in Calls)
@@ -1852,54 +1990,133 @@ namespace JoesScanner.ViewModels
             return StopAudioFromToggleAsync();
         }
 
-        private async Task OnCallTappedAsync(CallItem? item)
-        {
-            if (item == null)
-                return;
+        private Task OnCallTappedAsync(CallItem? item)
+		{
+			return OnCallTappedAsync(item, preserveQueueAnchor: false);
+		}
 
-            try
-            {
-                await InterruptAudioForUserActionAsync("User selected call");
+		// Address alert taps should play the call and then continue the queue starting from that call.
+		public async Task PlayFromAddressAlertAsync(CallItem? item)
+		{
+			if (item == null)
+				return;
 
-                LastQueueEvent = $"Call tapped at {DateTime.Now:T}";
+			// Address alerts can outlive the underlying call if the call falls out of the in-memory queue.
+			// If the call is gone, retire the alert so tapping it can't cause navigation/playback issues.
+			var resolved = ResolveCallForAddressAlert(item);
+			if (resolved == null)
+			{
+				DismissAddressAlert(item);
+				AppLog.Add(() => $"AddrAlert: Tap ignored (stale). callId={item.BackendId ?? "(no id)"}");
+				return;
+			}
 
-                if (!AudioEnabled)
-                {
-                    await PlaySingleCallWithoutQueueAsync(item);
-                    return;
-                }
+			await OnCallTappedAsync(resolved, preserveQueueAnchor: false, continueQueueFromPlayedCall: true);
+		}
 
-                foreach (var call in Calls)
-                {
-                    if (call.IsPlaying)
-                        call.IsPlaying = false;
-                }
+		public CallItem? ResolveCallForAddressAlert(CallItem alertItem)
+		{
+			try
+			{
+				// Prefer direct reference match first.
+				if (Calls.Contains(alertItem))
+					return alertItem;
 
-                // Transition the queue to this point by making it the new anchor.
-                // While anchored behind live, new calls will be stored in pending.
-                _currentPlayingCall = item;
-                UpdateQueueDerivedState();
+				var id = alertItem.BackendId;
+				if (!string.IsNullOrWhiteSpace(id))
+				{
+					var match = Calls.FirstOrDefault(c => !string.IsNullOrWhiteSpace(c.BackendId) && c.BackendId == id);
+					if (match != null)
+						return match;
+				}
+			}
+			catch { }
 
-                await PlayAudioAsync(item, allowMutedPlayback: true);
+			return null;
+		}
 
-				if (AudioEnabled && IsRunning && (_settingsService.AutoPlay || _userRunShouldDriveQueue) && CallsWaiting > 0)
-                {
-                    LastQueueEvent = "Tapped call finished; restarting queue";
+		private async Task OnCallTappedAsync(CallItem? item, bool preserveQueueAnchor, bool continueQueueFromPlayedCall = false)
+		{
+			if (item == null)
+				return;
+
+			// If requested, remember where the queue was so a "peek" play doesn't move the anchor.
+			var priorLastPlayed = preserveQueueAnchor ? _lastPlayedCall : null;
+			var wasQueuePlaybackRunning = preserveQueueAnchor && _isQueuePlaybackRunning;
+
+			try
+			{
+				await InterruptAudioForUserActionAsync("User selected call");
+
+				LastQueueEvent = $"Call tapped at {DateTime.Now:T}";
+
+				if (!AudioEnabled)
+				{
+					await PlaySingleCallWithoutQueueAsync(item);
+					return;
+				}
+
+				foreach (var call in Calls)
+				{
+					if (call.IsPlaying)
+						call.IsPlaying = false;
+				}
+
+				// Mark it as the current selection while it plays.
+				_currentPlayingCall = item;
+				UpdateQueueDerivedState();
+
+				await PlayAudioAsync(item, allowMutedPlayback: true);
+
+				// After a user-initiated play, do not leave the VM thinking something is still playing.
+				// Otherwise the queue restart gate can refuse to start.
+				_currentPlayingCall = null;
+				foreach (var call in Calls)
+				{
+					if (call.IsPlaying)
+						call.IsPlaying = false;
+				}
+
+				// If requested, continue the queue starting from the call that was just played.
+				if (continueQueueFromPlayedCall)
+				{
+					_lastPlayedCall = item;
+					UpdateQueueDerivedState();
+				}
+				// Otherwise, restore the prior anchor so the live queue continues from where it was.
+				else if (preserveQueueAnchor)
+				{
+					_lastPlayedCall = priorLastPlayed;
+					UpdateQueueDerivedState();
+				}
+
+				var shouldResumeQueue =
+					AudioEnabled &&
+					IsRunning &&
+					(
+						_settingsService.AutoPlay ||
+						_userRunShouldDriveQueue ||
+						wasQueuePlaybackRunning ||
+						continueQueueFromPlayedCall
+					);
+
+				if (shouldResumeQueue)
+				{
+					LastQueueEvent = "Tapped call finished; restarting queue";
 					_ = RequestQueuePlaybackAsync("TappedCallFinished", true);
-                }
-                else
-                {
-                    LastQueueEvent = "Tapped call finished";
-                }
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"Error in OnCallTappedAsync: {ex}");
-                LastQueueEvent = "Error while playing tapped call (see debug output)";
-            }
-        }
-
-        private async Task JumpToLiveAsync()
+				}
+				else
+				{
+					LastQueueEvent = "Tapped call finished";
+				}
+			}
+			catch (Exception ex)
+			{
+				AppLog.DebugWriteLine($"Error in OnCallTappedAsync: {ex}");
+				LastQueueEvent = "Error while playing tapped call (see debug output)";
+			}
+		}
+private async Task JumpToLiveAsync()
         {
             try
             {
@@ -1949,6 +2166,16 @@ namespace JoesScanner.ViewModels
                         call.IsPlaying = false;
                 }
 
+                // Force the UI list to snap back to the newest call even if the user was
+                // scrolled into history (which intentionally disables auto-follow).
+                try
+                {
+                    RequestJumpToLiveScroll?.Invoke();
+                }
+                catch
+                {
+                }
+
                 _currentPlayingCall = null;
 
                 if (!AudioEnabled)
@@ -1978,51 +2205,107 @@ namespace JoesScanner.ViewModels
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error in JumpToLiveAsync: {ex}");
+                AppLog.DebugWriteLine($"Error in JumpToLiveAsync: {ex}");
                 LastQueueEvent = "Error jumping to live (see debug output)";
             }
         }
 
-        private async Task OnToggleAudioAsync()
+
+		private Task OnToggleAudioAsync()
+		{
+		    var newValue = !AudioEnabled;
+		    var reason = newValue ? "Audio toggled ON" : "Audio toggled OFF";
+		    return SetAudioEnabledAsync(newValue, reason);
+		}
+
+
+public async Task ApplyAudioMenuSelectionAsync(double? speedStep)
+{
+    try
+    {
+        if (speedStep == null)
         {
-            var newValue = !AudioEnabled;
-
-            try
-            {
-                AudioEnabled = newValue;
-
-                LastQueueEvent = newValue ? "Audio toggled ON" : "Audio toggled OFF";
-
-                if (!newValue)
-                {
-                    await StopAudioFromToggleAsync();
-
-                    _lastPlayedCall = null;
-
-                    UpdateQueueDerivedState();
-                }
-                else
-                {
-                    if (Calls.Count > 0)
-                    {
-                        _lastPlayedCall = Calls[0];
-                    }
-                    else
-                    {
-                        _lastPlayedCall = null;
-                    }
-
-
-                    UpdateQueueDerivedState();
-                }
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"Error in OnToggleAudioAsync: {ex}");
-                LastQueueEvent = "Error while toggling audio (see debug output)";
-            }
+            await SetAudioEnabledAsync(false, "Audio menu set OFF");
+            return;
         }
 
+        if (!AudioEnabled)
+        {
+            await SetAudioEnabledAsync(true, "Audio menu set ON");
+        }
+
+        await InterruptAudioForUserActionAsync($"Speed set to {SpeedStepToLabel(speedStep.Value)}");
+        PlaybackSpeedStep = speedStep.Value;
+        LastQueueEvent = $"Speed set to {PlaybackSpeedLabel}";
+    }
+    catch (Exception ex)
+    {
+        AppLog.DebugWriteLine($"Error in ApplyAudioMenuSelectionAsync: {ex}");
+        try
+        {
+            AppLog.Add(() => $"Audio(VM): Menu apply error. {ex.GetType().Name}: {ex.Message}");
+        }
+        catch
+        {
+        }
+    }
+}
+
+private async Task SetAudioEnabledAsync(bool enabled, string reason)
+{
+    try
+    {
+        AudioEnabled = enabled;
+
+        LastQueueEvent = reason;
+
+        if (!enabled)
+        {
+            await StopAudioFromToggleAsync();
+
+            _lastPlayedCall = null;
+
+            UpdateQueueDerivedState();
+        }
+        else
+        {
+            if (Calls.Count > 0)
+            {
+                _lastPlayedCall = Calls[0];
+            }
+            else
+            {
+                _lastPlayedCall = null;
+            }
+
+            UpdateQueueDerivedState();
+        }
+    }
+    catch (Exception ex)
+    {
+        AppLog.DebugWriteLine($"Error in SetAudioEnabledAsync: {ex}");
+        try
+        {
+            AppLog.Add(() => $"Audio(VM): Enable error. {ex.GetType().Name}: {ex.Message}");
+        }
+        catch
+        {
+        }
+    }
+}
+
+private static string SpeedStepToLabel(double step)
+{
+    var rounded = (int)Math.Round(step);
+    return rounded switch
+    {
+        1 => "1.25x",
+        2 => "1.5x",
+        3 => "1.75x",
+        4 => "2x",
+        _ => "1x"
+    };
+}
         private async Task EnsureQueuePlaybackAsync()
         {
             if (_isQueuePlaybackRunning)
@@ -2058,7 +2341,7 @@ namespace JoesScanner.ViewModels
             catch (Exception ex)
             {
                 aborted = true;
-                System.Diagnostics.Debug.WriteLine($"Error in EnsureQueuePlaybackAsync: {ex}");
+                AppLog.DebugWriteLine($"Error in EnsureQueuePlaybackAsync: {ex}");
             }
             finally
             {
@@ -2091,17 +2374,66 @@ namespace JoesScanner.ViewModels
 
         private void EnforceMaxCalls()
         {
-            var max = MaxCallsToKeep; while (Calls.Count > max)
-            {
-                var lastIndex = Calls.Count - 1;
-                if (lastIndex >= 0)
-                {
-                    Calls.RemoveAt(lastIndex);
-                }
-            }
+			var max = MaxCallsToKeep;
+			List<CallItem>? removed = null;
+			while (Calls.Count > max)
+			{
+				var lastIndex = Calls.Count - 1;
+				if (lastIndex < 0)
+					break;
+
+				removed ??= new List<CallItem>();
+				removed.Add(Calls[lastIndex]);
+				Calls.RemoveAt(lastIndex);
+			}
+
+			if (removed != null && removed.Count > 0)
+			{
+				PurgeStaleAddressAlerts();
+			}
 
             UpdateQueueDerivedState();
         }
+
+		private void PurgeStaleAddressAlerts()
+		{
+			try
+			{
+				if (AddressAlerts.Count == 0 && _hiddenAddressAlerts.Count == 0)
+					return;
+
+				HashSet<string> liveIds = new(StringComparer.Ordinal);
+				foreach (var c in Calls)
+				{
+					if (!string.IsNullOrWhiteSpace(c.BackendId))
+						liveIds.Add(c.BackendId);
+				}
+
+				bool IsLive(CallItem a)
+				{
+					if (Calls.Contains(a))
+						return true;
+					return !string.IsNullOrWhiteSpace(a.BackendId) && liveIds.Contains(a.BackendId);
+				}
+
+				for (var i = AddressAlerts.Count - 1; i >= 0; i--)
+				{
+					var a = AddressAlerts[i];
+					if (!IsLive(a))
+						AddressAlerts.RemoveAt(i);
+				}
+
+				for (var i = _hiddenAddressAlerts.Count - 1; i >= 0; i--)
+				{
+					var a = _hiddenAddressAlerts[i];
+					if (!IsLive(a))
+						_hiddenAddressAlerts.RemoveAt(i);
+				}
+
+				OnPropertyChanged(nameof(HasAddressAlerts));
+			}
+			catch { }
+		}
 
         private void UpdateQueueDerivedState()
         {
@@ -2231,7 +2563,7 @@ namespace JoesScanner.ViewModels
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error in PlaySingleCallWithoutQueueAsync: {ex}");
+                AppLog.DebugWriteLine($"Error in PlaySingleCallWithoutQueueAsync: {ex}");
             }
             finally
             {
@@ -2393,7 +2725,7 @@ namespace JoesScanner.ViewModels
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Error in PlayAudioAsync: {ex}");
+                AppLog.DebugWriteLine($"Error in PlayAudioAsync: {ex}");
             }
             finally
             {
@@ -2540,7 +2872,7 @@ namespace JoesScanner.ViewModels
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"[MainViewModel] Error downloading audio with auth: {ex}");
+                AppLog.DebugWriteLine($"[MainViewModel] Error downloading audio with auth: {ex}");
                 return null;
             }
         }
@@ -2632,7 +2964,14 @@ namespace JoesScanner.ViewModels
                             {
                                 item.Transcription = refreshed;
 
-                                if (!string.IsNullOrWhiteSpace(item.DebugInfo))
+                                
+                                var hadAddress = item.HasDetectedAddress;
+                                try { _addressDetectionService.Apply(item); } catch { }
+                                if (!hadAddress && item.HasDetectedAddress)
+                                    AddAddressAlertIfNew(item);
+							try { _ = _what3WordsService.ResolveCoordinatesIfNeededAsync(item, CancellationToken.None); } catch { }
+
+							if (!string.IsNullOrWhiteSpace(item.DebugInfo))
                                 {
                                     var cleaned = item.DebugInfo
                                         .Replace("No transcription from server", string.Empty, StringComparison.OrdinalIgnoreCase)
@@ -2649,6 +2988,200 @@ namespace JoesScanner.ViewModels
                         {
                         }
                     });
+                }
+            }
+            catch
+            {
+            }
+        }
+
+private void AddAddressAlertIfNew(CallItem call)
+{
+    try
+    {
+        // MAUI/iOS requires collection mutations on the UI thread.
+        if (!MainThread.IsMainThread)
+        {
+            try
+            {
+                AppLog.Add(() => $"AddrAlert: Add request off UI thread. Scheduling on UI thread. callId={call?.BackendId ?? "(null)"}");
+                MainThread.BeginInvokeOnMainThread(() => AddAddressAlertIfNew(call));
+            }
+            catch
+            {
+            }
+            return;
+        }
+
+        if (call == null || !call.HasDetectedAddress)
+        {
+            try
+            {
+                if (call == null)
+                    AppLog.Add("AddrAlert: Add skipped. call is null");
+                else
+                    AppLog.Add(() => $"AddrAlert: Add skipped. HasDetectedAddress=false callId={call.BackendId ?? "(no id)"}");
+            }
+            catch
+            {
+            }
+            return;
+        }
+
+        try
+        {
+            AppLog.Add(() => $"AddrAlert: Add attempt. callId={call.BackendId ?? "(no id)"} addr='{call.DetectedAddress ?? ""}' conf={call.DetectedAddressConfidencePercent:0.##}% beforeVisible={AddressAlerts.Count} beforeHidden={_hiddenAddressAlerts.Count} hasVisibleFlag={HasAddressAlerts}");
+        }
+        catch
+        {
+        }
+
+        var id = call.BackendId;
+        if (!string.IsNullOrWhiteSpace(id))
+        {
+            if (AddressAlerts.Any(a => !string.IsNullOrWhiteSpace(a.BackendId) &&
+                                      string.Equals(a.BackendId, id, StringComparison.Ordinal)))
+            {
+                try { AppLog.Add(() => $"AddrAlert: Add skipped. Duplicate visible. callId={id}"); } catch { }
+                return;
+            }
+
+            if (_hiddenAddressAlerts.Any(a => !string.IsNullOrWhiteSpace(a.BackendId) &&
+                                             string.Equals(a.BackendId, id, StringComparison.Ordinal)))
+            {
+                try { AppLog.Add(() => $"AddrAlert: Add skipped. Duplicate hidden. callId={id}"); } catch { }
+                return;
+            }
+        }
+        else
+        {
+            // Fallback: avoid duplicating the same object reference.
+            if (AddressAlerts.Any(a => ReferenceEquals(a, call)) || _hiddenAddressAlerts.Any(a => ReferenceEquals(a, call)))
+            {
+                try { AppLog.Add("AddrAlert: Add skipped. Duplicate by reference."); } catch { }
+                return;
+            }
+        }
+
+        AddressAlerts.Insert(0, call);
+
+        try
+        {
+            AppLog.Add(() => $"AddrAlert: Added. nowVisible={AddressAlerts.Count} nowHidden={_hiddenAddressAlerts.Count} hasVisibleFlag={HasAddressAlerts}");
+        }
+        catch
+        {
+        }
+
+        // Keep only 3 visible; queue the oldest visible alert instead of discarding it.
+        if (AddressAlerts.Count > 3)
+        {
+            var oldestVisible = AddressAlerts[AddressAlerts.Count - 1];
+            AddressAlerts.RemoveAt(AddressAlerts.Count - 1);
+            _hiddenAddressAlerts.Add(oldestVisible);
+
+            try
+            {
+                AppLog.Add(() => $"AddrAlert: Moved oldest to hidden. nowVisible={AddressAlerts.Count} nowHidden={_hiddenAddressAlerts.Count}");
+            }
+            catch
+            {
+            }
+
+            // Safety cap: don't let this grow unbounded.
+            if (_hiddenAddressAlerts.Count > 25)
+                _hiddenAddressAlerts.RemoveRange(0, _hiddenAddressAlerts.Count - 25);
+        }
+    }
+    catch
+    {
+        try { AppLog.Add("AddrAlert: Add failed (exception swallowed)"); } catch { }
+    }
+}
+
+public void DismissAddressAlert(CallItem call)
+{
+    try
+    {
+        // MAUI/iOS requires collection mutations on the UI thread.
+        if (!MainThread.IsMainThread)
+        {
+            try
+            {
+                AppLog.Add(() => $"AddrAlert: Dismiss request off UI thread. Scheduling on UI thread. callId={call?.BackendId ?? "(null)"}");
+                MainThread.BeginInvokeOnMainThread(() => DismissAddressAlert(call));
+            }
+            catch
+            {
+            }
+            return;
+        }
+
+        if (call == null)
+            return;
+
+        try
+        {
+            AppLog.Add(() => $"AddrAlert: Dismiss attempt. callId={call.BackendId ?? "(no id)"} beforeVisible={AddressAlerts.Count} beforeHidden={_hiddenAddressAlerts.Count}");
+        }
+        catch
+        {
+        }
+
+        var existing = AddressAlerts.FirstOrDefault(a =>
+            (!string.IsNullOrWhiteSpace(a.BackendId) && !string.IsNullOrWhiteSpace(call.BackendId) &&
+             string.Equals(a.BackendId, call.BackendId, StringComparison.Ordinal)) ||
+            ReferenceEquals(a, call));
+
+        if (existing != null)
+            AddressAlerts.Remove(existing);
+        else
+        {
+            // Also allow dismissing something that was previously hidden.
+            var hiddenExisting = _hiddenAddressAlerts.FirstOrDefault(a =>
+                (!string.IsNullOrWhiteSpace(a.BackendId) && !string.IsNullOrWhiteSpace(call.BackendId) &&
+                 string.Equals(a.BackendId, call.BackendId, StringComparison.Ordinal)) ||
+                ReferenceEquals(a, call));
+
+            if (hiddenExisting != null)
+                _hiddenAddressAlerts.Remove(hiddenExisting);
+        }
+
+        // Backfill a newly freed slot with the most recently hidden alert.
+        while (AddressAlerts.Count < 3 && _hiddenAddressAlerts.Count > 0)
+        {
+            var idx = _hiddenAddressAlerts.Count - 1;
+            var next = _hiddenAddressAlerts[idx];
+            _hiddenAddressAlerts.RemoveAt(idx);
+            AddressAlerts.Add(next);
+        }
+
+        try
+        {
+            AppLog.Add(() => $"AddrAlert: Dismiss done. afterVisible={AddressAlerts.Count} afterHidden={_hiddenAddressAlerts.Count} hasVisibleFlag={HasAddressAlerts}");
+        }
+        catch
+        {
+        }
+    }
+    catch
+    {
+        try { AppLog.Add("AddrAlert: Dismiss failed (exception swallowed)"); } catch { }
+    }
+}
+
+
+        private void OnAddressDetectionSettingsChanged()
+        {
+            try
+            {
+                foreach (var call in Calls)
+                {
+                    var hadAddress = call.HasDetectedAddress;
+                    try { _addressDetectionService.Apply(call); } catch { }
+                    if (!hadAddress && call.HasDetectedAddress)
+                        AddAddressAlertIfNew(call);
+					try { _ = _what3WordsService.ResolveCoordinatesIfNeededAsync(call, CancellationToken.None); } catch { }
                 }
             }
             catch
@@ -2779,5 +3312,63 @@ namespace JoesScanner.ViewModels
 
             app.UserAppTheme = theme;
         }
+
+		private void OnToneDetected(string audioUrl)
+		{
+			if (string.IsNullOrWhiteSpace(audioUrl))
+				return;
+
+			try
+			{
+				MainThread.BeginInvokeOnMainThread(() =>
+				{
+					try
+					{
+						var match = Calls.FirstOrDefault(c =>
+							!string.IsNullOrWhiteSpace(c.AudioUrl)
+							&& string.Equals(c.AudioUrl, audioUrl, StringComparison.OrdinalIgnoreCase));
+
+						if (match == null)
+							return;
+
+						var key = match.ToneHotKey;
+						var minutes = Math.Clamp(_settingsService.AudioToneHighlightMinutes, 1, 99);
+						_toneAlertService.SetTalkgroupHot(key, TimeSpan.FromMinutes(minutes));
+						RefreshToneHotFlags();
+
+						try { AppLog.Add(() => $"AudioTone: talkgroup hot for {minutes} minutes. key={key}"); } catch { }
+					}
+					catch
+					{
+					}
+				});
+			}
+			catch
+			{
+			}
+		}
+
+		private void OnHotTalkgroupsChanged()
+		{
+			try
+			{
+				MainThread.BeginInvokeOnMainThread(RefreshToneHotFlags);
+			}
+			catch
+			{
+			}
+		}
+
+		private void RefreshToneHotFlags()
+		{
+			try
+			{
+				foreach (var c in Calls)
+					c.IsToneHot = _toneAlertService.IsTalkgroupHot(c.ToneHotKey);
+			}
+			catch
+			{
+			}
+		}
     }
 }

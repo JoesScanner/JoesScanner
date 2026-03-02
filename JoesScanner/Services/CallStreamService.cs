@@ -10,6 +10,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Channels;
 using JoesScanner.Data;
+using JoesScanner.Services;
 
 namespace JoesScanner.Services
 {
@@ -25,6 +26,7 @@ namespace JoesScanner.Services
 
         private readonly ISettingsService _settingsService;
         private readonly ILocalCallsRepository _localCallsRepository;
+        private readonly IAddressDetectionService _addressDetectionService;
         private readonly HttpClient _httpClient;
         private readonly JsonSerializerOptions _jsonOptions;
 
@@ -46,10 +48,11 @@ namespace JoesScanner.Services
         private int _draw = 1;
 
         // Creates a new call stream service with an HttpClient configured for the calljson endpoint.
-        public CallStreamService(ISettingsService settingsService, ILocalCallsRepository localCallsRepository)
+        public CallStreamService(ISettingsService settingsService, ILocalCallsRepository localCallsRepository, IAddressDetectionService addressDetectionService)
         {
             _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
             _localCallsRepository = localCallsRepository ?? throw new ArgumentNullException(nameof(localCallsRepository));
+            _addressDetectionService = addressDetectionService ?? throw new ArgumentNullException(nameof(addressDetectionService));
 
             // IMPORTANT (Apple platforms + HTTP custom servers)
             // iOS and MacCatalyst can still surface NSURLErrorDomain -1022 (ATS) for cleartext HTTP
@@ -268,7 +271,12 @@ namespace JoesScanner.Services
                     }
                     catch (Exception ex)
                     {
-                        Debug.WriteLine($"[CallStreamService] [WebSocket] Connect failed: {ex}");
+                        if (AppLog.IsEnabled)
+                        {
+                            Debug.WriteLine($"[CallStreamService] [WebSocket] Connect failed: {ex}");
+                        }
+
+                        AppLog.Add(() => $"CallStream: WebSocket connect failed. ex={ex.GetType().Name}: {ex.Message}");
                     }
 
                     if (ws != null)
@@ -323,25 +331,40 @@ namespace JoesScanner.Services
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
                     // Caller requested cancellation (disconnect, shutdown, etc.).
-                    Debug.WriteLine("[CallStreamService] Streaming cancelled by caller.");
+                    if (AppLog.IsEnabled)
+                    {
+                        Debug.WriteLine("[CallStreamService] Streaming cancelled by caller.");
+                    }
                     yield break;
                 }
                 catch (OperationCanceledException ex)
                 {
                     // Most likely an HttpClient timeout or similar; treat as recoverable.
                     errorMessage = "The connection to the audio server timed out. The app will retry automatically.";
-                    Debug.WriteLine($"[CallStreamService] [Timeout] {ex}");
+                    if (AppLog.IsEnabled)
+                    {
+                        Debug.WriteLine($"[CallStreamService] [Timeout] {ex}");
+                    }
+                    AppLog.Add(() => $"CallStream: poll timed out. ex={ex.GetType().Name}: {ex.Message}");
                 }
                 catch (CallStreamAuthException ex)
                 {
                     isAuthError = true;
                     errorMessage = ex.Message;
-                    Debug.WriteLine($"[CallStreamService] [AuthError] {ex}");
+                    if (AppLog.IsEnabled)
+                    {
+                        Debug.WriteLine($"[CallStreamService] [AuthError] {ex}");
+                    }
+                    AppLog.Add(() => $"CallStream: auth error. {ex.Message}");
                 }
                 catch (HttpRequestException ex)
                 {
                     // Retry once on transient transport failures (for example: "Socket closed").
-                    Debug.WriteLine($"[CallStreamService] [HttpError] {ex}");
+                    if (AppLog.IsEnabled)
+                    {
+                        Debug.WriteLine($"[CallStreamService] [HttpError] {ex}");
+                    }
+                    AppLog.Add(() => $"CallStream: http error. ex={ex.GetType().Name}: {ex.Message}");
 
                     try
                     {
@@ -357,18 +380,30 @@ namespace JoesScanner.Services
                     {
                         isAuthError = true;
                         errorMessage = retryAuth.Message;
-                        Debug.WriteLine($"[CallStreamService] [AuthError] {retryAuth}");
+                        if (AppLog.IsEnabled)
+                        {
+                            Debug.WriteLine($"[CallStreamService] [AuthError] {retryAuth}");
+                        }
+                        AppLog.Add(() => $"CallStream: auth error after retry. {retryAuth.Message}");
                     }
                     catch (Exception retryEx)
                     {
                         errorMessage = BuildTransportErrorMessage(retryEx);
-                        Debug.WriteLine($"[CallStreamService] [HttpRetryFailed] {retryEx}");
+                        if (AppLog.IsEnabled)
+                        {
+                            Debug.WriteLine($"[CallStreamService] [HttpRetryFailed] {retryEx}");
+                        }
+                        AppLog.Add(() => $"CallStream: http retry failed. ex={retryEx.GetType().Name}: {retryEx.Message}");
                     }
                 }
                 catch (Exception ex)
                 {
                     errorMessage = BuildTransportErrorMessage(ex);
-                    Debug.WriteLine($"[CallStreamService] [UnexpectedError] {ex}");
+                    if (AppLog.IsEnabled)
+                    {
+                        Debug.WriteLine($"[CallStreamService] [UnexpectedError] {ex}");
+                    }
+                    AppLog.Add(() => $"CallStream: unexpected error. ex={ex.GetType().Name}: {ex.Message}");
                 }
 
                 // Surface any error from the poll as a synthetic CallItem row.
@@ -779,7 +814,7 @@ namespace JoesScanner.Services
                 return null;
             }
 
-            return new CallItem
+            var item = new CallItem
             {
                 BackendId = rawId,
                 IsTranscriptionUpdate = isTranscriptionUpdate,
@@ -793,44 +828,25 @@ namespace JoesScanner.Services
                 AudioUrl = audioUrl,
                 DebugInfo = debugInfo
             };
+
+            // Address detection must never impact queue connectivity.
+            // If disabled (default), skip the work entirely. If enabled, run best-effort.
+            try
+            {
+                _addressDetectionService.Apply(item);
+            }
+            catch (Exception ex)
+            {
+                try { AppLog.Add(() => $"AddressDetection: Apply failed. {ex.Message}"); } catch { }
+            }
+            return item;
         }
 
         // Normalizes incoming transcription text so a single oversized payload cannot stall the UI.
-        // We intentionally keep this inexpensive: whitespace normalization plus a hard input cap.
+        // We intentionally keep this inexpensive: whitespace normalization, a hard input cap, and repetition culling.
         private static string NormalizeCallText(string? text)
         {
-            if (string.IsNullOrWhiteSpace(text))
-                return string.Empty;
-
-            var s = text.Trim();
-
-            const int maxIncomingChars = 20000;
-            if (s.Length > maxIncomingChars)
-                s = s.Substring(0, maxIncomingChars);
-
-            var sb = new StringBuilder(s.Length);
-            var lastWasSpace = true; // trim leading whitespace
-            foreach (var ch in s)
-            {
-                var c = ch;
-                if (c == '\n' || c == '\n' || c == '\t')
-                    c = ' ';
-
-                if (char.IsWhiteSpace(c))
-                {
-                    if (lastWasSpace)
-                        continue;
-
-                    sb.Append(' ');
-                    lastWasSpace = true;
-                    continue;
-                }
-
-                sb.Append(c);
-                lastWasSpace = false;
-            }
-
-            return sb.ToString().Trim();
+            return TranscriptionSanitizer.Sanitize(text);
         }
 
         private static string? CapTextRaw(string? text)
@@ -1305,7 +1321,12 @@ namespace JoesScanner.Services
                     }
                     catch (Exception ex)
                     {
-                        Debug.WriteLine($"[CallStreamService] [WebSocket] Parse error: {ex}");
+                        if (AppLog.IsEnabled)
+                        {
+                            Debug.WriteLine($"[CallStreamService] [WebSocket] Parse error: {ex}");
+                        }
+
+                        AppLog.Add(() => $"CallStream: WebSocket parse error. ex={ex.GetType().Name}: {ex.Message}");
                         // Break out so outer loop can fall back/reconnect.
                         yield break;
                     }
@@ -1342,7 +1363,12 @@ namespace JoesScanner.Services
                     }
                     catch (Exception ex)
                     {
-                        Debug.WriteLine($"[CallStreamService] [WebSocket] Transcription catch-up failed: {ex.Message}");
+                        if (AppLog.IsEnabled)
+                        {
+                            Debug.WriteLine($"[CallStreamService] [WebSocket] Transcription catch-up failed: {ex.Message}");
+                        }
+
+                        AppLog.Add(() => $"CallStream: transcription catch-up failed. ex={ex.GetType().Name}: {ex.Message}");
                     }
 
                     if (catchupYield != null)

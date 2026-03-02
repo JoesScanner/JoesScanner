@@ -68,7 +68,8 @@ namespace JoesScanner.Services
             string accept,
             string cancel,
             string? initialValue = null,
-            int maxLength = 64)
+            int maxLength = 64,
+            Keyboard? keyboard = null)
         {
             return MainThread.InvokeOnMainThreadAsync(async () =>
             {
@@ -83,7 +84,7 @@ namespace JoesScanner.Services
                     cancel: cancel,
                     placeholder: null,
                     maxLength: maxLength,
-                    keyboard: Keyboard.Default,
+                    keyboard: keyboard ?? Keyboard.Default,
                     initialValue: initialValue);
             });
         }

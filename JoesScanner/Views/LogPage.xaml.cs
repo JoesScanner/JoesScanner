@@ -1,4 +1,6 @@
+using System.IO;
 using JoesScanner.Services;
+using Microsoft.Maui.ApplicationModel.DataTransfer;
 using Microsoft.Maui.Dispatching;
 
 namespace JoesScanner.Views
@@ -92,6 +94,42 @@ namespace JoesScanner.Views
                 StartAutoRefreshTimer();
             }
         }
+
+        private async void OnExportClicked(object sender, EventArgs e)
+        {
+            try
+            {
+                if (!AppLog.IsEnabled)
+                {
+                    await DisplayAlert("Logs", "Logging is disabled.", "OK");
+                    return;
+                }
+
+                var zipPath = await AppLog.ExportLogsAsync(maxLogFiles: 3, snapshotMaxLines: MaxLines);
+                if (string.IsNullOrWhiteSpace(zipPath) || !File.Exists(zipPath))
+                {
+                    await DisplayAlert("Logs", "Unable to export logs.", "OK");
+                    return;
+                }
+
+                await Share.Default.RequestAsync(new ShareFileRequest
+                {
+                    Title = "Share logs",
+                    File = new ShareFile(zipPath)
+                });
+            }
+            catch
+            {
+                try
+                {
+                    await DisplayAlert("Logs", "Unable to export logs.", "OK");
+                }
+                catch
+                {
+                }
+            }
+        }
+
 
         private void OnAutoRefreshClicked(object sender, EventArgs e)
         {

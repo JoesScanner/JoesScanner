@@ -1,5 +1,8 @@
+using System.Collections.Generic;
+using System.Linq;
 using System.Globalization;
 using Microsoft.Data.Sqlite;
+using JoesScanner.Models;
 
 namespace JoesScanner.Services
 {
@@ -38,7 +41,27 @@ namespace JoesScanner.Services
         private const string KeyBluetoothComposer = "bt_label_composer";
         private const string KeyBluetoothGenre = "bt_label_genre";
 
-        // Built-in server definitions for this phase.
+        private const string KeyWhat3WordsLinksEnabled = "what3words_links_enabled";
+        private const string KeyWhat3WordsApiKey = "what3words_api_key";
+
+        private const string KeyAddressDetectionEnabled = "address_detection_enabled";
+        private const string KeyAddressDetectionOpenMapsOnTap = "address_detection_open_maps_on_tap";
+
+        private const string KeyAddressDetectionMinConfidencePercent = "address_detection_min_confidence_percent";
+        private const string KeyAddressDetectionMinAddressChars = "address_detection_min_address_chars";
+        private const string KeyAddressDetectionMaxCandidatesPerCall = "address_detection_max_candidates_per_call";
+
+        private const string KeyAudioStaticFilterEnabled = "audio_static_filter_enabled";
+        private const string KeyAudioStaticAttenuatorVolume = "audio_static_attenuator_volume";
+        private const string KeyAudioStaticAttenuatorVolumeLegacy = "audio_static_squelch";
+
+        private const string KeyAudioToneFilterEnabled = "audio_tone_filter_enabled";
+        private const string KeyAudioToneStrength = "audio_tone_strength";
+        private const string KeyAudioToneSensitivity = "audio_tone_sensitivity";
+        private const string KeyAudioToneHighlightMinutes = "audio_tone_highlight_minutes";
+
+        private const string KeyTelemetryEnabled = "telemetry_enabled";
+// Built-in server definitions for this phase.
         private const string BuiltinJoeKey = "joe";
         private const string BuiltinCustomKey = "custom";
         private const string BuiltinJoeUrl = "https://app.joesscanner.com";
@@ -55,6 +78,35 @@ namespace JoesScanner.Services
 
             _dbPath = Path.Combine(FileSystem.AppDataDirectory, DbFileName);
         }
+
+        // Fired when any address detection setting changes, so interested view models can re-apply detection to existing calls.
+        public event EventHandler? AddressDetectionSettingsChanged;
+
+        // Fired when what3words settings change.
+        public event EventHandler? What3WordsSettingsChanged;
+
+        private void OnWhat3WordsSettingsChanged()
+        {
+            try
+            {
+                What3WordsSettingsChanged?.Invoke(this, EventArgs.Empty);
+            }
+            catch
+            {
+            }
+        }
+
+        private void OnAddressDetectionSettingsChanged()
+        {
+            try
+            {
+                AddressDetectionSettingsChanged?.Invoke(this, EventArgs.Empty);
+            }
+            catch
+            {
+            }
+        }
+
 
         public string AuthServerBaseUrl
         {
@@ -480,6 +532,100 @@ namespace JoesScanner.Services
             set => SetString(KeyBluetoothGenre, (value ?? "Receiver").Trim());
         }
 
+
+        public bool What3WordsLinksEnabled
+        {
+            get => GetBool(KeyWhat3WordsLinksEnabled, true);
+            set => SetBool(KeyWhat3WordsLinksEnabled, value);
+        }
+
+        public string What3WordsApiKey
+        {
+            get => GetString(KeyWhat3WordsApiKey, string.Empty);
+            set => SetString(KeyWhat3WordsApiKey, (value ?? string.Empty).Trim());
+        }
+
+        public bool AddressDetectionEnabled
+        {
+            get => GetBool(KeyAddressDetectionEnabled, false);
+            set => SetBool(KeyAddressDetectionEnabled, value);
+        }
+        public bool AddressDetectionOpenMapsOnTap
+        {
+            get => GetBool(KeyAddressDetectionOpenMapsOnTap, true);
+            set => SetBool(KeyAddressDetectionOpenMapsOnTap, value);
+        }
+
+        public int AddressDetectionMinConfidencePercent
+        {
+            get => Clamp(GetInt(KeyAddressDetectionMinConfidencePercent, 70), 0, 100);
+            set => SetInt(KeyAddressDetectionMinConfidencePercent, Clamp(value, 0, 100));
+        }
+
+        public int AddressDetectionMinAddressChars
+        {
+            get => Clamp(GetInt(KeyAddressDetectionMinAddressChars, 8), 0, 200);
+            set => SetInt(KeyAddressDetectionMinAddressChars, Clamp(value, 0, 200));
+        }
+
+        public int AddressDetectionMaxCandidatesPerCall
+        {
+            get => Clamp(GetInt(KeyAddressDetectionMaxCandidatesPerCall, 3), 1, 10);
+            set => SetInt(KeyAddressDetectionMaxCandidatesPerCall, Clamp(value, 1, 10));
+        }
+
+
+        public bool AudioStaticFilterEnabled
+        {
+            get => GetBool(KeyAudioStaticFilterEnabled, false);
+            set => SetBool(KeyAudioStaticFilterEnabled, value);
+        }
+
+        public int AudioStaticAttenuatorVolume
+        {
+            get
+            {
+                var v = GetInt(KeyAudioStaticAttenuatorVolume, int.MinValue);
+                if (v == int.MinValue)
+                    v = GetInt(KeyAudioStaticAttenuatorVolumeLegacy, 50);
+                return Clamp(v, 0, 100);
+            }
+            set => SetInt(KeyAudioStaticAttenuatorVolume, Clamp(value, 0, 100));
+        }
+
+        public bool AudioToneFilterEnabled
+        {
+            get => GetBool(KeyAudioToneFilterEnabled, false);
+            set => SetBool(KeyAudioToneFilterEnabled, value);
+        }
+
+        public int AudioToneStrength
+        {
+            get => Clamp(GetInt(KeyAudioToneStrength, 50), 0, 100);
+            set => SetInt(KeyAudioToneStrength, Clamp(value, 0, 100));
+        }
+
+        public int AudioToneSensitivity
+        {
+            // Higher = detect tones more easily.
+            get => Clamp(GetInt(KeyAudioToneSensitivity, 50), 0, 100);
+            set => SetInt(KeyAudioToneSensitivity, Clamp(value, 0, 100));
+        }
+
+
+        public int AudioToneHighlightMinutes
+        {
+            get => Clamp(GetInt(KeyAudioToneHighlightMinutes, 5), 1, 99);
+            set => SetInt(KeyAudioToneHighlightMinutes, Clamp(value, 1, 99));
+        }
+
+        public bool TelemetryEnabled
+        {
+            // Default ON to preserve existing behavior.
+            get => GetBool(KeyTelemetryEnabled, true);
+            set => SetBool(KeyTelemetryEnabled, value);
+        }
+
         private void EnsureInitialized()
         {
             lock (_gate)
@@ -561,6 +707,15 @@ CREATE INDEX IF NOT EXISTS idx_servers_enabled_sort ON servers(enabled, sort_ord
             EnsureColumnExists(conn, TableServers, "created_utc", "TEXT NOT NULL DEFAULT ''");
             EnsureColumnExists(conn, TableServers, "updated_utc", "TEXT NOT NULL DEFAULT ''");
             EnsureColumnExists(conn, TableServers, "last_used_utc", "TEXT NULL");
+
+            EnsureColumnExists(conn, TableServers, "info_url", "TEXT NOT NULL DEFAULT ''");
+            EnsureColumnExists(conn, TableServers, "area_label", "TEXT NOT NULL DEFAULT ''");
+            EnsureColumnExists(conn, TableServers, "map_anchor", "TEXT NOT NULL DEFAULT ''");
+            EnsureColumnExists(conn, TableServers, "is_official", "INTEGER NOT NULL DEFAULT 0");
+            EnsureColumnExists(conn, TableServers, "directory_id", "INTEGER NOT NULL DEFAULT 0");
+            EnsureColumnExists(conn, TableServers, "badge", "TEXT NOT NULL DEFAULT ''");
+            EnsureColumnExists(conn, TableServers, "badge_label", "TEXT NOT NULL DEFAULT ''");
+            EnsureColumnExists(conn, TableServers, "source", "TEXT NOT NULL DEFAULT ''");
 
             // Upgrade older installs that had a minimal auth state table.
             EnsureColumnExists(conn, TableServerAuthState, "validated_online", "INTEGER NOT NULL DEFAULT 0");
@@ -713,6 +868,231 @@ WHERE server_key IN ($joe, $custom);";
             cmd.ExecuteNonQuery();
         }
 
+
+
+        public IReadOnlyList<ServerDirectoryEntry> GetCachedDirectoryServers()
+        {
+            EnsureInitialized();
+
+            var list = new List<ServerDirectoryEntry>();
+
+            using var conn = OpenConnection();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+SELECT directory_id, display_name, base_url, info_url, area_label, map_anchor, is_official, badge, badge_label
+FROM servers
+WHERE source = 'directory'
+ORDER BY is_official DESC, sort_order ASC, display_name ASC;";
+
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                var entry = new ServerDirectoryEntry
+                {
+                    DirectoryId = SafeGetInt(reader, 0),
+                    Name = SafeGetString(reader, 1),
+                    Url = SafeGetString(reader, 2),
+                    InfoUrl = SafeGetString(reader, 3),
+                    AreaLabel = SafeGetString(reader, 4),
+                    MapAnchor = SafeGetString(reader, 5),
+                    IsOfficial = SafeGetInt(reader, 6) != 0,
+                    Badge = SafeGetString(reader, 7),
+                    BadgeLabel = SafeGetString(reader, 8)
+                };
+
+                // Skip entries that do not have a usable URL.
+                if (string.IsNullOrWhiteSpace(entry.Url))
+                    continue;
+
+                list.Add(entry);
+            }
+
+            return list;
+        }
+
+        public void UpsertCachedDirectoryServers(IEnumerable<ServerDirectoryEntry> servers)
+        {
+            EnsureInitialized();
+
+            var incoming = (servers ?? Array.Empty<ServerDirectoryEntry>()).ToList();
+
+            // Normalize and filter up front.
+            var normalized = new List<(string ServerKey, ServerDirectoryEntry Entry)>();
+
+            foreach (var s in incoming)
+            {
+                if (s == null)
+                    continue;
+
+                var url = CanonicalizeBaseUrl(s.Url);
+                if (string.IsNullOrWhiteSpace(url))
+                    continue;
+
+                s.Url = url;
+
+                // Directory entries use a stable key based on the URL.
+                var key = "dir::" + NormalizeServerKey(url);
+                if (string.IsNullOrWhiteSpace(key) || key == "dir::")
+                    continue;
+
+                normalized.Add((key, s));
+            }
+
+            using var conn = OpenConnection();
+            using var tx = conn.BeginTransaction();
+
+            var now = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+
+            // Upsert all incoming.
+            for (var i = 0; i < normalized.Count; i++)
+            {
+                var (serverKey, entry) = normalized[i];
+                using var cmd = conn.CreateCommand();
+                cmd.Transaction = tx;
+                cmd.CommandText = @"
+INSERT INTO servers (
+  server_key, display_name, base_url, enabled, sort_order, is_builtin, created_utc, updated_utc, last_used_utc,
+  info_url, area_label, map_anchor, is_official, directory_id, badge, badge_label, source
+)
+VALUES (
+  $k, $n, $u, 1, $s, 0, $c, $m, NULL,
+  $info, $area, $anchor, $official, $dirId, $badge, $badgeLabel, 'directory'
+)
+ON CONFLICT(server_key) DO UPDATE SET
+  display_name = excluded.display_name,
+  base_url = excluded.base_url,
+  enabled = excluded.enabled,
+  sort_order = excluded.sort_order,
+  updated_utc = excluded.updated_utc,
+  info_url = excluded.info_url,
+  area_label = excluded.area_label,
+  map_anchor = excluded.map_anchor,
+  is_official = excluded.is_official,
+  directory_id = excluded.directory_id,
+  badge = excluded.badge,
+  badge_label = excluded.badge_label,
+  source = excluded.source;";
+
+                cmd.Parameters.AddWithValue("$k", serverKey);
+                cmd.Parameters.AddWithValue("$n", (entry.Name ?? string.Empty).Trim());
+                cmd.Parameters.AddWithValue("$u", entry.Url);
+                cmd.Parameters.AddWithValue("$s", 100 + i);
+                cmd.Parameters.AddWithValue("$c", now);
+                cmd.Parameters.AddWithValue("$m", now);
+                cmd.Parameters.AddWithValue("$info", (entry.InfoUrl ?? string.Empty).Trim());
+                cmd.Parameters.AddWithValue("$area", (entry.AreaLabel ?? string.Empty).Trim());
+                cmd.Parameters.AddWithValue("$anchor", (entry.MapAnchor ?? string.Empty).Trim());
+                cmd.Parameters.AddWithValue("$official", entry.IsOfficial ? 1 : 0);
+                cmd.Parameters.AddWithValue("$dirId", entry.DirectoryId);
+                cmd.Parameters.AddWithValue("$badge", (entry.Badge ?? string.Empty).Trim());
+                cmd.Parameters.AddWithValue("$badgeLabel", (entry.BadgeLabel ?? string.Empty).Trim());
+
+                cmd.ExecuteNonQuery();
+            }
+
+            // Remove directory entries that no longer exist.
+            // Keep built-ins and any non-directory rows.
+            if (normalized.Count == 0)
+            {
+                using var delAll = conn.CreateCommand();
+                delAll.Transaction = tx;
+                delAll.CommandText = "DELETE FROM servers WHERE source = 'directory';";
+                delAll.ExecuteNonQuery();
+            }
+            else
+            {
+                var keys = normalized.Select(x => x.ServerKey).Distinct(StringComparer.Ordinal).ToList();
+
+                // Build a safe IN clause with parameters.
+                var placeholders = string.Join(",", keys.Select((_, idx) => "$k" + idx));
+                using var del = conn.CreateCommand();
+                del.Transaction = tx;
+                del.CommandText = $"DELETE FROM servers WHERE source = 'directory' AND server_key NOT IN ({placeholders});";
+                for (var i = 0; i < keys.Count; i++)
+                {
+                    del.Parameters.AddWithValue("$k" + i, keys[i]);
+                }
+                del.ExecuteNonQuery();
+            }
+
+            tx.Commit();
+        }
+
+        public bool TryGetMapAnchorForServerUrl(string serverUrl, out string mapAnchor)
+        {
+            mapAnchor = string.Empty;
+            EnsureInitialized();
+
+            var url = CanonicalizeBaseUrl(serverUrl);
+            if (string.IsNullOrWhiteSpace(url))
+                return false;
+
+            using var conn = OpenConnection();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+SELECT map_anchor
+FROM servers
+WHERE lower(trim(base_url)) = lower(trim($u))
+LIMIT 1;";
+            cmd.Parameters.AddWithValue("$u", url);
+
+            var result = cmd.ExecuteScalar();
+            if (result == null)
+                return false;
+
+            var s = (result?.ToString() ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(s))
+                return false;
+
+            mapAnchor = s;
+            return true;
+        }
+
+        private static string CanonicalizeBaseUrl(string? url)
+        {
+            var s = (url ?? string.Empty).Trim();
+            if (s.Length == 0)
+                return string.Empty;
+
+            // Keep scheme and host exactly as provided, but remove trailing slashes.
+            return s.TrimEnd('/');
+        }
+
+        private static string SafeGetString(SqliteDataReader reader, int ordinal)
+        {
+            try
+            {
+                return reader.IsDBNull(ordinal) ? string.Empty : (reader.GetString(ordinal) ?? string.Empty);
+            }
+            catch
+            {
+                return string.Empty;
+            }
+        }
+
+        private static int SafeGetInt(SqliteDataReader reader, int ordinal)
+        {
+            try
+            {
+                return reader.IsDBNull(ordinal) ? 0 : reader.GetInt32(ordinal);
+            }
+            catch
+            {
+                try
+                {
+                    if (reader.IsDBNull(ordinal))
+                        return 0;
+
+                    var raw = reader.GetValue(ordinal)?.ToString() ?? "0";
+                    return int.TryParse(raw, out var v) ? v : 0;
+                }
+                catch
+                {
+                    return 0;
+                }
+            }
+        }
+
         private string GetString(string key, string defaultValue)
         {
             EnsureInitialized();
@@ -728,6 +1108,21 @@ WHERE server_key IN ($joe, $custom);";
         {
             var raw = GetString(key, defaultValue ? "true" : "false");
             return bool.TryParse(raw, out var b) ? b : defaultValue;
+        }
+
+        private int GetInt(string key, int defaultValue)
+        {
+            var raw = GetString(key, defaultValue.ToString(CultureInfo.InvariantCulture));
+            return int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) ? v : defaultValue;
+        }
+
+        private void SetInt(string key, int value)
+        {
+            SetString(key, value.ToString(CultureInfo.InvariantCulture));
+
+            if (key.StartsWith("address_detection_", StringComparison.OrdinalIgnoreCase))
+                OnAddressDetectionSettingsChanged();
+
         }
 
         private void SetString(string key, string value)
@@ -756,6 +1151,26 @@ ON CONFLICT(setting_key) DO UPDATE SET
         private void SetBool(string key, bool value)
         {
             SetString(key, value ? "true" : "false");
+
+            if (key.StartsWith("address_detection_", StringComparison.OrdinalIgnoreCase))
+                OnAddressDetectionSettingsChanged();
+
+        
+            if (string.Equals(key, KeyWhat3WordsLinksEnabled, StringComparison.OrdinalIgnoreCase))
+                OnWhat3WordsSettingsChanged();
+
+            if (string.Equals(key, KeyWhat3WordsApiKey, StringComparison.OrdinalIgnoreCase))
+                OnWhat3WordsSettingsChanged();
+
+        }
+
+        private static int Clamp(int value, int min, int max)
+        {
+            if (value < min)
+                return min;
+            if (value > max)
+                return max;
+            return value;
         }
 
         private void Remove(string key)

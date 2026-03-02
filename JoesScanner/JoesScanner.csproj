@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <!-- Multi target: Android, iOS, MacCatalyst, Windows (on .NET 10) -->
@@ -24,10 +24,10 @@
     <ApplicationId>app.joesscanner.com</ApplicationId>
 
     <!-- Display version is semantic -->
-    <ApplicationDisplayVersion>1.5.3</ApplicationDisplayVersion>
+    <ApplicationDisplayVersion>1.5.4</ApplicationDisplayVersion>
 
     <!-- ApplicationVersion must be an integer and should only ever go up -->
-    <ApplicationVersion>153</ApplicationVersion>
+    <ApplicationVersion>154</ApplicationVersion>
 
     <DefaultLanguage>en-us</DefaultLanguage>
 
@@ -66,9 +66,6 @@
     <!-- Work around occasional simulator builds failing in the generated registrar -->
     <MtouchLink>SdkOnly</MtouchLink>
     <MtouchExtraArgs>$(MtouchExtraArgs) --registrar:static</MtouchExtraArgs>
-    <CodesignProvision>test</CodesignProvision>
-    <ProvisioningType>automatic</ProvisioningType>
-    <CodesignKey>iPhone Distribution</CodesignKey>
   </PropertyGroup>
 
   <!-- iOS runtime selection -->
@@ -98,6 +95,9 @@
     <PackageReference Include="Microsoft.Maui.Controls" Version="10.0.1" />
     <PackageReference Include="Plugin.Maui.Audio" Version="4.0.0" />
 
+    <!-- Managed MP3 decoding used for tone detection (Audio filters Phase 4). -->
+
+    <PackageReference Include="NLayer" Version="1.16.0" />
     <!-- Local SQLite storage (cross-platform) -->
     <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.2" />
     <PackageReference Include="SQLitePCLRaw.bundle_green" Version="2.1.10" />
@@ -113,6 +113,8 @@
     <MauiIcon Include="Resources\AppIcon\appicon.png" />
     <MauiSplashScreen Include="Resources\Splash\joesscanner_splash.png" Color="#000000" />
     <MauiImage Include="Resources\Images\*" />
+    <MauiImage Remove="Resources\Images\banner_hq.png" />
+    <MauiImage Remove="Resources\Images\logo.png" />
     <MauiFont Include="Resources\Fonts\*" />
     <MauiAsset Include="Resources\Raw\**" LogicalName="%(RecursiveDir)%(Filename)%(Extension)" />
   </ItemGroup>

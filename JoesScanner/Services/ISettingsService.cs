@@ -77,5 +77,55 @@ namespace JoesScanner.Services
         string BluetoothLabelAlbum { get; set; }
         string BluetoothLabelComposer { get; set; }
         string BluetoothLabelGenre { get; set; }
+
+
+        // what3words
+        bool What3WordsLinksEnabled { get; set; }
+
+        string What3WordsApiKey { get; set; }
+
+        // Address detection
+        bool AddressDetectionEnabled { get; set; }
+
+        bool AddressDetectionOpenMapsOnTap { get; set; }
+
+        // Address detection tunings
+        // NOTE: These are tuning knobs only. Address detection feature wiring is handled elsewhere.
+        // Values are persisted locally and can be adjusted without server validation.
+        int AddressDetectionMinConfidencePercent { get; set; }     // 0 to 100
+        int AddressDetectionMinAddressChars { get; set; }          // 0 to 200
+        int AddressDetectionMaxCandidatesPerCall { get; set; }     // 1 to 10
+
+
+        // Audio filters (Phase 1 settings only)
+        bool AudioStaticFilterEnabled { get; set; }
+        int AudioStaticAttenuatorVolume { get; set; }       // 0 to 100 (0 disables attenuation)
+
+        bool AudioToneFilterEnabled { get; set; }
+        int AudioToneStrength { get; set; }        // 0 to 100
+
+        // Tone detection sensitivity. Higher values detect tones more easily.
+        // Range: 0 to 100. Default: 50.
+        int AudioToneSensitivity { get; set; }
+
+        // How long (in minutes) a talkgroup stays highlighted after a tone-only call is detected.
+        // Range: 1 to 30. Default: 5.
+        int AudioToneHighlightMinutes { get; set; }
+
+
+        // Telemetry
+        // When false (and a custom server is in use), the app should not send any
+        // phone-home telemetry such as pings, heartbeats, or queued telemetry events.
+        // This setting is ignored for built-in default servers.
+        bool TelemetryEnabled { get; set; }
+
+
+        // Server directory cache (fetched from the WordPress Auth plugin).
+        // Used for server selection UI and per-server map anchor resolution.
+        System.Collections.Generic.IReadOnlyList<JoesScanner.Models.ServerDirectoryEntry> GetCachedDirectoryServers();
+        void UpsertCachedDirectoryServers(System.Collections.Generic.IEnumerable<JoesScanner.Models.ServerDirectoryEntry> servers);
+        bool TryGetMapAnchorForServerUrl(string serverUrl, out string mapAnchor);
+
+
     }
 }

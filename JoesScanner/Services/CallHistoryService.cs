@@ -1356,9 +1356,30 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
             };
         }
 
+
+        private static bool TryGetPropertyIgnoreCase(JsonElement obj, string name, out JsonElement value)
+        {
+            // Fast path: exact match
+            if (obj.TryGetProperty(name, out value))
+                return true;
+
+            // Slow path: case-insensitive match, needed for some TR servers that emit lowercase or mixed-case keys.
+            foreach (var prop in obj.EnumerateObject())
+            {
+                if (string.Equals(prop.Name, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    value = prop.Value;
+                    return true;
+                }
+            }
+
+            value = default;
+            return false;
+        }
+
         private static string? GetString(JsonElement obj, string name)
         {
-            if (!obj.TryGetProperty(name, out var prop))
+            if (!TryGetPropertyIgnoreCase(obj, name, out var prop))
                 return null;
 
             return prop.ValueKind switch
@@ -1445,8 +1466,9 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
         private static string? CanonicalTranscription(CallRow r)
         {
             // Phase 1 rule: Transcription > Transcript > CallText
-            var s = (r.Transcription ?? r.Transcript ?? r.CallText ?? string.Empty).Trim();
-            return CapTextRaw(s);
+            var s = (r.Transcription ?? r.Transcript ?? r.CallText ?? string.Empty);
+            var sanitized = TranscriptionSanitizer.Sanitize(s);
+            return CapTextRaw(sanitized);
         }
 
         private static DbCallRecord? MapToDbRecord(CallRow r, string serverKey)

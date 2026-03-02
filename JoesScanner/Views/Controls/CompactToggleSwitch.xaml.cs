@@ -41,7 +41,9 @@ public partial class CompactToggleSwitch : ContentView
         typeof(CompactToggleSwitch),
         true);
 
-    public CompactToggleSwitch()
+        public event EventHandler<ToggledEventArgs>? Toggled;
+
+public CompactToggleSwitch()
     {
         InitializeComponent();
 
@@ -108,6 +110,7 @@ public partial class CompactToggleSwitch : ContentView
         if (bindable is CompactToggleSwitch s)
         {
             s.UpdateVisual(animated: s.Animate);
+            s.Toggled?.Invoke(s, new ToggledEventArgs((bool)newValue));
         }
     }
 

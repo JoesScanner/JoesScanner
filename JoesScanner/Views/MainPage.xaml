@@ -51,24 +51,26 @@
                         <RoundRectangle CornerRadius="10" />
                     </Border.StrokeShape>
 
-                    <Grid
-                        ColumnDefinitions="Auto,Auto"
-
-                        Padding="03"
-                        VerticalOptions="Center"
-                        HorizontalOptions="Center">
+					<Grid
+						ColumnDefinitions="Auto,Auto"
+						ColumnSpacing="0"
+						Padding="03"
+						VerticalOptions="Center"
+						HorizontalOptions="Center">
 
                         <!-- Media buttons strip -->
                         <ScrollView
+                            x:Name="MediaButtonsScroll"
                             Grid.Column="0"
                             Orientation="Horizontal"
-                             HorizontalOptions="Fill"
+                            HorizontalOptions="Start"
                             HorizontalScrollBarVisibility="Never"
                             VerticalScrollBarVisibility="Never"
                             Padding="0,0,3,0"
                             Margin="0">
 
                             <HorizontalStackLayout
+                                x:Name="MediaButtonsStack"
                                 Spacing="0"
                                 HorizontalOptions="Start"
                                 VerticalOptions="Center">
@@ -76,10 +78,9 @@
                                 <ImageButton
                                     Source="mc_previous.png"
                                     Command="{Binding PreviousCallCommand}"
-                                    IsEnabled="{Binding IsMediaButtonsEnabled}"
                                     BackgroundColor="Transparent"
-                                    HeightRequest="38"
-                                    WidthRequest="38"
+                                    HeightRequest="60"
+                                    WidthRequest="60"
                                     Padding="0"
                                     AutomationId="MediaPrevious"
                                     SemanticProperties.Description="Previous call"
@@ -89,8 +90,8 @@
                                     Source="{Binding MediaPlayStopIcon}"
                                     Command="{Binding ToggleConnectionCommand}"
                                     BackgroundColor="Transparent"
-                                    HeightRequest="38"
-                                    WidthRequest="38"
+                                    HeightRequest="60"
+                                    WidthRequest="60"
                                     Padding="0"
                                     AutomationId="MediaPlayStop"
                                     SemanticProperties.Description="Connect or disconnect"
@@ -99,10 +100,9 @@
                                 <ImageButton
                                     Source="mc_next.png"
                                     Command="{Binding NextCallCommand}"
-                                    IsEnabled="{Binding IsMediaButtonsEnabled}"
                                     BackgroundColor="Transparent"
-                                    HeightRequest="38"
-                                    WidthRequest="38"
+                                    HeightRequest="60"
+                                    WidthRequest="60"
                                     Padding="0"
                                     AutomationId="MediaNext"
                                     SemanticProperties.Description="Next call"
@@ -111,60 +111,36 @@
                                 <ImageButton
                                     Source="mc_jump_to_live.png"
                                     Command="{Binding JumpToLiveCommand}"
-                                    IsEnabled="{Binding IsMediaButtonsEnabled}"
                                     BackgroundColor="Transparent"
-                                    HeightRequest="38"
-                                    WidthRequest="38"
+                                    HeightRequest="60"
+                                    WidthRequest="60"
                                     Padding="0"
                                     AutomationId="MediaJumpToLive"
                                     SemanticProperties.Description="Jump to live"
                                     ToolTipProperties.Text="Jump to live" />
 
                                 <ImageButton
-                                    Source="mc_speeddown.png"
-                                    Command="{Binding PlaybackSpeedDownCommand}"
-                                    IsEnabled="{Binding IsSpeedButtonsEnabled}"
-                                    BackgroundColor="Transparent"
-                                    HeightRequest="38"
-                                    WidthRequest="38"
-                                    Padding="0"
-                                    AutomationId="MediaRewindDouble"
-                                    SemanticProperties.Description="Speed down"
-                                    ToolTipProperties.Text="Speed down" />
-
-                                <ImageButton
-                                    Source="mc_speedup.png"
-                                    Command="{Binding PlaybackSpeedUpCommand}"
-                                    IsEnabled="{Binding IsSpeedButtonsEnabled}"
-                                    BackgroundColor="Transparent"
-                                    HeightRequest="38"
-                                    WidthRequest="38"
-                                    Padding="0"
-                                    AutomationId="MediaFastForwardDouble"
-                                    SemanticProperties.Description="Speed up"
-                                    ToolTipProperties.Text="Speed up" />
-
-                                <ImageButton
                                     Source="mc_volume.png"
-                                    Command="{Binding ToggleAudioCommand}"
-                                    IsEnabled="{Binding IsMediaButtonsEnabled}"
+                                    Clicked="OnAudioMenuClicked"
                                     BackgroundColor="Transparent"
-                                    HeightRequest="38"
-                                    WidthRequest="38"
+                                    HeightRequest="60"
+                                    WidthRequest="60"
                                     Padding="0"
                                     AutomationId="MediaVolume"
-                                    SemanticProperties.Description="Toggle audio"
-                                    ToolTipProperties.Text="Toggle audio" />
+                                    SemanticProperties.Description="Audio options"
+                                    ToolTipProperties.Text="Audio options" />
 
                             </HorizontalStackLayout>
                         </ScrollView>
 
                         <!-- Indicators area (fixed width) -->
-                        <Grid
+						<Grid
+                            x:Name="MediaIndicatorsPanel"
                             Grid.Column="1"
                             Padding="0"
-                            RowDefinitions="Auto,Auto,Auto"
+                            RowDefinitions="Auto,Auto,Auto,Auto,Auto"
                             ColumnDefinitions="*"
+							InputTransparent="True"
                             VerticalOptions="Start">
 
                             <Border
@@ -184,9 +160,9 @@
                                 Grid.Row="1"
                                 IsVisible="{Binding IsCallsWaitingVisible}"
                                 Text="{Binding PlaybackSpeedLabel, StringFormat='Speed: {0}'}"
-                                FontSize="9"
+                                FontSize="10"
                                 FontAutoScalingEnabled="False"
-                                Margin="0,2"
+                                Margin="0,8,0,6"
                                 LineBreakMode="NoWrap"
                                 HorizontalTextAlignment="Center"
                                 TextColor="White" />
@@ -195,7 +171,7 @@
                                 Grid.Row="2"
                                 IsVisible="{Binding IsCallsWaitingVisible}"
                                 Text="{Binding CallsWaiting, StringFormat='Waiting: {0}'}"
-                                FontSize="9"
+                                FontSize="11"
                                 FontAutoScalingEnabled="False"
                                 LineBreakMode="NoWrap"
                                 HorizontalTextAlignment="Center"
@@ -212,7 +188,7 @@
                     ItemsSource="{Binding Calls}"
                     SelectionMode="None"
                     ItemsUpdatingScrollMode="KeepScrollOffset"
-                    ItemSizingStrategy="MeasureAllItems"
+                    ItemSizingStrategy="MeasureFirstItem"
                     HorizontalScrollBarVisibility="Never"
                     VerticalScrollBarVisibility="Never"
                     VerticalOptions="Fill"
@@ -242,6 +218,14 @@
                                 <Border.Triggers>
                                     <DataTrigger
                                         TargetType="Border"
+                                        Binding="{Binding IsToneHot}"
+                                        Value="True">
+                                        <Setter Property="StrokeThickness" Value="2" />
+                                        <Setter Property="Stroke" Value="#ef4444" />
+                                    </DataTrigger>
+
+                                    <DataTrigger
+                                        TargetType="Border"
                                         Binding="{Binding IsPlaying}"
                                         Value="True">
                                         <Setter Property="StrokeThickness" Value="2" />
@@ -255,7 +239,7 @@
                                 <!-- Call layout: header row, transcription, debug -->
                                 <Grid
                                     ColumnDefinitions="*,Auto"
-                                    RowDefinitions="Auto,Auto,Auto"
+                                    RowDefinitions="Auto,Auto,Auto,Auto"
                                     RowSpacing="{OnPlatform WinUI=4, MacCatalyst=4, Android=2, iOS=2}"
                                     ColumnSpacing="6">
 
@@ -348,9 +332,138 @@
                                         </Label.Triggers>
                                     </Label>
 
-                                    <!-- Debug or error info -->
-                                    <Label
+                                    
+                                    <!-- Address detection -->
+                                    <Grid
                                         Grid.Row="2"
+                                        Grid.Column="0"
+                                        Grid.ColumnSpan="2"
+                                        Margin="0,2,0,0"
+                                        ColumnDefinitions="Auto,Auto"
+                                        RowDefinitions="Auto"
+                                        IsVisible="{Binding HasDetectedAddress}">
+
+                                        <Label
+                                            Grid.Column="0"
+                                            FontSize="{OnPlatform WinUI=11, MacCatalyst=11, Android=10, iOS=10}"
+                                            FontAutoScalingEnabled="False"
+                                            MaxLines="2"
+                                            LineBreakMode="TailTruncation"
+                                            TextColor="{AppThemeBinding Light=#2563eb, Dark=#60a5fa}"
+                                            TextDecorations="Underline"
+                                            Text="{Binding DetectedAddress}">
+                                            <Label.GestureRecognizers>
+                                                <TapGestureRecognizer
+                                                    Tapped="OnDetectedAddressTapped"
+                                                    CommandParameter="{Binding .}" />
+                                            </Label.GestureRecognizers>
+                                        </Label>
+
+                                        <Label
+                                            Grid.Column="1"
+                                            Margin="8,0,0,0"
+                                            VerticalTextAlignment="Center"
+                                            FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
+                                            FontAutoScalingEnabled="False"
+                                            TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+                                            LineBreakMode="NoWrap"
+                                            MaxLines="1"
+                                            Text="{Binding DetectedAddressConfidencePercent, StringFormat='{0}%'}" />
+                                    </Grid>
+
+<!-- what3words -->
+                                    <VerticalStackLayout
+                                        Grid.Row="3"
+                                        Grid.Column="0"
+                                        Grid.ColumnSpan="2"
+                                        Margin="0,2,0,0"
+                                        Spacing="1"
+                                        IsVisible="{Binding HasWhat3WordsAddress}">
+
+                                        <VerticalStackLayout.Triggers>
+                                            <DataTrigger
+                                                TargetType="VerticalStackLayout"
+                                                Binding="{Binding Source={x:Reference Page}, Path=BindingContext.What3WordsLinksEnabled}"
+                                                Value="False">
+                                                <Setter Property="IsVisible" Value="False" />
+                                            </DataTrigger>
+                                        </VerticalStackLayout.Triggers>
+
+                                        <Label
+                                            FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
+                                            FontAutoScalingEnabled="False"
+                                            TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+                                            LineBreakMode="NoWrap"
+                                            MaxLines="1"
+                                            Text="what3words" />
+
+                                        
+                                        <HorizontalStackLayout Spacing="10">
+                                            <Label
+                                                FontSize="{OnPlatform WinUI=11, MacCatalyst=11, Android=10, iOS=10}"
+                                                FontAutoScalingEnabled="False"
+                                                MaxLines="1"
+                                                LineBreakMode="TailTruncation"
+                                                TextColor="{AppThemeBinding Light=#2563eb, Dark=#60a5fa}"
+                                                TextDecorations="Underline"
+                                                Text="{Binding What3WordsAddress}">
+                                                <Label.GestureRecognizers>
+                                                    <TapGestureRecognizer
+                                                        Tapped="OnWhat3WordsTapped"
+                                                        CommandParameter="{Binding .}" />
+                                                </Label.GestureRecognizers>
+                                            </Label>
+
+                                            <Label
+                                                FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
+                                                FontAutoScalingEnabled="False"
+                                                TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+                                                TextDecorations="Underline"
+                                                VerticalOptions="Center"
+                                                Text="Copy">
+                                                <Label.GestureRecognizers>
+                                                    <TapGestureRecognizer
+                                                        Tapped="OnWhat3WordsCopyTapped"
+                                                        CommandParameter="{Binding .}" />
+                                                </Label.GestureRecognizers>
+                                            </Label>
+                                        </HorizontalStackLayout>
+
+
+                                        
+                                        <HorizontalStackLayout
+                                            IsVisible="{Binding HasWhat3WordsCoordinates}"
+                                            Spacing="10">
+
+                                            <Label
+                                                FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
+                                                FontAutoScalingEnabled="False"
+                                                TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+                                                LineBreakMode="NoWrap"
+                                                MaxLines="1"
+                                                Text="{Binding What3WordsCoordinatesText}" />
+
+                                            <Label
+                                                FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
+                                                FontAutoScalingEnabled="False"
+                                                TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+                                                TextDecorations="Underline"
+                                                VerticalOptions="Center"
+                                                Text="Copy coords">
+                                                <Label.GestureRecognizers>
+                                                    <TapGestureRecognizer
+                                                        Tapped="OnWhat3WordsCoordsCopyTapped"
+                                                        CommandParameter="{Binding .}" />
+                                                </Label.GestureRecognizers>
+                                            </Label>
+
+                                        </HorizontalStackLayout>
+
+
+                                    </VerticalStackLayout>
+<!-- Debug or error info -->
+                                    <Label
+                                        Grid.Row="4"
                                         Grid.Column="0"
                                         Grid.ColumnSpan="2"
                                         Margin="0,2,0,0"
@@ -372,7 +485,7 @@
                     Grid.Row="2"
                     Padding="20,5,20,5"
                     RowDefinitions="Auto"
-                    ColumnDefinitions="*,Auto">
+                    ColumnDefinitions="Auto,Auto">
 
                     <!-- Desktop only label -->
                     <Label
@@ -400,5 +513,134 @@
 
             </Grid>
         </Border>
+    
+<!-- Address alert stack (max 3). Tap to jump to call, swipe or X to dismiss. -->
+<VerticalStackLayout
+    Grid.Row="1"
+    Margin="8"
+    VerticalOptions="End"
+    HorizontalOptions="Fill"
+    Spacing="6"
+    ZIndex="99"
+    IsVisible="{Binding HasAddressAlerts}">
+
+        <VerticalStackLayout
+        BindableLayout.ItemsSource="{Binding AddressAlerts}"
+        Spacing="6">
+
+        <BindableLayout.ItemTemplate>
+            <DataTemplate x:DataType="models:CallItem">
+                <SwipeView>
+                    <SwipeView.RightItems>
+                        <SwipeItems Mode="Execute">
+                            <SwipeItem
+                                Text="Dismiss"
+                                BackgroundColor="{AppThemeBinding Light=#ef4444, Dark=#b91c1c}"
+                                Invoked="OnAlertDismissInvoked"
+                                CommandParameter="{Binding .}" />
+                        </SwipeItems>
+                    </SwipeView.RightItems>
+
+                    <Border
+                        Padding="10"
+                        BackgroundColor="{AppThemeBinding Light=#f8fafc, Dark=#0b1220}"
+                        Stroke="{AppThemeBinding Light=#cbd5e1, Dark=#334155}"
+                        StrokeThickness="1">
+                        <Border.StrokeShape>
+                            <RoundRectangle CornerRadius="10" />
+                        </Border.StrokeShape>
+
+                        <Border.GestureRecognizers>
+                            <TapGestureRecognizer Tapped="OnAlertTapped" CommandParameter="{Binding .}" />
+                        </Border.GestureRecognizers>
+
+                        <Grid RowDefinitions="Auto,Auto">
+                            <Label
+                                Grid.Row="0"
+                                FontSize="{OnPlatform WinUI=12, MacCatalyst=12, Android=11, iOS=11}"
+                                FontAutoScalingEnabled="False"
+                                LineBreakMode="TailTruncation"
+                                MaxLines="2"
+                                TextColor="{AppThemeBinding Light=#0f172a, Dark=#e5e7eb}"
+                                Margin="0,0,22,0"
+                                Text="{Binding DetectedAddress}" />
+
+                            <Label
+                                Grid.Row="1"
+                                FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
+                                FontAutoScalingEnabled="False"
+                                LineBreakMode="TailTruncation"
+                                MaxLines="1"
+                                TextColor="{AppThemeBinding Light=#475569, Dark=#9ca3af}"
+                                Margin="0,0,22,0"
+                                Text="{Binding Talkgroup}" />
+
+                            <Label
+                                Grid.Row="0"
+                                Grid.RowSpan="2"
+                                FontSize="16"
+                                FontAutoScalingEnabled="False"
+                                TextColor="{AppThemeBinding Light=#64748b, Dark=#9ca3af}"
+                                HorizontalTextAlignment="Center"
+                                VerticalTextAlignment="Center"
+                                HorizontalOptions="End"
+                                VerticalOptions="Start"
+                                Margin="0,-2,-2,0"
+                                Text="✕">
+                                <Label.GestureRecognizers>
+                                    <TapGestureRecognizer Tapped="OnAlertDismissTapped" CommandParameter="{Binding .}" />
+                                </Label.GestureRecognizers>
+                            </Label>
+                        </Grid>
+                    </Border>
+                </SwipeView>
+            </DataTemplate>
+        </BindableLayout.ItemTemplate>
+    </VerticalStackLayout>
+</VerticalStackLayout>
+
+
+    <!-- Audio speed menu overlay (reliable on Windows, no Navigation or ActionSheet) -->
+    <Grid
+        x:Name="AudioMenuOverlay"
+        Grid.RowSpan="2"
+        IsVisible="False"
+        BackgroundColor="#66000000"
+        ZIndex="999">
+
+        <!-- Backdrop -->
+        <BoxView
+            BackgroundColor="Transparent">
+            <BoxView.GestureRecognizers>
+                <TapGestureRecognizer Tapped="OnAudioMenuBackdropTapped" />
+            </BoxView.GestureRecognizers>
+        </BoxView>
+
+        <!-- Menu panel -->
+        <Border
+            ZIndex="1000"
+            BackgroundColor="#0D0D28"
+            StrokeThickness="0"
+            Padding="10"
+            HorizontalOptions="Center"
+            VerticalOptions="Start"
+            Margin="0,60,0,0">
+
+            <Border.StrokeShape>
+                <RoundRectangle CornerRadius="12" />
+            </Border.StrokeShape>
+
+            <VerticalStackLayout Spacing="6">
+                <Button Text="Off" Clicked="OnAudioMenuOptionClicked" CommandParameter="Off" />
+                <Button Text="1x" Clicked="OnAudioMenuOptionClicked" CommandParameter="0" />
+                <Button Text="1.25x" Clicked="OnAudioMenuOptionClicked" CommandParameter="1" />
+                <Button Text="1.5x" Clicked="OnAudioMenuOptionClicked" CommandParameter="2" />
+                <Button Text="1.75x" Clicked="OnAudioMenuOptionClicked" CommandParameter="3" />
+                <Button Text="2x" Clicked="OnAudioMenuOptionClicked" CommandParameter="4" />
+            </VerticalStackLayout>
+        </Border>
+
     </Grid>
+
+</Grid>
 </ContentPage>

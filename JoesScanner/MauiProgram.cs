@@ -30,10 +30,19 @@ public static class MauiProgram
         builder.Services.AddSingleton<ICallStreamService, CallStreamService>();
         builder.Services.AddSingleton<ICallHistoryService, CallHistoryService>();
         builder.Services.AddSingleton<IHistoryLookupsCacheService, HistoryLookupsCacheService>();
+        builder.Services.AddSingleton<IAudioFilterService, AudioFilterService>();
         builder.Services.AddSingleton<IAudioPlaybackService, AudioPlaybackService>();
         builder.Services.AddSingleton<ISystemMediaService, SystemMediaService>();
         builder.Services.AddSingleton<ISubscriptionService, SubscriptionService>();
         builder.Services.AddSingleton<ITelemetryService, TelemetryService>();
+        builder.Services.AddSingleton<IAddressDetectionService, AddressDetectionService>();
+        builder.Services.AddSingleton<IWhat3WordsService, What3WordsService>();
+
+        // Call downloading (single and range zip).
+        builder.Services.AddSingleton<ICallDownloadService, CallDownloadService>();
+
+        // Tone detection highlight state (talkgroup hot window tracking).
+        builder.Services.AddSingleton<IToneAlertService, ToneAlertService>();
 
         // Centralized playback policy evaluation.
         builder.Services.AddSingleton<IPlaybackCoordinator, PlaybackCoordinator>();

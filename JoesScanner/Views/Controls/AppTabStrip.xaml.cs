@@ -7,8 +7,8 @@ namespace JoesScanner.Views.Controls;
 public partial class AppTabStrip : ContentView
 {
     // Static sizing. Adjust these two numbers to taste.
-    private const double StaticTabIconSize = 55d;
-    private const double StaticStripHeight = 55d;
+    private const double StaticTabIconSize = 70d;
+    private const double StaticStripHeight = 70d;
 
     public static readonly BindableProperty SelectedTabProperty = BindableProperty.Create(
         nameof(SelectedTab),
@@ -294,9 +294,7 @@ public partial class AppTabStrip : ContentView
             "//history" => AppTab.History,
             "//archive" => AppTab.History,
             "//stats" => AppTab.Stats,
-            "//communications" => AppTab.Communications,
-            "//log" => AppTab.Log,
-            "//settings" => AppTab.Settings,
+            "//communications" => AppTab.Communications,            "//settings" => AppTab.Settings,
             _ => AppTab.Main
         };
 
@@ -343,8 +341,7 @@ public partial class AppTabStrip : ContentView
         {
             try
             {
-                System.Diagnostics.Debug.WriteLine($"AppTabStrip.NavigateTo({tab}) failed: {ex}");
-                Console.WriteLine($"AppTabStrip.NavigateTo({tab}) failed: {ex}");
+                AppLog.DebugWriteLine($"AppTabStrip.NavigateTo({tab}) failed: {ex}");
             }
             catch
             {
@@ -377,7 +374,6 @@ public partial class AppTabStrip : ContentView
     private void OnArchiveTapped(object sender, TappedEventArgs e) => NavigateTo("//history");
     private void OnStatsTapped(object sender, TappedEventArgs e) => NavigateTo("//stats");
     private void OnCommunicationsTapped(object sender, TappedEventArgs e) => NavigateTo("//communications");
-    private void OnLogTapped(object sender, TappedEventArgs e) => NavigateTo("//log");
     private void OnSettingsTapped(object sender, TappedEventArgs e) => NavigateTo("//settings");
 
     // Legacy Clicked handlers (kept in case anything else still wires to them)
@@ -386,7 +382,6 @@ public partial class AppTabStrip : ContentView
     private void OnArchiveClicked(object sender, EventArgs e) => NavigateTo("//history");
     private void OnStatsClicked(object sender, EventArgs e) => NavigateTo("//stats");
     private void OnCommunicationsClicked(object sender, EventArgs e) => NavigateTo("//communications");
-    private void OnLogClicked(object sender, EventArgs e) => NavigateTo("//log");
     private void OnSettingsClicked(object sender, EventArgs e) => NavigateTo("//settings");
 
 

@@ -5,6 +5,7 @@ using System.Globalization;
 using System.Linq;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Threading.Tasks;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Input;
@@ -23,15 +24,26 @@ namespace JoesScanner.ViewModels
         private readonly ICallHistoryService _callHistoryService;
         private readonly IAudioPlaybackService _audioPlaybackService;
         private readonly ISettingsService _settingsService;
+        private readonly IAddressDetectionService _addressDetectionService;
+        private readonly IWhat3WordsService _what3WordsService;
         private readonly ISubscriptionService _subscriptionService;
         private readonly IFilterProfileStore _filterProfileStore;
         private readonly IHistoryLookupsCacheService _historyLookupsCacheService;
+        private readonly IToneAlertService _toneAlertService;
         private readonly HttpClient _audioHttpClient;
+
+        private bool _isDownloadRangeSelecting;
+        private string _downloadRangePrompt = string.Empty;
 
         private CancellationTokenSource? _audioCts;
         private CancellationTokenSource? _queuePlaybackCts;
         private CancellationTokenSource? _searchCts;
         private readonly SemaphoreSlim _playbackLock = new SemaphoreSlim(1, 1);
+
+        // When Stop is pressed while another playback operation holds the lock, we still want the
+        // stop to be instant. We do immediate cancellation + UI changes, then finish cleanup the next
+        // time the lock is acquired.
+        private volatile bool _stopCleanupPending;
 
 
         private readonly SemaphoreSlim _lookupsLock = new SemaphoreSlim(1, 1);
@@ -118,6 +130,8 @@ private HistorySearchFilters? _activeSearchFilters;
         private bool _suppressTimeCascade;
         private bool _isTimePickerOpen;
 
+        private bool _what3WordsLinksEnabled = true;
+
         private int _currentIndex = -1;
 
         // 0 = 1x, 1 = 1.25x, 2 = 1.5x, 3 = 1.75x, 4 = 2x
@@ -131,18 +145,47 @@ private HistorySearchFilters? _activeSearchFilters;
             ICallHistoryService callHistoryService,
             IAudioPlaybackService audioPlaybackService,
             ISettingsService settingsService,
+            IAddressDetectionService addressDetectionService,
+            IWhat3WordsService what3WordsService,
             ISubscriptionService subscriptionService,
             IFilterProfileStore filterProfileStore,
-            IHistoryLookupsCacheService historyLookupsCacheService)
+            IHistoryLookupsCacheService historyLookupsCacheService,
+            IToneAlertService toneAlertService)
         {
             _callHistoryService = callHistoryService ?? throw new ArgumentNullException(nameof(callHistoryService));
             _audioPlaybackService = audioPlaybackService ?? throw new ArgumentNullException(nameof(audioPlaybackService));
             _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
+            _addressDetectionService = addressDetectionService ?? throw new ArgumentNullException(nameof(addressDetectionService));
+            _what3WordsService = what3WordsService ?? throw new ArgumentNullException(nameof(what3WordsService));
+
+            try { What3WordsLinksEnabled = _settingsService.What3WordsLinksEnabled; } catch { }
+
+            try
+            {
+                if (settingsService is SettingsService concrete)
+                {
+                    concrete.AddressDetectionSettingsChanged += OnAddressDetectionSettingsChanged;
+                    concrete.What3WordsSettingsChanged += (_, __) =>
+                    {
+                        try { What3WordsLinksEnabled = _settingsService.What3WordsLinksEnabled; } catch { }
+                    };
+                }
+            }
+            catch
+            {
+            }
+
             
-            _subscriptionService = subscriptionService ?? throw new ArgumentNullException(nameof(subscriptionService));_filterProfileStore = filterProfileStore ?? throw new ArgumentNullException(nameof(filterProfileStore));
+            _subscriptionService = subscriptionService ?? throw new ArgumentNullException(nameof(subscriptionService));
+            _filterProfileStore = filterProfileStore ?? throw new ArgumentNullException(nameof(filterProfileStore));
             _historyLookupsCacheService = historyLookupsCacheService ?? throw new ArgumentNullException(nameof(historyLookupsCacheService));
+			_toneAlertService = toneAlertService ?? throw new ArgumentNullException(nameof(toneAlertService));
+
+			_toneAlertService.ToneDetected += OnToneDetected;
+			_toneAlertService.HotTalkgroupsChanged += OnHotTalkgroupsChanged;
 
             Calls = new ObservableCollection<CallItem>();
+            AddressAlerts.CollectionChanged += (_, __) => OnPropertyChanged(nameof(HasAddressAlerts));
             Receivers = new ObservableCollection<HistoryLookupItem>();
             Sites = new ObservableCollection<HistoryLookupItem>();
             Talkgroups = new ObservableCollection<HistoryLookupItem>();
@@ -155,11 +198,28 @@ private HistorySearchFilters? _activeSearchFilters;
             _selectedFilterProfileNameOption = NoneProfileNameOption;
             _isCustomFilterProfileName = false;
 
-            Calls.CollectionChanged += (_, __) =>
+            Calls.CollectionChanged += (_, e) =>
             {
                 OnPropertyChanged(nameof(IsHistoryMediaButtonsEnabled));
                 OnPropertyChanged(nameof(IsStopEnabled));
                 RefreshCommandStates();
+
+                // History page: if calls already have detected addresses (or after detection runs),
+                // ensure bottom alert popups are created.
+                try
+                {
+                    if (e?.NewItems != null)
+                    {
+                        foreach (var item in e.NewItems)
+                        {
+                            if (item is CallItem call && call.HasDetectedAddress)
+                            {
+                                try { MainThread.BeginInvokeOnMainThread(() => AddAddressAlertIfNew(call)); } catch { }
+                            }
+                        }
+                    }
+                }
+                catch { }
             };
 
             HourOptions = Enumerable.Range(0, 24).ToList();
@@ -215,6 +275,95 @@ private HistorySearchFilters? _activeSearchFilters;
         public ObservableCollection<HistoryLookupItem> Receivers { get; }
         public ObservableCollection<HistoryLookupItem> Sites { get; }
         public ObservableCollection<HistoryLookupItem> Talkgroups { get; }
+
+        public ObservableCollection<CallItem> AddressAlerts { get; } = new();
+        public bool HasAddressAlerts => AddressAlerts.Count > 0;
+
+        public bool IsDownloadRangeSelecting
+        {
+            get => _isDownloadRangeSelecting;
+            set
+            {
+                if (_isDownloadRangeSelecting == value)
+                    return;
+
+                _isDownloadRangeSelecting = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public string DownloadRangePrompt
+        {
+            get => _downloadRangePrompt;
+            set
+            {
+                var newValue = value ?? string.Empty;
+                if (_downloadRangePrompt == newValue)
+                    return;
+
+                _downloadRangePrompt = newValue;
+                OnPropertyChanged();
+            }
+        }
+
+        // We only show up to 3 alerts at once, but we keep older ones queued until dismissed.
+        private readonly List<CallItem> _hiddenAddressAlerts = new();
+
+		public CallItem? ResolveCallForAddressAlert(CallItem alertItem)
+		{
+			try
+			{
+				if (Calls.Contains(alertItem))
+					return alertItem;
+
+				var id = alertItem.BackendId;
+				if (!string.IsNullOrWhiteSpace(id))
+					return Calls.FirstOrDefault(c => !string.IsNullOrWhiteSpace(c.BackendId) && c.BackendId == id);
+			}
+			catch { }
+			return null;
+		}
+
+		private void PurgeStaleAddressAlerts()
+		{
+			try
+			{
+				if (AddressAlerts.Count == 0 && _hiddenAddressAlerts.Count == 0)
+					return;
+
+				HashSet<string> liveIds = new(StringComparer.Ordinal);
+				foreach (var c in Calls)
+				{
+					if (!string.IsNullOrWhiteSpace(c.BackendId))
+						liveIds.Add(c.BackendId);
+				}
+
+				bool IsLive(CallItem a)
+				{
+					if (Calls.Contains(a))
+						return true;
+					return !string.IsNullOrWhiteSpace(a.BackendId) && liveIds.Contains(a.BackendId);
+				}
+
+				for (var i = AddressAlerts.Count - 1; i >= 0; i--)
+				{
+					var a = AddressAlerts[i];
+					if (!IsLive(a))
+						AddressAlerts.RemoveAt(i);
+				}
+
+				for (var i = _hiddenAddressAlerts.Count - 1; i >= 0; i--)
+				{
+					var a = _hiddenAddressAlerts[i];
+					if (!IsLive(a))
+						_hiddenAddressAlerts.RemoveAt(i);
+				}
+
+				OnPropertyChanged(nameof(HasAddressAlerts));
+			}
+			catch { }
+		}
+
 
         public ObservableCollection<FilterProfile> FilterProfiles => _filterProfiles;
 
@@ -645,6 +794,19 @@ private HistorySearchFilters? _activeSearchFilters;
             }
         }
 
+        public bool What3WordsLinksEnabled
+        {
+            get => _what3WordsLinksEnabled;
+            private set
+            {
+                if (_what3WordsLinksEnabled == value)
+                    return;
+
+                _what3WordsLinksEnabled = value;
+                OnPropertyChanged();
+            }
+        }
+
         public bool IsHistoryMediaButtonsEnabled => Calls.Count > 0;
         public bool IsStopEnabled => _isQueuePlaybackRunning;
 
@@ -724,7 +886,7 @@ private HistorySearchFilters? _activeSearchFilters;
             };
 
         public async Task OnPageOpenedAsync()
-{
+        {
             AppLog.Add(() => "History: OnPageOpenedAsync invoked.");
             RefreshShow247Button();
 
@@ -751,38 +913,38 @@ private HistorySearchFilters? _activeSearchFilters;
             {
             }
 
-    // Only mute the Main tab audio. Do not stop or disconnect the live queue.
-    try
-    {
-        QueueControlBus.RequestSetMainAudioMuted(true);
-    }
-    catch (Exception ex)
-    {
-        AppLog.Add(() => $"History: RequestSetMainAudioMuted failed. ex={ex.GetType().Name}: {ex.Message}");
-    }
+            // Only mute the Main tab audio. Do not stop or disconnect the live queue.
+            try
+            {
+                QueueControlBus.RequestSetMainAudioMuted(true);
+            }
+            catch (Exception ex)
+            {
+                AppLog.Add(() => $"History: RequestSetMainAudioMuted failed. ex={ex.GetType().Name}: {ex.Message}");
+            }
 
-    // Load locally stored profiles first so the UI is usable even when the server is unreachable
-    // or when lookups would otherwise block on a network timeout.
-    try
-    {
-        await LoadFilterProfilesAsync(applySelectedProfile: true);
-    }
-    catch
-    {
-    }
+            // Load locally stored profiles first so the UI is usable even when the server is unreachable
+            // or when lookups would otherwise block on a network timeout.
+            try
+            {
+                await LoadFilterProfilesAsync(applySelectedProfile: true);
+            }
+            catch
+            {
+            }
 
-    // Lookups depend on the server and may fail when offline.
-    // We WANT them loaded on page open. If the first attempt races startup/connect,
-    // retry once after a short delay so the dropdowns are populated without requiring a tap.
-    await EnsureLookupsLoadedAsync(forceReload: true);
+            // Lookups depend on the server and may fail when offline.
+            // We WANT them loaded on page open. If the first attempt races startup/connect,
+            // retry once after a short delay so the dropdowns are populated without requiring a tap.
+            await EnsureLookupsLoadedAsync(forceReload: true);
 
-    if (Receivers.Count == 0 || Sites.Count == 0 || Talkgroups.Count == 0)
-    {
-        AppLog.Add(() => $"History: lookups incomplete after first load. receivers={Receivers.Count} sites={Sites.Count} talkgroups={Talkgroups.Count}. Retrying once.");
-        await Task.Delay(500);
-        await EnsureLookupsLoadedAsync(forceReload: true);
-    }
-}
+            if (LookupHasOnlyDefault(Receivers) || LookupHasOnlyDefault(Sites) || LookupHasOnlyDefault(Talkgroups))
+            {
+                AppLog.Add(() => $"History: lookups incomplete after first load (default-only or empty). receivers={Receivers.Count} sites={Sites.Count} talkgroups={Talkgroups.Count}. Retrying once.");
+                await Task.Delay(500);
+                await EnsureLookupsLoadedAsync(forceReload: true);
+            }
+        }
 
         public async Task EnsureLookupsLoadedAsync(bool forceReload = false)
         {
@@ -797,7 +959,9 @@ private HistorySearchFilters? _activeSearchFilters;
 
                 AppLog.Add(() => $"History: loading lookups. current receiver={SelectedReceiver?.Label ?? ""} site={SelectedSite?.Label ?? ""} talkgroup={SelectedTalkgroup?.Label ?? ""}");
                 await LoadLookupsAsyncSafe();
-                _lookupsLoaded = (Receivers.Count > 0 && Sites.Count > 0 && Talkgroups.Count > 0);
+                _lookupsLoaded = !LookupHasOnlyDefault(Receivers)
+                    && !LookupHasOnlyDefault(Sites)
+                    && !LookupHasOnlyDefault(Talkgroups);
                 AppLog.Add(() => $"History: lookups loaded. receivers={Receivers.Count} sites={Sites.Count} talkgroups={Talkgroups.Count}");
             }
             finally
@@ -1161,6 +1325,24 @@ public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
             }
         }
 
+        public static bool LookupHasOnlyDefault(System.Collections.Generic.IEnumerable<HistoryLookupItem>? items)
+        {
+            if (items == null)
+                return true;
+
+            var list = items as IList<HistoryLookupItem> ?? items.ToList();
+            if (list.Count == 0)
+                return true;
+
+            if (list.Count == 1)
+            {
+                var only = list[0];
+                return only == null || string.Equals(only.Label, "All", StringComparison.OrdinalIgnoreCase);
+            }
+
+            return false;
+        }
+
         private DateTime GetSelectedTargetLocal()
         {
             var date = SelectedDateFrom.Date;
@@ -1489,6 +1671,8 @@ private async Task SearchAsync()
                 Calls.Clear();
                 foreach (var c in linear)
                     Calls.Add(c);
+
+                StartAddressDetectionForHistoryCalls(linear);
 
                 _currentIndex = -1;
 
@@ -1844,6 +2028,12 @@ private async Task SearchAsync()
             await _playbackLock.WaitAsync().ConfigureAwait(false);
             try
             {
+                if (_stopCleanupPending)
+                {
+                    _stopCleanupPending = false;
+                    await StopAsyncCore().ConfigureAwait(false);
+                }
+
                 await StopAsyncCore().ConfigureAwait(false);
 
                 if (Calls == null || Calls.Count == 0)
@@ -1944,6 +2134,12 @@ private async Task SearchAsync()
                 await _playbackLock.WaitAsync().ConfigureAwait(false);
                 try
                 {
+                    if (_stopCleanupPending)
+                    {
+                        _stopCleanupPending = false;
+                        await StopAsyncCore().ConfigureAwait(false);
+                    }
+
                     if (ReferenceEquals(_queuePlaybackCts, myPlaybackCts))
                     {
                         await StopAsyncCore().ConfigureAwait(false);
@@ -2101,6 +2297,10 @@ private async Task LoadMoreOlderAsync()
                     if (added > 0)
                     {
                         _activeStartIndex = newStartIndex;
+
+                        // Apply address + what3words detection to newly appended History calls.
+                        StartAddressDetectionForHistoryCalls(newCalls);
+
                         await RunOnMainThreadAsync(() =>
                         {
                             StatusText = $"{_activeTotalMatches} match(es), showing {Calls.Count}";
@@ -2345,6 +2545,10 @@ private async Task LoadMoreOlderAsync()
 
                     if (added > 0)
                     {
+                        // Apply address + what3words detection to newly appended History calls.
+                        // This fixes cases where address detection appears to "stop working" after paging.
+                        StartAddressDetectionForHistoryCalls(appendCalls);
+
                         await RunOnMainThreadAsync(() =>
                         {
                             StatusText = $"{_activeTotalMatches} match(es), showing {Calls.Count}";
@@ -2374,14 +2578,68 @@ private async Task LoadMoreOlderAsync()
 
         private async Task StopAsync()
         {
-            await _playbackLock.WaitAsync().ConfigureAwait(false);
+            // Immediate user intent: cancel tokens and stop the player *right now*.
+            // Do this BEFORE waiting on any locks so Stop feels instantaneous.
             try
             {
-                await StopAsyncCore().ConfigureAwait(false);
+                if (_queuePlaybackCts != null)
+                {
+                    try { _queuePlaybackCts.Cancel(); } catch { }
+                }
+
+                if (_audioCts != null)
+                {
+                    try { _audioCts.Cancel(); } catch { }
+                }
+
+                // Fire-and-forget: we don't want to block the UI command on teardown.
+                _ = _audioPlaybackService.StopAsync();
             }
-            finally
+            catch
             {
-                _playbackLock.Release();
+            }
+
+            // Flip UI state immediately.
+            _isQueuePlaybackRunning = false;
+            OnPropertyChanged(nameof(IsHistoryPlaybackRunning));
+            OnPropertyChanged(nameof(IsPlayEnabled));
+            OnPropertyChanged(nameof(IsStopEnabled));
+            OnPropertyChanged(nameof(ShowHistoryPlayButton));
+            OnPropertyChanged(nameof(ShowHistoryStopButton));
+
+            try
+            {
+                if (Calls != null)
+                {
+                    foreach (var c in Calls)
+                    {
+                        if (c != null && c.IsPlaying)
+                            c.IsPlaying = false;
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            RefreshCommandStates();
+
+            // Best-effort full cleanup under the playback lock. If we can't acquire the lock
+            // instantly, mark it pending so the next lock acquisition will finish cleanup.
+            if (await _playbackLock.WaitAsync(0).ConfigureAwait(false))
+            {
+                try
+                {
+                    await StopAsyncCore().ConfigureAwait(false);
+                }
+                finally
+                {
+                    _playbackLock.Release();
+                }
+            }
+            else
+            {
+                _stopCleanupPending = true;
             }
         }
 
@@ -2685,6 +2943,7 @@ private async Task LoadMoreOlderAsync()
                 }
 
                 _visibleStartSnapshotIndex = desiredStart;
+				PurgeStaleAddressAlerts();
                 return;
             }
 
@@ -2696,6 +2955,7 @@ private async Task LoadMoreOlderAsync()
                     Calls.RemoveAt(Calls.Count - 1);
 
                 _visibleStartSnapshotIndex = desiredStart;
+				PurgeStaleAddressAlerts();
                 return;
             }
 
@@ -2710,6 +2970,7 @@ private async Task LoadMoreOlderAsync()
 
                 _visibleStartSnapshotIndex = desiredStart;
                 ScrollRequested?.Invoke(_activeCall, ScrollToPosition.Center);
+				PurgeStaleAddressAlerts();
                 return;
             }
 
@@ -2722,6 +2983,7 @@ private async Task LoadMoreOlderAsync()
 
             _visibleStartSnapshotIndex = desiredStart;
             ScrollRequested?.Invoke(_activeCall, ScrollToPosition.Center);
+			PurgeStaleAddressAlerts();
         }
 
 
@@ -2745,5 +3007,335 @@ private void DecreasePlaybackSpeedStep()
             var call = Calls[index];
             ScrollRequested?.Invoke(call, position);
         }
+        
+        private void StartAddressDetectionForHistoryCalls(IReadOnlyList<CallItem> calls)
+        {
+            try
+            {
+                if (calls == null || calls.Count == 0)
+                {
+                    try { AppLog.Add(() => "AddrDetect(Hist): skipped. calls empty"); } catch { }
+                    return;
+                }
+
+                try
+                {
+                    var withTx = calls.Count(c => c != null && !string.IsNullOrWhiteSpace(c.Transcription));
+                    AppLog.Add(() => $"AddrDetect(Hist): start calls={calls.Count} withTx={withTx}");
+                }
+                catch { }
+
+                _ = Task.Run(async () =>
+                {
+                    var applied = 0;
+                    var detected = 0;
+
+                    foreach (var call in calls)
+                    {
+                        try
+                        {
+                            if (call == null)
+                                continue;
+
+                            if (string.IsNullOrWhiteSpace(call.Transcription))
+                                continue;
+
+                            // IMPORTANT:
+                            // CallItem derives from BindableObject and its property change notifications should be
+                            // raised on the UI thread. If we mutate bound properties from a background thread,
+                            // History can appear like address detection "doesn't work" because the UI never updates.
+                            await MainThread.InvokeOnMainThreadAsync(() =>
+                            {
+                                _addressDetectionService.Apply(call);
+                            });
+
+                            if (call.HasDetectedAddress)
+                            {
+                                try
+                                {
+                                    // AddAddressAlertIfNew enforces the max-3-visible + hidden backlog rules.
+                                    MainThread.BeginInvokeOnMainThread(() => AddAddressAlertIfNew(call));
+                                }
+                                catch { }
+                            }
+
+                            try { _ = _what3WordsService.ResolveCoordinatesIfNeededAsync(call, CancellationToken.None); } catch { }
+
+                            applied++;
+                            if (!string.IsNullOrWhiteSpace(call.DetectedAddress))
+                                detected++;
+                        }
+                        catch (Exception ex)
+                        {
+                            try { AppLog.Add(() => $"AddrDetect(Hist): apply failed call={call?.BackendId}. {ex.Message}"); } catch { }
+                        }
+                    }
+
+                    try
+                    {
+                        AppLog.Add(() => $"AddrDetect(Hist): done applied={applied} detected={detected}");
+                    }
+                    catch { }
+                });
+            }
+            catch { }
+        }
+
+
+        private void AddAddressAlertIfNew(CallItem call)
+{
+    try
+    {
+        // MAUI/iOS requires collection mutations on the UI thread.
+        if (!MainThread.IsMainThread)
+        {
+            try
+            {
+                AppLog.Add(() => $"AddrAlert(Hist): Add request off UI thread. Scheduling on UI thread. callId={call?.BackendId ?? "(null)"}");
+                MainThread.BeginInvokeOnMainThread(() => AddAddressAlertIfNew(call));
+            }
+            catch
+            {
+            }
+            return;
+        }
+
+        if (call == null || !call.HasDetectedAddress)
+        {
+            try
+            {
+                if (call == null)
+                    AppLog.Add("AddrAlert(Hist): Add skipped. call is null");
+                else
+                    AppLog.Add(() => $"AddrAlert(Hist): Add skipped. HasDetectedAddress=false callId={call.BackendId ?? "(no id)"}");
+            }
+            catch
+            {
+            }
+            return;
+        }
+
+        try
+        {
+            AppLog.Add(() => $"AddrAlert(Hist): Add attempt. callId={call.BackendId ?? "(no id)"} addr='{call.DetectedAddress ?? ""}' conf={call.DetectedAddressConfidencePercent:0.##}% beforeVisible={AddressAlerts.Count} beforeHidden={_hiddenAddressAlerts.Count} hasVisibleFlag={HasAddressAlerts}");
+        }
+        catch
+        {
+        }
+
+        var id = call.BackendId;
+        if (!string.IsNullOrWhiteSpace(id))
+        {
+            if (AddressAlerts.Any(a => !string.IsNullOrWhiteSpace(a.BackendId) &&
+                                      string.Equals(a.BackendId, id, StringComparison.Ordinal)))
+            {
+                try { AppLog.Add(() => $"AddrAlert(Hist): Add skipped. Duplicate visible. callId={id}"); } catch { }
+                return;
+            }
+
+            if (_hiddenAddressAlerts.Any(a => !string.IsNullOrWhiteSpace(a.BackendId) &&
+                                             string.Equals(a.BackendId, id, StringComparison.Ordinal)))
+            {
+                try { AppLog.Add(() => $"AddrAlert(Hist): Add skipped. Duplicate hidden. callId={id}"); } catch { }
+                return;
+            }
+        }
+        else
+        {
+            if (AddressAlerts.Any(a => ReferenceEquals(a, call)) || _hiddenAddressAlerts.Any(a => ReferenceEquals(a, call)))
+            {
+                try { AppLog.Add("AddrAlert(Hist): Add skipped. Duplicate by reference."); } catch { }
+                return;
+            }
+        }
+
+        AddressAlerts.Insert(0, call);
+
+        try
+        {
+            AppLog.Add(() => $"AddrAlert(Hist): Added. nowVisible={AddressAlerts.Count} nowHidden={_hiddenAddressAlerts.Count} hasVisibleFlag={HasAddressAlerts}");
+        }
+        catch
+        {
+        }
+
+        // Keep only 3 visible; queue the oldest visible alert instead of discarding it.
+        if (AddressAlerts.Count > 3)
+        {
+            var oldestVisible = AddressAlerts[AddressAlerts.Count - 1];
+            AddressAlerts.RemoveAt(AddressAlerts.Count - 1);
+            _hiddenAddressAlerts.Add(oldestVisible);
+
+            try
+            {
+                AppLog.Add(() => $"AddrAlert(Hist): Moved oldest to hidden. nowVisible={AddressAlerts.Count} nowHidden={_hiddenAddressAlerts.Count}");
+            }
+            catch
+            {
+            }
+
+            if (_hiddenAddressAlerts.Count > 25)
+                _hiddenAddressAlerts.RemoveRange(0, _hiddenAddressAlerts.Count - 25);
+        }
+    }
+    catch
+    {
+        try { AppLog.Add("AddrAlert(Hist): Add failed (exception swallowed)"); } catch { }
+    }
+}
+
+public void DismissAddressAlert(CallItem call)
+{
+    try
+    {
+        if (!MainThread.IsMainThread)
+        {
+            try
+            {
+                AppLog.Add(() => $"AddrAlert(Hist): Dismiss request off UI thread. Scheduling on UI thread. callId={call?.BackendId ?? "(null)"}");
+                MainThread.BeginInvokeOnMainThread(() => DismissAddressAlert(call));
+            }
+            catch
+            {
+            }
+            return;
+        }
+
+        if (call == null)
+            return;
+
+        try
+        {
+            AppLog.Add(() => $"AddrAlert(Hist): Dismiss attempt. callId={call.BackendId ?? "(no id)"} beforeVisible={AddressAlerts.Count} beforeHidden={_hiddenAddressAlerts.Count}");
+        }
+        catch
+        {
+        }
+
+        var existing = AddressAlerts.FirstOrDefault(a =>
+            (!string.IsNullOrWhiteSpace(a.BackendId) && !string.IsNullOrWhiteSpace(call.BackendId) &&
+             string.Equals(a.BackendId, call.BackendId, StringComparison.Ordinal)) ||
+            ReferenceEquals(a, call));
+
+        if (existing != null)
+            AddressAlerts.Remove(existing);
+        else
+        {
+            var hiddenExisting = _hiddenAddressAlerts.FirstOrDefault(a =>
+                (!string.IsNullOrWhiteSpace(a.BackendId) && !string.IsNullOrWhiteSpace(call.BackendId) &&
+                 string.Equals(a.BackendId, call.BackendId, StringComparison.Ordinal)) ||
+                ReferenceEquals(a, call));
+
+            if (hiddenExisting != null)
+                _hiddenAddressAlerts.Remove(hiddenExisting);
+        }
+
+        while (AddressAlerts.Count < 3 && _hiddenAddressAlerts.Count > 0)
+        {
+            var idx = _hiddenAddressAlerts.Count - 1;
+            var next = _hiddenAddressAlerts[idx];
+            _hiddenAddressAlerts.RemoveAt(idx);
+            AddressAlerts.Add(next);
+        }
+
+        try
+        {
+            AppLog.Add(() => $"AddrAlert(Hist): Dismiss done. afterVisible={AddressAlerts.Count} afterHidden={_hiddenAddressAlerts.Count} hasVisibleFlag={HasAddressAlerts}");
+        }
+        catch
+        {
+        }
+    }
+    catch
+    {
+        try { AppLog.Add("AddrAlert(Hist): Dismiss failed (exception swallowed)"); } catch { }
+    }
+}
+
+private void OnAddressDetectionSettingsChanged(object? sender, EventArgs e)
+        {
+            try
+            {
+                MainThread.BeginInvokeOnMainThread(() =>
+                {
+                    try
+                    {
+                        if (Calls == null || Calls.Count == 0)
+                            return;
+
+                        foreach (var item in Calls)
+                        {
+                            _addressDetectionService.Apply(item);
+							try { _ = _what3WordsService.ResolveCoordinatesIfNeededAsync(item, CancellationToken.None); } catch { }
+                        }
+                    }
+                    catch
+                    {
+                    }
+                });
+            }
+            catch
+            {
+            }
+        }
+
+		private void OnToneDetected(string audioUrl)
+		{
+			if (string.IsNullOrWhiteSpace(audioUrl))
+				return;
+
+			try
+			{
+				MainThread.BeginInvokeOnMainThread(() =>
+				{
+					try
+					{
+						var match = Calls.FirstOrDefault(c =>
+							!string.IsNullOrWhiteSpace(c.AudioUrl)
+							&& string.Equals(c.AudioUrl, audioUrl, StringComparison.OrdinalIgnoreCase));
+
+						if (match == null)
+							return;
+
+						var key = match.ToneHotKey;
+						var minutes = Math.Clamp(_settingsService.AudioToneHighlightMinutes, 1, 99);
+						_toneAlertService.SetTalkgroupHot(key, TimeSpan.FromMinutes(minutes));
+						RefreshToneHotFlags();
+
+						try { AppLog.Add(() => $"AudioTone: talkgroup hot for {minutes} minutes. key={key}"); } catch { }
+					}
+					catch
+					{
+					}
+				});
+			}
+			catch
+			{
+			}
+		}
+
+		private void OnHotTalkgroupsChanged()
+		{
+			try
+			{
+				MainThread.BeginInvokeOnMainThread(RefreshToneHotFlags);
+			}
+			catch
+			{
+			}
+		}
+
+		private void RefreshToneHotFlags()
+		{
+			try
+			{
+				foreach (var c in Calls)
+					c.IsToneHot = _toneAlertService.IsTalkgroupHot(c.ToneHotKey);
+			}
+			catch
+			{
+			}
+		}
+
     }
 }

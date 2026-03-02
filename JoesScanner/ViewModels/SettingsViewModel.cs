@@ -46,12 +46,12 @@ namespace JoesScanner.ViewModels
             set
             {
                 var newValue = string.IsNullOrWhiteSpace(value) ? NoneSettingsProfileNameOption : value;
-                if (string.Equals(_selectedSettingsFilterProfileNameOption, newValue, StringComparison.Ordinal))
+                if (string.Equals(_selectedSettingsFilterProfileNameOption, newValue, StringComparison.OrdinalIgnoreCase))
                     return;
 
                 _selectedSettingsFilterProfileNameOption = newValue;
 
-                if (string.Equals(newValue, NoneSettingsProfileNameOption, StringComparison.Ordinal))
+                if (string.Equals(newValue, NoneSettingsProfileNameOption, StringComparison.OrdinalIgnoreCase))
                 {
                     _isCustomSettingsFilterProfileName = false;
                     SettingsFilterProfileNameDraft = string.Empty;
@@ -96,7 +96,7 @@ namespace JoesScanner.ViewModels
             set
             {
                 var newValue = value ?? string.Empty;
-                if (string.Equals(_settingsFilterProfileNameDraft, newValue, StringComparison.Ordinal))
+                if (string.Equals(_settingsFilterProfileNameDraft, newValue, StringComparison.OrdinalIgnoreCase))
                     return;
 
                 _settingsFilterProfileNameDraft = newValue;
@@ -150,7 +150,7 @@ SyncSettingsProfileNameDropdownFromDraft();
             if (string.IsNullOrWhiteSpace(nameOption))
                 return;
 
-            if (string.Equals(nameOption, NoneSettingsProfileNameOption, StringComparison.Ordinal))
+            if (string.Equals(nameOption, NoneSettingsProfileNameOption, StringComparison.OrdinalIgnoreCase))
             {
                 return;
             }
@@ -254,6 +254,22 @@ SyncSettingsProfileNameDropdownFromDraft();
 
         // Saved snapshot to detect connection changes
         private string _savedServerUrl = string.Empty;
+
+        private readonly ObservableCollection<ServerDirectoryEntry> _directoryServers = new();
+        
+        private static readonly ServerDirectoryEntry CustomServerDirectoryEntry = new ServerDirectoryEntry
+        {
+            DirectoryId = 0,
+            Name = "Custom server",
+            Url = string.Empty,
+            IsCustom = true
+        };
+private ServerDirectoryEntry? _selectedDirectoryServer;
+        private bool _isDirectoryLoading;
+        private string _directoryStatusText = string.Empty;
+        private int _directoryRefreshInProgress;
+        private bool _suppressDirectorySelection;
+
         private string _savedAuthServerBaseUrl = string.Empty;
         private bool _savedUseDefaultConnection;
         private bool _hasChanges;
@@ -277,6 +293,7 @@ SyncSettingsProfileNameDropdownFromDraft();
 
         // Theme as a single string: "System", "Light", "Dark"
         private string _themeMode = "System";
+        private string _savedThemeMode = "System";
 
         // Bluetooth label mapping
         private string _bluetoothLabelArtistToken = BluetoothLabelMapping.TokenAppName;
@@ -285,6 +302,51 @@ SyncSettingsProfileNameDropdownFromDraft();
         private string _bluetoothLabelComposerToken = BluetoothLabelMapping.TokenSite;
         private string _bluetoothLabelGenreToken = BluetoothLabelMapping.TokenReceiver;
 
+
+        // Audio filters (Phase 1 settings only; audio pipeline wiring in later phases)
+        private bool _audioStaticFilterEnabled;
+        private bool _savedAudioStaticFilterEnabled;
+
+        private int _audioStaticAttenuatorVolume = 50;
+        private int _savedAudioStaticAttenuatorVolume = 50;
+
+        private bool _audioToneFilterEnabled;
+        private bool _savedAudioToneFilterEnabled;
+
+        private int _audioToneStrength = 50;
+        private int _savedAudioToneStrength = 50;
+
+        private int _audioToneSensitivity = 50;
+        private int _savedAudioToneSensitivity = 50;
+
+        private int _audioToneHighlightMinutes = 5;
+        private int _savedAudioToneHighlightMinutes = 5;
+
+        // Telemetry (phone-home) - only configurable for custom servers.
+        private bool _telemetryEnabled = true;
+        private bool _savedTelemetryEnabled = true;
+
+        // Address detection
+        private bool _addressDetectionEnabled;
+
+        // what3words
+        private bool _what3WordsLinksEnabled = true;
+        private bool _savedWhat3WordsLinksEnabled = true;
+        private string _what3WordsApiKey = string.Empty;
+        private string _savedWhat3WordsApiKey = string.Empty;
+
+        private bool _savedAddressDetectionEnabled;
+        private bool _addressDetectionOpenMapsOnTap = true;
+        private bool _savedAddressDetectionOpenMapsOnTap = true;
+
+        private int _addressDetectionMinConfidencePercent = 70;
+        private int _savedAddressDetectionMinConfidencePercent = 70;
+
+        private int _addressDetectionMinAddressChars = 8;
+        private int _savedAddressDetectionMinAddressChars = 8;
+
+        private int _addressDetectionMaxCandidatesPerCall = 3;
+        private int _savedAddressDetectionMaxCandidatesPerCall = 3;
         private string _savedBluetoothLabelArtistToken = BluetoothLabelMapping.TokenAppName;
         private string _savedBluetoothLabelTitleToken = BluetoothLabelMapping.TokenTranscription;
         private string _savedBluetoothLabelAlbumToken = BluetoothLabelMapping.TokenTalkgroup;
@@ -300,6 +362,123 @@ SyncSettingsProfileNameDropdownFromDraft();
 
         // Sort order for the filter list (shared across instances)
         private static bool _sortAscending = true;
+        // Autosave gating: only fire autosave when the user is actively interacting with an open card.
+        // Server Connections remains manual (Verify button).
+        private volatile bool _autoplayCardOpen;
+        private volatile bool _filtersCardOpen;
+        private volatile bool _audioFiltersCardOpen;
+        private volatile bool _addressDetectionCardOpen;
+        private volatile bool _bluetoothCardOpen;
+        private volatile bool _themeCardOpen;
+        private volatile bool _telemetryCardOpen;
+        private volatile bool _logCardOpen;
+
+        private int _autoSaveInProgress = 0;
+        private int _autoSaveQueued = 0;
+
+        private bool _hasUnsavedConnectionChanges;
+        private bool _hasUnsavedNonConnectionChanges;
+
+        public void SetSettingsCardOpenState(string cardKey, bool isOpen)
+        {
+            var key = (cardKey ?? string.Empty).Trim();
+
+            if (string.Equals(key, "Autoplay", StringComparison.OrdinalIgnoreCase))
+                _autoplayCardOpen = isOpen;
+            else if (string.Equals(key, "Filters", StringComparison.OrdinalIgnoreCase))
+                _filtersCardOpen = isOpen;
+            else if (string.Equals(key, "AudioFilters", StringComparison.OrdinalIgnoreCase))
+                _audioFiltersCardOpen = isOpen;
+            else if (string.Equals(key, "AddressDetection", StringComparison.OrdinalIgnoreCase))
+                _addressDetectionCardOpen = isOpen;
+            else if (string.Equals(key, "Bluetooth", StringComparison.OrdinalIgnoreCase))
+                _bluetoothCardOpen = isOpen;
+            else if (string.Equals(key, "Theme", StringComparison.OrdinalIgnoreCase))
+                _themeCardOpen = isOpen;
+            else if (string.Equals(key, "Telemetry", StringComparison.OrdinalIgnoreCase))
+                _telemetryCardOpen = isOpen;
+            else if (string.Equals(key, "Log", StringComparison.OrdinalIgnoreCase))
+                _logCardOpen = isOpen;
+        }
+
+        private bool IsCardOpenForAutosave(string cardKey)
+        {
+            var key = (cardKey ?? string.Empty).Trim();
+
+            if (string.Equals(key, "Autoplay", StringComparison.OrdinalIgnoreCase))
+                return _autoplayCardOpen;
+
+            if (string.Equals(key, "Filters", StringComparison.OrdinalIgnoreCase))
+                return _filtersCardOpen;
+
+            if (string.Equals(key, "AudioFilters", StringComparison.OrdinalIgnoreCase))
+                return _audioFiltersCardOpen;
+
+            if (string.Equals(key, "AddressDetection", StringComparison.OrdinalIgnoreCase))
+                return _addressDetectionCardOpen;
+
+            if (string.Equals(key, "Bluetooth", StringComparison.OrdinalIgnoreCase))
+                return _bluetoothCardOpen;
+
+            if (string.Equals(key, "Theme", StringComparison.OrdinalIgnoreCase))
+                return _themeCardOpen;
+
+            if (string.Equals(key, "Telemetry", StringComparison.OrdinalIgnoreCase))
+                return _telemetryCardOpen;
+
+            if (string.Equals(key, "Log", StringComparison.OrdinalIgnoreCase))
+                return _logCardOpen;
+
+            return false;
+        }
+
+        private void QueueAutosaveNonConnection(string cardKey)
+        {
+            // Only autosave when the relevant card is open.
+            if (!IsCardOpenForAutosave(cardKey))
+                return;
+
+            // Debounce/serialize autosaves to avoid overlapping saves and excessive IO.
+            if (Interlocked.Exchange(ref _autoSaveQueued, 1) == 1)
+                return;
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    // Small debounce window to coalesce rapid toggles/picker changes.
+                    await Task.Delay(150);
+
+                    Interlocked.Exchange(ref _autoSaveQueued, 0);
+
+                    if (Interlocked.CompareExchange(ref _autoSaveInProgress, 1, 0) != 0)
+                        return;
+
+                    try
+                    {
+                        await SaveNonConnectionSettingsAsync();
+                    }
+                    finally
+                    {
+                        Interlocked.Exchange(ref _autoSaveInProgress, 0);
+                    }
+                }
+                catch
+                {
+                    // Autosave is best-effort; don't surface UI errors for it.
+                }
+            });
+        }
+
+        private static int ClampInt(int value, int min, int max)
+        {
+            if (value < min)
+                return min;
+            if (value > max)
+                return max;
+            return value;
+        }
+
 
         // Commands
         public ICommand ToggleMuteFilterCommand { get; }
@@ -309,10 +488,40 @@ SyncSettingsProfileNameDropdownFromDraft();
         public ICommand ResetServerCommand { get; }
         public ICommand ValidateServerCommand { get; }
 
+        public ICommand RefreshDirectoryServersCommand { get; }
+
         // Password visibility command
         public ICommand ToggleBasicAuthPasswordVisibilityCommand { get; }
 
         public const string DefaultServerUrl = "https://app.joesscanner.com";
+
+        // Default servers are provided by the app and always have telemetry on.
+        // Extend this list as additional built-in servers are added.
+        private static readonly string[] ProvidedDefaultServerUrls =
+        {
+            DefaultServerUrl
+        };
+
+        private static bool IsProvidedDefaultServerUrl(string? serverUrl)
+        {
+            var url = (serverUrl ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(url))
+                return false;
+
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+                return false;
+
+            foreach (var candidate in ProvidedDefaultServerUrls)
+            {
+                if (!Uri.TryCreate(candidate, UriKind.Absolute, out var candidateUri))
+                    continue;
+
+                if (string.Equals(uri.Host, candidateUri.Host, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+
+            return false;
+        }
 
         public SettingsViewModel(ISettingsService settingsService, MainViewModel mainViewModel, ITelemetryService telemetryService, IFilterProfileStore filterProfileStore)
         {
@@ -360,11 +569,13 @@ SyncSettingsProfileNameDropdownFromDraft();
 
             InitializeFromSettings();
 
-            SaveCommand = new Command(async () => await SaveSettingsAsync());
+            SaveCommand = new Command(async () => await SaveNonConnectionSettingsAsync());
             ResetServerCommand = new Command(ResetServerUrl);
 
             // Validate always saves first, then validates.
             ValidateServerCommand = new Command(async () => await SaveThenValidateServerUrlAsync());
+
+            RefreshDirectoryServersCommand = new Command(async () => await RefreshDirectoryServersAsync());
 
             ToggleMuteFilterCommand = new Command<FilterRule>(OnToggleMuteFilter);
             ToggleDisableFilterCommand = new Command<FilterRule>(OnToggleDisableFilter);
@@ -380,12 +591,15 @@ SyncSettingsProfileNameDropdownFromDraft();
             try
             {
                 await LoadSettingsFilterProfilesAsync(applySelectedProfile: true);
+
+                // Refresh server directory list (best effort).
+                await EnsureDirectoryServersFreshAsync(force: true);
             }
             catch (Exception ex)
             {
                 try
                 {
-                    System.Diagnostics.Debug.WriteLine($"SettingsViewModel.OnPageOpenedAsync failed: {ex}");
+                    AppLog.DebugWriteLine($"SettingsViewModel.OnPageOpenedAsync failed: {ex}");
                 }
                 catch
                 {
@@ -422,7 +636,7 @@ SyncSettingsProfileNameDropdownFromDraft();
                     return;
                 }
 
-                var selected = _settingsFilterProfiles.FirstOrDefault(p => string.Equals(p.Id, selectedId, StringComparison.Ordinal));
+                var selected = _settingsFilterProfiles.FirstOrDefault(p => string.Equals(p.Id, selectedId, StringComparison.OrdinalIgnoreCase));
                 SelectedSettingsFilterProfile = selected;
 
                 if (applySelectedProfile && selected != null)
@@ -482,7 +696,7 @@ SyncSettingsProfileNameDropdownFromDraft();
             await _filterProfileStore.RenameAsync(current.Id, newName, CancellationToken.None);
             await LoadSettingsFilterProfilesAsync(applySelectedProfile: false);
 
-            var refreshed = _settingsFilterProfiles.FirstOrDefault(p => string.Equals(p.Id, current.Id, StringComparison.Ordinal));
+            var refreshed = _settingsFilterProfiles.FirstOrDefault(p => string.Equals(p.Id, current.Id, StringComparison.OrdinalIgnoreCase));
             if (refreshed != null)
                 await SelectSettingsFilterProfileAsync(refreshed, apply: false);
 
@@ -513,7 +727,7 @@ SyncSettingsProfileNameDropdownFromDraft();
         }
 
         // True when any setting on this page differs from what was last saved.
-        public bool HasUnsavedSettings => HasChanges;
+        public bool HasUnsavedSettings => _hasUnsavedNonConnectionChanges;
 
         // True when there are unsaved connection or credential changes.
         public bool HasChanges
@@ -539,7 +753,7 @@ SyncSettingsProfileNameDropdownFromDraft();
             }
         }
 
-        public bool ConnectionNeedsValidation => HasChanges;
+        public bool ConnectionNeedsValidation => _hasUnsavedConnectionChanges;
 
         public bool IsValidatingServer
         {
@@ -607,26 +821,106 @@ SyncSettingsProfileNameDropdownFromDraft();
         }
 
         // Current server URL in the edit box.
+
+        public ObservableCollection<ServerDirectoryEntry> DirectoryServers => _directoryServers;
+
+        public ServerDirectoryEntry? SelectedDirectoryServer
+        {
+            get => _selectedDirectoryServer;
+            set
+            {
+                if (_suppressDirectorySelection)
+                {
+                    _selectedDirectoryServer = value;
+                    OnPropertyChanged(nameof(SelectedDirectoryServer));
+                    OnPropertyChanged(nameof(IsCustomServerSelected));
+                    return;
+                }
+
+                if (ReferenceEquals(_selectedDirectoryServer, value))
+                    return;
+
+                _selectedDirectoryServer = value;
+                OnPropertyChanged(nameof(SelectedDirectoryServer));
+                OnPropertyChanged(nameof(IsCustomServerSelected));
+
+                if (value == null)
+                    return;
+
+                // Selecting a directory server sets the server URL.
+                var url = (value.Url ?? string.Empty).Trim();
+                if (url.Length > 0)
+                    ServerUrl = url;
+            }
+        }
+
+        
+
+        public bool IsCustomServerSelected => SelectedDirectoryServer?.IsCustom == true;
+
+        private DateTime _lastDirectoryRefreshUtc = DateTime.MinValue;
+
+        // When we are applying connection settings programmatically (for example, during Validate),
+        // we do not want the act of assigning ServerUrl to re-sync the server picker selection.
+        // The picker should remain on what the user selected.
+        private int _suppressDirectorySelectionSync;
+
+        public async Task EnsureDirectoryServersFreshAsync(bool force)
+        {
+            // If we have only the Custom placeholder, or if it's been a while, refresh.
+            var hasAnyDirectoryServers = _directoryServers.Count > 1;
+            var age = DateTime.UtcNow - _lastDirectoryRefreshUtc;
+
+            if (!force && hasAnyDirectoryServers && age < TimeSpan.FromMinutes(5))
+                return;
+
+            await RefreshDirectoryServersAsync();
+        }
+public bool IsDirectoryLoading
+        {
+            get => _isDirectoryLoading;
+            private set
+            {
+                if (_isDirectoryLoading == value)
+                    return;
+                _isDirectoryLoading = value;
+                OnPropertyChanged(nameof(IsDirectoryLoading));
+            }
+        }
+
+        public string DirectoryStatusText
+        {
+            get => _directoryStatusText;
+            private set
+            {
+                if (string.Equals(_directoryStatusText, value, StringComparison.OrdinalIgnoreCase))
+                    return;
+                _directoryStatusText = value ?? string.Empty;
+                OnPropertyChanged(nameof(DirectoryStatusText));
+            }
+        }
+
         public string ServerUrl
         {
             get => _serverUrl;
             set
             {
                 var newValue = value ?? string.Empty;
-                if (string.Equals(_serverUrl, newValue, StringComparison.Ordinal))
+                if (string.Equals(_serverUrl, newValue, StringComparison.OrdinalIgnoreCase))
                     return;
 
                 _serverUrl = newValue;
                 OnPropertyChanged();
 
-                var defaultUrl = DefaultServerUrl;
-                var isDefault = string.Equals(_serverUrl, defaultUrl, StringComparison.OrdinalIgnoreCase);
+                var isDefault = IsProvidedDefaultServerUrl(_serverUrl);
 
                 if (_useDefaultConnection != isDefault)
                 {
                     _useDefaultConnection = isDefault;
                     OnPropertyChanged(nameof(UseDefaultConnection));
                 }
+
+                OnPropertyChanged(nameof(ShowTelemetryCard));
 
 
 
@@ -658,6 +952,11 @@ SyncSettingsProfileNameDropdownFromDraft();
                 // Server change invalidates any prior validation badge until Validate is pressed.
                 SetShowValidationPrefix(false);
 
+                // Keep the user's current picker selection stable when we are applying server
+                // state programmatically (for example, during Validate).
+                if (Volatile.Read(ref _suppressDirectorySelectionSync) == 0)
+                    SyncSelectedDirectoryServerFromCurrentUrl();
+
                 UpdateHasChanges();
             }
         }
@@ -669,7 +968,7 @@ SyncSettingsProfileNameDropdownFromDraft();
             set
             {
                 var newValue = value ?? string.Empty;
-                if (string.Equals(_authServerBaseUrl, newValue, StringComparison.Ordinal))
+                if (string.Equals(_authServerBaseUrl, newValue, StringComparison.OrdinalIgnoreCase))
                     return;
 
                 _authServerBaseUrl = newValue;
@@ -683,7 +982,7 @@ SyncSettingsProfileNameDropdownFromDraft();
             get => _basicAuthUsername;
             set
             {
-                if (string.Equals(_basicAuthUsername, value, StringComparison.Ordinal))
+                if (string.Equals(_basicAuthUsername, value, StringComparison.OrdinalIgnoreCase))
                     return;
 
                 _basicAuthUsername = value ?? string.Empty;
@@ -697,7 +996,7 @@ SyncSettingsProfileNameDropdownFromDraft();
             get => _basicAuthPassword;
             set
             {
-                if (string.Equals(_basicAuthPassword, value, StringComparison.Ordinal))
+                if (string.Equals(_basicAuthPassword, value, StringComparison.OrdinalIgnoreCase))
                     return;
 
                 _basicAuthPassword = value ?? string.Empty;
@@ -767,6 +1066,207 @@ public bool WindowsAutoConnectOnStart
             }
         }
 
+
+        public bool What3WordsLinksEnabled
+        {
+            get => _what3WordsLinksEnabled;
+            set
+            {
+                if (_what3WordsLinksEnabled == value)
+                    return;
+
+                _what3WordsLinksEnabled = value;
+                OnPropertyChanged();
+                UpdateHasChanges();
+                QueueAutosaveNonConnection("AddressDetection");
+            }
+        }
+
+        public string What3WordsApiKey
+        {
+            get => _what3WordsApiKey;
+            set
+            {
+                var cleaned = (value ?? string.Empty).Trim();
+                if (_what3WordsApiKey == cleaned)
+                    return;
+
+                _what3WordsApiKey = cleaned;
+                OnPropertyChanged();
+                UpdateHasChanges();
+                QueueAutosaveNonConnection("AddressDetection");
+            }
+        }
+
+
+        public bool AudioStaticFilterEnabled
+        {
+            get => _audioStaticFilterEnabled;
+            set
+            {
+                if (_audioStaticFilterEnabled == value)
+                    return;
+
+                _audioStaticFilterEnabled = value;
+                OnPropertyChanged();
+                QueueAutosaveNonConnection("AudioFilters");
+            }
+        }
+
+        public int AudioStaticAttenuatorVolume
+        {
+            get => _audioStaticAttenuatorVolume;
+            set
+            {
+                var cleaned = ClampInt(value, 0, 100);
+                if (_audioStaticAttenuatorVolume == cleaned)
+                    return;
+
+                _audioStaticAttenuatorVolume = cleaned;
+                OnPropertyChanged();
+                QueueAutosaveNonConnection("AudioFilters");
+            }
+        }
+
+        public bool AudioToneFilterEnabled
+        {
+            get => _audioToneFilterEnabled;
+            set
+            {
+                if (_audioToneFilterEnabled == value)
+                    return;
+
+                _audioToneFilterEnabled = value;
+                OnPropertyChanged();
+                QueueAutosaveNonConnection("AudioFilters");
+            }
+        }
+
+        public int AudioToneStrength
+        {
+            get => _audioToneStrength;
+            set
+            {
+                var cleaned = ClampInt(value, 0, 100);
+                if (_audioToneStrength == cleaned)
+                    return;
+
+                _audioToneStrength = cleaned;
+                OnPropertyChanged();
+                QueueAutosaveNonConnection("AudioFilters");
+            }
+        }
+
+        public int AudioToneSensitivity
+        {
+            get => _audioToneSensitivity;
+            set
+            {
+                var cleaned = ClampInt(value, 0, 100);
+                if (_audioToneSensitivity == cleaned)
+                    return;
+
+                _audioToneSensitivity = cleaned;
+                OnPropertyChanged();
+                QueueAutosaveNonConnection("AudioFilters");
+            }
+        }
+
+        public int AudioToneHighlightMinutes
+        {
+            get => _audioToneHighlightMinutes;
+            set
+            {
+                var cleaned = ClampInt(value, 1, 99);
+                if (_audioToneHighlightMinutes == cleaned)
+                    return;
+
+                _audioToneHighlightMinutes = cleaned;
+                OnPropertyChanged();
+                QueueAutosaveNonConnection("AudioFilters");
+            }
+        }
+
+
+        public bool AddressDetectionEnabled
+        {
+            get => _addressDetectionEnabled;
+            set
+            {
+                if (_addressDetectionEnabled == value)
+                    return;
+
+                _addressDetectionEnabled = value;
+                OnPropertyChanged();
+                UpdateHasChanges();
+                QueueAutosaveNonConnection("AddressDetection");
+            }
+        }
+
+        public bool AddressDetectionOpenMapsOnTap
+        {
+            get => _addressDetectionOpenMapsOnTap;
+            set
+            {
+                if (_addressDetectionOpenMapsOnTap == value)
+                    return;
+
+                _addressDetectionOpenMapsOnTap = value;
+                OnPropertyChanged();
+                UpdateHasChanges();
+                QueueAutosaveNonConnection("AddressDetection");
+            }
+        }
+
+        public int AddressDetectionMinConfidencePercent
+        {
+            get => _addressDetectionMinConfidencePercent;
+            set
+            {
+                var cleaned = ClampInt(value, 0, 100);
+                if (_addressDetectionMinConfidencePercent == cleaned)
+                    return;
+
+                _addressDetectionMinConfidencePercent = cleaned;
+                OnPropertyChanged();
+                UpdateHasChanges();
+                QueueAutosaveNonConnection("AddressDetection");
+            }
+        }
+
+        public int AddressDetectionMinAddressChars
+        {
+            get => _addressDetectionMinAddressChars;
+            set
+            {
+                var cleaned = ClampInt(value, 0, 200);
+                if (_addressDetectionMinAddressChars == cleaned)
+                    return;
+
+                _addressDetectionMinAddressChars = cleaned;
+                OnPropertyChanged();
+                UpdateHasChanges();
+                QueueAutosaveNonConnection("AddressDetection");
+            }
+        }
+
+        public int AddressDetectionMaxCandidatesPerCall
+        {
+            get => _addressDetectionMaxCandidatesPerCall;
+            set
+            {
+                var cleaned = ClampInt(value, 1, 10);
+                if (_addressDetectionMaxCandidatesPerCall == cleaned)
+                    return;
+
+                _addressDetectionMaxCandidatesPerCall = cleaned;
+                OnPropertyChanged();
+                UpdateHasChanges();
+                QueueAutosaveNonConnection("AddressDetection");
+            }
+        }
+        
+
 public bool WindowsStartWithWindows
         {
             get => _windowsStartWithWindows;
@@ -820,6 +1320,23 @@ public bool WindowsStartWithWindows
             }
         }
 
+        public bool ShowTelemetryCard => !IsProvidedDefaultServerUrl(_serverUrl);
+
+        public bool TelemetryEnabled
+        {
+            get => _telemetryEnabled;
+            set
+            {
+                if (_telemetryEnabled == value)
+                    return;
+
+                _telemetryEnabled = value;
+                OnPropertyChanged();
+                UpdateHasChanges();
+                QueueAutosaveNonConnection("Telemetry");
+            }
+        }
+
 
         public string ThemeMode
         {
@@ -838,8 +1355,9 @@ public bool WindowsStartWithWindows
                 OnPropertyChanged(nameof(IsThemeLight));
                 OnPropertyChanged(nameof(IsThemeDark));
 
-                _settings.ThemeMode = _themeMode;
                 ApplyTheme(_themeMode);
+                UpdateHasChanges();
+                QueueAutosaveNonConnection("Theme");
             }
         }
 
@@ -887,12 +1405,12 @@ public bool WindowsStartWithWindows
         {
             var key = string.IsNullOrWhiteSpace(token) ? defaultToken : token;
 
-            var opt = BluetoothLabelOptions.FirstOrDefault(o => string.Equals(o.Key, key, StringComparison.Ordinal));
+            var opt = BluetoothLabelOptions.FirstOrDefault(o => string.Equals(o.Key, key, StringComparison.OrdinalIgnoreCase));
             if (opt != null)
                 return opt;
 
             // Fall back to default token if stored token is unknown (corrupt/old settings)
-            opt = BluetoothLabelOptions.FirstOrDefault(o => string.Equals(o.Key, defaultToken, StringComparison.Ordinal));
+            opt = BluetoothLabelOptions.FirstOrDefault(o => string.Equals(o.Key, defaultToken, StringComparison.OrdinalIgnoreCase));
             return opt ?? BluetoothLabelOptions.First();
         }
 
@@ -908,13 +1426,14 @@ public bool WindowsStartWithWindows
             get => _bluetoothLabelArtistOption;
             set
             {
-                if (value == null || string.Equals(_bluetoothLabelArtistOption?.Key, value.Key, StringComparison.Ordinal))
+                if (value == null || string.Equals(_bluetoothLabelArtistOption?.Key, value.Key, StringComparison.OrdinalIgnoreCase))
                     return;
 
                 _bluetoothLabelArtistOption = value;
                 _bluetoothLabelArtistToken = value.Key;
                 OnPropertyChanged();
                 UpdateHasChanges();
+                QueueAutosaveNonConnection("Bluetooth");
             }
         }
 
@@ -923,13 +1442,14 @@ public bool WindowsStartWithWindows
             get => _bluetoothLabelTitleOption;
             set
             {
-                if (value == null || string.Equals(_bluetoothLabelTitleOption?.Key, value.Key, StringComparison.Ordinal))
+                if (value == null || string.Equals(_bluetoothLabelTitleOption?.Key, value.Key, StringComparison.OrdinalIgnoreCase))
                     return;
 
                 _bluetoothLabelTitleOption = value;
                 _bluetoothLabelTitleToken = value.Key;
                 OnPropertyChanged();
                 UpdateHasChanges();
+                QueueAutosaveNonConnection("Bluetooth");
             }
         }
 
@@ -938,13 +1458,14 @@ public bool WindowsStartWithWindows
             get => _bluetoothLabelAlbumOption;
             set
             {
-                if (value == null || string.Equals(_bluetoothLabelAlbumOption?.Key, value.Key, StringComparison.Ordinal))
+                if (value == null || string.Equals(_bluetoothLabelAlbumOption?.Key, value.Key, StringComparison.OrdinalIgnoreCase))
                     return;
 
                 _bluetoothLabelAlbumOption = value;
                 _bluetoothLabelAlbumToken = value.Key;
                 OnPropertyChanged();
                 UpdateHasChanges();
+                QueueAutosaveNonConnection("Bluetooth");
             }
         }
 
@@ -953,13 +1474,14 @@ public bool WindowsStartWithWindows
             get => _bluetoothLabelComposerOption;
             set
             {
-                if (value == null || string.Equals(_bluetoothLabelComposerOption?.Key, value.Key, StringComparison.Ordinal))
+                if (value == null || string.Equals(_bluetoothLabelComposerOption?.Key, value.Key, StringComparison.OrdinalIgnoreCase))
                     return;
 
                 _bluetoothLabelComposerOption = value;
                 _bluetoothLabelComposerToken = value.Key;
                 OnPropertyChanged();
                 UpdateHasChanges();
+                QueueAutosaveNonConnection("Bluetooth");
             }
         }
 
@@ -968,13 +1490,14 @@ public bool WindowsStartWithWindows
             get => _bluetoothLabelGenreOption;
             set
             {
-                if (value == null || string.Equals(_bluetoothLabelGenreOption?.Key, value.Key, StringComparison.Ordinal))
+                if (value == null || string.Equals(_bluetoothLabelGenreOption?.Key, value.Key, StringComparison.OrdinalIgnoreCase))
                     return;
 
                 _bluetoothLabelGenreOption = value;
                 _bluetoothLabelGenreToken = value.Key;
                 OnPropertyChanged();
                 UpdateHasChanges();
+                QueueAutosaveNonConnection("Bluetooth");
             }
         }
 
@@ -1025,6 +1548,10 @@ public bool WindowsStartWithWindows
             _basicAuthUsername = _settings.BasicAuthUsername ?? string.Empty;
             _basicAuthPassword = _settings.BasicAuthPassword ?? string.Empty;
 
+            // Derived flag: treat built-in server(s) as the default connection.
+            _useDefaultConnection = IsProvidedDefaultServerUrl(_serverUrl);
+
+
             _autoPlay = _settings.AutoPlay;
             _savedAutoPlay = _autoPlay;
 
@@ -1037,29 +1564,99 @@ public bool WindowsStartWithWindows
             _windowsStartWithWindows = _settings.WindowsStartWithWindows;
             _savedWindowsStartWithWindows = _windowsStartWithWindows;
 
-            _bluetoothLabelArtistToken = _settings.BluetoothLabelArtist ?? string.Empty;
+            _themeMode = string.IsNullOrWhiteSpace(_settings.ThemeMode) ? "System" : _settings.ThemeMode;
+            _savedThemeMode = _themeMode;
+            ApplyTheme(_themeMode);
+
+            _bluetoothLabelArtistToken = BluetoothLabelMapping.NormalizeToken(_settings.BluetoothLabelArtist, BluetoothLabelMapping.TokenAppName);
             _savedBluetoothLabelArtistToken = _bluetoothLabelArtistToken;
 
-            _bluetoothLabelTitleToken = _settings.BluetoothLabelTitle ?? string.Empty;
+            _bluetoothLabelTitleToken = BluetoothLabelMapping.NormalizeToken(_settings.BluetoothLabelTitle, BluetoothLabelMapping.TokenTranscription);
             _savedBluetoothLabelTitleToken = _bluetoothLabelTitleToken;
 
-            _bluetoothLabelAlbumToken = _settings.BluetoothLabelAlbum ?? string.Empty;
+            _bluetoothLabelAlbumToken = BluetoothLabelMapping.NormalizeToken(_settings.BluetoothLabelAlbum, BluetoothLabelMapping.TokenTalkgroup);
             _savedBluetoothLabelAlbumToken = _bluetoothLabelAlbumToken;
 
-            _bluetoothLabelComposerToken = _settings.BluetoothLabelComposer ?? string.Empty;
+            _bluetoothLabelComposerToken = BluetoothLabelMapping.NormalizeToken(_settings.BluetoothLabelComposer, BluetoothLabelMapping.TokenSite);
             _savedBluetoothLabelComposerToken = _bluetoothLabelComposerToken;
 
-            _bluetoothLabelGenreToken = _settings.BluetoothLabelGenre ?? string.Empty;
+            _bluetoothLabelGenreToken = BluetoothLabelMapping.NormalizeToken(_settings.BluetoothLabelGenre, BluetoothLabelMapping.TokenReceiver);
             _savedBluetoothLabelGenreToken = _bluetoothLabelGenreToken;
 
+            // Ensure the pickers show the persisted selections when the Settings page opens.
+            _bluetoothLabelArtistOption = GetBluetoothOptionOrDefault(_bluetoothLabelArtistToken, BluetoothLabelMapping.TokenAppName);
+            _bluetoothLabelTitleOption = GetBluetoothOptionOrDefault(_bluetoothLabelTitleToken, BluetoothLabelMapping.TokenTranscription);
+            _bluetoothLabelAlbumOption = GetBluetoothOptionOrDefault(_bluetoothLabelAlbumToken, BluetoothLabelMapping.TokenTalkgroup);
+            _bluetoothLabelComposerOption = GetBluetoothOptionOrDefault(_bluetoothLabelComposerToken, BluetoothLabelMapping.TokenSite);
+            _bluetoothLabelGenreOption = GetBluetoothOptionOrDefault(_bluetoothLabelGenreToken, BluetoothLabelMapping.TokenReceiver);
+
+            OnPropertyChanged(nameof(BluetoothLabelArtistOption));
+            OnPropertyChanged(nameof(BluetoothLabelTitleOption));
+            OnPropertyChanged(nameof(BluetoothLabelAlbumOption));
+            OnPropertyChanged(nameof(BluetoothLabelComposerOption));
+            OnPropertyChanged(nameof(BluetoothLabelGenreOption));
+
+            _what3WordsLinksEnabled = _settings.What3WordsLinksEnabled;
+            _savedWhat3WordsLinksEnabled = _what3WordsLinksEnabled;
+
+            _what3WordsApiKey = _settings.What3WordsApiKey;
+            _savedWhat3WordsApiKey = _what3WordsApiKey;
+
+            
+            _audioStaticFilterEnabled = _settings.AudioStaticFilterEnabled;
+            _savedAudioStaticFilterEnabled = _audioStaticFilterEnabled;
+
+            _audioStaticAttenuatorVolume = _settings.AudioStaticAttenuatorVolume;
+            _savedAudioStaticAttenuatorVolume = _audioStaticAttenuatorVolume;
+
+            _audioToneFilterEnabled = _settings.AudioToneFilterEnabled;
+            _savedAudioToneFilterEnabled = _audioToneFilterEnabled;
+
+            _audioToneStrength = _settings.AudioToneStrength;
+            _savedAudioToneStrength = _audioToneStrength;
+
+            _audioToneSensitivity = _settings.AudioToneSensitivity;
+            _savedAudioToneSensitivity = _audioToneSensitivity;
+
+            _audioToneHighlightMinutes = _settings.AudioToneHighlightMinutes;
+            _savedAudioToneHighlightMinutes = _audioToneHighlightMinutes;
+
+            _telemetryEnabled = _settings.TelemetryEnabled;
+            _savedTelemetryEnabled = _telemetryEnabled;
+
+_addressDetectionEnabled = _settings.AddressDetectionEnabled;
+            _savedAddressDetectionEnabled = _addressDetectionEnabled;
+
+
+            _addressDetectionOpenMapsOnTap = _settings.AddressDetectionOpenMapsOnTap;
+            _savedAddressDetectionOpenMapsOnTap = _addressDetectionOpenMapsOnTap;
+
+            LoadDirectoryServersFromCache();
+
+            _addressDetectionMinConfidencePercent = _settings.AddressDetectionMinConfidencePercent;
+            _savedAddressDetectionMinConfidencePercent = _addressDetectionMinConfidencePercent;
+
+            _addressDetectionMinAddressChars = _settings.AddressDetectionMinAddressChars;
+            _savedAddressDetectionMinAddressChars = _addressDetectionMinAddressChars;
+
+            _addressDetectionMaxCandidatesPerCall = _settings.AddressDetectionMaxCandidatesPerCall;
+            _savedAddressDetectionMaxCandidatesPerCall = _addressDetectionMaxCandidatesPerCall;
             // Snapshots used by HasUnsavedSettings comparisons.
             _savedAuthServerBaseUrl = _authServerBaseUrl;
-            _savedUseDefaultConnection = UseDefaultConnection;
+            _savedServerUrl = _serverUrl;
+
+            _savedBasicAuthUsername = _basicAuthUsername;
+            _savedBasicAuthPassword = _basicAuthPassword;
+
+            _savedUseDefaultConnection = _useDefaultConnection;
 
             HasChanges = false;
 
             OnPropertyChanged(nameof(AuthServerBaseUrl));
             OnPropertyChanged(nameof(ServerUrl));
+            OnPropertyChanged(nameof(UseDefaultConnection));
+            OnPropertyChanged(nameof(ShowTelemetryCard));
+            OnPropertyChanged(nameof(TelemetryEnabled));
             OnPropertyChanged(nameof(BasicAuthUsername));
             OnPropertyChanged(nameof(BasicAuthPassword));
             OnPropertyChanged(nameof(AutoPlay));
@@ -1068,6 +1665,10 @@ public bool WindowsStartWithWindows
             OnPropertyChanged(nameof(MobileAutoConnectOnStart));
             OnPropertyChanged(nameof(WindowsStartWithWindows));
 
+            OnPropertyChanged(nameof(ThemeMode));
+            OnPropertyChanged(nameof(IsThemeSystem));
+            OnPropertyChanged(nameof(IsThemeLight));
+            OnPropertyChanged(nameof(IsThemeDark));
 
             OnPropertyChanged(nameof(HasUnsavedSettings));
             OnPropertyChanged(nameof(ConnectionNeedsValidation));
@@ -1122,6 +1723,21 @@ public bool WindowsStartWithWindows
             var planSummary = _settings.SubscriptionLastMessage ?? string.Empty;
             planSummary = planSummary.Trim();
 
+            // Restore renewal info in the header summary when the last message is plan-only.
+            // The auth check caches the renewal timestamp separately; include it here so users can see the next renewal at a glance.
+            var renewalUtc = _settings.SubscriptionRenewalUtc;
+            if (renewalUtc.HasValue &&
+                planSummary.IndexOf("renewal", StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                var renewalDate = DateTime.SpecifyKind(renewalUtc.Value, DateTimeKind.Utc)
+                    .ToLocalTime()
+                    .ToString("yyyy-MM-dd");
+
+                if (!string.IsNullOrWhiteSpace(renewalDate))
+                    planSummary = $"{planSummary} - Renewal date: {renewalDate}";
+            }
+
+
             if (string.IsNullOrEmpty(planSummary))
             {
                 ShowSubscriptionSummary = false;
@@ -1139,7 +1755,7 @@ public bool WindowsStartWithWindows
                     priceText.Contains("$", StringComparison.Ordinal);
 
                 if (looksLikeFriendlyPrice &&
-                    !planSummary.Contains(priceText, StringComparison.Ordinal))
+                    !planSummary.Contains(priceText, StringComparison.OrdinalIgnoreCase))
                 {
                     var idxTrial = planSummary.IndexOf(" - Trial end date:", StringComparison.Ordinal);
                     var idxRenewalDate = planSummary.IndexOf(" - Renewal date:", StringComparison.Ordinal);
@@ -1197,10 +1813,12 @@ public bool WindowsStartWithWindows
             app.UserAppTheme = theme;
         }
 
-        private async Task SaveSettingsAsync()
+        private async Task SaveNonConnectionSettingsAsync()
         {
-            // IMPORTANT: Connection credentials and active server selection are persisted only by Validate.
-            // Save is for non-connection settings.
+            // Autosave target: non-connection settings only.
+            // Connection credentials and active server selection are persisted only by Verify/Validate.
+
+            _settings.AutoPlay = AutoPlay;
 
             _settings.WindowsAutoConnectOnStart = WindowsAutoConnectOnStart;
             _settings.WindowsStartWithWindows = WindowsStartWithWindows;
@@ -1211,15 +1829,19 @@ public bool WindowsStartWithWindows
             {
                 // Best effort. If this fails (policy restrictions, permissions, etc.),
                 // the setting remains saved and the user can toggle again.
-                WindowsStartupManager.TrySetRunOnLogin(_settings.WindowsStartWithWindows);
+                var ok = await WindowsStartupManager.TrySetRunOnLoginAsync(_settings.WindowsStartWithWindows);
+                if (!ok)
+                {
+                    AppLog.Add($"Startup: Settings save attempted to set StartWithWindows={_settings.WindowsStartWithWindows} but it reported failure.");
+                }
             }
-            catch
+            catch (Exception ex)
             {
+                AppLog.Add($"Startup: Settings save threw while applying StartWithWindows={_settings.WindowsStartWithWindows}. {ex.GetType().Name}: {ex.Message}");
             }
 #endif
 
             _settings.ThemeMode = ThemeMode;
-            ApplyTheme(ThemeMode);
 
             _settings.BluetoothLabelArtist = _bluetoothLabelArtistToken;
             _settings.BluetoothLabelTitle = _bluetoothLabelTitleToken;
@@ -1227,12 +1849,32 @@ public bool WindowsStartWithWindows
             _settings.BluetoothLabelComposer = _bluetoothLabelComposerToken;
             _settings.BluetoothLabelGenre = _bluetoothLabelGenreToken;
 
-            _savedAuthServerBaseUrl = _settings.AuthServerBaseUrl ?? string.Empty;
-            _savedUseDefaultConnection = UseDefaultConnection;
+            _settings.What3WordsLinksEnabled = _what3WordsLinksEnabled;
+            _settings.What3WordsApiKey = _what3WordsApiKey;
 
+            
+            _settings.AudioStaticFilterEnabled = _audioStaticFilterEnabled;
+            _settings.AudioStaticAttenuatorVolume = _audioStaticAttenuatorVolume;
+            _settings.AudioToneFilterEnabled = _audioToneFilterEnabled;
+            _settings.AudioToneStrength = _audioToneStrength;
+            _settings.AudioToneSensitivity = _audioToneSensitivity;
+            _settings.AudioToneHighlightMinutes = _audioToneHighlightMinutes;
+
+            _settings.TelemetryEnabled = _telemetryEnabled;
+
+_settings.AddressDetectionEnabled = _addressDetectionEnabled;
+            _settings.AddressDetectionOpenMapsOnTap = _addressDetectionOpenMapsOnTap;
+
+            _settings.AddressDetectionMinConfidencePercent = _addressDetectionMinConfidencePercent;
+            _settings.AddressDetectionMinAddressChars = _addressDetectionMinAddressChars;
+            _settings.AddressDetectionMaxCandidatesPerCall = _addressDetectionMaxCandidatesPerCall;
+            // Update non-connection saved snapshots so only connection changes drive the Verify indicator.
+            _savedAutoPlay = _autoPlay;
             _savedWindowsAutoConnectOnStart = _windowsAutoConnectOnStart;
             _savedWindowsStartWithWindows = _windowsStartWithWindows;
             _savedMobileAutoConnectOnStart = _mobileAutoConnectOnStart;
+
+            _savedThemeMode = _themeMode;
 
             _savedBluetoothLabelArtistToken = _bluetoothLabelArtistToken;
             _savedBluetoothLabelTitleToken = _bluetoothLabelTitleToken;
@@ -1240,7 +1882,28 @@ public bool WindowsStartWithWindows
             _savedBluetoothLabelComposerToken = _bluetoothLabelComposerToken;
             _savedBluetoothLabelGenreToken = _bluetoothLabelGenreToken;
 
-            HasChanges = false;
+            _savedWhat3WordsLinksEnabled = _what3WordsLinksEnabled;
+            _savedWhat3WordsApiKey = _what3WordsApiKey;
+            _savedAudioStaticFilterEnabled = _audioStaticFilterEnabled;
+            _savedAudioStaticAttenuatorVolume = _audioStaticAttenuatorVolume;
+            _savedAudioToneFilterEnabled = _audioToneFilterEnabled;
+            _savedAudioToneStrength = _audioToneStrength;
+            _savedAudioToneSensitivity = _audioToneSensitivity;
+            _savedAudioToneHighlightMinutes = _audioToneHighlightMinutes;
+
+            _savedTelemetryEnabled = _telemetryEnabled;
+
+
+
+            _savedAddressDetectionEnabled = _addressDetectionEnabled;
+            _savedAddressDetectionOpenMapsOnTap = _addressDetectionOpenMapsOnTap;
+
+            LoadDirectoryServersFromCache();
+
+            _savedAddressDetectionMinConfidencePercent = _addressDetectionMinConfidencePercent;
+            _savedAddressDetectionMinAddressChars = _addressDetectionMinAddressChars;
+            _savedAddressDetectionMaxCandidatesPerCall = _addressDetectionMaxCandidatesPerCall;
+            UpdateHasChanges();
 
             OnPropertyChanged(nameof(HasUnsavedSettings));
             OnPropertyChanged(nameof(ConnectionNeedsValidation));
@@ -1264,17 +1927,24 @@ public bool WindowsStartWithWindows
             // again from the queue when they are ready.
             var previousServerUrlSnapshot = _savedServerUrl ?? string.Empty;
 
-            await SaveSettingsAsync();
+            await SaveNonConnectionSettingsAsync();
             await ValidateServerUrlAsync();
 
             if (!ServerValidationIsError)
             {
+                // IMPORTANT:
+                // After a successful validation, mark the *current* connection state as the saved baseline.
+                // The Validate button's red/blue state is driven by ConnectionNeedsValidation, which is
+                // computed from _hasUnsavedConnectionChanges. If we don't refresh the saved snapshots and
+                // recompute, custom server validations (especially no-auth ones) can leave the Validate
+                // button stuck in a "needs validation" state.
+                _savedAuthServerBaseUrl = _authServerBaseUrl;
                 _savedServerUrl = _settings.ServerUrl ?? string.Empty;
+                _savedUseDefaultConnection = _useDefaultConnection;
                 _savedBasicAuthUsername = _settings.BasicAuthUsername ?? string.Empty;
                 _savedBasicAuthPassword = _settings.BasicAuthPassword ?? string.Empty;
 
-                HasChanges = false;
-                OnPropertyChanged(nameof(ConnectionNeedsValidation));
+                UpdateHasChanges();
             }
 
             // Only stop when validation succeeded and the server actually changed.
@@ -1291,6 +1961,16 @@ public bool WindowsStartWithWindows
                     try
                     {
                         await _mainViewModel.StopMonitoringAsync();
+                    }
+                    catch
+                    {
+                    }
+
+                    // When switching servers, clear any existing main queue items and address alerts so
+                    // the user never falls back into calls that belong to a different server.
+                    try
+                    {
+                        await _mainViewModel.ClearQueueForServerSwitchAsync();
                     }
                     catch
                     {
@@ -1588,6 +2268,29 @@ public bool WindowsStartWithWindows
 
                     _mainViewModel.ServerUrl = DefaultServerUrl;
 
+
+                    // Mark connection as saved so plan and renewal info appears immediately after the first successful verify.
+                    Interlocked.Exchange(ref _suppressDirectorySelectionSync, 1);
+                    try
+                    {
+                        UseDefaultConnection = true;
+                        ServerUrl = DefaultServerUrl;
+                        BasicAuthUsername = accountUsername;
+                        BasicAuthPassword = accountPassword;
+                    }
+                    finally
+                    {
+                        Interlocked.Exchange(ref _suppressDirectorySelectionSync, 0);
+                    }
+
+                    _savedAuthServerBaseUrl = _authServerBaseUrl;
+                    _savedServerUrl = _serverUrl;
+                    _savedUseDefaultConnection = _useDefaultConnection;
+                    _savedBasicAuthUsername = _basicAuthUsername;
+                    _savedBasicAuthPassword = _basicAuthPassword;
+
+                    UpdateHasChanges();
+
                     SetShowValidationPrefix(true);
                     UpdateSubscriptionSummaryFromSettings();
                 }
@@ -1806,61 +2509,271 @@ public bool WindowsStartWithWindows
             }
             finally
             {
+                // If validation succeeded, treat the current connection settings as saved
+                // so the Validate button returns to its normal (blue) state.
+                if (!ServerValidationIsError)
+                {
+                    _savedAuthServerBaseUrl = _authServerBaseUrl;
+                    _savedServerUrl = _serverUrl;
+                    _savedUseDefaultConnection = _useDefaultConnection;
+                    _savedBasicAuthUsername = _basicAuthUsername;
+                    _savedBasicAuthPassword = _basicAuthPassword;
+
+                    UpdateHasChanges();
+                }
+
                 IsValidatingServer = false;
             }
         }
 
         private void UpdateHasChanges()
         {
-            var has =
+            // Connection changes (manual Verify) vs non-connection changes (autosave).
+            _hasUnsavedConnectionChanges =
                 !string.Equals(_serverUrl, _savedServerUrl, StringComparison.OrdinalIgnoreCase)
                 || !string.Equals(_authServerBaseUrl, _savedAuthServerBaseUrl, StringComparison.Ordinal)
                 || _useDefaultConnection != _savedUseDefaultConnection
                 || !string.Equals(_basicAuthUsername, _savedBasicAuthUsername, StringComparison.Ordinal)
-                || !string.Equals(_basicAuthPassword, _savedBasicAuthPassword, StringComparison.Ordinal)
-                || _autoPlay != _savedAutoPlay
+                || !string.Equals(_basicAuthPassword, _savedBasicAuthPassword, StringComparison.Ordinal);
+
+            _hasUnsavedNonConnectionChanges =
+                _autoPlay != _savedAutoPlay
                 || _windowsAutoConnectOnStart != _savedWindowsAutoConnectOnStart
                 || _windowsStartWithWindows != _savedWindowsStartWithWindows
                 || _mobileAutoConnectOnStart != _savedMobileAutoConnectOnStart
+                || !string.Equals(_themeMode, _savedThemeMode, StringComparison.OrdinalIgnoreCase)
                 || !string.Equals(_bluetoothLabelArtistToken, _savedBluetoothLabelArtistToken, StringComparison.Ordinal)
                 || !string.Equals(_bluetoothLabelTitleToken, _savedBluetoothLabelTitleToken, StringComparison.Ordinal)
                 || !string.Equals(_bluetoothLabelAlbumToken, _savedBluetoothLabelAlbumToken, StringComparison.Ordinal)
                 || !string.Equals(_bluetoothLabelComposerToken, _savedBluetoothLabelComposerToken, StringComparison.Ordinal)
-                || !string.Equals(_bluetoothLabelGenreToken, _savedBluetoothLabelGenreToken, StringComparison.Ordinal);
+                || !string.Equals(_bluetoothLabelGenreToken, _savedBluetoothLabelGenreToken, StringComparison.Ordinal)
+                || _what3WordsLinksEnabled != _savedWhat3WordsLinksEnabled
+                || !string.Equals(_what3WordsApiKey ?? string.Empty, _savedWhat3WordsApiKey ?? string.Empty, StringComparison.Ordinal)
+                || _audioStaticFilterEnabled != _savedAudioStaticFilterEnabled
+                || _audioStaticAttenuatorVolume != _savedAudioStaticAttenuatorVolume
+                || _audioToneFilterEnabled != _savedAudioToneFilterEnabled
+                || _audioToneStrength != _savedAudioToneStrength
+                || _audioToneSensitivity != _savedAudioToneSensitivity
+                || _audioToneHighlightMinutes != _savedAudioToneHighlightMinutes
+                || _telemetryEnabled != _savedTelemetryEnabled
+                || _addressDetectionEnabled != _savedAddressDetectionEnabled
+                || _addressDetectionOpenMapsOnTap != _savedAddressDetectionOpenMapsOnTap
+                || _addressDetectionMinConfidencePercent != _savedAddressDetectionMinConfidencePercent
+                || _addressDetectionMinAddressChars != _savedAddressDetectionMinAddressChars
+                || _addressDetectionMaxCandidatesPerCall != _savedAddressDetectionMaxCandidatesPerCall
+;
 
-            HasChanges = has;
+            HasChanges = _hasUnsavedConnectionChanges || _hasUnsavedNonConnectionChanges;
+
+            OnPropertyChanged(nameof(HasUnsavedSettings));
+            OnPropertyChanged(nameof(ConnectionNeedsValidation));
         }
 
         public void DiscardConnectionChanges()
         {
+            // Only discard connection changes. Other settings are autosaved.
             ServerUrl = _savedServerUrl;
             AuthServerBaseUrl = _savedAuthServerBaseUrl;
             UseDefaultConnection = _savedUseDefaultConnection;
             BasicAuthUsername = _savedBasicAuthUsername;
             BasicAuthPassword = _savedBasicAuthPassword;
-            WindowsAutoConnectOnStart = _savedWindowsAutoConnectOnStart;
-            WindowsStartWithWindows = _savedWindowsStartWithWindows;
 
-            _bluetoothLabelArtistToken = _savedBluetoothLabelArtistToken;
-            _bluetoothLabelTitleToken = _savedBluetoothLabelTitleToken;
-            _bluetoothLabelAlbumToken = _savedBluetoothLabelAlbumToken;
-            _bluetoothLabelComposerToken = _savedBluetoothLabelComposerToken;
-            _bluetoothLabelGenreToken = _savedBluetoothLabelGenreToken;
+            ClearValidationUiForDirtyConnection();
 
-            _bluetoothLabelArtistOption = GetBluetoothOptionOrDefault(_bluetoothLabelArtistToken, BluetoothLabelMapping.TokenAppName);
-            _bluetoothLabelTitleOption = GetBluetoothOptionOrDefault(_bluetoothLabelTitleToken, BluetoothLabelMapping.TokenTranscription);
-            _bluetoothLabelAlbumOption = GetBluetoothOptionOrDefault(_bluetoothLabelAlbumToken, BluetoothLabelMapping.TokenTalkgroup);
-            _bluetoothLabelComposerOption = GetBluetoothOptionOrDefault(_bluetoothLabelComposerToken, BluetoothLabelMapping.TokenSite);
-            _bluetoothLabelGenreOption = GetBluetoothOptionOrDefault(_bluetoothLabelGenreToken, BluetoothLabelMapping.TokenReceiver);
-
-            OnPropertyChanged(nameof(BluetoothLabelArtistOption));
-            OnPropertyChanged(nameof(BluetoothLabelTitleOption));
-            OnPropertyChanged(nameof(BluetoothLabelAlbumOption));
-            OnPropertyChanged(nameof(BluetoothLabelComposerOption));
-            OnPropertyChanged(nameof(BluetoothLabelGenreOption));
-            HasChanges = false;
+            UpdateHasChanges();
         }
 
+
+
+        private void LoadDirectoryServersFromCache()
+        {
+            try
+            {
+                _directoryServers.Clear();
+                _directoryServers.Add(CustomServerDirectoryEntry);
+                var cached = _settings.GetCachedDirectoryServers();
+                foreach (var s in cached)
+                    _directoryServers.Add(s);
+
+                // Sync picker selection to current ServerUrl.
+                SyncSelectedDirectoryServerFromCurrentUrl();
+
+                DirectoryStatusText = _directoryServers.Count <= 1
+                    ? "No servers loaded yet."
+                    : $"Loaded {_directoryServers.Count - 1} server(s).";
+            }
+            catch
+            {
+                // Ignore cache load errors.
+            }
+        }
+
+        private void SyncSelectedDirectoryServerFromCurrentUrl()
+{
+    try
+    {
+        var current = (ServerUrl ?? string.Empty).Trim().TrimEnd('/');
+
+        // Default to Custom if empty or no match.
+        ServerDirectoryEntry? match = null;
+
+        if (!string.IsNullOrWhiteSpace(current))
+        {
+            match = _directoryServers.FirstOrDefault(s =>
+                !s.IsCustom &&
+                string.Equals((s.Url ?? string.Empty).Trim().TrimEnd('/'), current, StringComparison.OrdinalIgnoreCase));
+        }
+
+        match ??= _directoryServers.FirstOrDefault(s => s.IsCustom) ?? CustomServerDirectoryEntry;
+
+        _suppressDirectorySelection = true;
+        try
+        {
+            _selectedDirectoryServer = match;
+            OnPropertyChanged(nameof(SelectedDirectoryServer));
+            OnPropertyChanged(nameof(IsCustomServerSelected));
+        }
+        finally
+        {
+            _suppressDirectorySelection = false;
+        }
+    }
+    catch
+    {
+    }
+}
+
+        private async Task RefreshDirectoryServersAsync()
+        {
+            if (Interlocked.Exchange(ref _directoryRefreshInProgress, 1) == 1)
+                return;
+
+            try
+            {
+                IsDirectoryLoading = true;
+                DirectoryStatusText = "Loading servers...";
+
+                var url = BuildAuthServerUrl("/wp-json/joes-scanner/v1/servers");
+
+                using var resp = await _httpClient.GetAsync(url);
+                var body = await resp.Content.ReadAsStringAsync();
+
+                if (!resp.IsSuccessStatusCode)
+                {
+                    DirectoryStatusText = $"Server list load failed: HTTP {(int)resp.StatusCode}.";
+                    return;
+                }
+
+                ServerDirectoryResponseDto? parsed = null;
+                try
+                {
+                    parsed = JsonSerializer.Deserialize<ServerDirectoryResponseDto>(
+                        body,
+                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                }
+                catch
+                {
+                }
+
+                if (parsed == null || !parsed.Ok || parsed.Servers == null)
+                {
+                    DirectoryStatusText = "Server list returned an unexpected response.";
+                    return;
+                }
+
+                var list = new List<ServerDirectoryEntry>();
+                foreach (var s in parsed.Servers)
+                {
+                    if (s == null)
+                        continue;
+
+                    var entry = new ServerDirectoryEntry
+                    {
+                        DirectoryId = s.Id,
+                        Name = s.Name ?? string.Empty,
+                        Url = s.Url ?? string.Empty,
+                        InfoUrl = s.InfoUrl ?? string.Empty,
+                        AreaLabel = s.AreaLabel ?? string.Empty,
+                        MapAnchor = s.MapAnchor ?? string.Empty,
+                        IsOfficial = s.IsOfficial,
+                        Badge = s.Badge ?? string.Empty,
+                        BadgeLabel = s.BadgeLabel ?? string.Empty
+                    };
+
+                    if (string.IsNullOrWhiteSpace(entry.Url))
+                        continue;
+
+                    list.Add(entry);
+                }
+
+                // Persist cache first.
+                try { _settings.UpsertCachedDirectoryServers(list); } catch { }
+
+                await MainThread.InvokeOnMainThreadAsync(() =>
+                {
+                    _directoryServers.Clear();
+                    _directoryServers.Add(CustomServerDirectoryEntry);
+                    foreach (var s in list)
+                        _directoryServers.Add(s);
+
+                    SyncSelectedDirectoryServerFromCurrentUrl();
+                });
+
+                DirectoryStatusText = list.Count == 0
+                    ? "No servers are currently listed."
+                    : $"Loaded {list.Count} server(s).";
+            }
+            catch (Exception ex)
+            {
+                DirectoryStatusText = "Directory load failed.";
+                try { AppLog.Add(() => $"Directory: load failed. {ex.Message}"); } catch { }
+            }
+            finally
+            {
+                _lastDirectoryRefreshUtc = DateTime.UtcNow;
+                IsDirectoryLoading = false;
+                Interlocked.Exchange(ref _directoryRefreshInProgress, 0);
+            }
+        }
+
+        private sealed class ServerDirectoryResponseDto
+        {
+            [JsonPropertyName("ok")]
+            public bool Ok { get; set; }
+
+            [JsonPropertyName("servers")]
+            public List<ServerDirectoryServerDto>? Servers { get; set; }
+        }
+
+        private sealed class ServerDirectoryServerDto
+        {
+            [JsonPropertyName("id")]
+            public int Id { get; set; }
+
+            [JsonPropertyName("name")]
+            public string? Name { get; set; }
+
+            [JsonPropertyName("url")]
+            public string? Url { get; set; }
+
+            [JsonPropertyName("info_url")]
+            public string? InfoUrl { get; set; }
+
+            [JsonPropertyName("area_label")]
+            public string? AreaLabel { get; set; }
+
+            [JsonPropertyName("map_anchor")]
+            public string? MapAnchor { get; set; }
+
+            [JsonPropertyName("is_official")]
+            public bool IsOfficial { get; set; }
+
+            [JsonPropertyName("badge")]
+            public string? Badge { get; set; }
+
+            [JsonPropertyName("badge_label")]
+            public string? BadgeLabel { get; set; }
+        }
 
         private string BuildAuthServerUrl(string path)
         {
@@ -1872,7 +2785,7 @@ public bool WindowsStartWithWindows
             baseUrl = baseUrl.TrimEnd('/');
 
             var cleanPath = (path ?? string.Empty).Trim();
-            if (!cleanPath.StartsWith("/", StringComparison.Ordinal))
+            if (!cleanPath.StartsWith("/", StringComparison.OrdinalIgnoreCase))
                 cleanPath = "/" + cleanPath;
 
             return baseUrl + cleanPath;

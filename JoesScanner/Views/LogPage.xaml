@@ -37,22 +37,25 @@
 						<RoundRectangle CornerRadius="10" />
 					</Border.StrokeShape>
 
-					<Grid
-                        Padding="8,6"
-                        ColumnDefinitions="*,Auto"
-                        RowDefinitions="Auto">
+					<Grid Padding="8,6" ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto" ColumnSpacing="10" RowSpacing="6">
 						<HorizontalStackLayout
 							Grid.Row="0"
                             Grid.Column="0"
+                            Grid.ColumnSpan="{OnIdiom Phone=2, Default=1}"
 							Spacing="8"
 							HorizontalOptions="Start">
 <Button
 								Text="Load"
 								Style="{StaticResource SecondaryPillButtonStyle}"
 							Clicked="OnLoadClicked" />
+                            
+                            <Button
+								Text="Export"
+								Style="{StaticResource SecondaryPillButtonStyle}"
+								Clicked="OnExportClicked" />
                             <Button
 								x:Name="AutoRefreshButton"
-								Text="Refresh"
+								Text="Auto-refresh"
 								Style="{StaticResource SecondaryPillButtonStyle}"
 								Clicked="OnAutoRefreshClicked" />
 
@@ -80,7 +83,7 @@
 										TextColor="Black"
 										VerticalOptions="Center"
 										HorizontalOptions="Center" />
-                                </Grid>
+					</Grid>
                             </Border>
 
                             <Button
@@ -100,12 +103,14 @@
                                     FontSize="13"
                                     TextColor="White"
                                     VerticalOptions="Center" />
-                                <Switch
+                                <controls:CompactToggleSwitch
                                     x:Name="LoggingSwitch"
-                                    Scale="0.8"
+                                    WidthRequest="56"
+                                    HeightRequest="20"
                                     OnColor="#3B82F6"
                                     ThumbColor="White"
                                     Toggled="OnLoggingToggled"
+                                    HorizontalOptions="End"
                                     VerticalOptions="Center" />
                             </HorizontalStackLayout>
 					</Grid>

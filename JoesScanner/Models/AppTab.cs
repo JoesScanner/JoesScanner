@@ -7,6 +7,5 @@ public enum AppTab
     Archive,
     Stats,
     Communications,
-    Log,
     Settings
 }

@@ -15,7 +15,7 @@ namespace JoesScanner.Views
     // Responsible for wiring up navigation and discarding unsaved
     // connection changes when the user leaves the page.
     // Also provides handlers for filter tap gestures.
-    public partial class SettingsPage : ContentPage
+    public partial class SettingsPage : ContentPage, ITabHidingAware
     {
 
         // Profile UI is managed via a simple Picker plus a Manage menu.
@@ -60,6 +60,18 @@ namespace JoesScanner.Views
         {
             base.OnAppearing();
 
+            try
+            {
+                if (LogEnabledToggle != null)
+                {
+                    LogEnabledToggle.IsToggled = AppLog.IsEnabled;
+                }
+            }
+            catch
+            {
+            }
+
+
             if (BindingContext is SettingsViewModel vm)
             {
                 // Schedule the load so navigation and layout can complete first.
@@ -74,7 +86,7 @@ namespace JoesScanner.Views
                     {
                         try
                         {
-                            System.Diagnostics.Debug.WriteLine($"SettingsPage.OnAppearing load failed: {ex}");
+                            AppLog.DebugWriteLine($"SettingsPage.OnAppearing load failed: {ex}");
                         }
                         catch
                         {
@@ -412,11 +424,42 @@ namespace JoesScanner.Views
         }
 
         // If the user leaves the page (back, tab change, etc.)
-        // discard any unsaved connection changes to avoid
-        // half applied states.
+        // collapse the expandable cards and discard any unsaved
+        // connection changes to avoid half applied states.
+
+        public void OnTabHiding()
+        {
+            try
+            {
+                CollapseAllCards();
+            }
+            catch
+            {
+            }
+
+            if (BindingContext is SettingsViewModel vm)
+            {
+                try
+                {
+                    if (vm.HasChanges)
+                        vm.DiscardConnectionChanges();
+                }
+                catch
+                {
+                }
+            }
+        }
+
         protected override void OnDisappearing()
         {
-            base.OnDisappearing();
+            try
+            {
+                CollapseAllCards();
+            }
+            catch
+            {
+                // Never block navigation.
+            }
 
             if (BindingContext is SettingsViewModel vm)
             {
@@ -425,6 +468,8 @@ namespace JoesScanner.Views
                     vm.DiscardConnectionChanges();
                 }
             }
+
+            base.OnDisappearing();
         }
 
 
@@ -505,12 +550,301 @@ namespace JoesScanner.Views
             {
                 try
                 {
-                    System.Diagnostics.Debug.WriteLine($"SettingsPage.OnValidateClicked failed: {ex}");
+                    AppLog.DebugWriteLine($"SettingsPage.OnValidateClicked failed: {ex}");
                 }
                 catch
                 {
                 }
             }
         }
+
+private void ToggleSection(VisualElement body, Label chevron, VisualElement description = null)
+{
+    if (body == null || chevron == null)
+        return;
+
+    var isExpanded = body.IsVisible;
+
+    body.IsVisible = !isExpanded;
+    chevron.Text = body.IsVisible ? "▼" : "▶";
+
+    if (description != null)
+        description.IsVisible = body.IsVisible;
+}
+
+private void CollapseSection(VisualElement body, Label chevron, VisualElement description = null)
+{
+    if (body == null || chevron == null)
+        return;
+
+    body.IsVisible = false;
+    chevron.Text = "▶";
+
+    if (description != null)
+        description.IsVisible = false;
+}
+
+private void CollapseAllCards()
+{
+    // Connection
+    CollapseSection(ConnectionFieldsGrid, ConnectionChevronLabel, ConnectionDescriptionLabel);
+
+    // Non-connection cards
+    CollapseSection(AutoplayFieldsGrid, AutoplayChevronLabel);
+    CollapseSection(FiltersBodyLayout, FiltersChevronLabel);
+    CollapseSection(AudioFiltersBodyLayout, AudioFiltersChevronLabel);
+    CollapseSection(AddressDetectionBodyLayout, AddressDetectionChevronLabel);
+    CollapseSection(BluetoothBodyLayout, BluetoothChevronLabel);
+    CollapseSection(ThemeBodyLayout, ThemeChevronLabel);
+    CollapseSection(TelemetryBodyLayout, TelemetryChevronLabel);
+    CollapseSection(LogBodyLayout, LogChevronLabel);
+
+    if (BindingContext is SettingsViewModel vm)
+    {
+        vm.SetSettingsCardOpenState("Autoplay", false);
+        vm.SetSettingsCardOpenState("Filters", false);
+        vm.SetSettingsCardOpenState("AudioFilters", false);
+        vm.SetSettingsCardOpenState("AddressDetection", false);
+        vm.SetSettingsCardOpenState("Bluetooth", false);
+        vm.SetSettingsCardOpenState("Theme", false);
+        vm.SetSettingsCardOpenState("Telemetry", false);
+        vm.SetSettingsCardOpenState("Log", false);
     }
+}
+
+private void OnConnectionHeaderTapped(object sender, EventArgs e)
+{
+    ToggleSection(ConnectionFieldsGrid, ConnectionChevronLabel, ConnectionDescriptionLabel);
+
+    if (ConnectionFieldsGrid.IsVisible && BindingContext is SettingsViewModel vm)
+    {
+        MainThread.BeginInvokeOnMainThread(async () =>
+        {
+            try
+            {
+                await vm.EnsureDirectoryServersFreshAsync(force: false);
+            }
+            catch (Exception ex)
+            {
+                try { AppLog.DebugWriteLine($"SettingsPage: connection refresh failed: {ex}"); } catch { }
+            }
+        });
+    }
+}
+
+private void OnServerPickerFocused(object sender, FocusEventArgs e)
+{
+    if (BindingContext is SettingsViewModel vm)
+    {
+        MainThread.BeginInvokeOnMainThread(async () =>
+        {
+            try
+            {
+                await vm.EnsureDirectoryServersFreshAsync(force: false);
+            }
+            catch (Exception ex)
+            {
+                try { AppLog.DebugWriteLine($"SettingsPage: picker refresh failed: {ex}"); } catch { }
+            }
+        });
+    }
+}
+
+private void OnAutoplayHeaderTapped(object sender, EventArgs e)
+{
+    ToggleSection(AutoplayFieldsGrid, AutoplayChevronLabel);
+    if (BindingContext is SettingsViewModel vm)
+    {
+        vm.SetSettingsCardOpenState("Autoplay", AutoplayFieldsGrid.IsVisible);
+    }
+}
+
+private void OnFiltersHeaderTapped(object sender, EventArgs e)
+{
+    ToggleSection(FiltersBodyLayout, FiltersChevronLabel);
+    if (BindingContext is SettingsViewModel vm)
+    {
+        vm.SetSettingsCardOpenState("Filters", FiltersBodyLayout.IsVisible);
+    }
+}
+
+
+private void OnAudioFiltersHeaderTapped(object sender, EventArgs e)
+{
+    ToggleSection(AudioFiltersBodyLayout, AudioFiltersChevronLabel);
+    if (BindingContext is SettingsViewModel vm)
+    {
+        vm.SetSettingsCardOpenState("AudioFilters", AudioFiltersBodyLayout.IsVisible);
+    }
+}
+
+private void OnAddressDetectionHeaderTapped(object sender, EventArgs e)
+{
+    ToggleSection(AddressDetectionBodyLayout, AddressDetectionChevronLabel);
+    if (BindingContext is SettingsViewModel vm)
+    {
+        vm.SetSettingsCardOpenState("AddressDetection", AddressDetectionBodyLayout.IsVisible);
+    }
+}
+
+private void OnBluetoothHeaderTapped(object sender, EventArgs e)
+{
+    ToggleSection(BluetoothBodyLayout, BluetoothChevronLabel);
+    if (BindingContext is SettingsViewModel vm)
+    {
+        vm.SetSettingsCardOpenState("Bluetooth", BluetoothBodyLayout.IsVisible);
+    }
+}
+
+private void OnThemeHeaderTapped(object sender, EventArgs e)
+{
+    ToggleSection(ThemeBodyLayout, ThemeChevronLabel);
+    if (BindingContext is SettingsViewModel vm)
+    {
+        vm.SetSettingsCardOpenState("Theme", ThemeBodyLayout.IsVisible);
+    }
+}
+
+private void OnTelemetryHeaderTapped(object sender, EventArgs e)
+{
+    ToggleSection(TelemetryBodyLayout, TelemetryChevronLabel);
+    if (BindingContext is SettingsViewModel vm)
+    {
+        vm.SetSettingsCardOpenState("Telemetry", TelemetryBodyLayout.IsVisible);
+    }
+}
+
+private void OnLogHeaderTapped(object sender, EventArgs e)
+{
+    ToggleSection(LogBodyLayout, LogChevronLabel);
+
+    if (BindingContext is SettingsViewModel vm)
+    {
+        vm.SetSettingsCardOpenState("Log", LogBodyLayout.IsVisible);
+    }
+
+    if (LogBodyLayout.IsVisible)
+    {
+        RefreshLogText();
+    }
+}
+
+private void OnRefreshLogClicked(object sender, EventArgs e)
+{
+    RefreshLogText();
+}
+
+private async void OnClearLogClicked(object sender, EventArgs e)
+{
+    try
+    {
+        AppLog.ClearAll();
+        RefreshLogText();
+        await UiDialogs.AlertAsync("Cleared", "Log cleared.", "Close");
+    }
+    catch (Exception ex)
+    {
+        await UiDialogs.AlertAsync("Error", $"Could not clear the log:\n{ex.Message}", "Close");
+    }
+}
+
+private void OnLogEnabledToggled(object sender, ToggledEventArgs e)
+{
+    try
+    {
+        AppLog.SetEnabled(e.Value);
+
+        if (LogBodyLayout != null && LogBodyLayout.IsVisible)
+        {
+            RefreshLogText();
+        }
+    }
+    catch
+    {
+    }
+}
+
+private async void OnCopyLogClicked(object sender, EventArgs e)
+{
+    try
+    {
+        var text = LogEditor?.Text ?? string.Empty;
+        await Clipboard.Default.SetTextAsync(text);
+        await UiDialogs.AlertAsync("Copied", "Log copied to clipboard.", "Close");
+    }
+    catch (Exception ex)
+    {
+        await UiDialogs.AlertAsync("Error", $"Could not copy the log:\\n{ex.Message}", "Close");
+    }
+}
+
+private async void OnDownloadLogClicked(object sender, EventArgs e)
+{
+    try
+    {
+        var snapshotTime = DateTime.Now;
+
+        var lines = AppLog.GetSnapshot(500);
+        var bodyText = lines.Length == 0
+            ? "No log entries yet."
+            : string.Join(Environment.NewLine, lines);
+
+        // Pull basic connection info for the header if available.
+        var serverUrl = string.Empty;
+        var username = string.Empty;
+
+        if (BindingContext is SettingsViewModel vm)
+        {
+            serverUrl = vm.ServerUrl ?? string.Empty;
+            username = vm.BasicAuthUsername ?? string.Empty;
+        }
+
+        var fileContent = BuildLogFileContent(snapshotTime, bodyText, serverUrl, username);
+
+        var stamp = snapshotTime.ToString("yyyy-MM-dd_HH-mm");
+        var fileName = $"{stamp}_JoesScannerLog.txt";
+
+        var result = await SaveTextFileWithUserPromptAsync(fileName, fileContent);
+        if (!result.Ok)
+            return;
+
+        await UiDialogs.AlertAsync("Log saved", result.Message, "Close");
+    }
+    catch (Exception ex)
+    {
+        await UiDialogs.AlertAsync(
+            "Error saving log",
+            $"Could not save the log file:\\n{ex.Message}",
+            "Close");
+    }
+}
+
+private void RefreshLogText()
+{
+    try
+    {
+        if (!AppLog.IsEnabled)
+        {
+            LogEditor.Text = "Logging is disabled. Turn on Enable logging to capture entries."; 
+            return;
+        }
+
+        var lines = AppLog.GetSnapshot(500);
+        LogEditor.Text = lines.Length == 0
+            ? "No log entries yet."
+            : string.Join(Environment.NewLine, lines);
+    }
+    catch (Exception ex)
+    {
+        try
+        {
+            LogEditor.Text = $"Could not load log:\\n{ex.Message}";
+        }
+        catch
+        {
+        }
+    }
+}
+
+}
 }

@@ -9,6 +9,13 @@ namespace JoesScanner.Services
         private static readonly TimeSpan MaxAge = TimeSpan.FromDays(7);
         private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(60);
 
+        // Default servers are provided by the app and always have telemetry on.
+        // This list can be extended as additional built-in servers are added.
+        private static readonly string[] ProvidedDefaultServerUrls =
+        {
+            "https://app.joesscanner.com"
+        };
+
         private readonly ISettingsService _settings;
         private readonly HttpClient _httpClient;
 
@@ -74,8 +81,41 @@ namespace JoesScanner.Services
             return string.Equals(uri.Host, "app.joesscanner.com", StringComparison.OrdinalIgnoreCase);
         }
 
+        private static bool IsProvidedDefaultServerUrl(string? streamServerUrl)
+        {
+            var url = (streamServerUrl ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(url))
+                return false;
+
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+                return false;
+
+            foreach (var candidate in ProvidedDefaultServerUrls)
+            {
+                if (!Uri.TryCreate(candidate, UriKind.Absolute, out var candidateUri))
+                    continue;
+
+                if (string.Equals(uri.Host, candidateUri.Host, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private bool ShouldSendTelemetry()
+        {
+            var selectedServer = _settings.ServerUrl;
+            if (IsProvidedDefaultServerUrl(selectedServer))
+                return true;
+
+            return _settings.TelemetryEnabled;
+        }
+
         public void TrackAppStarted()
         {
+            if (!ShouldSendTelemetry())
+                return;
+
             // Make the session token change synchronous so no other telemetry path
             // can send a ping with an old token during startup.
             if (Interlocked.Exchange(ref _appStartInitialized, 1) == 0)
@@ -107,6 +147,9 @@ namespace JoesScanner.Services
             var token = _settings.AuthSessionToken;
             StopHeartbeat();
 
+            if (!ShouldSendTelemetry())
+                return;
+
             // Session end is inferred by absence of heartbeat pings.
             _ = Task.Run(async () =>
             {
@@ -124,6 +167,9 @@ namespace JoesScanner.Services
 
         public void TrackConnectionAttempt(string streamServerUrl, bool isHostedServer)
         {
+            if (!ShouldSendTelemetry())
+                return;
+
             EnsureAppStartSessionInitialized();
 
             UpdateLastStreamServer(streamServerUrl, isHostedServer);
@@ -154,6 +200,9 @@ namespace JoesScanner.Services
 
         public void TrackConnectionStatusChanged(string status, string? detailMessage, string streamServerUrl)
         {
+            if (!ShouldSendTelemetry())
+                return;
+
             EnsureAppStartSessionInitialized();
 
             UpdateLastStreamServer(streamServerUrl, IsHostedStreamServerUrl(streamServerUrl));
@@ -190,6 +239,12 @@ namespace JoesScanner.Services
 
         public void StartMonitoringHeartbeat(string streamServerUrl)
         {
+            if (!ShouldSendTelemetry())
+            {
+                StopHeartbeat();
+                return;
+            }
+
             EnsureAppStartSessionInitialized();
 
             UpdateLastStreamServer(streamServerUrl, IsHostedStreamServerUrl(streamServerUrl));
@@ -240,6 +295,9 @@ namespace JoesScanner.Services
 
             StopHeartbeat();
 
+            if (!ShouldSendTelemetry())
+                return;
+
             _ = Task.Run(async () =>
             {
                 try
@@ -261,6 +319,9 @@ namespace JoesScanner.Services
 
         public async Task ResetSessionAsync(string reason, CancellationToken cancellationToken)
         {
+            if (!ShouldSendTelemetry())
+                return;
+
             EnsureAppStartSessionInitialized();
 
             var newToken = Guid.NewGuid().ToString();
@@ -296,6 +357,9 @@ namespace JoesScanner.Services
             AppStateStore.SetString("telemetry_last_session_token", newSessionToken);
             AppStateStore.SetString("telemetry_session_start_utc", DateTime.UtcNow.ToString("o"));
 
+            if (!ShouldSendTelemetry())
+                return;
+
             try
             {
                 await SendPingAsync(newSessionToken, "session_start_" + (reason ?? string.Empty), cancellationToken).ConfigureAwait(false);
@@ -308,6 +372,12 @@ namespace JoesScanner.Services
 
         public async Task TryFlushQueueAsync(CancellationToken cancellationToken)
         {
+            if (!ShouldSendTelemetry())
+            {
+                await ClearQueueAsync(cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
             await _flushLock.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
@@ -317,8 +387,6 @@ namespace JoesScanner.Services
                 if (queue.Count == 0)
                     return;
 
-                                if (queue.Count == 0)
-                    return;
 
                 var sentIds = new List<long>();
 
@@ -576,6 +644,9 @@ namespace JoesScanner.Services
                 private readonly string _dbPath;
 private async Task EnqueueEventAsync(TelemetryEvent ev, CancellationToken cancellationToken)
         {
+            if (!ShouldSendTelemetry())
+                return;
+
             try
             {
                 using var conn = new SqliteConnection($"Data Source={_dbPath}");
@@ -601,6 +672,23 @@ VALUES ($created, $type, $json);";
                 cmd.Parameters.AddWithValue("$type", ev.EventType ?? string.Empty);
                 cmd.Parameters.AddWithValue("$json", json);
 
+                await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+            }
+        }
+
+        private async Task ClearQueueAsync(CancellationToken cancellationToken)
+        {
+            try
+            {
+                using var conn = new SqliteConnection($"Data Source={_dbPath}");
+                await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+                await DbBootstrapper.EnsureInitializedAsync(conn, cancellationToken).ConfigureAwait(false);
+
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = $"DELETE FROM {TableTelemetryQueue};";
                 await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
             }
             catch
