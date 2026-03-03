@@ -24,10 +24,10 @@
     <ApplicationId>app.joesscanner.com</ApplicationId>
 
     <!-- Display version is semantic -->
-    <ApplicationDisplayVersion>1.5.4</ApplicationDisplayVersion>
+    <ApplicationDisplayVersion>1.5.5</ApplicationDisplayVersion>
 
     <!-- ApplicationVersion must be an integer and should only ever go up -->
-    <ApplicationVersion>154</ApplicationVersion>
+    <ApplicationVersion>155</ApplicationVersion>
 
     <DefaultLanguage>en-us</DefaultLanguage>
 
@@ -53,7 +53,11 @@
     <HoursBetweenUpdateChecks>0</HoursBetweenUpdateChecks>
   </PropertyGroup>
 
-  <!--
+  
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net10.0-windows10.0.19041.0'">
+    <StartupObject>JoesScanner.WinUI.EntryPoint</StartupObject>
+  </PropertyGroup>
+<!--
     iOS configuration
     - Simulator builds should not use device signing settings.
     - Default simulator RID on Apple Silicon: iossimulator-arm64

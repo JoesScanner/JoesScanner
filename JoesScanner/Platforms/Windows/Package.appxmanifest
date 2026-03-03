@@ -9,7 +9,7 @@
 	<Identity
 	  Name="JoesScanner.JoesScanner"
 	  Publisher="CN=B69465BC-2064-4894-A665-14C31889B833"
-	  Version="1.5.4.0" />
+	  Version="1.5.5.0" />
 
 	<Properties>
 		<DisplayName>Joe&apos;s Scanner</DisplayName>
@@ -32,7 +32,7 @@
 	<Applications>
 		<Application
 		  Id="App"
-		  Executable="$targetnametoken$.exe"
+		  Executable="JoesScanner.exe"
 		  EntryPoint="$targetentrypoint$">
 
 			<uap:VisualElements
@@ -63,7 +63,7 @@
             <Extensions>
               <uap5:Extension
                 Category="windows.startupTask"
-                Executable="$targetnametoken$.exe"
+                Executable="JoesScanner.exe"
                 EntryPoint="Windows.FullTrustApplication">
                 <uap5:StartupTask
                   TaskId="JoesScannerStartupTask"
