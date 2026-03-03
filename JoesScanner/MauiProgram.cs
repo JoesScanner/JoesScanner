@@ -35,6 +35,7 @@ public static class MauiProgram
         builder.Services.AddSingleton<ISystemMediaService, SystemMediaService>();
         builder.Services.AddSingleton<ISubscriptionService, SubscriptionService>();
         builder.Services.AddSingleton<ITelemetryService, TelemetryService>();
+        builder.Services.AddSingleton<IAuthLookupsSyncService, AuthLookupsSyncService>();
         builder.Services.AddSingleton<IAddressDetectionService, AddressDetectionService>();
         builder.Services.AddSingleton<IWhat3WordsService, What3WordsService>();
 

@@ -992,7 +992,12 @@ public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
             //
             // Run the store call on a background thread, then marshal collection + selection updates back
             // to the UI thread.
-            var profiles = await Task.Run(async () => await _filterProfileStore.GetProfilesAsync(CancellationToken.None));
+            var serverKey = NormalizeServerKey(_settingsService.ServerUrl);
+
+            // Ensure the in-memory rules list is scoped to the active server when History loads.
+            FilterService.Instance.SetServerUrl(_settingsService.ServerUrl);
+
+            var profiles = await Task.Run(async () => await _filterProfileStore.GetProfilesForServerAsync(serverKey, CancellationToken.None));
 
             await MainThread.InvokeOnMainThreadAsync(() =>
             {
@@ -1041,6 +1046,7 @@ public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
             {
                 Id = profileId ?? string.Empty,
                 Name = name,
+                ServerKey = NormalizeServerKey(_settingsService.ServerUrl),
                 Filters = new FilterProfileFilters
                 {
                     ReceiverValue = SelectedReceiver?.Value,
@@ -3334,6 +3340,35 @@ private void OnAddressDetectionSettingsChanged(object? sender, EventArgs e)
 			}
 			catch
 			{
+			}
+		}
+
+		private static string NormalizeServerKey(string? serverUrl)
+		{
+			var raw = (serverUrl ?? string.Empty).Trim();
+			if (string.IsNullOrWhiteSpace(raw))
+				return string.Empty;
+
+			raw = raw.TrimEnd('/');
+
+			try
+			{
+				if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri))
+					return raw;
+
+				var builder = new UriBuilder(uri)
+				{
+					Path = string.Empty,
+					Query = string.Empty,
+					Fragment = string.Empty,
+					Port = uri.IsDefaultPort ? -1 : uri.Port
+				};
+
+				return builder.Uri.ToString().TrimEnd('/');
+			}
+			catch
+			{
+				return raw;
 			}
 		}
 

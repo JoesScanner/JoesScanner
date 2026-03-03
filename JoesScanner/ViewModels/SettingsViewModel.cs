@@ -24,6 +24,7 @@ namespace JoesScanner.ViewModels
         private readonly ISettingsService _settings;
         private readonly MainViewModel _mainViewModel;
         private readonly ITelemetryService _telemetryService;
+        private readonly IHistoryLookupsCacheService _historyLookupsCacheService;
         private readonly HttpClient _httpClient;
         private readonly FilterService _filterService = FilterService.Instance;
 
@@ -484,6 +485,7 @@ private ServerDirectoryEntry? _selectedDirectoryServer;
         public ICommand ToggleMuteFilterCommand { get; }
         public ICommand ToggleDisableFilterCommand { get; }
         public ICommand ClearFilterCommand { get; }
+        public ICommand SyncTalkgroupFiltersCommand { get; }
         public ICommand SaveCommand { get; }
         public ICommand ResetServerCommand { get; }
         public ICommand ValidateServerCommand { get; }
@@ -523,13 +525,37 @@ private ServerDirectoryEntry? _selectedDirectoryServer;
             return false;
         }
 
-        public SettingsViewModel(ISettingsService settingsService, MainViewModel mainViewModel, ITelemetryService telemetryService, IFilterProfileStore filterProfileStore)
+        private bool _isSyncingTalkgroupFilters;
+        public bool IsSyncingTalkgroupFilters
+        {
+            get => _isSyncingTalkgroupFilters;
+            private set
+            {
+                if (_isSyncingTalkgroupFilters == value)
+                    return;
+
+                _isSyncingTalkgroupFilters = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(EffectiveTelemetryEnabled));
+                OnPropertyChanged(nameof(CanSyncTalkgroupFilters));
+            }
+        }
+
+        public bool CanSyncTalkgroupFilters => EffectiveTelemetryEnabled && !IsSyncingTalkgroupFilters;
+
+        public SettingsViewModel(
+            ISettingsService settingsService,
+            MainViewModel mainViewModel,
+            ITelemetryService telemetryService,
+            IFilterProfileStore filterProfileStore,
+            IHistoryLookupsCacheService historyLookupsCacheService)
         {
             _settings = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
             _mainViewModel = mainViewModel ?? throw new ArgumentNullException(nameof(mainViewModel));
             _telemetryService = telemetryService ?? throw new ArgumentNullException(nameof(telemetryService));
 
             _filterProfileStore = filterProfileStore ?? throw new ArgumentNullException(nameof(filterProfileStore));
+            _historyLookupsCacheService = historyLookupsCacheService ?? throw new ArgumentNullException(nameof(historyLookupsCacheService));
 
             // IMPORTANT (Apple + HTTP): iOS/macOS native networking enforces App Transport Security (ATS).
             // We support user-configured HTTP custom servers, so for validation requests we force the
@@ -580,6 +606,60 @@ private ServerDirectoryEntry? _selectedDirectoryServer;
             ToggleMuteFilterCommand = new Command<FilterRule>(OnToggleMuteFilter);
             ToggleDisableFilterCommand = new Command<FilterRule>(OnToggleDisableFilter);
             ClearFilterCommand = new Command<FilterRule>(OnClearFilter);
+
+            SyncTalkgroupFiltersCommand = new Command(async () => await SyncTalkgroupFiltersWithServerAsync());
+        }
+
+        private async Task SyncTalkgroupFiltersWithServerAsync()
+        {
+            if (IsSyncingTalkgroupFilters)
+                return;
+            // User requested: when telemetry is disabled for custom servers, sync is disabled and does nothing.
+            // Default servers always behave as telemetry enabled.
+            if (!EffectiveTelemetryEnabled)
+            {
+                AppLog.Add(() => "Settings: manual lookup sync skipped (telemetry disabled for this server).");
+                return;
+            }
+
+try
+            {
+                IsSyncingTalkgroupFilters = true;
+
+                // Ensure the in-memory rules list remains scoped to the active server.
+                _filterService.SetServerUrl(_settings.ServerUrl);
+
+                AppLog.Add(() => $"Settings: manual lookup sync requested. server='{_settings.ServerUrl}'");
+
+                // Force a lookup refresh from the stream server. This also seeds from the Auth API when local
+                // cache is missing, and it reports back to the Auth API (telemetry-gated).
+                await _historyLookupsCacheService.PreloadAsync(forceReload: true, reason: "manual_filters_sync", CancellationToken.None);
+
+                // Quick user feedback so it is obvious that something happened.
+                var cached = await _historyLookupsCacheService.GetCachedAsync(CancellationToken.None);
+                var r = cached?.Receivers?.Count ?? 0;
+                var s = cached?.Sites?.Count ?? 0;
+                var t = cached?.Talkgroups?.Count ?? 0;
+
+                await MainThread.InvokeOnMainThreadAsync(async () =>
+                {
+                    if (Application.Current?.MainPage == null)
+                        return;
+
+                    await Application.Current.MainPage.DisplayAlert(
+                        "Sync complete",
+                        $"Receivers: {r}\nSites: {s}\nTalkgroups: {t}",
+                        "OK");
+                });
+            }
+            catch (Exception ex)
+            {
+                AppLog.Add(() => $"Settings: manual lookup sync failed. ex={ex.GetType().Name}: {ex.Message}");
+            }
+            finally
+            {
+                IsSyncingTalkgroupFilters = false;
+            }
         }
 
 
@@ -619,7 +699,12 @@ private ServerDirectoryEntry? _selectedDirectoryServer;
             // even though it exposes an async signature (Task.FromResult).
             //
             // Run the store call on a background thread, then marshal collection updates back to the UI thread.
-            var profiles = await Task.Run(async () => await _filterProfileStore.GetProfilesAsync(CancellationToken.None));
+	            var serverKey = NormalizeServerKey(_settings.ServerUrl);
+
+            // Ensure the in-memory rules list is scoped to the active server when Settings opens.
+	            _filterService.SetServerUrl(_settings.ServerUrl);
+
+            var profiles = await Task.Run(async () => await _filterProfileStore.GetProfilesForServerAsync(serverKey, CancellationToken.None));
 
             await MainThread.InvokeOnMainThreadAsync(() =>
             {
@@ -669,6 +754,7 @@ private ServerDirectoryEntry? _selectedDirectoryServer;
             {
                 Id = profileId ?? string.Empty,
                 Name = name,
+	                ServerKey = NormalizeServerKey(_settings.ServerUrl),
                 Filters = existingFilters,
                 Rules = records
             };
@@ -724,6 +810,35 @@ private ServerDirectoryEntry? _selectedDirectoryServer;
 
             var records = profile.Rules ?? new List<FilterRuleStateRecord>();
             _filterService.ApplyStateRecords(records, resetOthers: true);
+        }
+
+        private static string NormalizeServerKey(string? serverUrl)
+        {
+            var raw = (serverUrl ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(raw))
+                return string.Empty;
+
+            raw = raw.TrimEnd('/');
+
+            try
+            {
+                if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri))
+                    return raw;
+
+                var builder = new UriBuilder(uri)
+                {
+                    Path = string.Empty,
+                    Query = string.Empty,
+                    Fragment = string.Empty,
+                    Port = uri.IsDefaultPort ? -1 : uri.Port
+                };
+
+                return builder.Uri.ToString().TrimEnd('/');
+            }
+            catch
+            {
+                return raw;
+            }
         }
 
         // True when any setting on this page differs from what was last saved.
@@ -921,9 +1036,8 @@ public bool IsDirectoryLoading
                 }
 
                 OnPropertyChanged(nameof(ShowTelemetryCard));
-
-
-
+                OnPropertyChanged(nameof(EffectiveTelemetryEnabled));
+                OnPropertyChanged(nameof(CanSyncTalkgroupFilters));
                 // Changing the server URL must clear user/pass in the UI immediately.
                 // If this URL was used before, pull cached credentials for convenience.
                 var normalized = (newValue ?? string.Empty).Trim();
@@ -1322,6 +1436,8 @@ public bool WindowsStartWithWindows
 
         public bool ShowTelemetryCard => !IsProvidedDefaultServerUrl(_serverUrl);
 
+        public bool EffectiveTelemetryEnabled => IsProvidedDefaultServerUrl(_serverUrl) || _telemetryEnabled;
+
         public bool TelemetryEnabled
         {
             get => _telemetryEnabled;
@@ -1332,6 +1448,8 @@ public bool WindowsStartWithWindows
 
                 _telemetryEnabled = value;
                 OnPropertyChanged();
+                OnPropertyChanged(nameof(EffectiveTelemetryEnabled));
+                OnPropertyChanged(nameof(CanSyncTalkgroupFilters));
                 UpdateHasChanges();
                 QueueAutosaveNonConnection("Telemetry");
             }
@@ -1656,7 +1774,9 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             OnPropertyChanged(nameof(ServerUrl));
             OnPropertyChanged(nameof(UseDefaultConnection));
             OnPropertyChanged(nameof(ShowTelemetryCard));
-            OnPropertyChanged(nameof(TelemetryEnabled));
+                OnPropertyChanged(nameof(EffectiveTelemetryEnabled));
+                OnPropertyChanged(nameof(CanSyncTalkgroupFilters));
+                OnPropertyChanged(nameof(TelemetryEnabled));
             OnPropertyChanged(nameof(BasicAuthUsername));
             OnPropertyChanged(nameof(BasicAuthPassword));
             OnPropertyChanged(nameof(AutoPlay));

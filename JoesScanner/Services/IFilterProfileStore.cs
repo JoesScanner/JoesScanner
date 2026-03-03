@@ -5,6 +5,11 @@ namespace JoesScanner.Services
     public interface IFilterProfileStore
     {
         Task<IReadOnlyList<FilterProfile>> GetProfilesAsync(CancellationToken cancellationToken = default);
+
+        // Returns profiles for the requested server key. Profiles with no server key will be treated
+        // as belonging to this server and will be migrated to this server key on read.
+        Task<IReadOnlyList<FilterProfile>> GetProfilesForServerAsync(string serverKey, CancellationToken cancellationToken = default);
+
         Task<FilterProfile?> GetProfileAsync(string profileId, CancellationToken cancellationToken = default);
 
         Task SaveOrUpdateAsync(FilterProfile profile, CancellationToken cancellationToken = default);

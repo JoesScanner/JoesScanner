@@ -15,6 +15,8 @@ namespace JoesScanner.Services
         // DB key used for the new DB-backed filter persistence.
         private const string FiltersDbKey = "filter_rules_v1";
 
+        private string _currentServerKey = string.Empty;
+
         public event EventHandler? RulesChanged;
 
         private readonly ObservableCollection<FilterRule> _rules = [];
@@ -111,8 +113,61 @@ namespace JoesScanner.Services
 
         private FilterService()
         {
-            LoadFromStorage();
+            // Default to a blank context. The main view model will call SetServerUrl
+            // to switch context once the configured server is known.
+            LoadFromStorage(GetStorageKey());
             PruneInvalidRules(saveIfChanged: true);
+        }
+
+        public void SetServerUrl(string serverUrl)
+        {
+            var key = NormalizeServerKey(serverUrl);
+
+            if (string.Equals(_currentServerKey, key, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            _currentServerKey = key;
+
+            LoadFromStorage(GetStorageKey());
+            PruneInvalidRules(saveIfChanged: false);
+            OnRulesChanged();
+        }
+
+        private string GetStorageKey()
+        {
+            var k = (_currentServerKey ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(k))
+                k = "none";
+            return $"{FiltersDbKey}::{k}";
+        }
+
+        private static string NormalizeServerKey(string? serverUrl)
+        {
+            var raw = (serverUrl ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(raw))
+                return string.Empty;
+
+            raw = raw.TrimEnd('/');
+
+            try
+            {
+                if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri))
+                    return raw;
+
+                var builder = new UriBuilder(uri)
+                {
+                    Path = string.Empty,
+                    Query = string.Empty,
+                    Fragment = string.Empty,
+                    Port = uri.IsDefaultPort ? -1 : uri.Port
+                };
+
+                return builder.Uri.ToString().TrimEnd('/');
+            }
+            catch
+            {
+                return raw;
+            }
         }
         private static void InvokeOnMainThreadSync(Action action)
         {
@@ -700,14 +755,14 @@ namespace JoesScanner.Services
             public DateTime LastSeenUtc { get; set; }
         }
 
-        private void LoadFromStorage()
+        private void LoadFromStorage(string storageKey)
         {
             try
             {
                 string json = string.Empty;
 
                 // 1) DB is the source of truth.
-                json = AppStateStore.GetString(FiltersDbKey, string.Empty);
+                json = AppStateStore.GetString(storageKey, string.Empty);
 
                 if (string.IsNullOrWhiteSpace(json))
                     return;
@@ -801,7 +856,7 @@ namespace JoesScanner.Services
 
                 var json = JsonSerializer.Serialize(dtoList);
 
-                AppStateStore.SetString(FiltersDbKey, json);
+                AppStateStore.SetString(GetStorageKey(), json);
             }
             catch
             {

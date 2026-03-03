@@ -38,14 +38,56 @@ namespace JoesScanner.Services
 CREATE TABLE IF NOT EXISTS {TableName} (
   profile_id   TEXT PRIMARY KEY,
   name         TEXT NOT NULL,
+  server_key   TEXT NOT NULL DEFAULT '',
   created_utc  TEXT NOT NULL,
   updated_utc  TEXT NOT NULL,
   filters_json TEXT NOT NULL,
   rules_json   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_filter_profiles_name ON {TableName}(name);
+CREATE INDEX IF NOT EXISTS idx_filter_profiles_server_key ON {TableName}(server_key);
 ";
             cmd.ExecuteNonQuery();
+
+            // Back-compat migration: older installs may not have the server_key column.
+            EnsureServerKeyColumn(conn);
+        }
+
+        private static void EnsureServerKeyColumn(SqliteConnection conn)
+        {
+            try
+            {
+                using var check = conn.CreateCommand();
+                check.CommandText = $"PRAGMA table_info({TableName});";
+
+                var has = false;
+                using (var reader = check.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        var col = reader.GetString(1);
+                        if (string.Equals(col, "server_key", StringComparison.OrdinalIgnoreCase))
+                        {
+                            has = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (has)
+                    return;
+
+                using var alter = conn.CreateCommand();
+                alter.CommandText = $"ALTER TABLE {TableName} ADD COLUMN server_key TEXT NOT NULL DEFAULT '';";
+                alter.ExecuteNonQuery();
+
+                using var idx = conn.CreateCommand();
+                idx.CommandText = $"CREATE INDEX IF NOT EXISTS idx_filter_profiles_server_key ON {TableName}(server_key);";
+                idx.ExecuteNonQuery();
+            }
+            catch
+            {
+            }
         }
 
         public async Task<IReadOnlyList<FilterProfile>> GetProfilesAsync(CancellationToken cancellationToken = default)
@@ -56,7 +98,7 @@ CREATE INDEX IF NOT EXISTS idx_filter_profiles_name ON {TableName}(name);
                 await using var conn = OpenConnection();
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandText = $@"
-SELECT profile_id, name, created_utc, updated_utc, filters_json, rules_json
+SELECT profile_id, name, server_key, created_utc, updated_utc, filters_json, rules_json
 FROM {TableName}
 ORDER BY name COLLATE NOCASE;";
 
@@ -67,6 +109,66 @@ ORDER BY name COLLATE NOCASE;";
                     var p = ReadProfileRow(reader);
                     if (p != null)
                         list.Add(p);
+                }
+
+                return list;
+            }
+            finally
+            {
+                _gate.Release();
+            }
+        }
+
+        public async Task<IReadOnlyList<FilterProfile>> GetProfilesForServerAsync(string serverKey, CancellationToken cancellationToken = default)
+        {
+            var key = (serverKey ?? string.Empty).Trim();
+
+            await _gate.WaitAsync(cancellationToken);
+            try
+            {
+                await using var conn = OpenConnection();
+                await using var cmd = conn.CreateCommand();
+                cmd.CommandText = $@"
+SELECT profile_id, name, server_key, created_utc, updated_utc, filters_json, rules_json
+FROM {TableName}
+WHERE server_key = $k OR server_key = ''
+ORDER BY name COLLATE NOCASE;";
+                cmd.Parameters.AddWithValue("$k", key);
+
+                var list = new List<FilterProfile>();
+                var needsMigration = new List<string>();
+
+                await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    var p = ReadProfileRow(reader);
+                    if (p == null)
+                        continue;
+
+                    // Auto-attach legacy profiles (no server key) to the current server.
+                    if (string.IsNullOrWhiteSpace(p.ServerKey) && !string.IsNullOrWhiteSpace(key))
+                    {
+                        needsMigration.Add(p.Id);
+                        p = new FilterProfile
+                        {
+                            Id = p.Id,
+                            Name = p.Name,
+                            ServerKey = key,
+                            Filters = p.Filters ?? new FilterProfileFilters(),
+                            Rules = p.Rules ?? new List<FilterRuleStateRecord>(),
+                            CreatedUtc = p.CreatedUtc,
+                            UpdatedUtc = p.UpdatedUtc
+                        };
+                    }
+
+                    // Only return the server-scoped list.
+                    if (string.IsNullOrWhiteSpace(key) || string.Equals((p.ServerKey ?? string.Empty).Trim(), key, StringComparison.OrdinalIgnoreCase))
+                        list.Add(p);
+                }
+
+                if (needsMigration.Count > 0 && !string.IsNullOrWhiteSpace(key))
+                {
+                    await MigrateServerKeyAsync(conn, needsMigration, key, cancellationToken);
                 }
 
                 return list;
@@ -88,7 +190,7 @@ ORDER BY name COLLATE NOCASE;";
                 await using var conn = OpenConnection();
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandText = $@"
-SELECT profile_id, name, created_utc, updated_utc, filters_json, rules_json
+SELECT profile_id, name, server_key, created_utc, updated_utc, filters_json, rules_json
 FROM {TableName}
 WHERE profile_id = $id
 LIMIT 1;";
@@ -124,6 +226,8 @@ LIMIT 1;";
 
                 var now = DateTime.UtcNow;
 
+                var serverKey = (profile.ServerKey ?? string.Empty).Trim();
+
                 await using var conn = OpenConnection();
 
                 // Preserve created_utc if existing.
@@ -137,15 +241,17 @@ LIMIT 1;";
 
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandText = $@"
-INSERT INTO {TableName} (profile_id, name, created_utc, updated_utc, filters_json, rules_json)
-VALUES ($id, $name, $c, $u, $fj, $rj)
+INSERT INTO {TableName} (profile_id, name, server_key, created_utc, updated_utc, filters_json, rules_json)
+VALUES ($id, $name, $sk, $c, $u, $fj, $rj)
 ON CONFLICT(profile_id) DO UPDATE SET
   name = excluded.name,
+  server_key = excluded.server_key,
   updated_utc = excluded.updated_utc,
   filters_json = excluded.filters_json,
   rules_json = excluded.rules_json;";
                 cmd.Parameters.AddWithValue("$id", id);
                 cmd.Parameters.AddWithValue("$name", name);
+                cmd.Parameters.AddWithValue("$sk", serverKey);
                 cmd.Parameters.AddWithValue("$c", createdUtc.ToString("o", CultureInfo.InvariantCulture));
                 cmd.Parameters.AddWithValue("$u", now.ToString("o", CultureInfo.InvariantCulture));
                 cmd.Parameters.AddWithValue("$fj", filtersJson);
@@ -222,6 +328,7 @@ WHERE profile_id = $id;";
                     {
                         Id = p.Id,
                         Name = p.Name,
+                        ServerKey = p.ServerKey,
                         Filters = p.Filters ?? new FilterProfileFilters(),
                         Rules = p.Rules ?? new List<FilterRuleStateRecord>(),
                         CreatedUtc = p.CreatedUtc,
@@ -266,21 +373,25 @@ WHERE profile_id = $id;";
                     var now = DateTime.UtcNow;
                     var created = p.CreatedUtc == default ? now : p.CreatedUtc;
 
+                    var serverKey = (p.ServerKey ?? string.Empty).Trim();
+
                     var filtersJson = JsonSerializer.Serialize(p.Filters ?? new FilterProfileFilters(), JsonOptions);
                     var rulesJson = JsonSerializer.Serialize(p.Rules ?? new List<FilterRuleStateRecord>(), JsonOptions);
 
                     await using var cmd = conn.CreateCommand();
                     cmd.CommandText = $@"
-INSERT INTO {TableName} (profile_id, name, created_utc, updated_utc, filters_json, rules_json)
-VALUES ($id, $name, $c, $u, $fj, $rj)
+INSERT INTO {TableName} (profile_id, name, server_key, created_utc, updated_utc, filters_json, rules_json)
+VALUES ($id, $name, $sk, $c, $u, $fj, $rj)
 ON CONFLICT(profile_id) DO UPDATE SET
   name = excluded.name,
+  server_key = excluded.server_key,
   created_utc = excluded.created_utc,
   updated_utc = excluded.updated_utc,
   filters_json = excluded.filters_json,
   rules_json = excluded.rules_json;";
                     cmd.Parameters.AddWithValue("$id", id);
                     cmd.Parameters.AddWithValue("$name", name);
+                    cmd.Parameters.AddWithValue("$sk", serverKey);
                     cmd.Parameters.AddWithValue("$c", created.ToString("o", CultureInfo.InvariantCulture));
                     cmd.Parameters.AddWithValue("$u", now.ToString("o", CultureInfo.InvariantCulture));
                     cmd.Parameters.AddWithValue("$fj", filtersJson);
@@ -291,6 +402,39 @@ ON CONFLICT(profile_id) DO UPDATE SET
             finally
             {
                 _gate.Release();
+            }
+        }
+
+        private static async Task MigrateServerKeyAsync(SqliteConnection conn, List<string> profileIds, string serverKey, CancellationToken ct)
+        {
+            try
+            {
+	                await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
+                await using var cmd = conn.CreateCommand();
+                cmd.Transaction = tx;
+                cmd.CommandText = $"UPDATE {TableName} SET server_key = $sk WHERE profile_id = $id AND server_key = '';";
+                var pSk = cmd.CreateParameter();
+                pSk.ParameterName = "$sk";
+                pSk.Value = serverKey;
+                cmd.Parameters.Add(pSk);
+
+                var pId = cmd.CreateParameter();
+                pId.ParameterName = "$id";
+                cmd.Parameters.Add(pId);
+
+                foreach (var id in profileIds)
+                {
+                    if (string.IsNullOrWhiteSpace(id))
+                        continue;
+
+                    pId.Value = id;
+                    await cmd.ExecuteNonQueryAsync(ct);
+                }
+
+                await tx.CommitAsync(ct);
+            }
+            catch
+            {
             }
         }
 
@@ -316,10 +460,11 @@ ON CONFLICT(profile_id) DO UPDATE SET
             {
                 var id = reader.GetString(0);
                 var name = reader.GetString(1);
-                var createdRaw = reader.GetString(2);
-                var updatedRaw = reader.GetString(3);
-                var filtersJson = reader.GetString(4);
-                var rulesJson = reader.GetString(5);
+                var serverKey = reader.GetString(2);
+                var createdRaw = reader.GetString(3);
+                var updatedRaw = reader.GetString(4);
+                var filtersJson = reader.GetString(5);
+                var rulesJson = reader.GetString(6);
 
                 var created = DateTime.TryParse(createdRaw, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var c) ? c : DateTime.UtcNow;
                 var updated = DateTime.TryParse(updatedRaw, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var u) ? u : created;
@@ -336,6 +481,7 @@ ON CONFLICT(profile_id) DO UPDATE SET
                 {
                     Id = id,
                     Name = name,
+                    ServerKey = serverKey,
                     Filters = filters,
                     Rules = rules,
                     CreatedUtc = created,

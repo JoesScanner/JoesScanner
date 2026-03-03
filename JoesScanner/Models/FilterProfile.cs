@@ -9,6 +9,10 @@ namespace JoesScanner.Models
         public string Id { get; init; } = string.Empty;
         public string Name { get; init; } = string.Empty;
 
+        // Server scoping key (scheme + host + optional port). When set, the profile is only shown
+        // when connected to the matching server.
+        public string ServerKey { get; init; } = string.Empty;
+
         // History and Archive selection state.
         public FilterProfileFilters Filters { get; init; } = new FilterProfileFilters();
 

@@ -217,6 +217,9 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             // StartMonitoringAsync will prompt them to set one in Settings.
             _serverUrl = _settingsService.ServerUrl ?? string.Empty;
 
+            // Scope filter rules to the configured server.
+            _filterService.SetServerUrl(_serverUrl);
+
             // Global audio flag persisted across runs.
             // Default is true so a fresh install behaves like a radio.
             _audioEnabled = AppStateStore.GetBool("audio_enabled", true);
@@ -572,6 +575,9 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 
                 _serverUrl = newValue;
                 _settingsService.ServerUrl = _serverUrl;
+
+                // Scope filter rules to the new server.
+                _filterService.SetServerUrl(_serverUrl);
 
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(TaglineText));

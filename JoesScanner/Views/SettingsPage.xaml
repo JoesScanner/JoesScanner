@@ -467,11 +467,24 @@
 
         <!-- Body -->
         <VerticalStackLayout x:Name="FiltersBodyLayout" Spacing="8" IsVisible="False">
-            <Label
-                Text="Mute or hide traffic by Receiver, Site, or Talkgroup."
-                FontSize="12"
-                Opacity="0.8"
-                TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
+            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                <Label
+                    Grid.Column="0"
+                    Text="Mute or hide traffic by Receiver, Site, or Talkgroup."
+                    FontSize="12"
+                    Opacity="0.8"
+                    VerticalOptions="Center"
+                    TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
+
+                <Button
+                    Grid.Column="1"
+                    Text="Sync"
+                    Style="{StaticResource PillButtonStyle}"
+                    VerticalOptions="Center"
+                    HorizontalOptions="End"
+                    Command="{Binding SyncTalkgroupFiltersCommand}"
+                    IsEnabled="{Binding CanSyncTalkgroupFilters}" />
+            </Grid>
 
             <!-- Filters table (single horizontal scroller for ALL keys, buttons stay fixed) -->
             <Grid ColumnDefinitions="*,160" RowDefinitions="Auto,*" ColumnSpacing="10" RowSpacing="0">
