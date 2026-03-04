@@ -1,4 +1,5 @@
 using JoesScanner.Services;
+using JoesScanner.Controls;
 using JoesScanner.ViewModels;
 using JoesScanner.Views;
 using SQLitePCL;
@@ -17,6 +18,10 @@ public static class MauiProgram
 
         builder
             .UseMauiApp<App>()
+            .ConfigureMauiHandlers(handlers =>
+            {
+                handlers.AddHandler(typeof(SelectableEditor), typeof(SelectableEditorHandler));
+            })
             .ConfigureFonts(fonts =>
             {
                 // Add custom fonts here if needed.
@@ -36,6 +41,7 @@ public static class MauiProgram
         builder.Services.AddSingleton<ISubscriptionService, SubscriptionService>();
         builder.Services.AddSingleton<ITelemetryService, TelemetryService>();
         builder.Services.AddSingleton<IAuthLookupsSyncService, AuthLookupsSyncService>();
+        builder.Services.AddSingleton<IAuthObservedTriplesSyncService, AuthObservedTriplesSyncService>();
         builder.Services.AddSingleton<IAddressDetectionService, AddressDetectionService>();
         builder.Services.AddSingleton<IWhat3WordsService, What3WordsService>();
 

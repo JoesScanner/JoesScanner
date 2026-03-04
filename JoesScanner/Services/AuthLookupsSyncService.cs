@@ -237,7 +237,7 @@ namespace JoesScanner.Services
             }
         }
 
-        public async Task TryReportAsync(string serverKey, HistoryLookupData data, CancellationToken cancellationToken)
+        public async Task TryReportAsync(string serverKey, HistoryLookupData data, CancellationToken cancellationToken, bool force = false)
         {
             if (!IsEnabled())
             {
@@ -263,16 +263,20 @@ namespace JoesScanner.Services
                 var groupsJson = JsonSerializer.Serialize(groupsObj, JsonOptions);
 
                 var hash = HashPayload(receiversJson, sitesJson, talkgroupsJson, groupsJson);
+                if (force)
+                {
+                    AppLog.Add(() => $"AuthLookups: report forced. server={serverKey}");
+                }
 
                 var lastUtc = TryParseUtc(AppStateStore.GetString(GetLastReportUtcKey(serverKey), string.Empty));
-                if (lastUtc.HasValue && (DateTime.UtcNow - lastUtc.Value) < ReportMinInterval)
+                if (!force && lastUtc.HasValue && (DateTime.UtcNow - lastUtc.Value) < ReportMinInterval)
                 {
                     AppLog.Add(() => $"AuthLookups: report skipped (throttled). server={serverKey} lastUtc={lastUtc.Value:O}");
                     return;
                 }
 
                 var lastHash = AppStateStore.GetString(GetLastReportHashKey(serverKey), string.Empty);
-                if (!string.IsNullOrWhiteSpace(lastHash) && string.Equals(lastHash, hash, StringComparison.OrdinalIgnoreCase))
+                if (!force && !string.IsNullOrWhiteSpace(lastHash) && string.Equals(lastHash, hash, StringComparison.OrdinalIgnoreCase))
                 {
                     // Nothing changed; still update the last report timestamp so we do not spam retries.
                     AppStateStore.SetString(GetLastReportUtcKey(serverKey), DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
@@ -283,6 +287,9 @@ namespace JoesScanner.Services
                 var payload = new
                 {
                     server_key = serverKey,
+
+                    // When true, server records a fresh updated_at even if payload hash is unchanged (manual Sync button).
+                    force_touch = force,
 
                     // Telemetry identity
                     device_platform = DeviceInfo.Platform.ToString(),

@@ -769,7 +769,7 @@ private async void OnCopyLogClicked(object sender, EventArgs e)
     try
     {
         var text = LogEditor?.Text ?? string.Empty;
-        await Clipboard.Default.SetTextAsync(text);
+        await AppClipboard.SetTextAsync(text);
         await UiDialogs.AlertAsync("Copied", "Log copied to clipboard.", "Close");
     }
     catch (Exception ex)

@@ -1,6 +1,5 @@
 using System.IO;
 using JoesScanner.Services;
-using Microsoft.Maui.ApplicationModel.DataTransfer;
 using Microsoft.Maui.Dispatching;
 
 namespace JoesScanner.Views
@@ -277,7 +276,7 @@ namespace JoesScanner.Views
                 }
 
                 var text = LogEditor.Text ?? string.Empty;
-                await Clipboard.Default.SetTextAsync(text);
+                await AppClipboard.SetTextAsync(text);
                 await UiDialogs.AlertAsync("Copied", "Log copied to clipboard.", "OK");
             }
             catch

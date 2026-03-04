@@ -6,6 +6,7 @@
     xmlns:vm="clr-namespace:JoesScanner.ViewModels"
     xmlns:models="clr-namespace:JoesScanner.Models"
     xmlns:controls="clr-namespace:JoesScanner.Views.Controls"
+    xmlns:corecontrols="clr-namespace:JoesScanner.Controls"
     x:Name="SettingsPageRoot"
     x:DataType="vm:SettingsViewModel"
     Shell.NavBarIsVisible="False"
@@ -1459,7 +1460,7 @@
             </Grid>
 
 
-            <Editor
+            <corecontrols:SelectableEditor
                 x:Name="LogEditor"
                 Text=""
                 IsReadOnly="True"

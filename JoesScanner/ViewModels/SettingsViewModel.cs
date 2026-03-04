@@ -25,6 +25,7 @@ namespace JoesScanner.ViewModels
         private readonly MainViewModel _mainViewModel;
         private readonly ITelemetryService _telemetryService;
         private readonly IHistoryLookupsCacheService _historyLookupsCacheService;
+        private readonly IAuthObservedTriplesSyncService _authObservedTriplesSyncService;
         private readonly HttpClient _httpClient;
         private readonly FilterService _filterService = FilterService.Instance;
 
@@ -548,7 +549,8 @@ private ServerDirectoryEntry? _selectedDirectoryServer;
             MainViewModel mainViewModel,
             ITelemetryService telemetryService,
             IFilterProfileStore filterProfileStore,
-            IHistoryLookupsCacheService historyLookupsCacheService)
+            IHistoryLookupsCacheService historyLookupsCacheService,
+            IAuthObservedTriplesSyncService authObservedTriplesSyncService)
         {
             _settings = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
             _mainViewModel = mainViewModel ?? throw new ArgumentNullException(nameof(mainViewModel));
@@ -556,6 +558,7 @@ private ServerDirectoryEntry? _selectedDirectoryServer;
 
             _filterProfileStore = filterProfileStore ?? throw new ArgumentNullException(nameof(filterProfileStore));
             _historyLookupsCacheService = historyLookupsCacheService ?? throw new ArgumentNullException(nameof(historyLookupsCacheService));
+            _authObservedTriplesSyncService = authObservedTriplesSyncService ?? throw new ArgumentNullException(nameof(authObservedTriplesSyncService));
 
             // IMPORTANT (Apple + HTTP): iOS/macOS native networking enforces App Transport Security (ATS).
             // We support user-configured HTTP custom servers, so for validation requests we force the
@@ -634,6 +637,11 @@ try
                 // Force a lookup refresh from the stream server. This also seeds from the Auth API when local
                 // cache is missing, and it reports back to the Auth API (telemetry-gated).
                 await _historyLookupsCacheService.PreloadAsync(forceReload: true, reason: "manual_filters_sync", CancellationToken.None);
+
+                // Also force an observed-triples report so the WordPress API Observed tab updates immediately.
+                // This sends a best-effort snapshot from the local calls database.
+                await _authObservedTriplesSyncService.TryReportAsync(_settings.ServerUrl, force: true, CancellationToken.None);
+
 
                 // Quick user feedback so it is obvious that something happened.
                 var cached = await _historyLookupsCacheService.GetCachedAsync(CancellationToken.None);

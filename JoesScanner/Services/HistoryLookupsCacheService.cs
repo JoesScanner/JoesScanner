@@ -1,3 +1,5 @@
+using System.Linq;
+
 namespace JoesScanner.Services
 {
     public sealed class HistoryLookupsCacheService : IHistoryLookupsCacheService
@@ -7,6 +9,7 @@ namespace JoesScanner.Services
         private readonly ICallHistoryService _callHistoryService;
         private readonly IHistoryLookupsRepository _repo;
         private readonly IAuthLookupsSyncService _authLookupsSyncService;
+        private readonly IAuthObservedTriplesSyncService _authObservedTriplesSyncService;
 
         // Prevent overlapping refreshes.
         private readonly SemaphoreSlim _lock = new(1, 1);
@@ -15,12 +18,14 @@ namespace JoesScanner.Services
             ISettingsService settingsService,
             ICallHistoryService callHistoryService,
             IHistoryLookupsRepository repo,
-            IAuthLookupsSyncService authLookupsSyncService)
+            IAuthLookupsSyncService authLookupsSyncService,
+            IAuthObservedTriplesSyncService authObservedTriplesSyncService)
         {
             _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
             _callHistoryService = callHistoryService ?? throw new ArgumentNullException(nameof(callHistoryService));
             _repo = repo ?? throw new ArgumentNullException(nameof(repo));
             _authLookupsSyncService = authLookupsSyncService ?? throw new ArgumentNullException(nameof(authLookupsSyncService));
+            _authObservedTriplesSyncService = authObservedTriplesSyncService ?? throw new ArgumentNullException(nameof(authObservedTriplesSyncService));
         }
 
         public async Task<HistoryLookupData?> GetCachedAsync(CancellationToken cancellationToken = default)
@@ -67,6 +72,18 @@ namespace JoesScanner.Services
                     {
                         try
                         {
+                            // Prefer observed-triples seed because it includes reliable associations.
+                            var observed = await _authObservedTriplesSyncService.TryFetchSeedAsync(serverKey, cancellationToken).ConfigureAwait(false);
+                            if (observed != null && observed.Count > 0)
+                            {
+                                var seededFromObserved = BuildLookupDataFromObserved(observed);
+                                await _repo.UpsertAsync(serverKey, seededFromObserved, DateTime.UtcNow, cancellationToken).ConfigureAwait(false);
+                                cached = seededFromObserved;
+                                fetchedUtc = DateTime.UtcNow;
+                                AppLog.Add(() => $"History: seeded lookups from Auth Observed. server={serverKey} receivers={seededFromObserved.Receivers?.Count ?? 0} sites={seededFromObserved.Sites?.Count ?? 0} talkgroups={seededFromObserved.Talkgroups?.Count ?? 0}");
+                            }
+
+                            // Fall back to raw lookup catalogs seed.
                             var seeded = await _authLookupsSyncService.TryFetchSeedAsync(serverKey, cancellationToken).ConfigureAwait(false);
                             if (seeded != null)
                             {
@@ -99,7 +116,16 @@ namespace JoesScanner.Services
                     // This is telemetry-gated and silently skipped when disabled.
                     try
                     {
-                        await _authLookupsSyncService.TryReportAsync(serverKey, data, cancellationToken).ConfigureAwait(false);
+                        await _authLookupsSyncService.TryReportAsync(serverKey, data, cancellationToken, force: forceReload).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                    }
+
+                    // Best-effort daily report of observed receiver/site/talkgroup associations.
+                    try
+                    {
+                        await _authObservedTriplesSyncService.TryReportAsync(serverKey, force: forceReload, cancellationToken).ConfigureAwait(false);
                     }
                     catch
                     {
@@ -161,6 +187,72 @@ namespace JoesScanner.Services
             {
                 return (raw, raw);
             }
+        }
+
+        private static HistoryLookupData BuildLookupDataFromObserved(IReadOnlyList<ObservedTriple> observed)
+        {
+            var receivers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var sites = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var talkgroups = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var groups = new Dictionary<string, List<HistoryLookupItem>>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var row in observed)
+            {
+                if (row == null)
+                    continue;
+
+                var rxV = (row.ReceiverValue ?? string.Empty).Trim();
+                var rxL = (row.ReceiverLabel ?? string.Empty).Trim();
+                var siteV = (row.SiteValue ?? string.Empty).Trim();
+                var siteL = (row.SiteLabel ?? string.Empty).Trim();
+                var tgV = (row.TalkgroupValue ?? string.Empty).Trim();
+                var tgL = (row.TalkgroupLabel ?? string.Empty).Trim();
+
+                if (!string.IsNullOrWhiteSpace(rxV))
+                    receivers[rxV] = string.IsNullOrWhiteSpace(rxL) ? rxV : rxL;
+                if (!string.IsNullOrWhiteSpace(siteV))
+                    sites[siteV] = string.IsNullOrWhiteSpace(siteL) ? siteV : siteL;
+                if (!string.IsNullOrWhiteSpace(tgV))
+                    talkgroups[tgV] = string.IsNullOrWhiteSpace(tgL) ? tgV : tgL;
+
+                // Group talkgroups by site label to preserve association.
+                var groupName = string.IsNullOrWhiteSpace(siteL) ? siteV : siteL;
+                if (!string.IsNullOrWhiteSpace(groupName) && !string.IsNullOrWhiteSpace(tgV))
+                {
+                    if (!groups.TryGetValue(groupName, out var list))
+                    {
+                        list = new List<HistoryLookupItem>();
+                        groups[groupName] = list;
+                    }
+
+                    if (!list.Any(x => string.Equals(x.Value, tgV, StringComparison.OrdinalIgnoreCase)))
+                        list.Add(new HistoryLookupItem { Value = tgV, Label = string.IsNullOrWhiteSpace(tgL) ? tgV : tgL });
+                }
+            }
+
+            static List<HistoryLookupItem> ToSortedList(Dictionary<string, string> map)
+            {
+                var list = new List<HistoryLookupItem>(map.Count);
+                foreach (var kv in map)
+                    list.Add(new HistoryLookupItem { Value = kv.Key, Label = kv.Value });
+                list.Sort((a, b) => string.Compare(a.Label, b.Label, StringComparison.OrdinalIgnoreCase));
+                return list;
+            }
+
+            var finalGroups = new Dictionary<string, IReadOnlyList<HistoryLookupItem>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var kv in groups)
+            {
+                kv.Value.Sort((a, b) => string.Compare(a.Label, b.Label, StringComparison.OrdinalIgnoreCase));
+                finalGroups[kv.Key] = kv.Value;
+            }
+
+            return new HistoryLookupData
+            {
+                Receivers = ToSortedList(receivers),
+                Sites = ToSortedList(sites),
+                Talkgroups = ToSortedList(talkgroups),
+                TalkgroupGroups = finalGroups
+            };
         }
     }
 }
