@@ -81,7 +81,7 @@ namespace JoesScanner.Services
                 var result = new CommsSyncResult
                 {
                     Ok = ok,
-                    Message = msg,
+                    Message = msg ?? string.Empty,
                     NextSeq = TryGetLong(root, "next_seq")
                 };
 

@@ -18,7 +18,7 @@ internal static class AppStateStore
 
     private static string GetDbPath()
     {
-        return Path.Combine(FileSystem.AppDataDirectory, DbFileName);
+        return AppPaths.GetDbPath(DbFileName);
     }
 
     private static SqliteConnection OpenConnection()

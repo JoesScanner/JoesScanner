@@ -631,13 +631,13 @@
                 <RoundRectangle CornerRadius="12" />
             </Border.StrokeShape>
 
-            <VerticalStackLayout Spacing="6">
-                <Button Text="Off" Clicked="OnAudioMenuOptionClicked" CommandParameter="Off" />
-                <Button Text="1x" Clicked="OnAudioMenuOptionClicked" CommandParameter="0" />
-                <Button Text="1.25x" Clicked="OnAudioMenuOptionClicked" CommandParameter="1" />
-                <Button Text="1.5x" Clicked="OnAudioMenuOptionClicked" CommandParameter="2" />
-                <Button Text="1.75x" Clicked="OnAudioMenuOptionClicked" CommandParameter="3" />
-                <Button Text="2x" Clicked="OnAudioMenuOptionClicked" CommandParameter="4" />
+            <VerticalStackLayout Spacing="6" HorizontalOptions="Center">
+                <Button Text="Off" Clicked="OnAudioMenuOptionClicked" CommandParameter="Off" WidthRequest="88" HeightRequest="34" Padding="8,2" FontAttributes="Bold" FontSize="13" BackgroundColor="#2563eb" TextColor="White" BorderColor="#93c5fd" BorderWidth="1" CornerRadius="10" HorizontalOptions="Center" />
+                <Button Text="1x" Clicked="OnAudioMenuOptionClicked" CommandParameter="0" WidthRequest="88" HeightRequest="34" Padding="8,2" FontAttributes="Bold" FontSize="13" BackgroundColor="#2563eb" TextColor="White" BorderColor="#93c5fd" BorderWidth="1" CornerRadius="10" HorizontalOptions="Center" />
+                <Button Text="1.25x" Clicked="OnAudioMenuOptionClicked" CommandParameter="1" WidthRequest="88" HeightRequest="34" Padding="8,2" FontAttributes="Bold" FontSize="13" BackgroundColor="#2563eb" TextColor="White" BorderColor="#93c5fd" BorderWidth="1" CornerRadius="10" HorizontalOptions="Center" />
+                <Button Text="1.5x" Clicked="OnAudioMenuOptionClicked" CommandParameter="2" WidthRequest="88" HeightRequest="34" Padding="8,2" FontAttributes="Bold" FontSize="13" BackgroundColor="#2563eb" TextColor="White" BorderColor="#93c5fd" BorderWidth="1" CornerRadius="10" HorizontalOptions="Center" />
+                <Button Text="1.75x" Clicked="OnAudioMenuOptionClicked" CommandParameter="3" WidthRequest="88" HeightRequest="34" Padding="8,2" FontAttributes="Bold" FontSize="13" BackgroundColor="#2563eb" TextColor="White" BorderColor="#93c5fd" BorderWidth="1" CornerRadius="10" HorizontalOptions="Center" />
+                <Button Text="2x" Clicked="OnAudioMenuOptionClicked" CommandParameter="4" WidthRequest="88" HeightRequest="34" Padding="8,2" FontAttributes="Bold" FontSize="13" BackgroundColor="#2563eb" TextColor="White" BorderColor="#93c5fd" BorderWidth="1" CornerRadius="10" HorizontalOptions="Center" />
             </VerticalStackLayout>
         </Border>
 

@@ -95,14 +95,11 @@ private HistorySearchFilters? _activeSearchFilters;
         // We keep a fixed window of calls around an active center index and shift by one item per call.
         private bool _isSnapshotSearchActive;
         private readonly List<CallItem> _snapshotCalls = new List<CallItem>();
-        private int _snapshotCenterIndex = -1; // index into _snapshotCalls for the active call
         private int _visibleStartSnapshotIndex; // snapshot index represented by Calls[0]
         private int _visibleWindowSize = 25; // target number of items visible/bound
         private CallItem? _activeCall;
 
         private string _statusText = string.Empty;
-
-        private bool _suppressLookupReload;
         private IReadOnlyDictionary<string, IReadOnlyList<HistoryLookupItem>> _talkgroupGroups
             = new Dictionary<string, IReadOnlyList<HistoryLookupItem>>(StringComparer.OrdinalIgnoreCase);
 
@@ -200,9 +197,20 @@ private HistorySearchFilters? _activeSearchFilters;
 
             Calls.CollectionChanged += (_, e) =>
             {
-                OnPropertyChanged(nameof(IsHistoryMediaButtonsEnabled));
-                OnPropertyChanged(nameof(IsStopEnabled));
-                RefreshCommandStates();
+                // Collection mutations can happen from background operations. Command CanExecute and
+                // PropertyChanged notifications must run on the UI thread or MAUI will ignore / throw.
+                try
+                {
+                    MainThread.BeginInvokeOnMainThread(() =>
+                    {
+                        OnPropertyChanged(nameof(IsHistoryMediaButtonsEnabled));
+                        OnPropertyChanged(nameof(IsStopEnabled));
+                        RefreshCommandStates();
+                    });
+                }
+                catch
+                {
+                }
 
                 // History page: if calls already have detected addresses (or after detection runs),
                 // ensure bottom alert popups are created.
@@ -245,17 +253,19 @@ private HistorySearchFilters? _activeSearchFilters;
             _selectedMinute = now.Minute;
             _selectedSecond = now.Second;
 
-            SearchCommand = new Command(async () => await SearchAsync(), () => !IsLoading);
-            LoadMoreOlderCommand = new Command(async () => await LoadMoreOlderAsync(), () => CanLoadMoreOlder);
-            UnlimitedHistoryCommand = new Command(async () => await UnlimitedHistoryAsync(), () => !IsLoading);
-            PlayFromCallCommand = new Command<CallItem>(async c => await PlayFromCallAsync(c), c => !IsLoading && c != null);
-            PlayCommand = new Command(async () => await PlayAsync(), () => !IsLoading && Calls.Count > 0 && !_isQueuePlaybackRunning);
-            StopCommand = new Command(async () => await StopAsync(), () => true);
-            NextCommand = new Command(async () => await SkipNextAsync(), () => Calls.Count > 0);
-            PreviousCommand = new Command(async () => await SkipPreviousAsync(), () => Calls.Count > 0);
+            SearchCommand = new Command(async () => await SafeRunAsync(SearchAsync, "History.Search"), () => !IsLoading);
+            LoadMoreOlderCommand = new Command(async () => await SafeRunAsync(LoadMoreOlderAsync, "History.LoadMoreOlder"), () => CanLoadMoreOlder);
+            UnlimitedHistoryCommand = new Command(async () => await SafeRunAsync(UnlimitedHistoryAsync, "History.UnlimitedHistory"), () => !IsLoading);
+            PlayFromCallCommand = new Command<CallItem>(async c => await SafeRunAsync(() => PlayFromCallAsync(c), "History.PlayFromCall"), c => !IsLoading && c != null);
+            PlayCommand = new Command(async () => await SafeRunAsync(PlayAsync, "History.Play"), () => !IsLoading && Calls.Count > 0 && !_isQueuePlaybackRunning);
+            StopCommand = new Command(async () => await SafeRunAsync(StopAsync, "History.Stop"), () => true);
+            // Allow transport/speed controls while playback is running even if the visible Calls list
+            // is temporarily cleared/replaced by paging or background refresh.
+            NextCommand = new Command(async () => await SafeRunAsync(SkipNextAsync, "History.Next"), () => !IsLoading && (Calls.Count > 0 || _isQueuePlaybackRunning));
+            PreviousCommand = new Command(async () => await SafeRunAsync(SkipPreviousAsync, "History.Previous"), () => !IsLoading && (Calls.Count > 0 || _isQueuePlaybackRunning));
 
-            PlaybackSpeedDownCommand = new Command(DecreasePlaybackSpeedStep, () => Calls.Count > 0);
-            PlaybackSpeedUpCommand = new Command(IncreasePlaybackSpeedStep, () => Calls.Count > 0);
+            PlaybackSpeedDownCommand = new Command(DecreasePlaybackSpeedStep, () => !IsLoading && (Calls.Count > 0 || _isQueuePlaybackRunning));
+            PlaybackSpeedUpCommand = new Command(IncreasePlaybackSpeedStep, () => !IsLoading && (Calls.Count > 0 || _isQueuePlaybackRunning));
 
             OpenTimePickerCommand = new Command(() => IsTimePickerOpen = true, () => !IsLoading);
             CancelTimePickerCommand = new Command(() => IsTimePickerOpen = false, () => !IsLoading);
@@ -807,7 +817,8 @@ private HistorySearchFilters? _activeSearchFilters;
             }
         }
 
-        public bool IsHistoryMediaButtonsEnabled => Calls.Count > 0;
+        // Keep transport/speed buttons usable while audio is playing even if the list is paged/cleared.
+        public bool IsHistoryMediaButtonsEnabled => _isQueuePlaybackRunning || Calls.Count > 0;
         public bool IsStopEnabled => _isQueuePlaybackRunning;
 
         public bool IsPlayEnabled => !_isQueuePlaybackRunning && Calls.Count > 0;
@@ -1209,7 +1220,6 @@ public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
 
         private void ApplyLookups(HistoryLookupData data, bool preserveSelections)
         {
-            _suppressLookupReload = true;
             try
             {
                 var prevReceiverId = preserveSelections ? SelectedReceiver?.Value : null;
@@ -1234,7 +1244,6 @@ public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
             }
             finally
             {
-                _suppressLookupReload = false;
             }
         }
 
@@ -1254,8 +1263,6 @@ public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
                 };
 
                 var data = await _callHistoryService.GetLookupDataAsync(filters, CancellationToken.None);
-
-                _suppressLookupReload = true;
                 try
                 {
                     ReplaceItems(Sites, data.Sites);
@@ -1266,7 +1273,6 @@ public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
                 }
                 finally
                 {
-                    _suppressLookupReload = false;
                 }
 
                 StatusText = string.Empty;
@@ -1298,8 +1304,6 @@ public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
                 };
 
                 var data = await _callHistoryService.GetLookupDataAsync(filters, CancellationToken.None);
-
-                _suppressLookupReload = true;
                 try
                 {
                     ReplaceItems(Talkgroups, data.Talkgroups);
@@ -1307,7 +1311,6 @@ public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
                 }
                 finally
                 {
-                    _suppressLookupReload = false;
                 }
 
                 StatusText = string.Empty;
@@ -1458,11 +1461,7 @@ public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
                 {
                     try
                     {
-                        var page = Application.Current?.MainPage;
-                        if (page == null)
-                            return;
-
-                        await page.DisplayAlert(
+                        await UiDialogs.AlertAsync(
                             "History limit",
                             "Your account is limited to the last 24 hours. Upgrade to a premium account for full access.",
                             "OK");
@@ -1960,6 +1959,24 @@ private async Task SearchAsync()
             }
             catch
             {
+            }
+        }
+
+        private async Task SafeRunAsync(Func<Task> action, string operation)
+        {
+            try
+            {
+                await action().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    AppLog.Add(() => $"{operation} failed. ex={ex.GetType().Name}: {ex.Message}");
+                }
+                catch
+                {
+                }
             }
         }
 
@@ -2889,9 +2906,9 @@ private async Task LoadMoreOlderAsync()
                 if (string.IsNullOrWhiteSpace(usernameCustom))
                     return null;
 
-                var passwordCustom = _settingsService.BasicAuthPassword ?? string.Empty;
+                var passwordCustom = NormalizeSmartQuotes(_settingsService.BasicAuthPassword ?? string.Empty);
                 var raw = $"{usernameCustom}:{passwordCustom}";
-                var bytes = Encoding.ASCII.GetBytes(raw);
+                var bytes = Encoding.UTF8.GetBytes(raw);
                 var base64 = Convert.ToBase64String(bytes);
                 return $"Basic {base64}";
             }
@@ -2899,6 +2916,18 @@ private async Task LoadMoreOlderAsync()
             {
                 return null;
             }
+        }
+
+        private static string NormalizeSmartQuotes(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+                return value;
+
+            return value
+                .Replace('\u2018', '\'')
+                .Replace('\u2019', '\'')
+                .Replace('\u201C', '"')
+                .Replace('\u201D', '"');
         }
 
 

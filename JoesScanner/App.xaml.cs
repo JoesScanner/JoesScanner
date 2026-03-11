@@ -19,6 +19,9 @@ namespace JoesScanner
             _subscriptionService = subscriptionService ?? throw new ArgumentNullException(nameof(subscriptionService));
             _commsBadgeService = commsBadgeService ?? throw new ArgumentNullException(nameof(commsBadgeService));
 
+            // Resolve the persisted logging preference before any app initialization work begins.
+            AppLog.ReloadEnabledStateFromStorage();
+
             InitializeComponent();
 
             // Always create a new session token for each process start.

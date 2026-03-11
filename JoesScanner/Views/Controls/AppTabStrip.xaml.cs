@@ -341,7 +341,7 @@ public partial class AppTabStrip : ContentView
         {
             try
             {
-                AppLog.DebugWriteLine($"AppTabStrip.NavigateTo({tab}) failed: {ex}");
+                AppLog.DebugWriteLine(() => $"AppTabStrip.NavigateTo({tab}) failed: {ex}");
             }
             catch
             {
@@ -353,9 +353,7 @@ public partial class AppTabStrip : ContentView
                 {
                     try
                     {
-                        var page = Application.Current?.MainPage;
-                        if (page != null)
-                            await page.DisplayAlert("Navigation error", $"Unable to open {tab}: {ex.Message}", "OK");
+                        await UiDialogs.AlertAsync("Navigation error", $"Unable to open {tab}: {ex.Message}", "OK");
                     }
                     catch
                     {

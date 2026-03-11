@@ -57,6 +57,8 @@ namespace JoesScanner.Services
         private Android.Media.MediaPlayer? _androidPlayer;
         private AudioManager? _audioManager;
         private AudioFocusChangeListener? _focusListener;
+	        // Android audio focus request object is intentionally not used here.
+	        // The .NET Android bindings for AudioFocusRequest vary across TFMs/SDKs.
 #endif
 
 #if IOS || MACCATALYST
@@ -377,30 +379,38 @@ namespace JoesScanner.Services
                 player = new Android.Media.MediaPlayer();
                 _androidPlayer = player;
 
+                var p0 = player;
+                if (p0 == null)
+                    return;
+
                 try
                 {
-                    var attrs = new AudioAttributes.Builder()
-                        .SetUsage(AudioUsageKind.Media)
-                        .SetContentType(AudioContentType.Speech)
-                        .Build();
-                    player.SetAudioAttributes(attrs);
+                    var attrsBuilder = new AudioAttributes.Builder();
+                    attrsBuilder.SetUsage(AudioUsageKind.Media);
+                    attrsBuilder.SetContentType(AudioContentType.Speech);
+                    var attrs = attrsBuilder.Build();
+                    p0.SetAudioAttributes(attrs);
                 }
                 catch
                 {
-                    try { player.SetAudioStreamType(AMediaStream.Music); } catch { }
+                    #pragma warning disable CS0618
+#pragma warning disable CA1422
+                    try { p0.SetAudioStreamType(AMediaStream.Music); } catch { }
+#pragma warning restore CA1422
+#pragma warning restore CS0618
                 }
 
-                player.Prepared += (_, __) =>
+                p0.Prepared += (_, __) =>
                 {
                     try
                     {
                         try
                         {
-                            if (Build.VERSION.SdkInt >= BuildVersionCodes.M)
+                            if (OperatingSystem.IsAndroidVersionAtLeast(23))
                             {
                                 var p = new PlaybackParams();
                                 p.SetSpeed((float)playbackRate);
-                                player.PlaybackParams = p;
+                                p0.PlaybackParams = p;
                             }
                         }
                         catch
@@ -412,14 +422,14 @@ namespace JoesScanner.Services
                             try
                             {
                                 var v = (float)Clamp01(1.0);
-                                player.SetVolume(v, v);
+                                p0.SetVolume(v, v);
                             }
                             catch
                             {
                             }
                         }
 
-                        player.Start();
+                        p0.Start();
                     }
                     catch
                     {
@@ -430,12 +440,12 @@ namespace JoesScanner.Services
                     }
                 };
 
-                player.Completion += (_, __) =>
+                p0.Completion += (_, __) =>
                 {
                     try { finishedTcs.TrySetResult(); } catch { }
                 };
 
-                player.Error += (_, __) =>
+                p0.Error += (_, __) =>
                 {
                     try { finishedTcs.TrySetResult(); } catch { }
                 };
@@ -448,14 +458,14 @@ namespace JoesScanner.Services
                     if (uri == null)
                         return;
 
-                    player.SetDataSource(ctx, uri);
+                    p0.SetDataSource(ctx, uri);
                 }
                 else
                 {
-                    player.SetDataSource(src);
+                    p0.SetDataSource(src);
                 }
 
-                player.PrepareAsync();
+                p0.PrepareAsync();
 
                 using var reg = cancellationToken.Register(() =>
                 {
@@ -466,7 +476,7 @@ namespace JoesScanner.Services
                 await startedTcs.Task.WaitAsync(cancellationToken);
 
                 if (prepared.StaticFilterEnabled || (prepared.ToneFilterEnabled && prepared.ToneDuckSegments.Count > 0))
-                    _ = ApplyDynamicVolumeAndroidAsync(prepared, player, cancellationToken);
+                    _ = ApplyDynamicVolumeAndroidAsync(prepared, p0, cancellationToken);
 
                 // Primary completion path: Completion or Error event.
                 // Secondary safety: poll IsPlaying so we do not "finish instantly" due to event quirks.
@@ -546,40 +556,47 @@ namespace JoesScanner.Services
             return Task.CompletedTask;
         }
 
-        private void RequestAudioFocus(Context context)
-        {
-            try
-            {
-                _audioManager ??= (AudioManager?)context.GetSystemService(Context.AudioService);
-                if (_audioManager == null)
-                    return;
+	        private void RequestAudioFocus(Context context)
+	        {
+	            try
+	            {
+	                _audioManager ??= (AudioManager?)context.GetSystemService(Context.AudioService);
+	                if (_audioManager == null)
+	                    return;
 
-                _focusListener ??= new AudioFocusChangeListener(this);
+	                _focusListener ??= new AudioFocusChangeListener(this);
 
-#pragma warning disable CS0618
+	#pragma warning disable CS0618
+#pragma warning disable CA1422
                 _audioManager.RequestAudioFocus(_focusListener, AMediaStream.Music, AudioFocus.Gain);
+#pragma warning restore CA1422
 #pragma warning restore CS0618
-            }
-            catch
-            {
-            }
-        }
+	            }
+	            catch
+	            {
+	            }
+	        }
 
-        private void AbandonAudioFocus()
-        {
-            try
-            {
-                if (_audioManager == null || _focusListener == null)
-                    return;
+	        private void AbandonAudioFocus()
+	        {
+	            try
+	            {
+	                if (_audioManager == null)
+	                    return;
 
-#pragma warning disable CS0618
+	                if (_focusListener == null)
+	                    return;
+
+	#pragma warning disable CS0618
+#pragma warning disable CA1422
                 _audioManager.AbandonAudioFocus(_focusListener);
+#pragma warning restore CA1422
 #pragma warning restore CS0618
-            }
-            catch
-            {
-            }
-        }
+	            }
+	            catch
+	            {
+	            }
+	        }
 
         private sealed class AudioFocusChangeListener : Java.Lang.Object, AudioManager.IOnAudioFocusChangeListener
         {

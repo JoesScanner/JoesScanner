@@ -41,7 +41,7 @@ namespace JoesScanner.Services
         public async Task<SubscriptionCheckResult> EnsureSubscriptionAsync(CancellationToken cancellationToken)
         {
             var basicUser = (_settings.BasicAuthUsername ?? string.Empty).Trim();
-            var basicPass = (_settings.BasicAuthPassword ?? string.Empty).Trim();
+            var basicPass = NormalizeSmartQuotes((_settings.BasicAuthPassword ?? string.Empty).Trim());
 
             // Credentials are required for Joe's Scanner hosted servers.
             // If missing, do not allow connecting.
@@ -82,7 +82,15 @@ namespace JoesScanner.Services
 
             try
             {
-                var json = JsonSerializer.Serialize(payload);
+                // Use UnsafeRelaxedJsonEscaping so special characters like apostrophes in
+                // passwords are sent as literal characters (e.g. ') rather than Unicode escapes
+                // (e.g. '). The default JavaScriptEncoder escapes ' which causes
+                // authentication failures for passwords containing apostrophes.
+                var authJsonOptions = new JsonSerializerOptions
+                {
+                    Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+                };
+                var json = JsonSerializer.Serialize(payload, authJsonOptions);
                 using var content = new StringContent(json, Encoding.UTF8, "application/json");
 
                 using var response = await _httpClient.PostAsync(GetAuthEndpoint(), content, cancellationToken).ConfigureAwait(false);
@@ -183,6 +191,37 @@ namespace JoesScanner.Services
                     _settings.SubscriptionLastMessage = (authResponse.Message ?? "No active subscription").Trim();
 
                     return new SubscriptionCheckResult(false, authResponse.Error ?? "no_active_subscription", _settings.SubscriptionLastMessage);
+                }
+
+                // Defensive expiry check: reject if the returned validity window is already in the past,
+                // even when the server reports ok:true and active:true. This guards against the server
+                // returning a false positive for an expired subscription.
+                if (subscription != null)
+                {
+                    var periodEnd = TryParseUtc(subscription.PeriodEndAt)
+                                    ?? TryParseUtc(subscription.ExpiresAt)
+                                    ?? TryParseUtc(subscription.TrialEndsAt);
+
+                    if (periodEnd.HasValue && periodEnd.Value < nowUtc)
+                    {
+                        _settings.SubscriptionLastCheckUtc = nowUtc;
+                        _settings.SubscriptionLastStatusOk = false;
+                        _settings.SubscriptionLastValidatedOnline = false;
+                        _settings.SubscriptionTierLevel = 0;
+
+                        var planLabel = (subscription.LevelLabel ?? subscription.Level ?? string.Empty).Trim();
+                        var priceText = (subscription.PriceId ?? string.Empty).Trim();
+
+                        _settings.SubscriptionLastLevel = planLabel;
+                        _settings.SubscriptionPriceId = priceText;
+                        _settings.SubscriptionExpiresUtc = periodEnd;
+                        _settings.SubscriptionRenewalUtc = null;
+
+                        var localDate = periodEnd.Value.ToLocalTime().ToString("yyyy-MM-dd");
+                        _settings.SubscriptionLastMessage = $"Subscription expired on {localDate}.";
+
+                        return new SubscriptionCheckResult(false, "expired", _settings.SubscriptionLastMessage);
+                    }
                 }
 
                 // Success
@@ -318,6 +357,12 @@ namespace JoesScanner.Services
             var priceText = (sub.PriceId ?? string.Empty).Trim();
             var statusText = (sub.Status ?? string.Empty).Trim().ToLowerInvariant();
 
+            var includePriceText =
+                !string.IsNullOrEmpty(priceText) &&
+                !string.Equals(planLabel, priceText, StringComparison.OrdinalIgnoreCase) &&
+                !planLabel.Contains(priceText, StringComparison.OrdinalIgnoreCase) &&
+                !priceText.Contains(planLabel, StringComparison.OrdinalIgnoreCase);
+
             var periodRaw = statusText == "trialing"
                 ? (sub.TrialEndsAt ?? sub.PeriodEndAt ?? sub.ExpiresAt ?? string.Empty)
                 : (sub.PeriodEndAt ?? sub.ExpiresAt ?? sub.TrialEndsAt ?? string.Empty);
@@ -332,14 +377,14 @@ namespace JoesScanner.Services
                 : "Renewal:";
 
             if (!string.IsNullOrEmpty(planLabel) &&
-                !string.IsNullOrEmpty(priceText) &&
+                includePriceText &&
                 !string.IsNullOrEmpty(formattedDate))
             {
                 return $"Plan: {planLabel} - {priceText} - {dateLabel} {formattedDate}";
             }
 
             if (!string.IsNullOrEmpty(planLabel) &&
-                !string.IsNullOrEmpty(priceText))
+                includePriceText)
             {
                 return $"Plan: {planLabel} - {priceText}";
             }
@@ -399,6 +444,18 @@ namespace JoesScanner.Services
                 return mfg;
 
             return mfg + " " + mdl;
+        }
+
+        private static string NormalizeSmartQuotes(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+                return value;
+
+            return value
+                .Replace('\u2018', '\'')
+                .Replace('\u2019', '\'')
+                .Replace('\u201C', '"')
+                .Replace('\u201D', '"');
         }
 
         private sealed class AuthResponseDto

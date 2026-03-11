@@ -7,18 +7,10 @@ using Microsoft.Data.Sqlite;
 namespace JoesScanner.Services;
 
 // Syncs observed Receiver/Site/Talkgroup associations to/from the WordPress Auth API.
-// Gated by telemetry. Default servers are always enabled; custom servers respect the user's telemetry setting.
+// Always enabled (no rate limiting). Identity is still required by the server (device_id and/or session_token).
 public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncService, IDisposable
 {
     private const string DefaultAuthServerBaseUrl = "https://joesscanner.com";
-    private const string DefaultStreamServerUrl = "https://app.joesscanner.com";
-
-    private static readonly string[] ProvidedDefaultServerUrls =
-    {
-        DefaultStreamServerUrl
-    };
-
-    private static readonly TimeSpan ReportMinInterval = TimeSpan.FromHours(20);
 
     private readonly ISettingsService _settings;
     private readonly IDatabasePathProvider _dbPathProvider;
@@ -43,36 +35,6 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
         // HttpClient lifetime managed by DI.
     }
 
-    private static bool IsProvidedDefaultServerUrl(string? streamServerUrl)
-    {
-        var url = (streamServerUrl ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(url))
-            return false;
-
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
-            return false;
-
-        foreach (var candidate in ProvidedDefaultServerUrls)
-        {
-            if (!Uri.TryCreate(candidate, UriKind.Absolute, out var candidateUri))
-                continue;
-
-            if (string.Equals(uri.Host, candidateUri.Host, StringComparison.OrdinalIgnoreCase))
-                return true;
-        }
-
-        return false;
-    }
-
-    private bool IsEnabled()
-    {
-        var selectedServer = _settings.ServerUrl;
-        if (IsProvidedDefaultServerUrl(selectedServer))
-            return true;
-
-        return _settings.TelemetryEnabled;
-    }
-
     private Uri GetEndpoint()
     {
         var baseUrl = (_settings.AuthServerBaseUrl ?? string.Empty).Trim();
@@ -80,7 +42,7 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
             baseUrl = DefaultAuthServerBaseUrl;
 
         baseUrl = baseUrl.TrimEnd('/');
-        return new Uri(baseUrl + "/wp-json/joes-scanner/v1/observed-triples");
+        return new Uri(baseUrl + "/wp-json/joes-scanner/v1/observed-triples-v2");
     }
 
     private static string CombineDeviceModel(string? manufacturer, string? model)
@@ -146,13 +108,18 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
             : null;
     }
 
+    private static string CanonicalizeIdentityPart(string? primary, string? fallback)
+    {
+        var value = string.IsNullOrWhiteSpace(primary) ? fallback : primary;
+        value = (value ?? string.Empty).Trim();
+        if (value.Length == 0)
+            return string.Empty;
+
+        return string.Join(" ", value.Split((char[])null, StringSplitOptions.RemoveEmptyEntries));
+    }
+
     public async Task<IReadOnlyList<ObservedTriple>?> TryFetchSeedAsync(string serverKey, CancellationToken cancellationToken)
     {
-        if (!IsEnabled())
-        {
-            AppLog.Add(() => "AuthObserved: seed fetch skipped (telemetry disabled)." );
-            return null;
-        }
 
         if (string.IsNullOrWhiteSpace(serverKey))
             return null;
@@ -204,7 +171,7 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
                     TalkgroupValue = tgV,
                     TalkgroupLabel = string.IsNullOrWhiteSpace(it.TalkgroupLabel) ? tgV : it.TalkgroupLabel.Trim(),
                     SeenCount = it.SeenCount,
-                    LastSeenUtc = it.LastSeenUtc ?? DateTime.MinValue
+                    LastSeenUtc = TryParseUtc(it.LastSeenUtcRaw ?? string.Empty) ?? DateTime.MinValue
                 });
             }
 
@@ -219,22 +186,9 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
 
     public async Task TryReportAsync(string serverKey, bool force, CancellationToken cancellationToken)
     {
-        if (!IsEnabled())
-        {
-            AppLog.Add(() => "AuthObserved: report skipped (telemetry disabled)." );
-            return;
-        }
 
         if (string.IsNullOrWhiteSpace(serverKey))
             return;
-
-        var lastUtcRaw = AppStateStore.GetString(GetLastReportUtcKey(serverKey), string.Empty);
-        var lastUtc = TryParseUtc(lastUtcRaw);
-        if (!force && lastUtc.HasValue && (DateTime.UtcNow - lastUtc.Value) < ReportMinInterval)
-        {
-            AppLog.Add(() => $"AuthObserved: report skipped (throttle). server={serverKey} last={lastUtc.Value:O}");
-            return;
-        }
 
         // When force is requested (manual sync), backfill the full local history so a server with
         // existing local history can immediately populate the observed triples table.
@@ -293,7 +247,10 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
                 return;
             }
 
-            AppLog.Add(() => $"AuthObserved: report POST ok. server={serverKey} items={delta.Count}");
+            var okBody = string.Empty;
+            try { okBody = await resp.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false); } catch { }
+            if (okBody.Length > 300) okBody = okBody.Substring(0, 300);
+            AppLog.Add(() => $"AuthObserved: report POST ok. server={serverKey} items={delta.Count} body='{okBody}'");
 
             AppStateStore.SetString(GetLastReportUtcKey(serverKey), DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture));
             if (maxLastSeen.HasValue)
@@ -303,6 +260,215 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
         {
             AppLog.Add(() => $"AuthObserved: report POST exception. server={serverKey} ex={ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    public async Task<IReadOnlyList<ObservedTriple>?> TrySyncExchangeAsync(string serverKey, bool force, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(serverKey))
+            return null;
+
+        var lastCutoffRaw = AppStateStore.GetString(GetLastCutoffUtcKey(serverKey), string.Empty);
+        var sinceUtc = force
+            ? DateTime.MinValue
+            : (TryParseUtc(lastCutoffRaw) ?? DateTime.UtcNow.AddDays(-7));
+
+        List<ObservedTripleReportItem> delta;
+        DateTime? maxLastSeen;
+        try
+        {
+            (delta, maxLastSeen) = await QueryObservedDeltaAsync(serverKey, sinceUtc, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Add(() => $"AuthObserved: exchange query failed. server={serverKey} ex={ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+
+        var payload = new ObservedTriplesReportRequestDto
+        {
+            ServerKey = serverKey,
+            DeviceId = _settings.DeviceInstallId ?? string.Empty,
+            SessionToken = _settings.AuthSessionToken ?? string.Empty,
+            ForceTouch = force,
+            Items = delta
+        };
+
+        var endpoint = GetEndpoint();
+
+        try
+        {
+            AppLog.Add(() => $"AuthObserved: exchange POST start. server={serverKey} items={delta.Count} since={sinceUtc:O}");
+
+            var json = JsonSerializer.Serialize(payload, JsonOptions);
+            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+            using var resp = await _httpClient.PostAsync(endpoint, content, cancellationToken).ConfigureAwait(false);
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                var errBody = string.Empty;
+                try { errBody = await resp.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false); } catch { }
+                if (errBody.Length > 300) errBody = errBody.Substring(0, 300);
+                AppLog.Add(() => $"AuthObserved: exchange POST failed. status={(int)resp.StatusCode} body='{errBody}'");
+                return null;
+            }
+
+            var body = string.Empty;
+            try { body = await resp.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false); } catch { }
+            if (string.IsNullOrWhiteSpace(body))
+                return null;
+
+            if (body.Length > 300)
+                AppLog.Add(() => $"AuthObserved: exchange POST ok. server={serverKey} items={delta.Count} body='{body.Substring(0, 300)}'");
+            else
+                AppLog.Add(() => $"AuthObserved: exchange POST ok. server={serverKey} items={delta.Count} body='{body}'");
+
+            var dto = JsonSerializer.Deserialize<ObservedTriplesExchangeResponseDto>(body, JsonOptions);
+            if (dto == null || !dto.Ok || dto.Items == null)
+                return null;
+
+            var mergedMap = new Dictionary<string, ObservedTriple>(StringComparer.OrdinalIgnoreCase);
+
+            static string MakeKey(string a, string b, string c) => (a ?? string.Empty) + "\n" + (b ?? string.Empty) + "\n" + (c ?? string.Empty);
+
+foreach (var it in dto.Items)
+{
+    if (it == null)
+        continue;
+
+    var rxV = (it.ReceiverValue ?? string.Empty).Trim();
+    var siteV = (it.SiteValue ?? string.Empty).Trim();
+    var tgV = (it.TalkgroupValue ?? string.Empty).Trim();
+    if (string.IsNullOrWhiteSpace(rxV) || string.IsNullOrWhiteSpace(siteV) || string.IsNullOrWhiteSpace(tgV))
+        continue;
+
+    var rxL = string.IsNullOrWhiteSpace(it.ReceiverLabel) ? rxV : it.ReceiverLabel.Trim();
+    var siteL = string.IsNullOrWhiteSpace(it.SiteLabel) ? siteV : it.SiteLabel.Trim();
+    var tgL = string.IsNullOrWhiteSpace(it.TalkgroupLabel) ? tgV : it.TalkgroupLabel.Trim();
+
+    var seen = it.SeenCount;
+    var last = TryParseUtc(it.LastSeenUtcRaw ?? string.Empty) ?? DateTime.MinValue;
+
+    var key = MakeKey(rxV, siteV, tgV);
+    if (!mergedMap.TryGetValue(key, out var existing))
+    {
+        mergedMap[key] = new ObservedTriple
+        {
+            ReceiverValue = rxV,
+            ReceiverLabel = rxL,
+            SiteValue = siteV,
+            SiteLabel = siteL,
+            TalkgroupValue = tgV,
+            TalkgroupLabel = tgL,
+            SeenCount = seen,
+            LastSeenUtc = last
+        };
+        continue;
+    }
+
+    // Merge: keep max counts and latest last-seen, and prefer the more descriptive labels.
+    if (seen > existing.SeenCount)
+        existing.SeenCount = seen;
+
+    if (last > existing.LastSeenUtc)
+        existing.LastSeenUtc = last;
+
+    if (!string.IsNullOrWhiteSpace(rxL) && rxL.Length > (existing.ReceiverLabel?.Length ?? 0))
+        existing.ReceiverLabel = rxL;
+
+    if (!string.IsNullOrWhiteSpace(siteL) && siteL.Length > (existing.SiteLabel?.Length ?? 0))
+        existing.SiteLabel = siteL;
+
+    if (!string.IsNullOrWhiteSpace(tgL) && tgL.Length > (existing.TalkgroupLabel?.Length ?? 0))
+        existing.TalkgroupLabel = tgL;
+}
+
+var merged = mergedMap.Values
+    .OrderBy(x => x.ReceiverLabel ?? x.ReceiverValue ?? string.Empty, StringComparer.OrdinalIgnoreCase)
+    .ThenBy(x => x.SiteLabel ?? x.SiteValue ?? string.Empty, StringComparer.OrdinalIgnoreCase)
+    .ThenBy(x => x.TalkgroupLabel ?? x.TalkgroupValue ?? string.Empty, StringComparer.OrdinalIgnoreCase)
+    .ToList();
+
+AppStateStore.SetString(GetLastReportUtcKey(serverKey), DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+if (maxLastSeen.HasValue)
+    AppStateStore.SetString(GetLastCutoffUtcKey(serverKey), maxLastSeen.Value.ToString("O", CultureInfo.InvariantCulture));
+
+AppLog.Add(() => $"AuthObserved: exchange merged ok. server={serverKey} merged={merged.Count} serverLastReportUtc='{dto.ServerLastReportUtc ?? string.Empty}'");
+return merged.Count == 0 ? null : merged;
+
+        }
+        catch (Exception ex)
+        {
+            AppLog.Add(() => $"AuthObserved: exchange POST exception. server={serverKey} ex={ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
+
+    public async Task<IReadOnlyList<ObservedTriple>> GetLocalObservedAsync(string serverKey, DateTime sinceUtc, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(serverKey))
+            return Array.Empty<ObservedTriple>();
+
+        // Use the same selection logic as reporting. Keep it fast and bounded.
+        var items = new List<ObservedTriple>();
+
+        await using var conn = new SqliteConnection($"Data Source={_dbPathProvider.DbPath}");
+        await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+SELECT
+  COALESCE(NULLIF(voice_receiver, ''), NULLIF(source_label, ''), NULLIF(system_label, ''), '') AS receiver_value,
+  COALESCE(NULLIF(site_id, ''), NULLIF(site_label, ''), '') AS site_value,
+  COALESCE(NULLIF(site_label, ''), NULLIF(site_id, ''), '') AS site_label,
+  COALESCE(NULLIF(target_id, ''), NULLIF(target_label, ''), '') AS talkgroup_value,
+  COALESCE(NULLIF(target_label, ''), NULLIF(target_id, ''), '') AS talkgroup_label,
+  COUNT(1) AS seen_count,
+  MAX(received_at_utc) AS last_seen_utc
+FROM calls
+WHERE server_key = $server_key
+  AND received_at_utc > $since_utc
+  AND COALESCE(NULLIF(voice_receiver, ''), NULLIF(source_label, ''), NULLIF(system_label, ''), '') <> ''
+  AND COALESCE(NULLIF(site_id, ''), NULLIF(site_label, ''), '') <> ''
+  AND COALESCE(NULLIF(target_id,''), NULLIF(target_label,''), '') <> ''
+GROUP BY receiver_value, site_value, talkgroup_value
+ORDER BY last_seen_utc DESC
+LIMIT 5000;";
+        cmd.Parameters.AddWithValue("$server_key", serverKey);
+        cmd.Parameters.AddWithValue("$since_utc", sinceUtc.ToString("O", CultureInfo.InvariantCulture));
+
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var receiverValueRaw = reader.GetString(0).Trim();
+            var siteValueRaw = reader.GetString(1).Trim();
+            var siteLabelRaw = reader.GetString(2).Trim();
+            var talkgroupValueRaw = reader.GetString(3).Trim();
+            var talkgroupLabelRaw = reader.GetString(4).Trim();
+            var seenCount = reader.GetInt32(5);
+            var lastSeenRaw = reader.IsDBNull(6) ? string.Empty : reader.GetString(6);
+
+            var receiverCanonical = CanonicalizeIdentityPart(receiverValueRaw, receiverValueRaw);
+            var siteCanonical = CanonicalizeIdentityPart(siteLabelRaw, siteValueRaw);
+            var talkgroupCanonical = CanonicalizeIdentityPart(talkgroupLabelRaw, talkgroupValueRaw);
+            if (string.IsNullOrWhiteSpace(receiverCanonical) || string.IsNullOrWhiteSpace(siteCanonical) || string.IsNullOrWhiteSpace(talkgroupCanonical))
+                continue;
+
+            var lastSeenUtc = TryParseUtc(lastSeenRaw) ?? DateTime.UtcNow;
+
+            items.Add(new ObservedTriple
+            {
+                ReceiverValue = receiverCanonical,
+                ReceiverLabel = receiverCanonical,
+                SiteValue = siteCanonical,
+                SiteLabel = siteCanonical,
+                TalkgroupValue = talkgroupCanonical,
+                TalkgroupLabel = talkgroupCanonical,
+                SeenCount = seenCount,
+                LastSeenUtc = lastSeenUtc
+            });
+        }
+
+        return items;
     }
 
     private async Task<(List<ObservedTripleReportItem> Items, DateTime? MaxLastSeenUtc)> QueryObservedDeltaAsync(string serverKey, DateTime sinceUtc, CancellationToken cancellationToken)
@@ -322,8 +488,8 @@ SELECT
   COALESCE(NULLIF(voice_receiver, ''), NULLIF(source_label, ''), NULLIF(system_label, ''), '') AS receiver_value,
   COALESCE(NULLIF(site_id, ''), NULLIF(site_label, ''), '') AS site_value,
   COALESCE(NULLIF(site_label, ''), NULLIF(site_id, ''), '') AS site_label,
-  COALESCE(target_id, '') AS talkgroup_value,
-  COALESCE(NULLIF(target_label, ''), target_id, '') AS talkgroup_label,
+  COALESCE(NULLIF(target_id, ''), NULLIF(target_label, ''), '') AS talkgroup_value,
+  COALESCE(NULLIF(target_label, ''), NULLIF(target_id, ''), '') AS talkgroup_label,
   COUNT(1) AS seen_count,
   MAX(received_at_utc) AS last_seen_utc
 FROM calls
@@ -331,8 +497,8 @@ WHERE server_key = $server_key
   AND received_at_utc > $since_utc
   AND COALESCE(NULLIF(voice_receiver, ''), NULLIF(source_label, ''), NULLIF(system_label, ''), '') <> ''
   AND COALESCE(NULLIF(site_id, ''), NULLIF(site_label, ''), '') <> ''
-  AND COALESCE(target_id,'') <> ''
-GROUP BY receiver_value, site_value, site_label, talkgroup_value, talkgroup_label
+  AND COALESCE(NULLIF(target_id,''), NULLIF(target_label,''), '') <> ''
+GROUP BY receiver_value, site_value, talkgroup_value
 ORDER BY last_seen_utc DESC
 LIMIT 5000;";
         cmd.Parameters.AddWithValue("$server_key", serverKey);
@@ -341,18 +507,19 @@ LIMIT 5000;";
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
         while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
         {
-            var receiverValue = reader.GetString(0).Trim();
+            var receiverValueRaw = reader.GetString(0).Trim();
             var siteValueRaw = reader.GetString(1).Trim();
-            var siteLabel = reader.GetString(2).Trim();
-            var talkgroupValue = reader.GetString(3).Trim();
-            var talkgroupLabel = reader.GetString(4).Trim();
+            var siteLabelRaw = reader.GetString(2).Trim();
+            var talkgroupValueRaw = reader.GetString(3).Trim();
+            var talkgroupLabelRaw = reader.GetString(4).Trim();
             var seenCount = reader.GetInt32(5);
             var lastSeenRaw = reader.IsDBNull(6) ? string.Empty : reader.GetString(6);
 
-            if (string.IsNullOrWhiteSpace(receiverValue) || string.IsNullOrWhiteSpace(siteLabel) || string.IsNullOrWhiteSpace(talkgroupValue))
+            var receiverCanonical = CanonicalizeIdentityPart(receiverValueRaw, receiverValueRaw);
+            var siteCanonical = CanonicalizeIdentityPart(siteLabelRaw, siteValueRaw);
+            var talkgroupCanonical = CanonicalizeIdentityPart(talkgroupLabelRaw, talkgroupValueRaw);
+            if (string.IsNullOrWhiteSpace(receiverCanonical) || string.IsNullOrWhiteSpace(siteCanonical) || string.IsNullOrWhiteSpace(talkgroupCanonical))
                 continue;
-
-            var siteValue = string.IsNullOrWhiteSpace(siteValueRaw) ? siteLabel : siteValueRaw;
 
             var lastSeenUtc = TryParseUtc(lastSeenRaw) ?? DateTime.UtcNow;
             if (!maxLastSeen.HasValue || lastSeenUtc > maxLastSeen.Value)
@@ -360,12 +527,12 @@ LIMIT 5000;";
 
             items.Add(new ObservedTripleReportItem
             {
-                ReceiverValue = receiverValue,
-                ReceiverLabel = receiverValue,
-                SiteValue = siteValue,
-                SiteLabel = siteLabel,
-                TalkgroupValue = talkgroupValue,
-                TalkgroupLabel = string.IsNullOrWhiteSpace(talkgroupLabel) ? talkgroupValue : talkgroupLabel,
+                ReceiverValue = receiverCanonical,
+                ReceiverLabel = receiverCanonical,
+                SiteValue = siteCanonical,
+                SiteLabel = siteCanonical,
+                TalkgroupValue = talkgroupCanonical,
+                TalkgroupLabel = talkgroupCanonical,
                 SeenCountDelta = seenCount,
                 LastSeenUtc = lastSeenUtc
             });
@@ -380,6 +547,15 @@ LIMIT 5000;";
         [JsonPropertyName("items")] public List<ObservedTriplesItemDto>? Items { get; set; }
     }
 
+    private sealed class ObservedTriplesExchangeResponseDto
+    {
+        [JsonPropertyName("ok")] public bool Ok { get; set; }
+        [JsonPropertyName("inserted")] public int Inserted { get; set; }
+        [JsonPropertyName("updated")] public int Updated { get; set; }
+        [JsonPropertyName("server_last_reported_at_utc")] public string? ServerLastReportUtc { get; set; }
+        [JsonPropertyName("items")] public List<ObservedTriplesItemDto>? Items { get; set; }
+    }
+
     private sealed class ObservedTriplesItemDto
     {
         [JsonPropertyName("receiver_value")] public string? ReceiverValue { get; set; }
@@ -389,7 +565,9 @@ LIMIT 5000;";
         [JsonPropertyName("talkgroup_value")] public string? TalkgroupValue { get; set; }
         [JsonPropertyName("talkgroup_label")] public string? TalkgroupLabel { get; set; }
         [JsonPropertyName("seen_count")] public int SeenCount { get; set; }
-        [JsonPropertyName("last_seen_utc")] public DateTime? LastSeenUtc { get; set; }
+        // The WordPress API may return UTC timestamps in either ISO 8601 (recommended)
+        // or legacy "yyyy-MM-dd HH:mm:ss" format. Parse manually to avoid hard failures.
+        [JsonPropertyName("last_seen_utc")] public string? LastSeenUtcRaw { get; set; }
     }
 
     private sealed class ObservedTriplesReportRequestDto

@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Collections.Concurrent;
 using System.Text.Json;
 using JoesScanner.Models;
 using Microsoft.Data.Sqlite;
@@ -19,8 +20,47 @@ namespace JoesScanner.Services
         };
 
         private readonly SemaphoreSlim _gate = new(1, 1);
+        private sealed record CacheEntry(int Stamp, IReadOnlyList<FilterProfile> Profiles);
 
-        private static string DbPath => Path.Combine(FileSystem.AppDataDirectory, DbFileName);
+        private readonly ConcurrentDictionary<string, CacheEntry> _serverCache = new(StringComparer.OrdinalIgnoreCase);
+        private CacheEntry? _allCache;
+        private int _cacheStamp;
+
+        private void InvalidateCache()
+        {
+            Interlocked.Increment(ref _cacheStamp);
+            _serverCache.Clear();
+            _allCache = null;
+        }
+
+        private static IReadOnlyList<FilterProfile> CloneProfiles(IReadOnlyList<FilterProfile> source)
+        {
+            if (source == null || source.Count == 0)
+                return Array.Empty<FilterProfile>();
+
+            var list = new List<FilterProfile>(source.Count);
+            foreach (var p in source)
+            {
+                if (p == null)
+                    continue;
+
+                list.Add(new FilterProfile
+                {
+                    Id = p.Id,
+                    Name = p.Name,
+                    ServerKey = p.ServerKey,
+                    CreatedUtc = p.CreatedUtc,
+                    UpdatedUtc = p.UpdatedUtc,
+                    Filters = p.Filters == null ? new FilterProfileFilters() : JsonSerializer.Deserialize<FilterProfileFilters>(JsonSerializer.Serialize(p.Filters, JsonOptions), JsonOptions) ?? new FilterProfileFilters(),
+                    Rules = p.Rules == null ? new List<FilterRuleStateRecord>() : JsonSerializer.Deserialize<List<FilterRuleStateRecord>>(JsonSerializer.Serialize(p.Rules, JsonOptions), JsonOptions) ?? new List<FilterRuleStateRecord>()
+                });
+            }
+
+            return list;
+        }
+
+
+        private static string DbPath => AppPaths.GetDbPath(DbFileName);
 
         private static SqliteConnection OpenConnection()
         {
@@ -92,6 +132,11 @@ CREATE INDEX IF NOT EXISTS idx_filter_profiles_server_key ON {TableName}(server_
 
         public async Task<IReadOnlyList<FilterProfile>> GetProfilesAsync(CancellationToken cancellationToken = default)
         {
+            var stamp = Volatile.Read(ref _cacheStamp);
+            var allCached = _allCache;
+            if (allCached != null && allCached.Stamp == stamp)
+                return CloneProfiles(allCached.Profiles);
+
             await _gate.WaitAsync(cancellationToken);
             try
             {
@@ -111,6 +156,10 @@ ORDER BY name COLLATE NOCASE;";
                         list.Add(p);
                 }
 
+                // Cache the snapshot for subsequent reads in this process.
+                _allCache = new CacheEntry(stamp, CloneProfiles(list));
+
+
                 return list;
             }
             finally
@@ -122,6 +171,11 @@ ORDER BY name COLLATE NOCASE;";
         public async Task<IReadOnlyList<FilterProfile>> GetProfilesForServerAsync(string serverKey, CancellationToken cancellationToken = default)
         {
             var key = (serverKey ?? string.Empty).Trim();
+
+            var stamp = Volatile.Read(ref _cacheStamp);
+            if (_serverCache.TryGetValue(key, out var cached) && cached.Stamp == stamp)
+                return CloneProfiles(cached.Profiles);
+
 
             await _gate.WaitAsync(cancellationToken);
             try
@@ -170,6 +224,10 @@ ORDER BY name COLLATE NOCASE;";
                 {
                     await MigrateServerKeyAsync(conn, needsMigration, key, cancellationToken);
                 }
+
+                // Cache the snapshot for subsequent reads in this process.
+                _serverCache[key] = new CacheEntry(stamp, CloneProfiles(list));
+
 
                 return list;
             }
@@ -258,6 +316,8 @@ ON CONFLICT(profile_id) DO UPDATE SET
                 cmd.Parameters.AddWithValue("$rj", rulesJson);
 
                 await cmd.ExecuteNonQueryAsync(cancellationToken);
+
+                InvalidateCache();
             }
             finally
             {
@@ -278,6 +338,8 @@ ON CONFLICT(profile_id) DO UPDATE SET
                 cmd.CommandText = $"DELETE FROM {TableName} WHERE profile_id = $id;";
                 cmd.Parameters.AddWithValue("$id", profileId);
                 await cmd.ExecuteNonQueryAsync(cancellationToken);
+
+                InvalidateCache();
             }
             finally
             {
@@ -308,6 +370,8 @@ WHERE profile_id = $id;";
                 cmd.Parameters.AddWithValue("$name", name);
                 cmd.Parameters.AddWithValue("$u", DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
                 await cmd.ExecuteNonQueryAsync(cancellationToken);
+
+                InvalidateCache();
             }
             finally
             {
@@ -398,6 +462,9 @@ ON CONFLICT(profile_id) DO UPDATE SET
                     cmd.Parameters.AddWithValue("$rj", rulesJson);
                     await cmd.ExecuteNonQueryAsync(cancellationToken);
                 }
+
+                InvalidateCache();
+
             }
             finally
             {

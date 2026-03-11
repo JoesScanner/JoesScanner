@@ -5,8 +5,8 @@ namespace JoesScanner.Services
 {
     // Centralized dialog helper.
     // RootPage hosts tab content as Views, so many ContentPages are not part of the active Window.
-    // Calling DisplayAlert / DisplayActionSheet on those detached pages can fail.
-    // Always present dialogs from the active visual root (Shell or MainPage).
+    // Calling DisplayAlert or DisplayActionSheet on those detached pages can fail.
+    // Always present dialogs from the active visual root (Shell or window root page).
     internal static class UiDialogs
     {
         private static Page? GetHostPage()
@@ -16,8 +16,15 @@ namespace JoesScanner.Services
                 if (Shell.Current is Page shellPage)
                     return shellPage;
 
-                if (Application.Current?.MainPage is Page mainPage)
+                var app = Application.Current;
+                var windows = app?.Windows;
+                if (windows != null && windows.Count > 0 && windows[0].Page is Page windowPage)
+                    return windowPage;
+
+#pragma warning disable CS0618
+                if (app?.MainPage is Page mainPage)
                     return mainPage;
+#pragma warning restore CS0618
             }
             catch
             {
@@ -34,7 +41,7 @@ namespace JoesScanner.Services
                 if (host == null)
                     return;
 
-                await host.DisplayAlert(title, message, cancel);
+                await host.DisplayAlertAsync(title, message, cancel);
             });
         }
 
@@ -46,7 +53,7 @@ namespace JoesScanner.Services
                 if (host == null)
                     return false;
 
-                return await host.DisplayAlert(title, message, accept, cancel);
+                return await host.DisplayAlertAsync(title, message, accept, cancel);
             });
         }
 
@@ -58,7 +65,7 @@ namespace JoesScanner.Services
                 if (host == null)
                     return null;
 
-                return await host.DisplayActionSheet(title, cancel, destruction, buttons);
+                return await host.DisplayActionSheetAsync(title, cancel, destruction, buttons);
             });
         }
 

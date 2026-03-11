@@ -6,8 +6,10 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Tasks;
 using System.Linq;
 using Microsoft.Maui.ApplicationModel;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace JoesScanner.Views
 {
@@ -17,6 +19,7 @@ namespace JoesScanner.Views
     // Also provides handlers for filter tap gestures.
     public partial class SettingsPage : ContentPage, ITabHidingAware
     {
+        private readonly IAppUpdateService? _appUpdateService;
 
         // Profile UI is managed via a simple Picker plus a Manage menu.
 
@@ -24,36 +27,137 @@ namespace JoesScanner.Views
         // BindingContext is expected to be supplied by DI / Shell.
         public SettingsPage()
         {
-            InitializeComponent();
-            SetAppVersionText();
+            SafeInitializeComponent();
+            _appUpdateService = ResolveAppUpdateService();
+            SetAppVersionTextSafe();
+            SetAboutInfoTextSafe();
             // No per page edit mode state.
         }
 
         // Optional constructor if you ever want to inject the view model.
-        public SettingsPage(SettingsViewModel viewModel)
+        public SettingsPage(SettingsViewModel viewModel, IAppUpdateService appUpdateService)
         {
-            InitializeComponent();
+            SafeInitializeComponent();
             BindingContext = viewModel;
-            SetAppVersionText();
+            _appUpdateService = appUpdateService;
+            SetAppVersionTextSafe();
+            SetAboutInfoTextSafe();
             // No per page edit mode state.
         }
 
 
-
-        private void SetAppVersionText()
+        private void SafeInitializeComponent()
         {
-            // UI should show only Major.Minor.Patch, even if the platform reports 4 parts.
-            var raw = AppInfo.Current.VersionString ?? string.Empty;
+            try
+            {
+                InitializeComponent();
+            }
+            catch (Exception ex)
+            {
+                // If XAML load fails (often a WinRT/WinUI COMException when running unpackaged),
+                // don't let it abort navigation. Render a simple fallback view and log details.
+                try { AppLog.DebugWriteLine(() => $"SettingsPage.InitializeComponent failed: {ex}"); } catch { }
 
-            var parts = raw.Split('.', StringSplitOptions.RemoveEmptyEntries);
-
-            var display =
-                parts.Length >= 3
-                    ? $"{parts[0]}.{parts[1]}.{parts[2]}"
-                    : raw;
-
-            AppVersionLabel.Text = $"v{display}";
+                Content = new ScrollView
+                {
+                    Content = new VerticalStackLayout
+                    {
+                        Padding = new Thickness(16),
+                        Spacing = 12,
+                        Children =
+                        {
+                            new Label { Text = "Settings failed to load", FontSize = 20, FontAttributes = FontAttributes.Bold },
+                            new Label { Text = "A platform component failed while loading the Settings UI.", FontSize = 14 },
+                            new Label { Text = ex.ToString(), FontSize = 12 }
+                        }
+                    }
+                };
+            }
         }
+
+
+
+        private static IAppUpdateService? ResolveAppUpdateService()
+        {
+            try
+            {
+                return Application.Current?.Handler?.MauiContext?.Services?.GetService<IAppUpdateService>();
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private void SetAboutInfoTextSafe()
+        {
+            try
+            {
+                if (_appUpdateService == null)
+                    return;
+
+                if (AboutVersionLabel != null)
+                    AboutVersionLabel.Text = $"v{_appUpdateService.CurrentVersionDisplay}";
+
+                if (AboutPlatformLabel != null)
+                    AboutPlatformLabel.Text = _appUpdateService.PlatformDisplayName;
+
+                if (AboutStoreLabel != null)
+                    AboutStoreLabel.Text = _appUpdateService.StoreDisplayName;
+            }
+            catch
+            {
+            }
+        }
+
+        private void SetAppVersionTextSafe()
+{
+    // UI should show only Major.Minor.Patch, even if the platform reports 4 parts.
+    // On Windows, AppInfo can throw when the app is running unpackaged (no package identity).
+    // Keep Settings navigation resilient by falling back to the assembly version.
+    string raw;
+
+    try
+    {
+        raw = AppInfo.Current.VersionString ?? string.Empty;
+    }
+    catch
+    {
+        raw = string.Empty;
+    }
+
+    if (string.IsNullOrWhiteSpace(raw))
+    {
+        try
+        {
+            raw = typeof(App).Assembly.GetName().Version?.ToString() ?? string.Empty;
+        }
+        catch
+        {
+            raw = string.Empty;
+        }
+    }
+
+    if (string.IsNullOrWhiteSpace(raw))
+        raw = "0.0.0";
+
+    var parts = raw.Split('.', StringSplitOptions.RemoveEmptyEntries);
+
+    var display =
+        parts.Length >= 3
+            ? $"{parts[0]}.{parts[1]}.{parts[2]}"
+            : raw;
+
+    try
+    {
+        if (AppVersionLabel != null)
+            AppVersionLabel.Text = $"v{display}";
+    }
+    catch
+    {
+    }
+}
+
 
 
         protected override void OnAppearing()
@@ -64,7 +168,7 @@ namespace JoesScanner.Views
             {
                 if (LogEnabledToggle != null)
                 {
-                    LogEnabledToggle.IsToggled = AppLog.IsEnabled;
+                    LogEnabledToggle.IsToggled = AppLog.ReloadEnabledStateFromStorage();
                 }
             }
             catch
@@ -86,13 +190,39 @@ namespace JoesScanner.Views
                     {
                         try
                         {
-                            AppLog.DebugWriteLine($"SettingsPage.OnAppearing load failed: {ex}");
+                            AppLog.DebugWriteLine(() => $"SettingsPage.OnAppearing load failed: {ex}");
                         }
                         catch
                         {
                         }
                     }
                 });
+            }
+        }
+        private async void OnFilterTextSliderValueChanged(object sender, ValueChangedEventArgs e)
+        {
+            await ApplyFilterTextHorizontalScrollAsync(e.NewValue);
+        }
+
+        private async void OnFilterRulesTextScrollViewLoaded(object sender, EventArgs e)
+        {
+            if (BindingContext is SettingsViewModel vm)
+            {
+                await ApplyFilterTextHorizontalScrollAsync(vm.FilterTextHorizontalOffset);
+            }
+        }
+
+        private async Task ApplyFilterTextHorizontalScrollAsync(double offset)
+        {
+            try
+            {
+                if (FilterRulesTextScrollView == null)
+                    return;
+
+                await FilterRulesTextScrollView.ScrollToAsync(offset, 0, false);
+            }
+            catch
+            {
             }
         }
 
@@ -531,7 +661,10 @@ namespace JoesScanner.Views
             try
             {
                 // Force bindings to commit their Text values.
-                ServerUrlEntry?.Unfocus();
+                // Only unfocus the custom URL entry when Custom server is actually selected.
+                if (BindingContext is SettingsViewModel urlVm && urlVm.IsCustomServerSelected)
+                    ServerUrlEntry?.Unfocus();
+
                 BasicAuthUsernameEntry?.Unfocus();
                 BasicAuthPasswordEntry?.Unfocus();
 
@@ -550,7 +683,7 @@ namespace JoesScanner.Views
             {
                 try
                 {
-                    AppLog.DebugWriteLine($"SettingsPage.OnValidateClicked failed: {ex}");
+                    AppLog.DebugWriteLine(() => $"SettingsPage.OnValidateClicked failed: {ex}");
                 }
                 catch
                 {
@@ -558,7 +691,7 @@ namespace JoesScanner.Views
             }
         }
 
-private void ToggleSection(VisualElement body, Label chevron, VisualElement description = null)
+private void ToggleSection(VisualElement body, Label chevron, VisualElement? description = null)
 {
     if (body == null || chevron == null)
         return;
@@ -572,7 +705,7 @@ private void ToggleSection(VisualElement body, Label chevron, VisualElement desc
         description.IsVisible = body.IsVisible;
 }
 
-private void CollapseSection(VisualElement body, Label chevron, VisualElement description = null)
+private void CollapseSection(VisualElement body, Label chevron, VisualElement? description = null)
 {
     if (body == null || chevron == null)
         return;
@@ -616,38 +749,43 @@ private void OnConnectionHeaderTapped(object sender, EventArgs e)
 {
     ToggleSection(ConnectionFieldsGrid, ConnectionChevronLabel, ConnectionDescriptionLabel);
 
-    if (ConnectionFieldsGrid.IsVisible && BindingContext is SettingsViewModel vm)
+    if (!ConnectionFieldsGrid.IsVisible)
+        return;
+
+    var vm = BindingContext as SettingsViewModel;
+    if (vm == null)
+        return;
+
+    MainThread.BeginInvokeOnMainThread(async () =>
     {
-        MainThread.BeginInvokeOnMainThread(async () =>
+        try
         {
-            try
-            {
-                await vm.EnsureDirectoryServersFreshAsync(force: false);
-            }
-            catch (Exception ex)
-            {
-                try { AppLog.DebugWriteLine($"SettingsPage: connection refresh failed: {ex}"); } catch { }
-            }
-        });
-    }
+            await vm.EnsureDirectoryServersFreshAsync(force: false);
+        }
+        catch (Exception ex)
+        {
+            try { AppLog.DebugWriteLine(() => $"SettingsPage: connection refresh failed: {ex}"); } catch { }
+        }
+    });
 }
 
 private void OnServerPickerFocused(object sender, FocusEventArgs e)
 {
-    if (BindingContext is SettingsViewModel vm)
+    var vm = BindingContext as SettingsViewModel;
+    if (vm == null)
+        return;
+
+    MainThread.BeginInvokeOnMainThread(async () =>
     {
-        MainThread.BeginInvokeOnMainThread(async () =>
+        try
         {
-            try
-            {
-                await vm.EnsureDirectoryServersFreshAsync(force: false);
-            }
-            catch (Exception ex)
-            {
-                try { AppLog.DebugWriteLine($"SettingsPage: picker refresh failed: {ex}"); } catch { }
-            }
-        });
-    }
+            await vm.EnsureDirectoryServersFreshAsync(force: false);
+        }
+        catch (Exception ex)
+        {
+            try { AppLog.DebugWriteLine(() => $"SettingsPage: picker refresh failed: {ex}"); } catch { }
+        }
+    });
 }
 
 private void OnAutoplayHeaderTapped(object sender, EventArgs e)
@@ -661,16 +799,37 @@ private void OnAutoplayHeaderTapped(object sender, EventArgs e)
 
 private void OnFiltersHeaderTapped(object sender, EventArgs e)
 {
+    var willOpen = !FiltersBodyLayout.IsVisible;
+
     ToggleSection(FiltersBodyLayout, FiltersChevronLabel);
     if (BindingContext is SettingsViewModel vm)
-    {
         vm.SetSettingsCardOpenState("Filters", FiltersBodyLayout.IsVisible);
-    }
+
+    if (!willOpen || BindingContext is not SettingsViewModel loadVm)
+        return;
+
+    MainThread.BeginInvokeOnMainThread(async () =>
+    {
+        try
+        {
+            await Task.Yield();
+            await loadVm.EnsureFiltersReadyAsync();
+        }
+        catch (Exception ex)
+        {
+            try { AppLog.DebugWriteLine(() => $"SettingsPage: filters load failed: {ex}"); } catch { }
+        }
+    });
 }
 
 
 private void OnAudioFiltersHeaderTapped(object sender, EventArgs e)
 {
+    var willOpen = !AudioFiltersBodyLayout.IsVisible;
+    var pre = BindingContext as SettingsViewModel;
+    if (willOpen && pre != null)
+        pre.EnsureSectionLoaded("AudioFilters");
+
     ToggleSection(AudioFiltersBodyLayout, AudioFiltersChevronLabel);
     if (BindingContext is SettingsViewModel vm)
     {
@@ -680,6 +839,11 @@ private void OnAudioFiltersHeaderTapped(object sender, EventArgs e)
 
 private void OnAddressDetectionHeaderTapped(object sender, EventArgs e)
 {
+    var willOpen = !AddressDetectionBodyLayout.IsVisible;
+    var pre = BindingContext as SettingsViewModel;
+    if (willOpen && pre != null)
+        pre.EnsureSectionLoaded("AddressDetection");
+
     ToggleSection(AddressDetectionBodyLayout, AddressDetectionChevronLabel);
     if (BindingContext is SettingsViewModel vm)
     {
@@ -689,6 +853,11 @@ private void OnAddressDetectionHeaderTapped(object sender, EventArgs e)
 
 private void OnBluetoothHeaderTapped(object sender, EventArgs e)
 {
+    var willOpen = !BluetoothBodyLayout.IsVisible;
+    var pre = BindingContext as SettingsViewModel;
+    if (willOpen && pre != null)
+        pre.EnsureSectionLoaded("Bluetooth");
+
     ToggleSection(BluetoothBodyLayout, BluetoothChevronLabel);
     if (BindingContext is SettingsViewModel vm)
     {
@@ -698,6 +867,11 @@ private void OnBluetoothHeaderTapped(object sender, EventArgs e)
 
 private void OnThemeHeaderTapped(object sender, EventArgs e)
 {
+    var willOpen = !ThemeBodyLayout.IsVisible;
+    var pre = BindingContext as SettingsViewModel;
+    if (willOpen && pre != null)
+        pre.EnsureSectionLoaded("Theme");
+
     ToggleSection(ThemeBodyLayout, ThemeChevronLabel);
     if (BindingContext is SettingsViewModel vm)
     {
@@ -707,6 +881,11 @@ private void OnThemeHeaderTapped(object sender, EventArgs e)
 
 private void OnTelemetryHeaderTapped(object sender, EventArgs e)
 {
+    var willOpen = !TelemetryBodyLayout.IsVisible;
+    var pre = BindingContext as SettingsViewModel;
+    if (willOpen && pre != null)
+        pre.EnsureSectionLoaded("Telemetry");
+
     ToggleSection(TelemetryBodyLayout, TelemetryChevronLabel);
     if (BindingContext is SettingsViewModel vm)
     {
@@ -716,6 +895,11 @@ private void OnTelemetryHeaderTapped(object sender, EventArgs e)
 
 private void OnLogHeaderTapped(object sender, EventArgs e)
 {
+    var willOpen = !LogBodyLayout.IsVisible;
+    var pre = BindingContext as SettingsViewModel;
+    if (willOpen && pre != null)
+        pre.EnsureSectionLoaded("Log");
+
     ToggleSection(LogBodyLayout, LogChevronLabel);
 
     if (BindingContext is SettingsViewModel vm)
@@ -774,7 +958,7 @@ private async void OnCopyLogClicked(object sender, EventArgs e)
     }
     catch (Exception ex)
     {
-        await UiDialogs.AlertAsync("Error", $"Could not copy the log:\\n{ex.Message}", "Close");
+        await UiDialogs.AlertAsync("Error", $"Could not copy the log:\n{ex.Message}", "Close");
     }
 }
 
@@ -819,11 +1003,66 @@ private async void OnDownloadLogClicked(object sender, EventArgs e)
     }
 }
 
+private async void OnCheckForUpdatesClicked(object sender, EventArgs e)
+{
+    if (_appUpdateService == null)
+    {
+        await UiDialogs.AlertAsync("Updates", "Update service is not available in this build.", "Close");
+        return;
+    }
+
+    try
+    {
+        var result = await _appUpdateService.CheckForUpdatesAsync();
+        await UiDialogs.AlertAsync("Updates", result.Message, "Close");
+    }
+    catch (Exception ex)
+    {
+        await UiDialogs.AlertAsync("Updates", $"Could not check for updates:\n{ex.Message}", "Close");
+    }
+}
+
+private async void OnOpenStorePageClicked(object sender, EventArgs e)
+{
+    if (_appUpdateService == null)
+    {
+        await UiDialogs.AlertAsync("Store page", "Store page is not available in this build.", "Close");
+        return;
+    }
+
+    try
+    {
+        await _appUpdateService.OpenStorePageAsync();
+    }
+    catch (Exception ex)
+    {
+        await UiDialogs.AlertAsync("Store page", $"Could not open the store page:\n{ex.Message}", "Close");
+    }
+}
+
+private async void OnOpenSupportSiteClicked(object sender, EventArgs e)
+{
+    if (_appUpdateService == null)
+    {
+        await UiDialogs.AlertAsync("Support", "Support link is not available in this build.", "Close");
+        return;
+    }
+
+    try
+    {
+        await _appUpdateService.OpenSupportSiteAsync();
+    }
+    catch (Exception ex)
+    {
+        await UiDialogs.AlertAsync("Support", $"Could not open the support site:\n{ex.Message}", "Close");
+    }
+}
+
 private void RefreshLogText()
 {
     try
     {
-        if (!AppLog.IsEnabled)
+        if (!AppLog.ReloadEnabledStateFromStorage())
         {
             LogEditor.Text = "Logging is disabled. Turn on Enable logging to capture entries."; 
             return;

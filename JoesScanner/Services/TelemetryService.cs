@@ -701,7 +701,7 @@ VALUES ($created, $type, $json);";
         {
             try
             {
-                var legacyPath = Path.Combine(FileSystem.AppDataDirectory, "telemetry-events.json");
+                var legacyPath = Path.Combine(AppPaths.GetAppDataDirectorySafe(), "telemetry-events.json");
                 if (File.Exists(legacyPath))
                     File.Delete(legacyPath);
             }

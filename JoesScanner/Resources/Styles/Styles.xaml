@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="UTF-8" ?>
+<?xml version="1.0" encoding="UTF-8" ?>
 <?xaml-comp compile="true" ?>
 <!-- Global control styles and converters shared across the JoesScanner app. -->
 <ResourceDictionary
@@ -37,7 +37,11 @@
         <Setter Property="BorderWidth" Value="0"/>
         <Setter Property="CornerRadius" Value="8"/>
         <Setter Property="Padding" Value="14,10"/>
-        <Setter Property="ToolTipProperties.Text" Value="{Binding Source={RelativeSource Self}, Path=Text}" />
+        <Setter Property="ToolTipProperties.Text">
+            <Setter.Value>
+                <Binding Source="{RelativeSource Self}" Path="Text" x:DataType="Button" />
+            </Setter.Value>
+        </Setter>
         <Setter Property="MinimumHeightRequest" Value="44"/>
         <Setter Property="MinimumWidthRequest" Value="44"/>
         <Setter Property="VisualStateManager.VisualStateGroups">
@@ -61,7 +65,11 @@
         <Setter Property="HeightRequest" Value="22" />
         <Setter Property="MinimumHeightRequest" Value="22" />
         <Setter Property="Padding" Value="8,2" />
-        <Setter Property="ToolTipProperties.Text" Value="{Binding Source={RelativeSource Self}, Path=Text}" />
+        <Setter Property="ToolTipProperties.Text">
+            <Setter.Value>
+                <Binding Source="{RelativeSource Self}" Path="Text" x:DataType="Button" />
+            </Setter.Value>
+        </Setter>
         <Setter Property="FontSize" Value="10" />
         <Setter Property="CornerRadius" Value="8" />
         <Setter Property="TextColor" Value="White" />
@@ -229,7 +237,11 @@
         <Setter Property="CornerRadius" Value="0"/>
         <Setter Property="MinimumHeightRequest" Value="44"/>
         <Setter Property="MinimumWidthRequest" Value="44"/>
-        <Setter Property="ToolTipProperties.Text" Value="{Binding Source={RelativeSource Self}, Path=AutomationId}" />
+        <Setter Property="ToolTipProperties.Text">
+            <Setter.Value>
+                <Binding Source="{RelativeSource Self}" Path="AutomationId" x:DataType="ImageButton" />
+            </Setter.Value>
+        </Setter>
         <Setter Property="VisualStateManager.VisualStateGroups">
             <VisualStateGroupList>
                 <VisualStateGroup x:Name="CommonStates">

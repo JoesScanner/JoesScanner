@@ -25,7 +25,9 @@ namespace JoesScanner.Services
 
         // Keep this bounded so a burst cannot grow memory without limit.
         // DropOldest keeps the most recent events, which is usually what you want for debugging.
-        private static readonly Channel<string> FileChannel = Channel.CreateBounded<string>(new BoundedChannelOptions(5000)
+        private readonly record struct LogWriteItem(string Line, int Generation);
+
+        private static readonly Channel<LogWriteItem> FileChannel = Channel.CreateBounded<LogWriteItem>(new BoundedChannelOptions(5000)
         {
             SingleReader = true,
             SingleWriter = false,
@@ -33,100 +35,186 @@ namespace JoesScanner.Services
         });
 
         private static int _fileWriterStarted;
+        private static int _writeGeneration;
 
         private static volatile bool _isEnabled;
 
         static AppLog()
         {
-            // Default ON so testers get logs unless they explicitly disable them.
-            _isEnabled = Preferences.Get(LogEnabledPreferenceKey, true);
+            // Fail closed until persisted state is resolved. This avoids early startup
+            // writes slipping through when storage APIs are temporarily unavailable.
+            _isEnabled = false;
+
+            // Enforce persisted state immediately on first use so startup cannot keep
+            // stale in-memory or queued log entries alive when logging is off.
+            ReloadEnabledStateFromStorage(purgePersistedLogs: true);
         }
 
         private static bool ReadEnabledPreference()
         {
-            // Preference is the primary source of truth. The marker file is a robust fallback/override
-            // in case Preferences storage is unavailable or fails silently on a given platform/runtime.
+            // Logging must fail closed if we find any explicit disabled marker.
+            // This protects against path changes between packaged/unpackaged or early/late startup resolution.
+            if (TryReadEnabledMarker(out var markerEnabled))
+                return markerEnabled;
+
             try
             {
-                var pref = Preferences.Get(LogEnabledPreferenceKey, true);
-
-                if (TryReadEnabledMarker(out var markerEnabled))
-                    return markerEnabled;
-
-                return pref;
+                return Preferences.Get(LogEnabledPreferenceKey, false);
             }
             catch
             {
-                if (TryReadEnabledMarker(out var markerEnabled))
-                    return markerEnabled;
-
-                return _isEnabled;
+                return false;
             }
         }
 
         private static bool TryReadEnabledMarker(out bool enabled)
         {
             enabled = true;
+            var sawExplicitTrue = false;
 
-            try
+            foreach (var dir in GetCandidateLogsDirectories())
             {
-                var dir = GetLogsDirectory();
-                var path = Path.Combine(dir, LogEnabledMarkerFileName);
-
-                if (!File.Exists(path))
-                    return false;
-
-                var text = (File.ReadAllText(path) ?? string.Empty).Trim();
-
-                if (string.Equals(text, "0", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(text, "false", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(text, "off", StringComparison.OrdinalIgnoreCase))
+                try
                 {
-                    enabled = false;
-                    return true;
-                }
+                    var path = Path.Combine(dir, LogEnabledMarkerFileName);
+                    if (!File.Exists(path))
+                        continue;
 
-                if (string.Equals(text, "1", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(text, "true", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(text, "on", StringComparison.OrdinalIgnoreCase))
+                    var text = (File.ReadAllText(path) ?? string.Empty).Trim();
+
+                    if (string.Equals(text, "0", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(text, "false", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(text, "off", StringComparison.OrdinalIgnoreCase))
+                    {
+                        enabled = false;
+                        return true;
+                    }
+
+                    if (string.Equals(text, "1", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(text, "true", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(text, "on", StringComparison.OrdinalIgnoreCase))
+                    {
+                        sawExplicitTrue = true;
+                    }
+                }
+                catch
                 {
-                    enabled = true;
-                    return true;
                 }
+            }
 
-                // Unrecognized content: ignore and treat as no marker.
-                return false;
-            }
-            catch
-            {
-                return false;
-            }
+            enabled = sawExplicitTrue;
+            return sawExplicitTrue;
         }
 
         private static void TryWriteEnabledMarker(bool enabled)
         {
+            foreach (var dir in GetCandidateLogsDirectories())
+            {
+                try
+                {
+                    Directory.CreateDirectory(dir);
+
+                    var path = Path.Combine(dir, LogEnabledMarkerFileName);
+                    File.WriteAllText(path, enabled ? "1" : "0");
+                }
+                catch
+                {
+                }
+            }
+        }
+
+        private static IReadOnlyList<string> GetCandidateLogsDirectories()
+        {
+            var results = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            void Add(string? path)
+            {
+                if (string.IsNullOrWhiteSpace(path))
+                    return;
+
+                var full = path;
+                try { full = Path.GetFullPath(path); } catch { }
+
+                if (seen.Add(full))
+                    results.Add(full);
+            }
+
             try
             {
-                var dir = GetLogsDirectory();
-                Directory.CreateDirectory(dir);
-
-                var path = Path.Combine(dir, LogEnabledMarkerFileName);
-                File.WriteAllText(path, enabled ? "1" : "0");
+                Add(Path.Combine(AppPaths.GetAppDataDirectorySafe(), "Logs"));
             }
             catch
             {
             }
+
+            try
+            {
+                var appDataDirectory = FileSystem.AppDataDirectory;
+                if (!string.IsNullOrWhiteSpace(appDataDirectory))
+                    Add(Path.Combine(appDataDirectory, "Logs"));
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                var baseDir = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                if (!string.IsNullOrWhiteSpace(baseDir))
+                    Add(Path.Combine(baseDir, "JoesScanner", "Logs"));
+            }
+            catch
+            {
+            }
+
+            return results;
+        }
+
+        private static void ApplyResolvedEnabledState(bool enabled, bool purgePersistedLogs)
+        {
+            _isEnabled = enabled;
+            Interlocked.Increment(ref _writeGeneration);
+
+            if (enabled)
+                return;
+
+            Clear();
+            DrainPendingWrites();
+
+            if (purgePersistedLogs)
+            {
+                ClearPersistedLogsSafe();
+            }
         }
 
 
-        public static bool IsEnabled
+        public static bool IsEnabled => _isEnabled;
+
+        public static bool ReloadEnabledStateFromStorage(bool purgePersistedLogs = true)
         {
-            get
+            var enabled = ReadEnabledPreference();
+            TryWriteEnabledMarker(enabled);
+            ApplyResolvedEnabledState(enabled, purgePersistedLogs: purgePersistedLogs && !enabled);
+            return enabled;
+        }
+
+        public static void DebugWriteLine(Func<string> messageFactory)
+        {
+            if (!_isEnabled || messageFactory == null)
+                return;
+
+            string message;
+            try
             {
-                var enabled = ReadEnabledPreference();
-                _isEnabled = enabled;
-                return enabled;
+                message = messageFactory();
             }
+            catch
+            {
+                return;
+            }
+
+            DebugWriteLine(message);
         }
 
         public static void DebugWriteLine(string message)
@@ -134,33 +222,16 @@ namespace JoesScanner.Services
             if (string.IsNullOrWhiteSpace(message))
                 return;
 
-            if (!IsEnabled)
+            if (!_isEnabled)
                 return;
 
-            // Route through AppLog so the Settings log view matches what is emitted.
+            // When logging is off, nothing should be emitted anywhere.
+            // When logging is on, keep a single logging path through AppLog only.
             Add(message);
-
-            try
-            {
-                Debug.WriteLine(message);
-            }
-            catch
-            {
-            }
-
-            try
-            {
-                Console.WriteLine(message);
-            }
-            catch
-            {
-            }
         }
 
         public static void SetEnabled(bool enabled)
         {
-            _isEnabled = enabled;
-
             try
             {
                 Preferences.Set(LogEnabledPreferenceKey, enabled);
@@ -171,11 +242,7 @@ namespace JoesScanner.Services
             }
 
             TryWriteEnabledMarker(enabled);
-
-            if (!enabled)
-            {
-                Clear();
-            }
+            ApplyResolvedEnabledState(enabled, purgePersistedLogs: !enabled);
         }
 
         public static void Clear()
@@ -191,24 +258,36 @@ namespace JoesScanner.Services
             try
             {
                 Clear();
-
-                var dir = GetLogsDirectory();
-                if (!Directory.Exists(dir))
-                    return;
-
-                foreach (var file in Directory.EnumerateFiles(dir, "app_log_*.txt", SearchOption.TopDirectoryOnly))
-                {
-                    try
-                    {
-                        File.Delete(file);
-                    }
-                    catch
-                    {
-                    }
-                }
+                ClearPersistedLogsSafe();
             }
             catch
             {
+            }
+        }
+
+        private static void ClearPersistedLogsSafe()
+        {
+            foreach (var dir in GetCandidateLogsDirectories())
+            {
+                try
+                {
+                    if (!Directory.Exists(dir))
+                        continue;
+
+                    foreach (var file in Directory.EnumerateFiles(dir, "app_log_*.txt", SearchOption.TopDirectoryOnly))
+                    {
+                        try
+                        {
+                            File.Delete(file);
+                        }
+                        catch
+                        {
+                        }
+                    }
+                }
+                catch
+                {
+                }
             }
         }
 
@@ -220,6 +299,19 @@ namespace JoesScanner.Services
             _ = Task.Run(FileWriterLoopAsync);
         }
 
+        private static void DrainPendingWrites()
+        {
+            try
+            {
+                while (FileChannel.Reader.TryRead(out _))
+                {
+                }
+            }
+            catch
+            {
+            }
+        }
+
         private static async Task FileWriterLoopAsync()
         {
             StreamWriter? writer = null;
@@ -229,11 +321,11 @@ namespace JoesScanner.Services
             {
                 while (await FileChannel.Reader.WaitToReadAsync().ConfigureAwait(false))
                 {
-                    var batch = new List<string>(128);
+                    var batch = new List<LogWriteItem>(128);
 
-                    while (FileChannel.Reader.TryRead(out var line))
+                    while (FileChannel.Reader.TryRead(out var item))
                     {
-                        batch.Add(line);
+                        batch.Add(item);
 
                         // Cap batch size so we do not hold huge batches if a burst arrives.
                         if (batch.Count >= 512)
@@ -263,9 +355,16 @@ namespace JoesScanner.Services
                             };
                         }
 
+                        var currentGeneration = Volatile.Read(ref _writeGeneration);
+                        var loggingEnabled = _isEnabled;
+
                         for (var i = 0; i < batch.Count; i++)
                         {
-                            writer!.WriteLine(batch[i]);
+                            var item = batch[i];
+                            if (!loggingEnabled || item.Generation != currentGeneration)
+                                continue;
+
+                            writer!.WriteLine(item.Line);
                         }
 
                         writer!.Flush();
@@ -304,7 +403,7 @@ namespace JoesScanner.Services
 
         private static string GetLogsDirectory()
         {
-            return Path.Combine(FileSystem.AppDataDirectory, "Logs");
+            return Path.Combine(AppPaths.GetAppDataDirectorySafe(), "Logs");
         }
 
         private static string GetLogFilePath()
@@ -316,7 +415,7 @@ namespace JoesScanner.Services
 
         public static void Add(Func<string> messageFactory)
         {
-            if (!IsEnabled || messageFactory == null)
+            if (!_isEnabled || messageFactory == null)
                 return;
 
             string message;
@@ -334,7 +433,7 @@ namespace JoesScanner.Services
 
         public static void Add(string message)
         {
-            if (!IsEnabled || string.IsNullOrWhiteSpace(message))
+            if (!_isEnabled || string.IsNullOrWhiteSpace(message))
                 return;
 
             var line = $"{DateTime.Now:HH:mm:ss}  {message}";
@@ -349,13 +448,17 @@ namespace JoesScanner.Services
             StartFileWriterIfNeeded();
 
             // If the channel is full, DropOldest mode makes this succeed while keeping recent logs.
-            FileChannel.Writer.TryWrite(line);
+            var generation = Volatile.Read(ref _writeGeneration);
+            FileChannel.Writer.TryWrite(new LogWriteItem(line, generation));
         }
 
         // Returns a snapshot of up to maxLines log entries as an array.
         // The result is ordered from newest to oldest.
         public static string[] GetSnapshot(int maxLines)
         {
+            if (!_isEnabled)
+                return [];
+
             lock (Sync)
             {
                 return Buffer.Reverse().Take(maxLines).ToArray();
@@ -368,6 +471,9 @@ namespace JoesScanner.Services
         {
             try
             {
+                if (!_isEnabled)
+                    return null;
+
                 var cacheDir = FileSystem.CacheDirectory;
                 if (string.IsNullOrWhiteSpace(cacheDir))
                     return null;

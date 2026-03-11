@@ -66,24 +66,13 @@ namespace JoesScanner.Services
                 {
                     var (cached, fetchedUtc) = await _repo.GetAsync(serverKey, cancellationToken);
 
-                    // If we have no local lookup data yet, attempt to seed from the Auth API.
-                    // This is best-effort and must not block connecting.
+                    // If we have no local lookup data yet, attempt to seed only from the lookup catalog API.
+                    // Discovery sync is now handled separately by the observed-triples pipeline and should not
+                    // overwrite or masquerade as lookup catalog state.
                     if (cached == null || (cached.Receivers?.Count ?? 0) == 0 || (cached.Sites?.Count ?? 0) == 0 || (cached.Talkgroups?.Count ?? 0) == 0)
                     {
                         try
                         {
-                            // Prefer observed-triples seed because it includes reliable associations.
-                            var observed = await _authObservedTriplesSyncService.TryFetchSeedAsync(serverKey, cancellationToken).ConfigureAwait(false);
-                            if (observed != null && observed.Count > 0)
-                            {
-                                var seededFromObserved = BuildLookupDataFromObserved(observed);
-                                await _repo.UpsertAsync(serverKey, seededFromObserved, DateTime.UtcNow, cancellationToken).ConfigureAwait(false);
-                                cached = seededFromObserved;
-                                fetchedUtc = DateTime.UtcNow;
-                                AppLog.Add(() => $"History: seeded lookups from Auth Observed. server={serverKey} receivers={seededFromObserved.Receivers?.Count ?? 0} sites={seededFromObserved.Sites?.Count ?? 0} talkgroups={seededFromObserved.Talkgroups?.Count ?? 0}");
-                            }
-
-                            // Fall back to raw lookup catalogs seed.
                             var seeded = await _authLookupsSyncService.TryFetchSeedAsync(serverKey, cancellationToken).ConfigureAwait(false);
                             if (seeded != null)
                             {
@@ -123,12 +112,18 @@ namespace JoesScanner.Services
                     }
 
                     // Best-effort daily report of observed receiver/site/talkgroup associations.
-                    try
+                    // IMPORTANT:
+                    // Manual talkgroup sync performs a dedicated observed-triples exchange and applies the
+                    // authoritative list to the UI. Avoid double-posting observed rows during that flow.
+                    if (!string.Equals(reason, "manual_filters_sync", StringComparison.OrdinalIgnoreCase))
                     {
-                        await _authObservedTriplesSyncService.TryReportAsync(serverKey, force: forceReload, cancellationToken).ConfigureAwait(false);
-                    }
-                    catch
-                    {
+                        try
+                        {
+                            await _authObservedTriplesSyncService.TryReportAsync(serverKey, force: forceReload, cancellationToken).ConfigureAwait(false);
+                        }
+                        catch
+                        {
+                        }
                     }
 
                     AppLog.Add(() => $"History: lookup preload ok. server={serverKey} receivers={data.Receivers?.Count ?? 0} sites={data.Sites?.Count ?? 0} talkgroups={data.Talkgroups?.Count ?? 0}");
@@ -187,72 +182,6 @@ namespace JoesScanner.Services
             {
                 return (raw, raw);
             }
-        }
-
-        private static HistoryLookupData BuildLookupDataFromObserved(IReadOnlyList<ObservedTriple> observed)
-        {
-            var receivers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            var sites = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            var talkgroups = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            var groups = new Dictionary<string, List<HistoryLookupItem>>(StringComparer.OrdinalIgnoreCase);
-
-            foreach (var row in observed)
-            {
-                if (row == null)
-                    continue;
-
-                var rxV = (row.ReceiverValue ?? string.Empty).Trim();
-                var rxL = (row.ReceiverLabel ?? string.Empty).Trim();
-                var siteV = (row.SiteValue ?? string.Empty).Trim();
-                var siteL = (row.SiteLabel ?? string.Empty).Trim();
-                var tgV = (row.TalkgroupValue ?? string.Empty).Trim();
-                var tgL = (row.TalkgroupLabel ?? string.Empty).Trim();
-
-                if (!string.IsNullOrWhiteSpace(rxV))
-                    receivers[rxV] = string.IsNullOrWhiteSpace(rxL) ? rxV : rxL;
-                if (!string.IsNullOrWhiteSpace(siteV))
-                    sites[siteV] = string.IsNullOrWhiteSpace(siteL) ? siteV : siteL;
-                if (!string.IsNullOrWhiteSpace(tgV))
-                    talkgroups[tgV] = string.IsNullOrWhiteSpace(tgL) ? tgV : tgL;
-
-                // Group talkgroups by site label to preserve association.
-                var groupName = string.IsNullOrWhiteSpace(siteL) ? siteV : siteL;
-                if (!string.IsNullOrWhiteSpace(groupName) && !string.IsNullOrWhiteSpace(tgV))
-                {
-                    if (!groups.TryGetValue(groupName, out var list))
-                    {
-                        list = new List<HistoryLookupItem>();
-                        groups[groupName] = list;
-                    }
-
-                    if (!list.Any(x => string.Equals(x.Value, tgV, StringComparison.OrdinalIgnoreCase)))
-                        list.Add(new HistoryLookupItem { Value = tgV, Label = string.IsNullOrWhiteSpace(tgL) ? tgV : tgL });
-                }
-            }
-
-            static List<HistoryLookupItem> ToSortedList(Dictionary<string, string> map)
-            {
-                var list = new List<HistoryLookupItem>(map.Count);
-                foreach (var kv in map)
-                    list.Add(new HistoryLookupItem { Value = kv.Key, Label = kv.Value });
-                list.Sort((a, b) => string.Compare(a.Label, b.Label, StringComparison.OrdinalIgnoreCase));
-                return list;
-            }
-
-            var finalGroups = new Dictionary<string, IReadOnlyList<HistoryLookupItem>>(StringComparer.OrdinalIgnoreCase);
-            foreach (var kv in groups)
-            {
-                kv.Value.Sort((a, b) => string.Compare(a.Label, b.Label, StringComparison.OrdinalIgnoreCase));
-                finalGroups[kv.Key] = kv.Value;
-            }
-
-            return new HistoryLookupData
-            {
-                Receivers = ToSortedList(receivers),
-                Sites = ToSortedList(sites),
-                Talkgroups = ToSortedList(talkgroups),
-                TalkgroupGroups = finalGroups
-            };
         }
     }
 }

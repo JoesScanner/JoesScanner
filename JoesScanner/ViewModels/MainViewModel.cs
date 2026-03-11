@@ -1710,7 +1710,7 @@ if (!string.IsNullOrWhiteSpace(existing.DebugInfo))
                             }
                             catch (Exception ex)
                             {
-                                AppLog.DebugWriteLine($"Error updating UI for call: {ex}");
+                                AppLog.DebugWriteLine(() => $"Error updating UI for call: {ex}");
                             }
                         }
 
@@ -1736,7 +1736,7 @@ if (!string.IsNullOrWhiteSpace(existing.DebugInfo))
                     }
                     catch (Exception ex)
                     {
-                        AppLog.DebugWriteLine($"Error in call stream loop: {ex}");
+                        AppLog.DebugWriteLine(() => $"Error in call stream loop: {ex}");
 
                         try
                         {
@@ -1976,7 +1976,7 @@ if (!string.IsNullOrWhiteSpace(existing.DebugInfo))
             }
             catch (Exception ex)
             {
-                AppLog.DebugWriteLine($"Error stopping audio: {ex}");
+                AppLog.DebugWriteLine(() => $"Error stopping audio: {ex}");
             }
 
             foreach (var call in Calls)
@@ -2118,7 +2118,7 @@ if (!string.IsNullOrWhiteSpace(existing.DebugInfo))
 			}
 			catch (Exception ex)
 			{
-				AppLog.DebugWriteLine($"Error in OnCallTappedAsync: {ex}");
+				AppLog.DebugWriteLine(() => $"Error in OnCallTappedAsync: {ex}");
 				LastQueueEvent = "Error while playing tapped call (see debug output)";
 			}
 		}
@@ -2211,7 +2211,7 @@ private async Task JumpToLiveAsync()
             }
             catch (Exception ex)
             {
-                AppLog.DebugWriteLine($"Error in JumpToLiveAsync: {ex}");
+                AppLog.DebugWriteLine(() => $"Error in JumpToLiveAsync: {ex}");
                 LastQueueEvent = "Error jumping to live (see debug output)";
             }
         }
@@ -2246,7 +2246,7 @@ public async Task ApplyAudioMenuSelectionAsync(double? speedStep)
     }
     catch (Exception ex)
     {
-        AppLog.DebugWriteLine($"Error in ApplyAudioMenuSelectionAsync: {ex}");
+        AppLog.DebugWriteLine(() => $"Error in ApplyAudioMenuSelectionAsync: {ex}");
         try
         {
             AppLog.Add(() => $"Audio(VM): Menu apply error. {ex.GetType().Name}: {ex.Message}");
@@ -2289,7 +2289,7 @@ private async Task SetAudioEnabledAsync(bool enabled, string reason)
     }
     catch (Exception ex)
     {
-        AppLog.DebugWriteLine($"Error in SetAudioEnabledAsync: {ex}");
+        AppLog.DebugWriteLine(() => $"Error in SetAudioEnabledAsync: {ex}");
         try
         {
             AppLog.Add(() => $"Audio(VM): Enable error. {ex.GetType().Name}: {ex.Message}");
@@ -2347,7 +2347,7 @@ private static string SpeedStepToLabel(double step)
             catch (Exception ex)
             {
                 aborted = true;
-                AppLog.DebugWriteLine($"Error in EnsureQueuePlaybackAsync: {ex}");
+                AppLog.DebugWriteLine(() => $"Error in EnsureQueuePlaybackAsync: {ex}");
             }
             finally
             {
@@ -2569,7 +2569,7 @@ private static string SpeedStepToLabel(double step)
             }
             catch (Exception ex)
             {
-                AppLog.DebugWriteLine($"Error in PlaySingleCallWithoutQueueAsync: {ex}");
+                AppLog.DebugWriteLine(() => $"Error in PlaySingleCallWithoutQueueAsync: {ex}");
             }
             finally
             {
@@ -2731,7 +2731,7 @@ private static string SpeedStepToLabel(double step)
             }
             catch (Exception ex)
             {
-                AppLog.DebugWriteLine($"Error in PlayAudioAsync: {ex}");
+                AppLog.DebugWriteLine(() => $"Error in PlayAudioAsync: {ex}");
             }
             finally
             {
@@ -2820,7 +2820,7 @@ private static string SpeedStepToLabel(double step)
             else
             {
                 username = _settingsService.BasicAuthUsername;
-                password = _settingsService.BasicAuthPassword ?? string.Empty;
+                password = NormalizeSmartQuotes(_settingsService.BasicAuthPassword ?? string.Empty);
             }
 
             if (string.IsNullOrWhiteSpace(username))
@@ -2829,7 +2829,7 @@ private static string SpeedStepToLabel(double step)
             try
             {
                 var raw = $"{username}:{password}";
-                var bytes = Encoding.ASCII.GetBytes(raw);
+                var bytes = Encoding.UTF8.GetBytes(raw);
                 var base64 = Convert.ToBase64String(bytes);
 
                 using var request = new HttpRequestMessage(HttpMethod.Get, audioUri);
@@ -2878,9 +2878,21 @@ private static string SpeedStepToLabel(double step)
             }
             catch (Exception ex)
             {
-                AppLog.DebugWriteLine($"[MainViewModel] Error downloading audio with auth: {ex}");
+                AppLog.DebugWriteLine(() => $"[MainViewModel] Error downloading audio with auth: {ex}");
                 return null;
             }
+        }
+
+        private static string NormalizeSmartQuotes(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+                return value;
+
+            return value
+                .Replace('\u2018', '\'')
+                .Replace('\u2019', '\'')
+                .Replace('\u201C', '"')
+                .Replace('\u201D', '"');
         }
 
         private async Task OpenDonateAsync()

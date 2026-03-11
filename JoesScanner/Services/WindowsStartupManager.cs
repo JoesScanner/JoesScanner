@@ -20,7 +20,7 @@ namespace JoesScanner.Services
 #if WINDOWS
             try
             {
-                AppLog.Add($"Startup: SetRunOnLogin requested. enabled={enabled}");
+                AppLog.Add(() => $"Startup: SetRunOnLogin requested. enabled={enabled}");
 
                 // Store-installed (MSIX) apps cannot rely on writing HKCU\\...\\Run.
                 // When the app has package identity, use StartupTask (requires Package.appxmanifest extension).
@@ -35,7 +35,7 @@ namespace JoesScanner.Services
             }
             catch (Exception ex)
             {
-                AppLog.Add($"Startup: SetRunOnLogin failed. {ex.GetType().Name}: {ex.Message}");
+                AppLog.Add(() => $"Startup: SetRunOnLogin failed. {ex.GetType().Name}: {ex.Message}");
                 return false;
             }
 #else
@@ -52,18 +52,18 @@ namespace JoesScanner.Services
                 if (HasPackageIdentity())
                 {
                     var startupTask = await Windows.ApplicationModel.StartupTask.GetAsync(StartupTaskId);
-                    AppLog.Add($"Startup: StartupTask current state={startupTask.State}");
+                    AppLog.Add(() => $"Startup: StartupTask current state={startupTask.State}");
                     return startupTask.State == Windows.ApplicationModel.StartupTaskState.Enabled;
                 }
 
                 using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: false);
                 var value = key?.GetValue(ValueName)?.ToString();
-                AppLog.Add($"Startup: Run key present={!string.IsNullOrWhiteSpace(value)}");
+                AppLog.Add(() => $"Startup: Run key present={!string.IsNullOrWhiteSpace(value)}");
                 return !string.IsNullOrWhiteSpace(value);
             }
             catch (Exception ex)
             {
-                AppLog.Add($"Startup: IsRunOnLoginEnabled check failed. {ex.GetType().Name}: {ex.Message}");
+                AppLog.Add(() => $"Startup: IsRunOnLoginEnabled check failed. {ex.GetType().Name}: {ex.Message}");
                 return false;
             }
 #else
@@ -91,13 +91,13 @@ namespace JoesScanner.Services
             var exePath = Environment.ProcessPath;
             if (string.IsNullOrWhiteSpace(exePath) || !File.Exists(exePath))
             {
-                AppLog.Add($"Startup: Cannot set HKCU Run value. Invalid exePath='{exePath}'.");
+                AppLog.Add(() => $"Startup: Cannot set HKCU Run value. Invalid exePath='{exePath}'.");
                 return false;
             }
 
             // Quote path in case of spaces.
             key.SetValue(ValueName, $"\"{exePath}\"");
-            AppLog.Add($"Startup: Set HKCU Run value to '{exePath}'.");
+            AppLog.Add(() => $"Startup: Set HKCU Run value to '{exePath}'.");
             return true;
         }
 
@@ -119,7 +119,7 @@ namespace JoesScanner.Services
             try
             {
                 var startupTask = await Windows.ApplicationModel.StartupTask.GetAsync(StartupTaskId);
-                AppLog.Add($"Startup: StartupTask '{StartupTaskId}' initial state={startupTask.State}");
+                AppLog.Add(() => $"Startup: StartupTask '{StartupTaskId}' initial state={startupTask.State}");
 
                 if (!enabled)
                 {
@@ -129,7 +129,7 @@ namespace JoesScanner.Services
                 }
 
                 var state = await startupTask.RequestEnableAsync();
-                AppLog.Add($"Startup: StartupTask enable request result state={state}");
+                AppLog.Add(() => $"Startup: StartupTask enable request result state={state}");
 
                 if (state != Windows.ApplicationModel.StartupTaskState.Enabled)
                 {
@@ -139,7 +139,7 @@ namespace JoesScanner.Services
             }
             catch (Exception ex)
             {
-                AppLog.Add($"Startup: StartupTask operation failed. {ex.GetType().Name}: {ex.Message}");
+                AppLog.Add(() => $"Startup: StartupTask operation failed. {ex.GetType().Name}: {ex.Message}");
                 return false;
             }
         }

@@ -95,7 +95,7 @@ public CompactToggleSwitch()
         set => SetValue(AnimateProperty, value);
     }
 
-    protected override void OnPropertyChanged(string propertyName = null)
+        protected override void OnPropertyChanged(string? propertyName = null)
     {
         base.OnPropertyChanged(propertyName);
 
@@ -158,7 +158,7 @@ public CompactToggleSwitch()
             return;
         }
 
-        _ = Thumb.TranslateTo(targetX, 0, 80, Easing.CubicOut);
+        _ = Thumb.TranslateToAsync(targetX, 0, 80, Easing.CubicOut);
     }
 
     private static Color ResolvePrimaryColorFallback()

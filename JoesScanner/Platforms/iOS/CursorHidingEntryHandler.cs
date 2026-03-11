@@ -11,15 +11,13 @@ namespace JoesScanner.Platforms.iOS
     public sealed class CursorHidingEntryHandler : EntryHandler
     {
         private UIColor? _originalTint;
-
-        private static readonly IPropertyMapper<IEntry, CursorHidingEntryHandler> Mapper =
+        private static readonly IPropertyMapper<IEntry, CursorHidingEntryHandler> CursorMapper =
             new PropertyMapper<IEntry, CursorHidingEntryHandler>(EntryHandler.Mapper)
             {
                 [nameof(Entry.IsPassword)] = MapCursorTint,
                 [nameof(CursorHidingEntry.HideCursorWhenPassword)] = MapCursorTint
             };
-
-        public CursorHidingEntryHandler() : base(Mapper)
+        public CursorHidingEntryHandler() : base(CursorMapper)
         {
         }
 

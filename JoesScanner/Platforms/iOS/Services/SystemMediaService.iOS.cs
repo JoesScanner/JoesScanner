@@ -256,7 +256,9 @@ namespace JoesScanner.Services
                 if (image == null)
                     return null;
 
-                _cachedArtwork = new MPMediaItemArtwork(image);
+                // Use the iOS 10+ artwork API (avoids obsolete ctor warnings).
+                var boundsSize = image.Size;
+                _cachedArtwork = new MPMediaItemArtwork(boundsSize, _ => image);
                 return _cachedArtwork;
             }
             catch
@@ -272,7 +274,10 @@ namespace JoesScanner.Services
 
             NSError? error;
             using var data = NSData.FromArray(SilenceWav);
-            _silenceKeepAlivePlayer = new AVAudioPlayer(data, "wav", out error);
+	            // Prefer factory methods over constructors because construction can fail.
+	            // Note: we intentionally don't pass a file-type hint here because bindings differ across .NET iOS versions.
+	            // AVAudioPlayer can infer the format from the data header (our keepalive buffer is a WAV).
+	            _silenceKeepAlivePlayer = AVAudioPlayer.FromData(data, out error);
             if (_silenceKeepAlivePlayer == null)
                 return;
 

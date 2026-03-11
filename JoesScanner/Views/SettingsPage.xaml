@@ -50,9 +50,10 @@
                              6 = bluetooth labels
                              7 = theme
                              8 = telemetry
-                             9 = log -->
+                             9 = log
+                             10 = about -->
                 <Grid
-                            RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
+                            RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
                             ColumnDefinitions="*">
 
                     <!-- HEADER PANEL -->
@@ -93,7 +94,8 @@
                                     FontSize="12"
                                     VerticalOptions="Center"
                                     HorizontalOptions="Center"
-                                    TextColor="White" />
+                                    TextColor="White"
+                                    IsVisible="False" />
 
                             </Grid>
 
@@ -308,6 +310,8 @@
                     Grid.Column="1"
                     Text="{Binding BasicAuthUsername, UpdateSourceEventName=Unfocused}"
                     Placeholder="username"
+                    IsSpellCheckEnabled="False"
+                    IsTextPredictionEnabled="False"
                     FontSize="12"
                     HeightRequest="30" />
 
@@ -324,6 +328,8 @@
                     Text="{Binding BasicAuthPassword, UpdateSourceEventName=Unfocused}"
                     Placeholder="password"
                     IsPassword="{Binding IsBasicAuthPasswordHidden}"
+                    IsSpellCheckEnabled="False"
+                    IsTextPredictionEnabled="False"
                     FontSize="12"
                     HeightRequest="30"
                     Margin="0,0,4,0" />
@@ -468,6 +474,7 @@
 
         <!-- Body -->
         <VerticalStackLayout x:Name="FiltersBodyLayout" Spacing="8" IsVisible="False">
+            <VerticalStackLayout Spacing="8" x:Load="{Binding FiltersBodyLoaded}">
             <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
                 <Label
                     Grid.Column="0"
@@ -487,209 +494,191 @@
                     IsEnabled="{Binding CanSyncTalkgroupFilters}" />
             </Grid>
 
-            <!-- Filters table (single horizontal scroller for ALL keys, buttons stay fixed) -->
-            <Grid ColumnDefinitions="*,160" RowDefinitions="Auto,*" ColumnSpacing="10" RowSpacing="0">
+            <!-- Filters table: one shared horizontal scroller for text rows, fixed action columns -->
+            <Grid RowDefinitions="Auto,*,Auto" ColumnDefinitions="*,50,56" ColumnSpacing="0" RowSpacing="2" HorizontalOptions="Fill">
 
-                <!-- Left: one horizontally scrollable region for header + all keys -->
-                <ScrollView
+                <!-- Header stays fixed -->
+                <Label
                     Grid.Row="0"
-                    Grid.RowSpan="2"
                     Grid.Column="0"
-                    Orientation="Horizontal"
-                    HorizontalScrollBarVisibility="Always"
-                    VerticalScrollBarVisibility="Never">
+                    Text="Receiver > Site > Talkgroup"
+                    FontSize="13"
+                    FontAttributes="Bold"
+                    LineBreakMode="NoWrap"
+                    VerticalOptions="Center" />
 
-                    <VerticalStackLayout Spacing="2">
+                <Label
+                    Grid.Row="0"
+                    Grid.Column="1"
+                    Text="Mute"
+                    FontSize="13"
+                    FontAttributes="Bold"
+                    HorizontalOptions="Center"
+                    HorizontalTextAlignment="Center"
+                    VerticalOptions="Center" />
 
-                        <Grid Padding="0,4,0,2">
-                            <Label
-                                Text="Receiver > Site > Talkgroup"
-                                FontSize="13"
-                                FontAttributes="Bold"
-                                VerticalOptions="Center" />
-                        </Grid>
+                <Label
+                    Grid.Row="0"
+                    Grid.Column="2"
+                    Text="Disable"
+                    FontSize="13"
+                    FontAttributes="Bold"
+                    HorizontalOptions="Center"
+                    HorizontalTextAlignment="Center"
+                    VerticalOptions="Center" />
+
+
+                <!-- Rows -->
+                <ScrollView
+                    Grid.Row="1"
+                    Grid.ColumnSpan="3"
+                    Orientation="Vertical"
+                    HorizontalOptions="Fill"
+                    VerticalOptions="Fill">
+                    <Grid ColumnDefinitions="*,50,56" ColumnSpacing="3" HorizontalOptions="Fill">
+
+                        <ScrollView
+                            x:Name="FilterRulesTextScrollView"
+                            Grid.Column="0"
+                            Orientation="Horizontal"
+                            HorizontalScrollBarVisibility="Never"
+                            VerticalScrollBarVisibility="Never"
+                            HorizontalOptions="Fill"
+                            Loaded="OnFilterRulesTextScrollViewLoaded">
+                            <VerticalStackLayout
+                                Spacing="2"
+                                BindableLayout.ItemsSource="{Binding FilterRules}">
+                                <BindableLayout.ItemTemplate>
+                                    <DataTemplate x:DataType="models:FilterRule">
+                                        <Grid Padding="0,2" HeightRequest="26" VerticalOptions="Center">
+                                            <Label
+                                                Text="{Binding DisplayKey}"
+                                                FontSize="13"
+                                                LineBreakMode="NoWrap"
+                                                VerticalOptions="Center" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </BindableLayout.ItemTemplate>
+                            </VerticalStackLayout>
+                        </ScrollView>
 
                         <VerticalStackLayout
+                            Grid.Column="1"
                             BindableLayout.ItemsSource="{Binding FilterRules}"
                             Spacing="2"
                             VerticalOptions="Fill">
                             <BindableLayout.ItemTemplate>
                                 <DataTemplate x:DataType="models:FilterRule">
-	                                    <Grid Padding="0,2" HeightRequest="26" VerticalOptions="Center">
-                                        <Label
-                                            Text="{Binding DisplayKey}"
-                                            FontSize="13"
-                                            LineBreakMode="TailTruncation"
-                                            MaxLines="1"
-                                            VerticalOptions="Center" />
+                                    <Grid Padding="0,2" HeightRequest="26" VerticalOptions="Center">
+                                        <Border
+                                            Stroke="#d1d5db"
+                                            StrokeThickness="1"
+                                            StrokeShape="RoundRectangle 4"
+                                            Padding="4,4,4,2"
+                                            HorizontalOptions="Center"
+                                            VerticalOptions="Center"
+                                            BackgroundColor="#ffffff">
+                                            <Border.Triggers>
+                                                <DataTrigger TargetType="Border" Binding="{Binding IsMuted}" Value="True">
+                                                    <Setter Property="BackgroundColor" Value="#facc15" />
+                                                    <Setter Property="Stroke" Value="#ca8a04" />
+                                                </DataTrigger>
+                                                <DataTrigger TargetType="Border" Binding="{Binding IsMuted}" Value="False">
+                                                    <Setter Property="BackgroundColor" Value="#ffffff" />
+                                                    <Setter Property="Stroke" Value="#d1d5db" />
+                                                </DataTrigger>
+                                            </Border.Triggers>
+                                            <Border.GestureRecognizers>
+                                                <TapGestureRecognizer
+                                                    Tapped="OnMuteFilterTapped"
+                                                    CommandParameter="{Binding}" />
+                                            </Border.GestureRecognizers>
+                                            <Label FontSize="10" HorizontalOptions="Center" VerticalOptions="Center" TextColor="#000000" FontAttributes="Bold">
+                                                <Label.Triggers>
+                                                    <DataTrigger TargetType="Label" Binding="{Binding IsMuted}" Value="True">
+                                                        <Setter Property="Text" Value="Unmute" />
+                                                        <Setter Property="TextColor" Value="#000000" />
+                                                    </DataTrigger>
+                                                    <DataTrigger TargetType="Label" Binding="{Binding IsMuted}" Value="False">
+                                                        <Setter Property="Text" Value="Mute" />
+                                                        <Setter Property="TextColor" Value="#000000" />
+                                                    </DataTrigger>
+                                                </Label.Triggers>
+                                            </Label>
+                                        </Border>
                                     </Grid>
                                 </DataTemplate>
                             </BindableLayout.ItemTemplate>
                         </VerticalStackLayout>
 
-                    </VerticalStackLayout>
+                        <VerticalStackLayout
+                            Grid.Column="2"
+                            BindableLayout.ItemsSource="{Binding FilterRules}"
+                            Spacing="2"
+                            VerticalOptions="Fill">
+                            <BindableLayout.ItemTemplate>
+                                <DataTemplate x:DataType="models:FilterRule">
+                                    <Grid Padding="0,2" HeightRequest="26" VerticalOptions="Center">
+                                        <Border
+                                            Stroke="#d1d5db"
+                                            StrokeThickness="1"
+                                            StrokeShape="RoundRectangle 4"
+                                            Padding="4,4,4,2"
+                                            HorizontalOptions="Center"
+                                            VerticalOptions="Center"
+                                            BackgroundColor="#ffffff">
+                                            <Border.Triggers>
+                                                <DataTrigger TargetType="Border" Binding="{Binding IsDisabled}" Value="True">
+                                                    <Setter Property="BackgroundColor" Value="#dc2626" />
+                                                    <Setter Property="Stroke" Value="#b91c1c" />
+                                                </DataTrigger>
+                                                <DataTrigger TargetType="Border" Binding="{Binding IsDisabled}" Value="False">
+                                                    <Setter Property="BackgroundColor" Value="#ffffff" />
+                                                    <Setter Property="Stroke" Value="#d1d5db" />
+                                                </DataTrigger>
+                                            </Border.Triggers>
+                                            <Border.GestureRecognizers>
+                                                <TapGestureRecognizer
+                                                    Tapped="OnDisableFilterTapped"
+                                                    CommandParameter="{Binding}" />
+                                            </Border.GestureRecognizers>
+                                            <Label FontSize="10" HorizontalOptions="Center" VerticalOptions="Center" TextColor="#000000" FontAttributes="Bold">
+                                                <Label.Triggers>
+                                                    <DataTrigger TargetType="Label" Binding="{Binding IsDisabled}" Value="True">
+                                                        <Setter Property="Text" Value="Enable" />
+                                                        <Setter Property="TextColor" Value="#ffffff" />
+                                                    </DataTrigger>
+                                                    <DataTrigger TargetType="Label" Binding="{Binding IsDisabled}" Value="False">
+                                                        <Setter Property="Text" Value="Disable" />
+                                                        <Setter Property="TextColor" Value="#000000" />
+                                                    </DataTrigger>
+                                                </Label.Triggers>
+                                            </Label>
+                                        </Border>
+                                    </Grid>
+                                </DataTemplate>
+                            </BindableLayout.ItemTemplate>
+                        </VerticalStackLayout>
+
+
+
+                    </Grid>
                 </ScrollView>
 
-                <!-- Right: header labels stay fixed -->
-                <Grid
-                    Grid.Row="0"
-                    Grid.Column="1"
-                    ColumnDefinitions="50,50,60"
-                    Padding="0,4,0,2"
-                    ColumnSpacing="0">
-
-                    <Label
-                        Grid.Column="0"
-                        Text="Mute"
-                        FontSize="13"
-                        FontAttributes="Bold"
-                        HorizontalOptions="Center"
-                        HorizontalTextAlignment="Center"
-                        VerticalOptions="Center" />
-
-                    <Label
-                        Grid.Column="1"
-                        Text="Disable"
-                        FontSize="13"
-                        FontAttributes="Bold"
-                        HorizontalOptions="Center"
-                        HorizontalTextAlignment="Center"
-                        VerticalOptions="Center" />
-
-                    <Label
-                        Grid.Column="2"
-                        Text="Clear"
-                        FontSize="13"
-                        FontAttributes="Bold"
-                        HorizontalOptions="Center"
-                        HorizontalTextAlignment="Center"
-                        VerticalOptions="Center" />
-                </Grid>
-
-                <!-- Right: fixed buttons column (no horizontal scrolling) -->
-                <VerticalStackLayout
-                    Grid.Row="1"
-                    Grid.Column="1"
-                    BindableLayout.ItemsSource="{Binding FilterRules}"
-                    Spacing="2"
-                    VerticalOptions="Fill">
-                    <BindableLayout.ItemTemplate>
-                        <DataTemplate x:DataType="models:FilterRule">
-	                            <Grid ColumnDefinitions="50,50,60" Padding="0,2" HeightRequest="26" VerticalOptions="Center">
-
-                                <!-- Mute "button" -->
-                                <Border
-                                    Grid.Column="0"
-                                    Stroke="{AppThemeBinding Light=#d1d5db, Dark=#4b5563}"
-                                    StrokeThickness="1"
-                                    StrokeShape="RoundRectangle 4"
-                                    Padding="5,4,5,2"
-                                    HorizontalOptions="Center"
-                                    VerticalOptions="Center"
-                                    BackgroundColor="Transparent">
-
-                                    <Border.GestureRecognizers>
-                                        <TapGestureRecognizer
-                                            Tapped="OnMuteFilterTapped"
-                                            CommandParameter="{Binding}" />
-                                    </Border.GestureRecognizers>
-
-                                    <Label
-                                        FontSize="10"
-                                        HorizontalOptions="Center"
-                                        VerticalOptions="Center">
-                                        <Label.Triggers>
-                                            <DataTrigger TargetType="Label" Binding="{Binding IsMuted}" Value="True">
-                                                <Setter Property="Text" Value="Unmute" />
-                                            </DataTrigger>
-                                            <DataTrigger TargetType="Label" Binding="{Binding IsMuted}" Value="False">
-                                                <Setter Property="Text" Value="Mute" />
-                                            </DataTrigger>
-                                        </Label.Triggers>
-                                    </Label>
-
-                                    <Border.Triggers>
-                                        <DataTrigger TargetType="Border" Binding="{Binding IsMuted}" Value="True">
-                                            <Setter Property="BackgroundColor" Value="#f59e0b" />
-                                        </DataTrigger>
-                                        <DataTrigger TargetType="Border" Binding="{Binding IsMuted}" Value="False">
-                                            <Setter Property="BackgroundColor" Value="Transparent" />
-                                        </DataTrigger>
-                                    </Border.Triggers>
-                                </Border>
-
-                                <!-- Disabled "button" -->
-                                <Border
-                                    Grid.Column="1"
-                                    Stroke="{AppThemeBinding Light=#d1d5db, Dark=#4b5563}"
-                                    StrokeThickness="1"
-                                    StrokeShape="RoundRectangle 4"
-                                    Padding="5,4,5,2"
-                                    HorizontalOptions="Center"
-                                    VerticalOptions="Center"
-                                    BackgroundColor="Transparent">
-
-                                    <Border.GestureRecognizers>
-                                        <TapGestureRecognizer
-                                            Tapped="OnDisableFilterTapped"
-                                            CommandParameter="{Binding}" />
-                                    </Border.GestureRecognizers>
-
-                                    <Label
-                                        FontSize="10"
-                                        HorizontalOptions="Center"
-                                        VerticalOptions="Center">
-                                        <Label.Triggers>
-                                            <DataTrigger TargetType="Label" Binding="{Binding IsDisabled}" Value="True">
-                                                <Setter Property="Text" Value="Enable" />
-                                            </DataTrigger>
-                                            <DataTrigger TargetType="Label" Binding="{Binding IsDisabled}" Value="False">
-                                                <Setter Property="Text" Value="Disable" />
-                                            </DataTrigger>
-                                        </Label.Triggers>
-                                    </Label>
-
-                                    <Border.Triggers>
-                                        <DataTrigger TargetType="Border" Binding="{Binding IsDisabled}" Value="True">
-                                            <Setter Property="BackgroundColor" Value="#ef4444" />
-                                        </DataTrigger>
-                                        <DataTrigger TargetType="Border" Binding="{Binding IsDisabled}" Value="False">
-                                            <Setter Property="BackgroundColor" Value="Transparent" />
-                                        </DataTrigger>
-                                    </Border.Triggers>
-                                </Border>
-
-                                <!-- Clear "button" -->
-                                <Border
-                                    Grid.Column="2"
-                                    Stroke="{AppThemeBinding Light=#d1d5db, Dark=#4b5563}"
-                                    StrokeThickness="1"
-                                    StrokeShape="RoundRectangle 4"
-                                    Padding="5,4,5,2"
-                                    HorizontalOptions="Center"
-                                    VerticalOptions="Center"
-                                    BackgroundColor="Transparent">
-
-                                    <Border.GestureRecognizers>
-                                        <TapGestureRecognizer
-                                            Tapped="OnClearFilterTapped"
-                                            CommandParameter="{Binding}" />
-                                    </Border.GestureRecognizers>
-
-                                    <Label
-                                        FontSize="10"
-                                        Text="Clear"
-                                        HorizontalOptions="Center"
-                                        VerticalOptions="Center" />
-                                </Border>
-
-                            </Grid>
-                        </DataTemplate>
-                    </BindableLayout.ItemTemplate>
-                </VerticalStackLayout>
+                <Slider
+                    Grid.Row="2"
+                    Grid.Column="0"
+                    Minimum="0"
+                    Maximum="260"
+                    Value="{Binding FilterTextHorizontalOffset, Mode=TwoWay}"
+                    ValueChanged="OnFilterTextSliderValueChanged"
+                    MinimumTrackColor="{StaticResource Primary}"
+                    MaximumTrackColor="{AppThemeBinding Light=#d1d5db, Dark=#4b5563}"
+                    ThumbColor="{StaticResource Primary}"
+                    Margin="0,4,8,0" />
 
             </Grid>
-
+            </VerticalStackLayout>
         </VerticalStackLayout>
 
     </VerticalStackLayout>
@@ -731,6 +720,7 @@
 
         <!-- Body -->
         <VerticalStackLayout x:Name="AudioFiltersBodyLayout" Spacing="10" IsVisible="False">
+            <VerticalStackLayout Spacing="10" x:Load="{Binding AudioFiltersBodyLoaded}">
             <Label
                 Text="Reduce static and quiet emergency tones during playback."
                 FontSize="12"
@@ -929,6 +919,7 @@
                 FontSize="11"
                 Opacity="0.75"
                 TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
+            </VerticalStackLayout>
         </VerticalStackLayout>
 
     </VerticalStackLayout>
@@ -972,6 +963,7 @@
 
         <!-- Body -->
         <VerticalStackLayout x:Name="AddressDetectionBodyLayout" Spacing="10" IsVisible="False">
+            <VerticalStackLayout Spacing="10" x:Load="{Binding AddressDetectionBodyLoaded}">
             <Label
                 Text="Detects addresses in transcriptions and can open them in maps."
                 FontSize="12"
@@ -1042,7 +1034,7 @@
                 <VerticalStackLayout
                     Grid.Row="3"
                     Grid.Column="0"
-                    Grid.ColumnSpan="2"
+                    Grid.ColumnSpan="1"
                     Spacing="4">
 
                     <Label
@@ -1172,6 +1164,7 @@
                 FontSize="11"
                 Opacity="0.75"
                 TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
+            </VerticalStackLayout>
         </VerticalStackLayout>
 
     </VerticalStackLayout>
@@ -1214,6 +1207,7 @@
 
         <!-- Body -->
         <VerticalStackLayout x:Name="BluetoothBodyLayout" Spacing="6" IsVisible="False">
+            <VerticalStackLayout Spacing="6" x:Load="{Binding BluetoothBodyLoaded}">
             <Label
                 Text="Choose which call fields show up on your Bluetooth device. Not all devices display all fields."
                 FontSize="12"
@@ -1272,6 +1266,7 @@
                                                     VerticalOptions="Center" />
                                         </Grid>
 
+            </VerticalStackLayout>
         </VerticalStackLayout>
 
     </VerticalStackLayout>
@@ -1312,6 +1307,7 @@
 
         <!-- Body -->
         <VerticalStackLayout x:Name="ThemeBodyLayout" Spacing="10" IsVisible="False">
+            <VerticalStackLayout Spacing="10" x:Load="{Binding ThemeBodyLoaded}">
 
             <Label
                                                         Text="Choose System, Light, or Dark."
@@ -1332,6 +1328,7 @@
                                                                 IsChecked="{Binding IsThemeDark}" />
                                             </HorizontalStackLayout>
 
+            </VerticalStackLayout>
         </VerticalStackLayout>
 
     </VerticalStackLayout>
@@ -1376,6 +1373,7 @@
 
         <!-- Body -->
         <VerticalStackLayout x:Name="TelemetryBodyLayout" Spacing="10" IsVisible="False">
+            <VerticalStackLayout Spacing="10" x:Load="{Binding TelemetryBodyLoaded}">
 
             <Label
                 Text="Disable phone home telemetry for custom servers. Default servers always send telemetry."
@@ -1398,6 +1396,7 @@
                     Style="{StaticResource CompactToggleStyle}" />
             </Grid>
 
+            </VerticalStackLayout>
         </VerticalStackLayout>
 
     </VerticalStackLayout>
@@ -1439,6 +1438,7 @@
 
         <!-- Body -->
         <VerticalStackLayout x:Name="LogBodyLayout" Spacing="10" IsVisible="False">
+            <VerticalStackLayout Spacing="10" x:Load="{Binding LogBodyLoaded}">
 
             <Label
                 Text="Recent log entries. Use Refresh, Copy, or Download to export."
@@ -1495,11 +1495,71 @@
                     Style="{StaticResource PillButtonStyle}" />
             </Grid>
 
+            </VerticalStackLayout>
         </VerticalStackLayout>
 
     </VerticalStackLayout>
 </Border>
 
+                    <!-- ABOUT CARD -->
+                    <Border
+                                    Grid.Row="10"
+                                    Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
+                                    StrokeThickness="1"
+                                    Padding="12"
+                                    Margin="0,12,0,0"
+                                    BackgroundColor="{AppThemeBinding Light=#ffffff, Dark=#111827}"
+                                    StrokeShape="RoundRectangle 8">
+
+    <VerticalStackLayout Spacing="10">
+
+        <Label
+            Text="About"
+            FontSize="16"
+            FontAttributes="Bold"
+            TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+
+        <Label
+            Text="App info, support, and update actions for this device."
+            FontSize="12"
+            Opacity="0.8"
+            TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
+
+        <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="12" RowSpacing="8">
+            <Label Grid.Row="0" Text="App" FontSize="12" FontAttributes="Bold" VerticalOptions="Center" />
+            <Label Grid.Row="0" Grid.Column="1" Text="Joe's Scanner" FontSize="12" VerticalOptions="Center" />
+
+            <Label Grid.Row="1" Text="Version" FontSize="12" FontAttributes="Bold" VerticalOptions="Center" />
+            <Label x:Name="AboutVersionLabel" Grid.Row="1" Grid.Column="1" Text="" FontSize="12" VerticalOptions="Center" />
+
+            <Label Grid.Row="2" Text="Platform" FontSize="12" FontAttributes="Bold" VerticalOptions="Center" />
+            <Label x:Name="AboutPlatformLabel" Grid.Row="2" Grid.Column="1" Text="" FontSize="12" VerticalOptions="Center" />
+
+            <Label Grid.Row="3" Text="Store" FontSize="12" FontAttributes="Bold" VerticalOptions="Center" />
+            <Label x:Name="AboutStoreLabel" Grid.Row="3" Grid.Column="1" Text="" FontSize="12" VerticalOptions="Center" />
+        </Grid>
+
+        <Grid ColumnDefinitions="Auto,Auto,Auto" ColumnSpacing="10">
+            <Button
+                Text="Check for updates"
+                Clicked="OnCheckForUpdatesClicked"
+                Style="{StaticResource PillButtonStyle}" />
+
+            <Button
+                Grid.Column="1"
+                Text="Store page"
+                Clicked="OnOpenStorePageClicked"
+                Style="{StaticResource SecondaryPillButtonStyle}" />
+
+            <Button
+                Grid.Column="2"
+                Text="Support"
+                Clicked="OnOpenSupportSiteClicked"
+                Style="{StaticResource SecondaryPillButtonStyle}" />
+        </Grid>
+
+    </VerticalStackLayout>
+</Border>
 
                 </Grid>
             </Border>

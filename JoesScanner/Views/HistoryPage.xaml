@@ -435,26 +435,160 @@
                                     </DataTrigger>
                                 </Border.Triggers>
 
-                                <Grid RowDefinitions="Auto,Auto,Auto" ColumnDefinitions="*,Auto" ColumnSpacing="8" RowSpacing="2">
+                                                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
 
-                                    <Label Grid.Row="0" Grid.Column="0" FontSize="14">
-                                        <Label.GestureRecognizers>
-                                            <TapGestureRecognizer Tapped="OnCallPrimaryTapped" CommandParameter="{Binding .}" />
-                                        </Label.GestureRecognizers>
-                                        <Label.FormattedText>
-                                            <FormattedString>
-                                                <Span Text="{Binding TimeOnlyDisplay}" FontAttributes="Bold" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
-                                                <Span Text=">" TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
-                                                <Span Text="{Binding ReceiverName}" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
-                                                <Span Text=">" TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
-                                                <Span Text="{Binding Site}" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
-                                                <Span Text=">" TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
-                                                <Span Text="{Binding Talkgroup}" FontAttributes="Bold" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
-                                            </FormattedString>
-                                        </Label.FormattedText>
-                                    </Label>
+                                    <VerticalStackLayout Grid.Column="0" Spacing="2">
 
-                                    <VerticalStackLayout Grid.Row="0" Grid.Column="1" Spacing="0" HorizontalOptions="End" VerticalOptions="Start">
+                                        <Label FontSize="14">
+                                            <Label.GestureRecognizers>
+                                                <TapGestureRecognizer Tapped="OnCallPrimaryTapped" CommandParameter="{Binding .}" />
+                                            </Label.GestureRecognizers>
+                                            <Label.FormattedText>
+                                                <FormattedString>
+                                                    <Span Text="{Binding TimeOnlyDisplay}" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                                                    <Span Text=" > " TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
+                                                    <Span Text="{Binding ReceiverName}" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                                                    <Span Text=" > " TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
+                                                    <Span Text="{Binding Site}" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                                                    <Span Text=" > " TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
+                                                    <Span Text="{Binding Talkgroup}" FontAttributes="Bold" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                                                </FormattedString>
+                                            </Label.FormattedText>
+                                        </Label>
+
+                                        <Label
+                                            FontSize="12"
+                                            TextColor="{AppThemeBinding Light=#374151, Dark=#cbd5e1}"
+                                            LineBreakMode="WordWrap"
+                                            Text="{Binding Transcription}">
+                                            <Label.GestureRecognizers>
+                                                <TapGestureRecognizer Tapped="OnCallPrimaryTapped" CommandParameter="{Binding .}" />
+                                            </Label.GestureRecognizers>
+                                            <Label.Triggers>
+                                                <DataTrigger TargetType="Label" Binding="{Binding Transcription}" Value="">
+                                                    <Setter Property="IsVisible" Value="False" />
+                                                </DataTrigger>
+                                            </Label.Triggers>
+                                        </Label>
+
+                                        <Grid
+                                            Margin="0,2,0,0"
+                                            ColumnDefinitions="*,Auto"
+                                            RowDefinitions="Auto"
+                                            IsVisible="{Binding HasDetectedAddress}">
+
+                                            <Label
+                                                Grid.Column="0"
+                                                FontSize="12"
+                                                TextColor="{AppThemeBinding Light=#1d4ed8, Dark=#60a5fa}"
+                                                TextDecorations="Underline"
+                                                LineBreakMode="WordWrap"
+                                                Text="{Binding DetectedAddress}">
+                                                <Label.GestureRecognizers>
+                                                    <TapGestureRecognizer
+                                                        Tapped="OnAddressLinkTapped"
+                                                        CommandParameter="{Binding .}" />
+                                                </Label.GestureRecognizers>
+                                                <Label.Triggers>
+                                                    <DataTrigger TargetType="Label" Binding="{Binding DetectedAddress}" Value="">
+                                                        <Setter Property="IsVisible" Value="False" />
+                                                    </DataTrigger>
+                                                </Label.Triggers>
+                                            </Label>
+
+                                            <Label
+                                                Grid.Column="1"
+                                                Margin="8,0,0,0"
+                                                VerticalTextAlignment="Center"
+                                                FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
+                                                FontAutoScalingEnabled="False"
+                                                TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+                                                LineBreakMode="NoWrap"
+                                                MaxLines="1"
+                                                Text="{Binding DetectedAddressConfidencePercent, StringFormat='{0}%'}" />
+                                        </Grid>
+
+                                        <VerticalStackLayout Spacing="1">
+                                            <VerticalStackLayout.Triggers>
+                                                <DataTrigger TargetType="VerticalStackLayout" Binding="{Binding What3WordsAddress}" Value="">
+                                                    <Setter Property="IsVisible" Value="False" />
+                                                </DataTrigger>
+                                                <DataTrigger TargetType="VerticalStackLayout" Binding="{Binding Source={x:Reference Page}, Path=BindingContext.What3WordsLinksEnabled}" Value="False">
+                                                    <Setter Property="IsVisible" Value="False" />
+                                                </DataTrigger>
+                                            </VerticalStackLayout.Triggers>
+
+                                            <Label
+                                                FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
+                                                FontAutoScalingEnabled="False"
+                                                TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+                                                LineBreakMode="NoWrap"
+                                                MaxLines="1"
+                                                Text="what3words" />
+
+                                            <HorizontalStackLayout Spacing="10">
+                                                <Label
+                                                    FontSize="12"
+                                                    TextColor="{AppThemeBinding Light=#2563eb, Dark=#60a5fa}"
+                                                    TextDecorations="Underline"
+                                                    LineBreakMode="WordWrap"
+                                                    Text="{Binding What3WordsAddress}">
+                                                    <Label.GestureRecognizers>
+                                                        <TapGestureRecognizer
+                                                            Tapped="OnWhat3WordsLinkTapped"
+                                                            CommandParameter="{Binding .}" />
+                                                    </Label.GestureRecognizers>
+                                                </Label>
+
+                                                <Label
+                                                    FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
+                                                    FontAutoScalingEnabled="False"
+                                                    TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+                                                    TextDecorations="Underline"
+                                                    VerticalOptions="Center"
+                                                    Text="Copy">
+                                                    <Label.GestureRecognizers>
+                                                        <TapGestureRecognizer
+                                                            Tapped="OnWhat3WordsCopyTapped"
+                                                            CommandParameter="{Binding .}" />
+                                                    </Label.GestureRecognizers>
+                                                </Label>
+                                            </HorizontalStackLayout>
+
+                                            <HorizontalStackLayout
+                                                IsVisible="{Binding HasWhat3WordsCoordinates}"
+                                                Spacing="10">
+
+                                                <Label
+                                                    FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
+                                                    FontAutoScalingEnabled="False"
+                                                    TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+                                                    LineBreakMode="NoWrap"
+                                                    MaxLines="1"
+                                                    Text="{Binding What3WordsCoordinatesText}" />
+
+                                                <Label
+                                                    FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
+                                                    FontAutoScalingEnabled="False"
+                                                    TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
+                                                    TextDecorations="Underline"
+                                                    VerticalOptions="Center"
+                                                    Text="Copy coords">
+                                                    <Label.GestureRecognizers>
+                                                        <TapGestureRecognizer
+                                                            Tapped="OnWhat3WordsCoordsCopyTapped"
+                                                            CommandParameter="{Binding .}" />
+                                                    </Label.GestureRecognizers>
+                                                </Label>
+
+                                            </HorizontalStackLayout>
+
+                                        </VerticalStackLayout>
+
+                                    </VerticalStackLayout>
+
+                                    <VerticalStackLayout Grid.Column="1" Spacing="2" HorizontalOptions="End" VerticalOptions="Start">
+
                                         <Label
                                             FontSize="12"
                                             TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
@@ -464,144 +598,20 @@
                                         <Label
                                             FontSize="12"
                                             TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
-                                            Text="{Binding DurationDisplay}"
+                                            Text="{Binding DurationMmSsDisplay}"
                                             HorizontalTextAlignment="End" />
+
+                                        <Button
+                                            Text="Grab"
+                                            Style="{StaticResource PillButtonStyle}"
+                                            BackgroundColor="{StaticResource TabStripNavy}"
+                                            BorderColor="{StaticResource TabStripNavy}"
+                                            TextColor="White"
+                                            CommandParameter="{Binding .}"
+                                            Clicked="OnCallDownloadClicked"
+                                            HorizontalOptions="End" />
+
                                     </VerticalStackLayout>
-
-                                    <Label Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2"
-                                           FontSize="12"
-                                           TextColor="{AppThemeBinding Light=#374151, Dark=#cbd5e1}"
-                                           LineBreakMode="WordWrap"
-                                           Text="{Binding Transcription}">
-                                        <Label.GestureRecognizers>
-                                            <TapGestureRecognizer Tapped="OnCallPrimaryTapped" CommandParameter="{Binding .}" />
-                                        </Label.GestureRecognizers>
-                                        <Label.Triggers>
-                                            <DataTrigger TargetType="Label" Binding="{Binding Transcription}" Value="">
-                                                <Setter Property="IsVisible" Value="False" />
-                                            </DataTrigger>
-                                        </Label.Triggers>
-                                    </Label>
-<Grid
-    Grid.Row="3"
-    Grid.Column="0"
-    Grid.ColumnSpan="2"
-    Margin="0,2,0,0"
-    ColumnDefinitions="*,Auto"
-    RowDefinitions="Auto"
-    IsVisible="{Binding HasDetectedAddress}">
-
-    <Label
-        Grid.Column="0"
-        FontSize="12"
-        TextColor="{AppThemeBinding Light=#1d4ed8, Dark=#60a5fa}"
-        TextDecorations="Underline"
-        LineBreakMode="WordWrap"
-        Text="{Binding DetectedAddress}">
-        <Label.GestureRecognizers>
-            <TapGestureRecognizer
-                Tapped="OnAddressLinkTapped"
-                CommandParameter="{Binding .}" />
-        </Label.GestureRecognizers>
-        <Label.Triggers>
-            <DataTrigger TargetType="Label" Binding="{Binding DetectedAddress}" Value="">
-                <Setter Property="IsVisible" Value="False" />
-            </DataTrigger>
-        </Label.Triggers>
-    </Label>
-
-    <Label
-        Grid.Column="1"
-        Margin="8,0,0,0"
-        VerticalTextAlignment="Center"
-        FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
-        FontAutoScalingEnabled="False"
-        TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
-        LineBreakMode="NoWrap"
-        MaxLines="1"
-        Text="{Binding DetectedAddressConfidencePercent, StringFormat='{0}%'}" />
-</Grid>
-
-<VerticalStackLayout Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="2" Spacing="1">
-    <VerticalStackLayout.Triggers>
-        <DataTrigger TargetType="VerticalStackLayout" Binding="{Binding What3WordsAddress}" Value="">
-            <Setter Property="IsVisible" Value="False" />
-        </DataTrigger>
-        <DataTrigger TargetType="VerticalStackLayout" Binding="{Binding Source={x:Reference Page}, Path=BindingContext.What3WordsLinksEnabled}" Value="False">
-            <Setter Property="IsVisible" Value="False" />
-        </DataTrigger>
-    </VerticalStackLayout.Triggers>
-
-    <Label
-        FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
-        FontAutoScalingEnabled="False"
-        TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
-        LineBreakMode="NoWrap"
-        MaxLines="1"
-        Text="what3words" />
-
-    
-    <HorizontalStackLayout Spacing="10">
-        <Label
-            FontSize="12"
-            TextColor="{AppThemeBinding Light=#2563eb, Dark=#60a5fa}"
-            TextDecorations="Underline"
-            LineBreakMode="WordWrap"
-            Text="{Binding What3WordsAddress}">
-            <Label.GestureRecognizers>
-                <TapGestureRecognizer
-                    Tapped="OnWhat3WordsLinkTapped"
-                    CommandParameter="{Binding .}" />
-            </Label.GestureRecognizers>
-        </Label>
-
-        <Label
-            FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
-            FontAutoScalingEnabled="False"
-            TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
-            TextDecorations="Underline"
-            VerticalOptions="Center"
-            Text="Copy">
-            <Label.GestureRecognizers>
-                <TapGestureRecognizer
-                    Tapped="OnWhat3WordsCopyTapped"
-                    CommandParameter="{Binding .}" />
-            </Label.GestureRecognizers>
-        </Label>
-    </HorizontalStackLayout>
-
-
-    
-    <HorizontalStackLayout
-        IsVisible="{Binding HasWhat3WordsCoordinates}"
-        Spacing="10">
-
-        <Label
-            FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
-            FontAutoScalingEnabled="False"
-            TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
-            LineBreakMode="NoWrap"
-            MaxLines="1"
-            Text="{Binding What3WordsCoordinatesText}" />
-
-        <Label
-            FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
-            FontAutoScalingEnabled="False"
-            TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
-            TextDecorations="Underline"
-            VerticalOptions="Center"
-            Text="Copy coords">
-            <Label.GestureRecognizers>
-                <TapGestureRecognizer
-                    Tapped="OnWhat3WordsCoordsCopyTapped"
-                    CommandParameter="{Binding .}" />
-            </Label.GestureRecognizers>
-        </Label>
-
-    </HorizontalStackLayout>
-
-</VerticalStackLayout>
-
 
                                 </Grid>
 

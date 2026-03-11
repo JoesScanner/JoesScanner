@@ -1,4 +1,5 @@
 #if ANDROID
+using System;
 using global::Android.App;
 using global::Android.Content;
 using global::Android.Graphics.Drawables;
@@ -103,10 +104,9 @@ namespace JoesScanner.Platforms.Android.Services
 
             try
             {
-                var meta = new MediaMetadata.Builder()
-                    .PutString(MediaMetadata.MetadataKeyTitle, _title)
-                    .PutString(MediaMetadata.MetadataKeyArtist, _subtitle);
-
+                var meta = new MediaMetadata.Builder();
+                meta.PutString(MediaMetadata.MetadataKeyTitle, _title);
+                meta.PutString(MediaMetadata.MetadataKeyArtist, _subtitle);
                 if (!string.IsNullOrWhiteSpace(metadata.Album))
                     meta.PutString(MediaMetadata.MetadataKeyAlbum, metadata.Album);
 
@@ -141,11 +141,10 @@ namespace JoesScanner.Platforms.Android.Services
             if (_isConnected)
                 actions |= PlaybackState.ActionSkipToNext | PlaybackState.ActionSkipToPrevious;
 
-            var ps = new PlaybackState.Builder()
-                .SetState(state, PlaybackState.PlaybackPositionUnknown, 1.0f)
-                .SetActions(actions)
-                .Build();
-
+            var psBuilder = new PlaybackState.Builder();
+            psBuilder.SetState(state, PlaybackState.PlaybackPositionUnknown, 1.0f);
+            psBuilder.SetActions(actions);
+            var ps = psBuilder.Build();
             _session?.SetPlaybackState(ps);
 
             UpdateNotification(context);
@@ -188,7 +187,14 @@ namespace JoesScanner.Platforms.Android.Services
         {
             EnsureInitialized(context);
 
-            var openIntent = context.PackageManager?.GetLaunchIntentForPackage(context.PackageName);
+            var packageName = context.PackageName;
+            if (string.IsNullOrWhiteSpace(packageName))
+                packageName = context.ApplicationContext?.PackageName ?? string.Empty;
+
+            Intent? openIntent = null;
+            if (!string.IsNullOrWhiteSpace(packageName))
+                openIntent = context.PackageManager?.GetLaunchIntentForPackage(packageName);
+
             PendingIntent? contentPending = null;
 
             if (openIntent != null)
@@ -198,7 +204,7 @@ namespace JoesScanner.Platforms.Android.Services
                     context,
                     0,
                     openIntent,
-                    PendingIntentFlags.UpdateCurrent | PendingIntentFlags.Immutable);
+                    GetPendingIntentFlags());
             }
 
             var playPending = BuildActionPendingIntent(context, MediaActionReceiver.ActionPlay, 1);
@@ -206,7 +212,14 @@ namespace JoesScanner.Platforms.Android.Services
             var nextPending = BuildActionPendingIntent(context, MediaActionReceiver.ActionNext, 3);
             var prevPending = BuildActionPendingIntent(context, MediaActionReceiver.ActionPrevious, 4);
 
-            var builder = new Notification.Builder(context, NotificationChannelId)
+            Notification.Builder builder;
+
+            if (OperatingSystem.IsAndroidVersionAtLeast(26))
+                builder = new Notification.Builder(context, NotificationChannelId);
+            else
+                builder = new Notification.Builder(context);
+
+            builder
                 .SetSmallIcon(global::Android.Resource.Drawable.IcMediaPlay)
                 .SetContentTitle(_title)
                 .SetContentText(_subtitle)
@@ -217,29 +230,44 @@ namespace JoesScanner.Platforms.Android.Services
                 builder.SetContentIntent(contentPending);
 
             var playLabel = new global::Java.Lang.String("Play");
-            var stopLabel = new global::Java.Lang.String("Stop");
-            var prevLabel = new global::Java.Lang.String("Prev");
-            var nextLabel = new global::Java.Lang.String("Next");
+var stopLabel = new global::Java.Lang.String("Stop");
+var prevLabel = new global::Java.Lang.String("Prev");
+var nextLabel = new global::Java.Lang.String("Next");
 
-            var playIcon = Icon.CreateWithResource(context, global::Android.Resource.Drawable.IcMediaPlay);
-            var stopIcon = Icon.CreateWithResource(context, global::Android.Resource.Drawable.IcDelete);
-            var prevIcon = Icon.CreateWithResource(context, global::Android.Resource.Drawable.IcMediaPrevious);
-            var nextIcon = Icon.CreateWithResource(context, global::Android.Resource.Drawable.IcMediaNext);
+if (OperatingSystem.IsAndroidVersionAtLeast(23))
+{
+    var playIcon = Icon.CreateWithResource(context, global::Android.Resource.Drawable.IcMediaPlay);
+    var stopIcon = Icon.CreateWithResource(context, global::Android.Resource.Drawable.IcDelete);
+    var prevIcon = Icon.CreateWithResource(context, global::Android.Resource.Drawable.IcMediaPrevious);
+    var nextIcon = Icon.CreateWithResource(context, global::Android.Resource.Drawable.IcMediaNext);
 
-            builder.AddAction(new Notification.Action.Builder(playIcon, playLabel, playPending).Build());
-            builder.AddAction(new Notification.Action.Builder(stopIcon, stopLabel, stopPending).Build());
+    builder.AddAction(new Notification.Action.Builder(playIcon, playLabel, playPending).Build());
+    builder.AddAction(new Notification.Action.Builder(stopIcon, stopLabel, stopPending).Build());
 
-            if (_isConnected)
-            {
-                builder.AddAction(new Notification.Action.Builder(prevIcon, prevLabel, prevPending).Build());
-                builder.AddAction(new Notification.Action.Builder(nextIcon, nextLabel, nextPending).Build());
-            }
+    if (_isConnected)
+    {
+        builder.AddAction(new Notification.Action.Builder(prevIcon, prevLabel, prevPending).Build());
+        builder.AddAction(new Notification.Action.Builder(nextIcon, nextLabel, nextPending).Build());
+    }
+}
+else
+{
+    // Pre-23 devices do not support Icon-based actions.
+    builder.AddAction(new Notification.Action.Builder(global::Android.Resource.Drawable.IcMediaPlay, playLabel, playPending).Build());
+    builder.AddAction(new Notification.Action.Builder(global::Android.Resource.Drawable.IcDelete, stopLabel, stopPending).Build());
 
-            var style = new Notification.MediaStyle();
-            if (_session != null)
-                style.SetMediaSession(_session.SessionToken);
+    if (_isConnected)
+    {
+        builder.AddAction(new Notification.Action.Builder(global::Android.Resource.Drawable.IcMediaPrevious, prevLabel, prevPending).Build());
+        builder.AddAction(new Notification.Action.Builder(global::Android.Resource.Drawable.IcMediaNext, nextLabel, nextPending).Build());
+    }
+}
 
-            style.SetShowActionsInCompactView(0, 1);
+var style = new Notification.MediaStyle();
+if (_session != null)
+    style.SetMediaSession(_session.SessionToken);
+
+style.SetShowActionsInCompactView(0, 1);
             builder.SetStyle(style);
 
             return builder.Build();
@@ -275,9 +303,18 @@ namespace JoesScanner.Platforms.Android.Services
             }
         }
 
-        private static void EnsureChannel(Context context)
+        
+private static PendingIntentFlags GetPendingIntentFlags()
+{
+    var flags = PendingIntentFlags.UpdateCurrent;
+    if (OperatingSystem.IsAndroidVersionAtLeast(23))
+        flags |= PendingIntentFlags.Immutable;
+    return flags;
+}
+
+private static void EnsureChannel(Context context)
         {
-            if (Build.VERSION.SdkInt < BuildVersionCodes.O)
+            if (!OperatingSystem.IsAndroidVersionAtLeast(26))
                 return;
 
             var nm = (NotificationManager?)context.GetSystemService(Context.NotificationService);
@@ -306,14 +343,14 @@ namespace JoesScanner.Platforms.Android.Services
                 context,
                 requestCode,
                 intent,
-                PendingIntentFlags.UpdateCurrent | PendingIntentFlags.Immutable);
+                GetPendingIntentFlags())!;
         }
 
         private sealed class SessionCallback : MediaSession.Callback
         {
             public override void OnPlay()
             {
-                try { _ = _onPlay?.Invoke(); } catch { }
+                try { _ = _onPlay?.Invoke()!; } catch { }
             }
 
             public override void OnStop()

@@ -15,14 +15,18 @@ namespace JoesScanner.Views
     public partial class HistoryPage : ContentPage
     {
         private readonly HistoryViewModel _viewModel;
+        private readonly ICallDownloadService _downloadService;
+        private readonly ISettingsService _settingsService;
         private int _ignoreNextScrollEvents;
         private bool _isDropdownOpen;
 
         private bool _addressAlertHandlersAttached;
-public HistoryPage(HistoryViewModel viewModel)
+public HistoryPage(HistoryViewModel viewModel, ICallDownloadService downloadService, ISettingsService settingsService)
         {
             InitializeComponent();
             _viewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
+            _downloadService = downloadService ?? throw new ArgumentNullException(nameof(downloadService));
+            _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
             BindingContext = _viewModel;
         }
 
@@ -138,38 +142,130 @@ public HistoryPage(HistoryViewModel viewModel)
             }
         }
 
-        private async void OnCallPrimaryTapped(object sender, TappedEventArgs e)
+        
+private async void OnCallOptionsClicked(object sender, EventArgs e)
+{
+    try
+    {
+        if (sender is not Button btn)
+            return;
+
+        var selected = btn.CommandParameter as CallItem;
+        if (selected == null)
+            return;
+
+        await ShowCallOptionsAsync(selected);
+    }
+    catch
+    {
+    }
+}
+
+private async void OnCallDownloadClicked(object sender, EventArgs e)
+{
+    try
+    {
+        if (sender is not Button btn)
+            return;
+
+        var selected = btn.CommandParameter as CallItem;
+        if (selected == null)
+            return;
+
+        await ShowDownloadOptionsAsync(selected);
+    }
+    catch
+    {
+    }
+}
+
+
+
+private void OnCallPrimaryTapped(object sender, TappedEventArgs e)
         {
             try
             {
                 var selected = e.Parameter as CallItem;
                 if (selected == null)
                     return;
-                await ShowCallOptionsAsync(selected);
+
+                if (BindingContext is HistoryViewModel vm)
+                {
+                    var cmd = vm.PlayFromCallCommand;
+                    if (cmd != null && cmd.CanExecute(selected))
+                        cmd.Execute(selected);
+                }
             }
             catch
             {
             }
         }
 
-        private async Task ShowCallOptionsAsync(CallItem call)
+        private async Task ShowDownloadOptionsAsync(CallItem call)
         {
             try
             {
                 if (call == null)
                     return;
 
-                var choice = await DisplayActionSheet(
+                var choice = await UiDialogs.ActionSheetAsync(
+                    title: "Download",
+                    cancel: "Cancel",
+                    destruction: null,
+                    "Download this call",
+                    "Download a range",
+                    "Download a range (this talkgroup only)");
+
+                if (string.IsNullOrWhiteSpace(choice) || string.Equals(choice, "Cancel", StringComparison.Ordinal))
+                    return;
+
+                if (BindingContext is not HistoryViewModel vm)
+                    return;
+
+                if (string.Equals(choice, "Download this call", StringComparison.Ordinal))
+                {
+                    await DownloadSingleAsync(call);
+                    return;
+                }
+
+                if (string.Equals(choice, "Download a range", StringComparison.Ordinal) ||
+                    string.Equals(choice, "Download a range (this talkgroup only)", StringComparison.Ordinal))
+                {
+                    var talkgroupOnly = string.Equals(choice, "Download a range (this talkgroup only)", StringComparison.Ordinal);
+
+                    var eachSide = await PromptRangeCountAsync();
+                    if (eachSide == null)
+                        return;
+
+                    var calls = BuildRangeCalls(vm.Calls, call, eachSide.Value, talkgroupOnly);
+                    if (calls.Count == 0)
+                        return;
+
+                    await DownloadRangeAsZipAsync(calls);
+                }
+            }
+            catch
+            {
+            }
+        }
+
+
+
+private async Task ShowCallOptionsAsync(CallItem call)
+        {
+            try
+            {
+                if (call == null)
+                    return;
+
+                var choice = await UiDialogs.ActionSheetAsync(
                     title: "Call",
                     cancel: "Cancel",
                     destruction: null,
-                    buttons: new[]
-                    {
-                        "Play",
-                        "Download this call",
-                        "Download a range",
-                        "Download a range (this talkgroup only)",
-                    });
+                    "Play",
+                    "Download this call",
+                    "Download a range",
+                    "Download a range (this talkgroup only)");
 
                 if (string.IsNullOrWhiteSpace(choice) || string.Equals(choice, "Cancel", StringComparison.Ordinal))
                     return;
@@ -329,11 +425,7 @@ public HistoryPage(HistoryViewModel viewModel)
         {
             try
             {
-                var downloader = this.Handler?.MauiContext?.Services?.GetService<ICallDownloadService>();
-                if (downloader == null)
-                    return;
-
-                await downloader.DownloadSingleAsync(call);
+                await _downloadService.DownloadSingleAsync(call);
             }
             catch
             {
@@ -344,11 +436,7 @@ public HistoryPage(HistoryViewModel viewModel)
         {
             try
             {
-                var downloader = this.Handler?.MauiContext?.Services?.GetService<ICallDownloadService>();
-                if (downloader == null)
-                    return;
-
-                await downloader.DownloadRangeZipAsync(calls);
+                await _downloadService.DownloadRangeZipAsync(calls);
             }
             catch
             {
@@ -482,12 +570,12 @@ private void OnAlertDismissInvoked(object? sender, EventArgs e)
                 if (_isDropdownOpen)
                     return;
 
-                var items = getItems()?.ToList();
+                var items = getItems()?.ToList() ?? new List<HistoryLookupItem>();
                 if (HistoryViewModel.LookupHasOnlyDefault(items))
                 {
                     AppLog.Add(() => $"History: dropdown '{title}' had only default/empty items. Triggering lookup load. count={items?.Count ?? 0}");
                     await _viewModel.EnsureLookupsLoadedAsync(forceReload: true);
-                    items = getItems()?.ToList();
+                    items = getItems()?.ToList() ?? new List<HistoryLookupItem>();
                     if (HistoryViewModel.LookupHasOnlyDefault(items))
                     {
                         AppLog.Add(() => $"History: dropdown '{title}' still default-only/empty after reload. count={items?.Count ?? 0}");
@@ -569,7 +657,7 @@ private void OnAlertDismissInvoked(object? sender, EventArgs e)
                 if (string.IsNullOrWhiteSpace(call.DetectedAddress))
                     return;
 
-                var settings = this.Handler?.MauiContext?.Services?.GetService<ISettingsService>();
+                var settings = _settingsService;
                 if (settings == null)
                     return;
 

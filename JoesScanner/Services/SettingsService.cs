@@ -74,9 +74,13 @@ namespace JoesScanner.Services
 
         public SettingsService(IDatabasePathProvider dbPathProvider)
         {
+            // Prefer the injected provider (single source of truth).
+            // Provider should already be using AppPaths for packaged/unpackaged safety.
             _dbPath = (dbPathProvider ?? throw new ArgumentNullException(nameof(dbPathProvider))).DbPath;
 
-            _dbPath = Path.Combine(FileSystem.AppDataDirectory, DbFileName);
+            // Defensive fallback in case the provider returns empty.
+            if (string.IsNullOrWhiteSpace(_dbPath))
+                _dbPath = AppPaths.GetDbPath(DbFileName);
         }
 
         // Fired when any address detection setting changes, so interested view models can re-apply detection to existing calls.

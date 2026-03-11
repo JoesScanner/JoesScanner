@@ -58,6 +58,17 @@ private static readonly Regex What3WordsRegex = new(
             pattern: @"\b(?<num1>\d{1,6})[,_\-]?\s+(?<dir1>(?:" + DirectionAlternation + @"))\b[,_\-]?\s+(?<num2>\d{1,6})[,_\-]?\s+(?<dir2>(?:" + DirectionAlternation + @"))\b",
             options: RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+
+
+        // Intersection/cross-street patterns, e.g.:
+        // - Cleveland boulevard and south 18th avenue
+        // - Cleveland Blvd & S 18th Ave
+        // - Main St at 1st Avenue
+        //
+        // Note: these do not start with a civic house number, so they use a separate scoring routine.
+        private static readonly Regex IntersectionRegex = new(
+            pattern: @"\b(?<s1>(?:(?:[A-Za-z][A-Za-z0-9\.]*|[0-9]{1,4}(?:st|nd|rd|th)?)\s+){0,8})(?<suffix1>(" + SuffixAlternation + @"))\b\s+(?:and|&|at|@)\s+(?<s2>(?:(?:" + DirectionAlternation + @")\s+)?(?:(?:[A-Za-z][A-Za-z0-9\.]*|[0-9]{1,4}(?:st|nd|rd|th)?)\s+){0,8})(?<suffix2>(" + SuffixAlternation + @"))\b(?:\s+(?<postdir2>(?:" + DirectionAlternation + @")))?\b",
+            options: RegexOptions.IgnoreCase | RegexOptions.Compiled);
         public AddressDetectionService(ISettingsService settings)
         {
             _settings = settings ?? throw new ArgumentNullException(nameof(settings));
@@ -205,11 +216,81 @@ var shouldLog = AppLog.IsEnabled;
                     break;
             }
 
-            // If we still have room, try the no-suffix pattern (directional + street name).
+            
+            // If we still have room, try intersection/cross-street patterns like "X and Y".
+            // These are useful for traffic collisions and other location-based calls.
+            if (candidates.Count < maxCandidates)
+            {
+                MatchCollection? intersectionMatches = null;
+                try
+                {
+                    intersectionMatches = IntersectionRegex.Matches(text);
+                }
+                catch (Exception ex)
+                {
+                    if (shouldLog)
+                        AppLog.Add(() => $"AddrDetect: intersection regex error call={callKey}. {ex.Message}");
+                    intersectionMatches = null;
+                }
+
+                if (intersectionMatches != null)
+                {
+                    if (shouldLog)
+                        AppLog.Add(() => $"AddrDetect: intersectionMatches={intersectionMatches.Count} call={callKey}");
+
+                    foreach (Match m in intersectionMatches)
+                    {
+                        if (!m.Success)
+                            continue;
+
+                        var s1 = (m.Groups["s1"].Value ?? string.Empty).Trim();
+                        var suffix1 = (m.Groups["suffix1"].Value ?? string.Empty).Trim();
+                        var s2 = (m.Groups["s2"].Value ?? string.Empty).Trim();
+                        var suffix2 = (m.Groups["suffix2"].Value ?? string.Empty).Trim();
+                        var postDir2 = (m.Groups["postdir2"].Value ?? string.Empty).Trim();
+
+                        var rawStreet1 = $"{s1} {suffix1}".Trim();
+                        var rawStreet2 = string.IsNullOrWhiteSpace(postDir2)
+                            ? $"{s2} {suffix2}".Trim()
+                            : $"{s2} {suffix2} {postDir2}".Trim();
+
+                        var rawCandidate = $"{rawStreet1} & {rawStreet2}".Trim();
+                        var candidate = NormalizeIntersectionCandidate(rawCandidate);
+
+                        if (shouldLog && debugLogged < MaxPerCallDebugLines)
+                        {
+                            AppLog.Add(() => $"AddrDetect: candXRaw='{rawCandidate}' candNorm='{candidate}' call={callKey}");
+                            debugLogged++;
+                        }
+
+                        if (candidate.Length < minChars)
+                            continue;
+
+                        if (candidates.Any(c => string.Equals(c.Address, candidate, StringComparison.OrdinalIgnoreCase)))
+                            continue;
+
+                        var confidence = ScoreIntersectionCandidate(candidate, GetContextWindow(text, m.Index, m.Length));
+                        if (shouldLog && debugLogged < MaxPerCallDebugLines)
+                        {
+                            AppLog.Add(() => $"AddrDetect: xScore {confidence}% for '{candidate}' call={callKey}");
+                            debugLogged++;
+                        }
+
+                        if (confidence < minConfidence)
+                            continue;
+
+                        candidates.Add((candidate, confidence, HasKnownSuffix: true));
+                        if (candidates.Count >= maxCandidates)
+                            break;
+                    }
+                }
+            }
+
+// If we still have room, try the no-suffix pattern (directional + street name).
             if (candidates.Count < maxCandidates)
             {
                 // First: grid-style addressing (number + dir + number + dir)
-                MatchCollection gridMatches;
+                MatchCollection? gridMatches = null;
                 try
                 {
                     gridMatches = GridAddressRegex.Matches(text);
@@ -268,7 +349,7 @@ var shouldLog = AppLog.IsEnabled;
                     goto CandidatesDone;
                 }
 
-                MatchCollection noSuffixMatches;
+                MatchCollection? noSuffixMatches = null;
                 try
                 {
                     noSuffixMatches = StreetAddressNoSuffixRegex.Matches(text);
@@ -702,6 +783,68 @@ if (Regex.IsMatch(candidate, @"\b(apt|apartment|unit|suite|ste|#)\b", RegexOptio
 
             score = Clamp(score, 0, 100);
             return score;
+        }
+
+
+        private static int ScoreIntersectionCandidate(string candidate, string contextWindow)
+        {
+            // Cross-street/intersection scoring.
+            // We aim for intersections like "Cleveland Blvd & S 18th Ave" to clear a default 70% threshold.
+
+            if (string.IsNullOrWhiteSpace(candidate))
+                return 0;
+
+            var score = 55;
+
+            // Must contain a connector and two street sides.
+            if (!candidate.Contains('&'))
+                return 0;
+
+            var parts = candidate.Split('&', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (parts.Length != 2)
+                return 0;
+
+            var left = parts[0];
+            var right = parts[1];
+
+            // Both sides should have a known suffix.
+            if (ContainsKnownSuffix(left))
+                score += 20;
+            if (ContainsKnownSuffix(right))
+                score += 20;
+
+            // Ordinals and numbers are common on the second street ("18th", "42nd").
+            if (Regex.IsMatch(candidate, @"\b\d{1,4}(?:st|nd|rd|th)?\b", RegexOptions.IgnoreCase))
+                score += 5;
+
+            // Directionals increase confidence ("S", "South", etc).
+            if (Regex.IsMatch(candidate, @"\b(" + DirectionAlternation + @")\b", RegexOptions.IgnoreCase))
+                score += 5;
+
+            // Penalize obvious unit/dispatch noise.
+            if (Regex.IsMatch(contextWindow, @"\b(?:engine|medic|ladder|truck|unit|caller|rp)\b", RegexOptions.IgnoreCase))
+                score -= 5;
+
+            return Clamp(score, 0, 100);
+        }
+
+        private static string NormalizeIntersectionCandidate(string s)
+        {
+            s = NormalizeCandidate(s);
+
+            // Normalize common connector words to '&' for consistent matching/deduping.
+            s = Regex.Replace(s, @"\b(and|at)\b", "&", RegexOptions.IgnoreCase);
+            s = Regex.Replace(s, @"\s*&\s*", " & ");
+
+            // Normalize directionals to compact tokens for map friendliness.
+            s = Regex.Replace(s, @"\bNorth\b", "N", RegexOptions.IgnoreCase);
+            s = Regex.Replace(s, @"\bSouth\b", "S", RegexOptions.IgnoreCase);
+            s = Regex.Replace(s, @"\bEast\b", "E", RegexOptions.IgnoreCase);
+            s = Regex.Replace(s, @"\bWest\b", "W", RegexOptions.IgnoreCase);
+
+            // Re-collapse whitespace after edits.
+            s = Regex.Replace(s, @"\s+", " ").Trim();
+            return s;
         }
 
         private static string NormalizeDirectionalToken(string token)

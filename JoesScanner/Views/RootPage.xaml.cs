@@ -3,6 +3,8 @@ using JoesScanner.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Maui.Devices;
 using Microsoft.Maui.ApplicationModel;
+using System;
+using System.Threading;
 
 namespace JoesScanner.Views;
 
@@ -16,6 +18,8 @@ public partial class RootPage : ContentPage
     private AppTab _current = AppTab.Main;
 
     private bool _hasAppearedOnce;
+
+    private int _warmupStarted;
 
     public RootPage(IServiceProvider services)
     {
@@ -55,7 +59,90 @@ public partial class RootPage : ContentPage
         catch (Exception ex)
         {
             LogNavError($"RootPage.OnAppearing initial SwitchTo({_current}) failed: {ex}");
-            _ = SafeAlertAsync("Navigation error", $"Settings navigation failed: {ex.Message}");
+            _ = SafeAlertAsync("Navigation error", $"Settings navigation failed:\n{FormatNavException(ex)}");
+        }
+
+        // Warm up local storage and settings caches.
+        //
+        // Goals:
+        // - Remove the one-time first-open hitch when the user taps Settings.
+        // - Do not block initial navigation or audio playback.
+        //
+        // Strategy:
+        // - Pre-create the Settings tab UI (XAML tree) on the UI thread after first render.
+        // - Prime SQLite and filter profile reads on a background thread.
+        // - Resolve and cache app data paths once to avoid repeated WinRT exceptions on Windows.
+        if (Interlocked.Exchange(ref _warmupStarted, 1) == 0)
+        {
+            // Pre-create Settings tab UI as soon as the UI is ready so the first tap is instant.
+            _ = MainThread.InvokeOnMainThreadAsync(async () =>
+            {
+                try
+                {
+                    // Keep this delay very small. In production, users can often tap Settings
+                    // quickly after launch, so we want the heavy XAML tree built early.
+                    await Task.Yield();
+                    await Task.Delay(50);
+                    View settingsView;
+                    if (DeviceInfo.Platform == DevicePlatform.WinUI)
+                    {
+                        // Use a throwaway Settings instance for warmup so we never re-host the same View.
+                        var tmpPage = _services.GetRequiredService<SettingsPage>();
+                        settingsView = tmpPage.Content ?? new ContentView();
+                        tmpPage.Content = null;
+                        try { settingsView.BindingContext = tmpPage.BindingContext; } catch { }
+                    }
+                    else
+                    {
+                        var (_settingsPage, _settingsView) = GetOrCreate(AppTab.Settings);
+                        settingsView = _settingsView;
+                    }
+
+                    // IMPORTANT:
+                    // Creating the Settings page is not enough to eliminate the first-open hitch.
+                    // The hitch often comes from the first time MAUI creates native handlers and
+                    // runs the initial layout pass for the Settings visual tree.
+                    //
+                    // WarmupHost is an invisible, tiny host that forces handler creation and a
+                    // first layout pass without changing the visible UI.
+                    if (WarmupHost != null)
+                    {
+                        try
+                        {
+                            WarmupHost.Content = settingsView;
+
+                            // Give MAUI a moment to attach handlers and measure/arrange.
+                            await Task.Delay(20);
+                        }
+                        finally
+                        {
+                            // Detach so the real tab switch can host the view later.
+                            WarmupHost.Content = null;
+                        }
+                    }
+                }
+                catch
+                {
+                }
+            });
+
+            // Prime DB and profile reads off the UI thread.
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    _ = AppPaths.GetAppDataDirectorySafe();
+
+                    var settings = _services.GetRequiredService<ISettingsService>();
+                    var serverKey = NormalizeServerKey(settings.ServerUrl);
+
+                    var store = _services.GetRequiredService<IFilterProfileStore>();
+                    _ = await store.GetProfilesForServerAsync(serverKey, CancellationToken.None);
+                }
+                catch
+                {
+                }
+            });
         }
     }
 
@@ -74,7 +161,7 @@ public partial class RootPage : ContentPage
         catch (Exception ex)
         {
             LogNavError($"RootPage.OnTabRequested({tab}) failed: {ex}");
-            _ = SafeAlertAsync("Navigation error", $"Switching tabs failed: {ex.Message}");
+            _ = SafeAlertAsync("Navigation error", $"Switching tabs failed:\n{FormatNavException(ex)}");
         }
     }
 
@@ -131,7 +218,9 @@ public partial class RootPage : ContentPage
         catch (Exception ex)
         {
             LogNavError($"RootPage.SwitchTo({tab}) failed: {ex}");
-            _ = SafeAlertAsync("Navigation error", $"Unable to open {tab}: {ex.Message}");
+            _ = SafeAlertAsync(
+                "Navigation error",
+                $"Unable to open {tab}:\n\n{FormatNavException(ex)}\n\nFULL:\n{ex}");
         }
     }
 
@@ -173,12 +262,58 @@ public partial class RootPage : ContentPage
         {
         }
 
-        var (page, view) = GetOrCreate(tab);
+        
+        // WinUI can throw COMException 0x800F1000 when re-attaching a previously hosted view
+        // that has already been attached to a different parent (WarmupHost, ContentHost, etc).
+        // To keep Settings stable on Windows, always recreate the Settings tab view.
+        if (DeviceInfo.Platform == DevicePlatform.WinUI && tab == AppTab.Settings)
+        {
+            try
+            {
+                _pages.Remove(AppTab.Settings);
+                _views.Remove(AppTab.Settings);
+            }
+            catch
+            {
+            }
+        }
+
+var (page, view) = GetOrCreate(tab);
 
         ContentHost.Content = view;
 
         // Tell the new page it is visible so it can attach handlers and refresh data.
         try { page.SendAppearing(); } catch { }
+    }
+
+    
+    private static string NormalizeServerKey(string? serverUrl)
+    {
+        var raw = (serverUrl ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(raw))
+            return string.Empty;
+
+        raw = raw.TrimEnd('/');
+
+        try
+        {
+            if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri))
+                return raw;
+
+            var builder = new UriBuilder(uri)
+            {
+                Path = string.Empty,
+                Query = string.Empty,
+                Fragment = string.Empty,
+                Port = uri.IsDefaultPort ? -1 : uri.Port
+            };
+
+            return builder.Uri.ToString().TrimEnd('/');
+        }
+        catch
+        {
+            return raw;
+        }
     }
 
     private void RebuildAllTabs()
@@ -201,7 +336,60 @@ public partial class RootPage : ContentPage
         _views.Clear();
     }
 
-    private static void LogNavError(string message)
+    private static string FormatNavException(Exception ex)
+    {
+        try
+        {
+            var sb = new System.Text.StringBuilder();
+            var depth = 0;
+            for (var e = ex; e != null && depth < 6; e = e.InnerException, depth++)
+            {
+                var indent = new string(' ', depth * 2);
+                sb.Append(indent);
+                sb.Append(e.GetType().Name);
+                sb.Append(": ");
+                sb.Append(e.Message);
+
+                try
+                {
+                    sb.Append("  HResult=0x");
+                    sb.Append(e.HResult.ToString("X8"));
+                }
+                catch
+                {
+                }
+
+                sb.AppendLine();
+
+                // Include a short stack to identify the failing component.
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(e.StackTrace))
+                    {
+                        var lines = e.StackTrace.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                        var take = Math.Min(lines.Length, 12);
+                        for (var i = 0; i < take; i++)
+                        {
+                            sb.Append(indent);
+                            sb.Append("  at ");
+                            sb.AppendLine(lines[i].Trim());
+                        }
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            return sb.ToString().TrimEnd();
+        }
+        catch
+        {
+            return $"{ex.GetType().Name}: {ex.Message}";
+        }
+    }
+
+    private void LogNavError(string message)
     {
         try
         {
@@ -220,9 +408,7 @@ public partial class RootPage : ContentPage
             {
                 try
                 {
-                    var page = Application.Current?.MainPage;
-                    if (page != null)
-                        await page.DisplayAlert(title, message, "OK");
+                    await UiDialogs.AlertAsync(title, message, "OK");
                 }
                 catch
                 {

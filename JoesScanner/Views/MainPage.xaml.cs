@@ -18,7 +18,7 @@ namespace JoesScanner.Views
 {
     public partial class MainPage : ContentPage
     {
-        private readonly MainViewModel _viewModel;
+        private readonly MainViewModel _viewModel = null!;
 
         private bool _handlersAttached;
         private bool _followLive = true;
@@ -32,7 +32,9 @@ namespace JoesScanner.Views
 
 
         private readonly HashSet<CallItem> _resizeTrackedItems = new();
+#if IOS
         private long _lastIosMeasureInvalidationTicks;
+#endif
         private CancellationTokenSource? _pendingScrollCts;
 
         private bool _addressAlertHandlersAttached;
@@ -82,7 +84,7 @@ namespace JoesScanner.Views
 
             try
             {
-                _viewModel.RequestJumpToLiveScroll += OnRequestJumpToLiveScroll;
+                _viewModel?.RequestJumpToLiveScroll += OnRequestJumpToLiveScroll;
             }
             catch
             {
@@ -348,7 +350,7 @@ private void AttachAddressAlertHandlers()
 
             try
             {
-                _viewModel.RequestJumpToLiveScroll -= OnRequestJumpToLiveScroll;
+                _viewModel?.RequestJumpToLiveScroll -= OnRequestJumpToLiveScroll;
             }
             catch
             {
@@ -358,7 +360,7 @@ private void AttachAddressAlertHandlers()
             UntrackTopItem();
         }
 
-        private void OnCallsViewScrolled(object sender, ItemsViewScrolledEventArgs e)
+        private void OnCallsViewScrolled(object? sender, ItemsViewScrolledEventArgs e)
         {
             try
             {
@@ -489,7 +491,7 @@ private void AttachAddressAlertHandlers()
             _pendingScrollCts = new CancellationTokenSource();
             var token = _pendingScrollCts.Token;
 
-            MainThread.BeginInvokeOnMainThread(async () =>
+            _ = Task.Run(async () =>
             {
                 try
                 {
@@ -502,11 +504,26 @@ private void AttachAddressAlertHandlers()
                     if (!_followLive)
                         return;
 
-                    // If we are already pinned to the top, do not force another scroll.
-                    if (_lastFirstVisibleIndex == 0)
-                        return;
+                    await MainThread.InvokeOnMainThreadAsync(() =>
+                    {
+                        try
+                        {
+                            if (token.IsCancellationRequested)
+                                return;
 
-                    ScrollToTopNoAnimCore();
+                            if (!_followLive)
+                                return;
+
+                            // If we are already pinned to the top, do not force another scroll.
+                            if (_lastFirstVisibleIndex == 0)
+                                return;
+
+                            ScrollToTopNoAnimCore();
+                        }
+                        catch
+                        {
+                        }
+                    });
                 }
                 catch
                 {
@@ -523,7 +540,7 @@ private void AttachAddressAlertHandlers()
             _pendingScrollCts = new CancellationTokenSource();
             var token = _pendingScrollCts.Token;
 
-            MainThread.BeginInvokeOnMainThread(async () =>
+            _ = Task.Run(async () =>
             {
                 try
                 {
@@ -533,7 +550,19 @@ private void AttachAddressAlertHandlers()
                     if (token.IsCancellationRequested)
                         return;
 
-                    ScrollToTopNoAnimCore();
+                    await MainThread.InvokeOnMainThreadAsync(() =>
+                    {
+                        try
+                        {
+                            if (token.IsCancellationRequested)
+                                return;
+
+                            ScrollToTopNoAnimCore();
+                        }
+                        catch
+                        {
+                        }
+                    });
 
                     if (retryDelayMs > 0)
                         await Task.Delay(retryDelayMs, token);
@@ -543,14 +572,25 @@ private void AttachAddressAlertHandlers()
 
                     // Second pass helps when CollectionView virtualization/layout hasn't fully
                     // settled yet (observed on iOS/Android occasionally).
-                    ScrollToTopNoAnimCore();
+                    await MainThread.InvokeOnMainThreadAsync(() =>
+                    {
+                        try
+                        {
+                            if (token.IsCancellationRequested)
+                                return;
+
+                            ScrollToTopNoAnimCore();
+                        }
+                        catch
+                        {
+                        }
+                    });
                 }
                 catch
                 {
                 }
             });
         }
-
         private void CancelPendingScroll()
         {
             try
@@ -569,6 +609,13 @@ private void AttachAddressAlertHandlers()
 
         private void ScrollToTopNoAnimCore()
         {
+            
+            if (!MainThread.IsMainThread)
+            {
+                MainThread.BeginInvokeOnMainThread(ScrollToTopNoAnimCore);
+                return;
+            }
+
             if (_isAutoScrolling)
                 return;
 

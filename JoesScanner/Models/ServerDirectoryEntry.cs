@@ -1,6 +1,8 @@
+using System;
+
 namespace JoesScanner.Models
 {
-    public sealed class ServerDirectoryEntry
+    public sealed class ServerDirectoryEntry : IEquatable<ServerDirectoryEntry>
     {
         public int DirectoryId { get; set; }
 
@@ -23,6 +25,43 @@ namespace JoesScanner.Models
 
         public string BadgeLabel { get; set; } = string.Empty;
 
+
+
+        private static string NormalizeUrl(string? value)
+        {
+            return (value ?? string.Empty).Trim().TrimEnd('/');
+        }
+
+        public bool Equals(ServerDirectoryEntry? other)
+        {
+            if (ReferenceEquals(this, other))
+                return true;
+
+            if (other is null)
+                return false;
+
+            if (IsCustom || other.IsCustom)
+                return IsCustom == other.IsCustom;
+
+            return string.Equals(
+                NormalizeUrl(Url),
+                NormalizeUrl(other.Url),
+                StringComparison.OrdinalIgnoreCase);
+        }
+
+        public override bool Equals(object? obj)
+        {
+            return Equals(obj as ServerDirectoryEntry);
+        }
+
+        public override int GetHashCode()
+        {
+            if (IsCustom)
+                return HashCode.Combine(true, "custom");
+
+            return StringComparer.OrdinalIgnoreCase.GetHashCode(NormalizeUrl(Url));
+        }
+
         public string DisplayName
         {
             get
@@ -35,7 +74,7 @@ namespace JoesScanner.Models
                     return "Custom server";
 
                 if (IsOfficial)
-                    return "🐟 " + n;
+                    return "🛡️ " + n;
 
                 return n;
             }

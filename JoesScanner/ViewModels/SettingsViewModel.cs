@@ -33,7 +33,21 @@ namespace JoesScanner.ViewModels
 
         private readonly ObservableCollection<FilterProfile> _settingsFilterProfiles = new();
         private readonly ObservableCollection<string> _settingsFilterProfileNameOptions = new();
-        private int _pageOpenInProgress;
+        // One-time guard to avoid redoing expensive initialization work each time the user
+        // visits Settings. (Profiles can still be refreshed via explicit actions.)
+        private int _pageOpenStarted;
+
+        private int _filterUiRefreshQueued;
+
+
+        private bool _deferredUiLoaded;
+        private bool _filtersBodyLoaded;
+        private bool _audioFiltersBodyLoaded;
+        private bool _addressDetectionBodyLoaded;
+        private bool _bluetoothBodyLoaded;
+        private bool _themeBodyLoaded;
+        private bool _telemetryBodyLoaded;
+        private bool _logBodyLoaded;
 
         private string _selectedSettingsFilterProfileNameOption = NoneSettingsProfileNameOption;
         private bool _isCustomSettingsFilterProfileName;
@@ -164,6 +178,31 @@ SyncSettingsProfileNameDropdownFromDraft();
 
         public ObservableCollection<FilterRule> FilterRules => _filterService.Rules;
 
+
+public ObservableCollection<FilterRule> FilterRulesUi => _filterService.Rules;
+
+private double _filterTextHorizontalOffset;
+public double FilterTextHorizontalOffset
+{
+    get => _filterTextHorizontalOffset;
+    set
+    {
+        var newValue = value < 0 ? 0 : value;
+        if (Math.Abs(_filterTextHorizontalOffset - newValue) < 0.5)
+            return;
+
+        _filterTextHorizontalOffset = newValue;
+        OnPropertyChanged();
+        OnPropertyChanged(nameof(FilterTextHorizontalTranslation));
+        OnPropertyChanged(nameof(FilterTextColumnWidth));
+    }
+}
+
+public double FilterTextHorizontalTranslation => -_filterTextHorizontalOffset;
+
+public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
+
+
         // Connection fields
         private string _serverUrl = string.Empty;
         private string _authServerBaseUrl = string.Empty;
@@ -259,6 +298,16 @@ SyncSettingsProfileNameDropdownFromDraft();
 
         private readonly ObservableCollection<ServerDirectoryEntry> _directoryServers = new();
         
+        private static readonly ServerDirectoryEntry BuiltinJoeDirectoryEntry = new ServerDirectoryEntry
+        {
+            DirectoryId = -1,
+            Name = "Joe's Scanner",
+            Url = DefaultServerUrl,
+            IsOfficial = true,
+            Badge = "Official",
+            BadgeLabel = "Official"
+        };
+
         private static readonly ServerDirectoryEntry CustomServerDirectoryEntry = new ServerDirectoryEntry
         {
             DirectoryId = 0,
@@ -266,11 +315,13 @@ SyncSettingsProfileNameDropdownFromDraft();
             Url = string.Empty,
             IsCustom = true
         };
-private ServerDirectoryEntry? _selectedDirectoryServer;
+
+        private ServerDirectoryEntry? _selectedDirectoryServer;
         private bool _isDirectoryLoading;
         private string _directoryStatusText = string.Empty;
         private int _directoryRefreshInProgress;
         private bool _suppressDirectorySelection;
+        private bool _showCustomServerUrlRow;
 
         private string _savedAuthServerBaseUrl = string.Empty;
         private bool _savedUseDefaultConnection;
@@ -481,6 +532,23 @@ private ServerDirectoryEntry? _selectedDirectoryServer;
             return value;
         }
 
+        /// <summary>
+        /// Normalizes smart/curly quotes to their ASCII equivalents so passwords
+        /// typed on mobile keyboards (which silently substitute smart quotes)
+        /// match what the server expects.
+        /// </summary>
+        private static string NormalizeSmartQuotes(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+                return value;
+
+            return value
+                .Replace('\u2018', '\'')  // left single quotation mark  → '
+                .Replace('\u2019', '\'')  // right single quotation mark → '
+                .Replace('\u201C', '"')   // left double quotation mark  → "
+                .Replace('\u201D', '"');   // right double quotation mark → "
+        }
+
 
         // Commands
         public ICommand ToggleMuteFilterCommand { get; }
@@ -542,7 +610,9 @@ private ServerDirectoryEntry? _selectedDirectoryServer;
             }
         }
 
-        public bool CanSyncTalkgroupFilters => EffectiveTelemetryEnabled && !IsSyncingTalkgroupFilters;
+        // Manual sync is user-initiated and should always be allowed.
+        // Telemetry settings only affect whether we can report/seed via the Auth API.
+        public bool CanSyncTalkgroupFilters => !IsSyncingTalkgroupFilters;
 
         public SettingsViewModel(
             ISettingsService settingsService,
@@ -557,6 +627,16 @@ private ServerDirectoryEntry? _selectedDirectoryServer;
             _telemetryService = telemetryService ?? throw new ArgumentNullException(nameof(telemetryService));
 
             _filterProfileStore = filterProfileStore ?? throw new ArgumentNullException(nameof(filterProfileStore));
+
+
+try
+{
+    _filterService.RulesChanged += (_, __) => QueueFilterUiRefresh();
+}
+catch
+{
+}
+
             _historyLookupsCacheService = historyLookupsCacheService ?? throw new ArgumentNullException(nameof(historyLookupsCacheService));
             _authObservedTriplesSyncService = authObservedTriplesSyncService ?? throw new ArgumentNullException(nameof(authObservedTriplesSyncService));
 
@@ -617,48 +697,61 @@ private ServerDirectoryEntry? _selectedDirectoryServer;
         {
             if (IsSyncingTalkgroupFilters)
                 return;
-            // User requested: when telemetry is disabled for custom servers, sync is disabled and does nothing.
-            // Default servers always behave as telemetry enabled.
-            if (!EffectiveTelemetryEnabled)
-            {
-                AppLog.Add(() => "Settings: manual lookup sync skipped (telemetry disabled for this server).");
-                return;
-            }
 
-try
+            try
             {
                 IsSyncingTalkgroupFilters = true;
-
-                // Ensure the in-memory rules list remains scoped to the active server.
-                _filterService.SetServerUrl(_settings.ServerUrl);
-
                 AppLog.Add(() => $"Settings: manual lookup sync requested. server='{_settings.ServerUrl}'");
 
-                // Force a lookup refresh from the stream server. This also seeds from the Auth API when local
-                // cache is missing, and it reports back to the Auth API (telemetry-gated).
+                // Ensure the filter engine is in the correct per-server context before we mutate rules.
+                try
+                {
+                    _filterService.SetServerUrl(_settings.ServerUrl);
+                }
+                catch
+                {
+                }
+
+                // First seed from the local calls database so the filter tree can immediately reflect
+                // anything the user has already observed on this device, even before the server responds.
+                var localSeeded = 0;
+                try
+                {
+                    var localObserved = await _authObservedTriplesSyncService.GetLocalObservedAsync(_settings.ServerUrl, DateTime.MinValue, CancellationToken.None);
+                    localSeeded = localObserved?.Count ?? 0;
+                    if (localObserved != null && localObserved.Count > 0)
+                        _filterService.SeedFromObservedTriples(localObserved);
+                }
+                catch
+                {
+                }
+
+                // Force a lookup refresh from the stream server. Lookup catalogs are now independent from
+                // talkgroup discovery, but we still refresh them here for the rest of the history/settings UI.
                 await _historyLookupsCacheService.PreloadAsync(forceReload: true, reason: "manual_filters_sync", CancellationToken.None);
 
-                // Also force an observed-triples report so the WordPress API Observed tab updates immediately.
-                // This sends a best-effort snapshot from the local calls database.
-                await _authObservedTriplesSyncService.TryReportAsync(_settings.ServerUrl, force: true, CancellationToken.None);
-
-
-                // Quick user feedback so it is obvious that something happened.
                 var cached = await _historyLookupsCacheService.GetCachedAsync(CancellationToken.None);
                 var r = cached?.Receivers?.Count ?? 0;
                 var s = cached?.Sites?.Count ?? 0;
                 var t = cached?.Talkgroups?.Count ?? 0;
 
-                await MainThread.InvokeOnMainThreadAsync(async () =>
+                // Canonical discovery exchange:
+                // report local discoveries and then mirror the authoritative server result exactly.
+                var replaced = 0;
+                var received = 0;
+                try
                 {
-                    if (Application.Current?.MainPage == null)
-                        return;
+                    var triples = await _authObservedTriplesSyncService.TrySyncExchangeAsync(_settings.ServerUrl, force: true, CancellationToken.None);
+                    received = triples?.Count ?? 0;
+                    if (triples != null)
+                        replaced = _filterService.ReplaceFromObservedTriples(triples);
+                }
+                catch
+                {
+                }
 
-                    await Application.Current.MainPage.DisplayAlert(
-                        "Sync complete",
-                        $"Receivers: {r}\nSites: {s}\nTalkgroups: {t}",
-                        "OK");
-                });
+                // Manual sync should be silent. Log the results for diagnostics, but do not show UI dialogs.
+                AppLog.Add(() => $"Settings: manual lookup sync complete. server='{_settings.ServerUrl}' receivers={r} sites={s} talkgroups={t} localObservedSeeded={localSeeded} observedReceived={received} rulesReplaced={replaced}");
             }
             catch (Exception ex)
             {
@@ -671,23 +764,80 @@ try
         }
 
 
-        public async Task OnPageOpenedAsync()
+        public Task OnPageOpenedAsync()
         {
-            if (Interlocked.Exchange(ref _pageOpenInProgress, 1) == 1)
-                return;
+            if (Interlocked.Exchange(ref _pageOpenStarted, 1) == 1)
+                return Task.CompletedTask;
+
 
             try
             {
-                await LoadSettingsFilterProfilesAsync(applySelectedProfile: true);
+                _filterService.SetServerUrl(_settings.ServerUrl);
+            }
+            catch
+            {
+            }
 
-                // Refresh server directory list (best effort).
-                await EnsureDirectoryServersFreshAsync(force: true);
+            try
+            {
+                // IMPORTANT:
+                // The Settings page must feel instant. Do not block the UI thread waiting for
+                // SQLite reads or any other IO during page open.
+                //
+                // Kick off the expensive work and let the UI render immediately.
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await LoadSettingsFilterProfilesAsync(applySelectedProfile: true);
+                    }
+                    catch
+                    {
+                    }
+                });
+
+                // Refresh server directory list (best effort) without blocking page open.
+                // Use the cached list immediately, then refresh only if stale.
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await Task.Delay(450);
+                        await MainThread.InvokeOnMainThreadAsync(async () =>
+                        {
+                            try
+                            {
+                                await EnsureDirectoryServersFreshAsync(force: false);
+                            }
+                            catch
+                            {
+                            }
+                        });
+                    }
+                    catch
+                    {
+                    }
+                });
+
+                // Let the page render first, then build the heavier UI sections.
+                _ = MainThread.InvokeOnMainThreadAsync(async () =>
+                {
+                    try
+                    {
+                        await Task.Delay(50);
+                        // Do not build or populate heavy card bodies here.
+                        // Cards are lazy loaded on demand when expanded.
+                    }
+                    catch
+                    {
+                    }
+                });
             }
             catch (Exception ex)
             {
                 try
                 {
-                    AppLog.DebugWriteLine($"SettingsViewModel.OnPageOpenedAsync failed: {ex}");
+                    AppLog.DebugWriteLine(() => $"SettingsViewModel.OnPageOpenedAsync failed: {ex}");
                 }
                 catch
                 {
@@ -695,7 +845,182 @@ try
             }
             finally
             {
-                Interlocked.Exchange(ref _pageOpenInProgress, 0);
+                // Intentionally do not reset _pageOpenStarted.
+                // This work is designed to be one-time per process so Settings stays snappy.
+            }
+
+            return Task.CompletedTask;
+        }
+
+        public bool FiltersBodyLoaded
+        {
+            get => _filtersBodyLoaded;
+            set
+            {
+                if (_filtersBodyLoaded == value)
+                    return;
+                _filtersBodyLoaded = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public bool AudioFiltersBodyLoaded
+        {
+            get => _audioFiltersBodyLoaded;
+            set
+            {
+                if (_audioFiltersBodyLoaded == value)
+                    return;
+                _audioFiltersBodyLoaded = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public bool AddressDetectionBodyLoaded
+        {
+            get => _addressDetectionBodyLoaded;
+            set
+            {
+                if (_addressDetectionBodyLoaded == value)
+                    return;
+                _addressDetectionBodyLoaded = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public bool BluetoothBodyLoaded
+        {
+            get => _bluetoothBodyLoaded;
+            set
+            {
+                if (_bluetoothBodyLoaded == value)
+                    return;
+                _bluetoothBodyLoaded = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public bool ThemeBodyLoaded
+        {
+            get => _themeBodyLoaded;
+            set
+            {
+                if (_themeBodyLoaded == value)
+                    return;
+                _themeBodyLoaded = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public bool TelemetryBodyLoaded
+        {
+            get => _telemetryBodyLoaded;
+            set
+            {
+                if (_telemetryBodyLoaded == value)
+                    return;
+                _telemetryBodyLoaded = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public bool LogBodyLoaded
+        {
+            get => _logBodyLoaded;
+            set
+            {
+                if (_logBodyLoaded == value)
+                    return;
+                _logBodyLoaded = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public async Task EnsureFiltersReadyAsync()
+        {
+            FiltersBodyLoaded = true;
+
+            // Always switch the filter engine to the currently selected server in the UI,
+            // not only the last saved settings value. This avoids stale or empty-state
+            // mismatches right after the user changes servers and immediately opens Filters.
+            try
+            {
+                _filterService.SetServerUrl(ServerUrl);
+            }
+            catch
+            {
+            }
+
+            // First rebuild from the current live queue snapshot. This is immediate, local,
+            // and avoids the first-open empty state when the user already has calls loaded.
+            RebuildFilterRulesFromCurrentCalls_NoThrow();
+
+            // If we already have rules after switching context/rebuilding locally, stop here.
+            if (_filterService.Rules.Count > 0)
+            {
+                RefreshFilterRulesUi();
+                return;
+            }
+
+            await SeedFiltersFromObservedAsync(ServerUrl, forceNetwork: false);
+            RefreshFilterRulesUi();
+        }
+
+        public void EnsureSectionLoaded(string sectionKey)
+        {
+            if (string.Equals(sectionKey, "AudioFilters", StringComparison.OrdinalIgnoreCase)) AudioFiltersBodyLoaded = true;
+            if (string.Equals(sectionKey, "AddressDetection", StringComparison.OrdinalIgnoreCase)) AddressDetectionBodyLoaded = true;
+            if (string.Equals(sectionKey, "Bluetooth", StringComparison.OrdinalIgnoreCase)) BluetoothBodyLoaded = true;
+            if (string.Equals(sectionKey, "Theme", StringComparison.OrdinalIgnoreCase)) ThemeBodyLoaded = true;
+            if (string.Equals(sectionKey, "Telemetry", StringComparison.OrdinalIgnoreCase)) TelemetryBodyLoaded = true;
+            if (string.Equals(sectionKey, "Log", StringComparison.OrdinalIgnoreCase)) LogBodyLoaded = true;
+        }
+
+        private async Task SeedFiltersFromObservedAsync(string? serverUrl, bool forceNetwork)
+        {
+            try
+            {
+                _ = forceNetwork;
+
+                var serverKey = NormalizeServerKey(serverUrl);
+                if (string.IsNullOrWhiteSpace(serverKey))
+                    return;
+
+                // Always seed from the local calls database first so the card can populate immediately from
+                // what this device has already discovered, even when the auth server is unavailable.
+                try
+                {
+                    var localObserved = await _authObservedTriplesSyncService.GetLocalObservedAsync(serverKey, DateTime.MinValue, CancellationToken.None);
+                    if (localObserved != null && localObserved.Count > 0)
+                        _filterService.SeedFromObservedTriples(localObserved);
+                }
+                catch
+                {
+                }
+
+                // Then fetch the canonical server view and merge it in. This keeps both sides converging
+                // without making the settings page wait on network success.
+                var triples = await _authObservedTriplesSyncService.TryFetchSeedAsync(serverKey, CancellationToken.None);
+                if (triples == null || triples.Count == 0)
+                    return;
+
+                _filterService.SeedFromObservedTriples(triples);
+            }
+            catch
+            {
+            }
+        }
+
+        public bool DeferredUiLoaded
+        {
+            get => _deferredUiLoaded;
+            set
+            {
+                if (_deferredUiLoaded == value)
+                    return;
+
+                _deferredUiLoaded = value;
+                OnPropertyChanged();
             }
         }
 
@@ -708,10 +1033,6 @@ try
             //
             // Run the store call on a background thread, then marshal collection updates back to the UI thread.
 	            var serverKey = NormalizeServerKey(_settings.ServerUrl);
-
-            // Ensure the in-memory rules list is scoped to the active server when Settings opens.
-	            _filterService.SetServerUrl(_settings.ServerUrl);
-
             var profiles = await Task.Run(async () => await _filterProfileStore.GetProfilesForServerAsync(serverKey, CancellationToken.None));
 
             await MainThread.InvokeOnMainThreadAsync(() =>
@@ -952,34 +1273,11 @@ try
             get => _selectedDirectoryServer;
             set
             {
-                if (_suppressDirectorySelection)
-                {
-                    _selectedDirectoryServer = value;
-                    OnPropertyChanged(nameof(SelectedDirectoryServer));
-                    OnPropertyChanged(nameof(IsCustomServerSelected));
-                    return;
-                }
-
-                if (ReferenceEquals(_selectedDirectoryServer, value))
-                    return;
-
-                _selectedDirectoryServer = value;
-                OnPropertyChanged(nameof(SelectedDirectoryServer));
-                OnPropertyChanged(nameof(IsCustomServerSelected));
-
-                if (value == null)
-                    return;
-
-                // Selecting a directory server sets the server URL.
-                var url = (value.Url ?? string.Empty).Trim();
-                if (url.Length > 0)
-                    ServerUrl = url;
+                ApplySelectedDirectoryServer(value, syncServerUrl: !_suppressDirectorySelection);
             }
         }
 
-        
-
-        public bool IsCustomServerSelected => SelectedDirectoryServer?.IsCustom == true;
+        public bool IsCustomServerSelected => _showCustomServerUrlRow;
 
         private DateTime _lastDirectoryRefreshUtc = DateTime.MinValue;
 
@@ -987,6 +1285,29 @@ try
         // we do not want the act of assigning ServerUrl to re-sync the server picker selection.
         // The picker should remain on what the user selected.
         private int _suppressDirectorySelectionSync;
+
+        private void ApplySelectedDirectoryServer(ServerDirectoryEntry? value, bool syncServerUrl)
+        {
+            var selectionChanged = !ReferenceEquals(_selectedDirectoryServer, value);
+            _selectedDirectoryServer = value;
+
+            var showCustom = value?.IsCustom == true;
+            var customVisibilityChanged = _showCustomServerUrlRow != showCustom;
+            _showCustomServerUrlRow = showCustom;
+
+            if (selectionChanged)
+                OnPropertyChanged(nameof(SelectedDirectoryServer));
+
+            if (selectionChanged || customVisibilityChanged)
+                OnPropertyChanged(nameof(IsCustomServerSelected));
+
+            if (!syncServerUrl || value == null)
+                return;
+
+            var url = (value.Url ?? string.Empty).Trim();
+            if (url.Length > 0)
+                ServerUrl = url;
+        }
 
         public async Task EnsureDirectoryServersFreshAsync(bool force)
         {
@@ -1118,7 +1439,7 @@ public bool IsDirectoryLoading
             get => _basicAuthPassword;
             set
             {
-                if (string.Equals(_basicAuthPassword, value, StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(_basicAuthPassword, value, StringComparison.Ordinal))
                     return;
 
                 _basicAuthPassword = value ?? string.Empty;
@@ -1669,7 +1990,11 @@ public bool WindowsStartWithWindows
             // Load persisted settings into local view model fields.
             // This keeps the Settings UI in sync with the DB (single source of truth).
             _authServerBaseUrl = _settings.AuthServerBaseUrl ?? string.Empty;
-            _serverUrl = _settings.ServerUrl ?? string.Empty;
+
+            var persistedServerUrl = (_settings.ServerUrl ?? string.Empty).Trim();
+            _serverUrl = string.IsNullOrWhiteSpace(persistedServerUrl)
+                ? DefaultServerUrl
+                : persistedServerUrl;
 
             _basicAuthUsername = _settings.BasicAuthUsername ?? string.Empty;
             _basicAuthPassword = _settings.BasicAuthPassword ?? string.Empty;
@@ -1882,7 +2207,25 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                     priceText.Contains(" ", StringComparison.Ordinal) ||
                     priceText.Contains("$", StringComparison.Ordinal);
 
+                var planLabelPrefix = "Plan:";
+                var planLabelText = string.Empty;
+                if (planSummary.StartsWith(planLabelPrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    var afterPlanPrefix = planSummary.Substring(planLabelPrefix.Length).Trim();
+                    var idxSeparator = afterPlanPrefix.IndexOf(" - ", StringComparison.Ordinal);
+                    planLabelText = idxSeparator >= 0
+                        ? afterPlanPrefix.Substring(0, idxSeparator).Trim()
+                        : afterPlanPrefix.Trim();
+                }
+
+                var priceDuplicatesPlan =
+                    !string.IsNullOrEmpty(planLabelText) &&
+                    (string.Equals(planLabelText, priceText, StringComparison.OrdinalIgnoreCase) ||
+                     planLabelText.Contains(priceText, StringComparison.OrdinalIgnoreCase) ||
+                     priceText.Contains(planLabelText, StringComparison.OrdinalIgnoreCase));
+
                 if (looksLikeFriendlyPrice &&
+                    !priceDuplicatesPlan &&
                     !planSummary.Contains(priceText, StringComparison.OrdinalIgnoreCase))
                 {
                     var idxTrial = planSummary.IndexOf(" - Trial end date:", StringComparison.Ordinal);
@@ -1960,12 +2303,12 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                 var ok = await WindowsStartupManager.TrySetRunOnLoginAsync(_settings.WindowsStartWithWindows);
                 if (!ok)
                 {
-                    AppLog.Add($"Startup: Settings save attempted to set StartWithWindows={_settings.WindowsStartWithWindows} but it reported failure.");
+                    AppLog.Add(() => $"Startup: Settings save attempted to set StartWithWindows={_settings.WindowsStartWithWindows} but it reported failure.");
                 }
             }
             catch (Exception ex)
             {
-                AppLog.Add($"Startup: Settings save threw while applying StartWithWindows={_settings.WindowsStartWithWindows}. {ex.GetType().Name}: {ex.Message}");
+                AppLog.Add(() => $"Startup: Settings save threw while applying StartWithWindows={_settings.WindowsStartWithWindows}. {ex.GetType().Name}: {ex.Message}");
             }
 #endif
 
@@ -2025,8 +2368,6 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
 
             _savedAddressDetectionEnabled = _addressDetectionEnabled;
             _savedAddressDetectionOpenMapsOnTap = _addressDetectionOpenMapsOnTap;
-
-            LoadDirectoryServersFromCache();
 
             _savedAddressDetectionMinConfidencePercent = _addressDetectionMinConfidencePercent;
             _savedAddressDetectionMinAddressChars = _addressDetectionMinAddressChars;
@@ -2114,6 +2455,12 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
 
         private async Task ValidateServerUrlAsync()
         {
+            var selectedDirectoryServerAtStart = _selectedDirectoryServer;
+            var selectedDirectoryServerUrlAtStart = (selectedDirectoryServerAtStart?.Url ?? string.Empty).Trim().TrimEnd('/');
+            var selectedCustomAtStart = selectedDirectoryServerAtStart?.IsCustom == true;
+
+            Interlocked.Increment(ref _suppressDirectorySelectionSync);
+
             var url = ServerUrl?.Trim();
 
             if (!string.IsNullOrEmpty(url))
@@ -2163,7 +2510,7 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                 if (isDefaultServer)
                 {
                     var accountUsername = (BasicAuthUsername ?? string.Empty).Trim();
-                    var accountPassword = (BasicAuthPassword ?? string.Empty).Trim();
+                    var accountPassword = NormalizeSmartQuotes((BasicAuthPassword ?? string.Empty).Trim());
 
                     if (string.IsNullOrWhiteSpace(accountUsername) || string.IsNullOrWhiteSpace(accountPassword))
                     {
@@ -2217,7 +2564,15 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                         session_token = _settings.AuthSessionToken
                     };
 
-                    var json = JsonSerializer.Serialize(payload);
+                    // Use UnsafeRelaxedJsonEscaping so special characters like apostrophes in
+                    // passwords are sent as literal characters (e.g. ') rather than Unicode escapes
+                    // (e.g. '). The default JavaScriptEncoder escapes ' which causes
+                    // authentication failures for passwords containing apostrophes.
+                    var authJsonOptions = new JsonSerializerOptions
+                    {
+                        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+                    };
+                    var json = JsonSerializer.Serialize(payload, authJsonOptions);
                     using var content = new StringContent(json, Encoding.UTF8, "application/json");
 
                     using var authResponseMessage = await _httpClient.PostAsync(authUrl, content);
@@ -2316,6 +2671,12 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                     var statusText = statusRaw.Trim().ToLowerInvariant();
                     var periodEnd = periodEndRaw.Trim();
 
+                    var includePriceText =
+                        !string.IsNullOrEmpty(priceText) &&
+                        !string.Equals(planLabel, priceText, StringComparison.OrdinalIgnoreCase) &&
+                        !planLabel.Contains(priceText, StringComparison.OrdinalIgnoreCase) &&
+                        !priceText.Contains(planLabel, StringComparison.OrdinalIgnoreCase);
+
                     string formattedDate = string.Empty;
                     if (!string.IsNullOrEmpty(periodEnd))
                     {
@@ -2340,13 +2701,13 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                     string planSummary;
 
                     if (!string.IsNullOrEmpty(planLabel) &&
-                        !string.IsNullOrEmpty(priceText) &&
+                        includePriceText &&
                         !string.IsNullOrEmpty(formattedDate))
                     {
                         planSummary = $"Plan: {planLabel} - {priceText} - {dateLabel} {formattedDate}";
                     }
                     else if (!string.IsNullOrEmpty(planLabel) &&
-                             !string.IsNullOrEmpty(priceText))
+                             includePriceText)
                     {
                         planSummary = $"Plan: {planLabel} - {priceText}";
                     }
@@ -2442,12 +2803,12 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                         if (includeAuth)
                         {
                             var u = (BasicAuthUsername ?? string.Empty).Trim();
-                            var p = (BasicAuthPassword ?? string.Empty).Trim();
+                            var p = NormalizeSmartQuotes((BasicAuthPassword ?? string.Empty).Trim());
 
                             if (!string.IsNullOrWhiteSpace(u) || !string.IsNullOrWhiteSpace(p))
                             {
                                 var raw = $"{u}:{p}";
-                                var bytes = Encoding.ASCII.GetBytes(raw);
+                                var bytes = Encoding.UTF8.GetBytes(raw);
                                 var base64 = Convert.ToBase64String(bytes);
 
                                 req.Headers.Authorization = new AuthenticationHeaderValue("Basic", base64);
@@ -2560,7 +2921,7 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                                 _settings.ServerUrl = finalUrl;
 
                                 var effectiveUser = (BasicAuthUsername ?? string.Empty).Trim();
-                                var effectivePass = (BasicAuthPassword ?? string.Empty).Trim();
+                                var effectivePass = NormalizeSmartQuotes((BasicAuthPassword ?? string.Empty).Trim());
 
                                 _settings.BasicAuthUsername = effectiveUser;
                                 _settings.BasicAuthPassword = effectivePass;
@@ -2637,6 +2998,46 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
             }
             finally
             {
+                try
+                {
+                    // Keep the picker locked to the user-selected listed server during Validate.
+                    // Only fall back to URL-based sync when Custom server was actually selected.
+                    if (!selectedCustomAtStart && selectedDirectoryServerAtStart != null)
+                    {
+                        var liveMatch = _directoryServers.FirstOrDefault(s =>
+                            !s.IsCustom &&
+                            string.Equals((s.Url ?? string.Empty).Trim().TrimEnd('/'), selectedDirectoryServerUrlAtStart, StringComparison.OrdinalIgnoreCase));
+
+                        if (liveMatch != null)
+                        {
+                            _suppressDirectorySelection = true;
+                            try
+                            {
+                                ApplySelectedDirectoryServer(liveMatch, syncServerUrl: false);
+                            }
+                            finally
+                            {
+                                _suppressDirectorySelection = false;
+                            }
+                        }
+                        else
+                        {
+                            SyncSelectedDirectoryServerFromCurrentUrl();
+                        }
+                    }
+                    else
+                    {
+                        SyncSelectedDirectoryServerFromCurrentUrl();
+                    }
+                }
+                catch
+                {
+                }
+                finally
+                {
+                    Interlocked.Decrement(ref _suppressDirectorySelectionSync);
+                }
+
                 // If validation succeeded, treat the current connection settings as saved
                 // so the Validate button returns to its normal (blue) state.
                 if (!ServerValidationIsError)
@@ -2713,22 +3114,73 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
 
 
 
+        private ServerDirectoryEntry ReuseOrUpdateDirectoryEntry(ServerDirectoryEntry source)
+        {
+            if (source == null)
+                return new ServerDirectoryEntry();
+
+            if (source.IsCustom)
+                return CustomServerDirectoryEntry;
+
+            var normalizedUrl = (source.Url ?? string.Empty).Trim().TrimEnd('/');
+            var builtinJoeUrl = DefaultServerUrl.Trim().TrimEnd('/');
+
+            if (string.Equals(normalizedUrl, builtinJoeUrl, StringComparison.OrdinalIgnoreCase))
+                return BuiltinJoeDirectoryEntry;
+
+            var existing = _directoryServers.FirstOrDefault(s =>
+                s != null &&
+                !s.IsCustom &&
+                string.Equals((s.Url ?? string.Empty).Trim().TrimEnd('/'), normalizedUrl, StringComparison.OrdinalIgnoreCase));
+
+            var target = existing ?? new ServerDirectoryEntry();
+            target.DirectoryId = source.DirectoryId;
+            target.Name = source.Name ?? string.Empty;
+            target.Url = source.Url ?? string.Empty;
+            target.InfoUrl = source.InfoUrl ?? string.Empty;
+            target.AreaLabel = source.AreaLabel ?? string.Empty;
+            target.MapAnchor = source.MapAnchor ?? string.Empty;
+            target.IsOfficial = source.IsOfficial;
+            target.IsCustom = false;
+            target.Badge = source.Badge ?? string.Empty;
+            target.BadgeLabel = source.BadgeLabel ?? string.Empty;
+            return target;
+        }
+
         private void LoadDirectoryServersFromCache()
         {
             try
             {
+                var existingEntries = _directoryServers.ToList();
                 _directoryServers.Clear();
-                _directoryServers.Add(CustomServerDirectoryEntry);
+                _directoryServers.Add(BuiltinJoeDirectoryEntry);
                 var cached = _settings.GetCachedDirectoryServers();
                 foreach (var s in cached)
-                    _directoryServers.Add(s);
+                {
+                    if (s == null)
+                        continue;
+
+                    var cachedUrl = (s.Url ?? string.Empty).Trim().TrimEnd('/');
+                    var builtinJoeUrl = DefaultServerUrl.Trim().TrimEnd('/');
+                    if (string.Equals(cachedUrl, builtinJoeUrl, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var existing = existingEntries.FirstOrDefault(entry =>
+                        entry != null &&
+                        !entry.IsCustom &&
+                        string.Equals((entry.Url ?? string.Empty).Trim().TrimEnd('/'), cachedUrl, StringComparison.OrdinalIgnoreCase));
+
+                    _directoryServers.Add(ReuseOrUpdateDirectoryEntry(existing ?? s));
+                }
+
+                _directoryServers.Add(CustomServerDirectoryEntry);
 
                 // Sync picker selection to current ServerUrl.
                 SyncSelectedDirectoryServerFromCurrentUrl();
 
-                DirectoryStatusText = _directoryServers.Count <= 1
+                DirectoryStatusText = _directoryServers.Count <= 2
                     ? "No servers loaded yet."
-                    : $"Loaded {_directoryServers.Count - 1} server(s).";
+                    : $"Loaded {_directoryServers.Count - 2} server(s).";
             }
             catch
             {
@@ -2737,39 +3189,42 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
         }
 
         private void SyncSelectedDirectoryServerFromCurrentUrl()
-{
-    try
-    {
-        var current = (ServerUrl ?? string.Empty).Trim().TrimEnd('/');
-
-        // Default to Custom if empty or no match.
-        ServerDirectoryEntry? match = null;
-
-        if (!string.IsNullOrWhiteSpace(current))
         {
-            match = _directoryServers.FirstOrDefault(s =>
-                !s.IsCustom &&
-                string.Equals((s.Url ?? string.Empty).Trim().TrimEnd('/'), current, StringComparison.OrdinalIgnoreCase));
-        }
+            try
+            {
+                var current = (ServerUrl ?? string.Empty).Trim().TrimEnd('/');
+                var defaultUrl = DefaultServerUrl.Trim().TrimEnd('/');
 
-        match ??= _directoryServers.FirstOrDefault(s => s.IsCustom) ?? CustomServerDirectoryEntry;
+                ServerDirectoryEntry? match;
 
-        _suppressDirectorySelection = true;
-        try
-        {
-            _selectedDirectoryServer = match;
-            OnPropertyChanged(nameof(SelectedDirectoryServer));
-            OnPropertyChanged(nameof(IsCustomServerSelected));
+                if (string.IsNullOrWhiteSpace(current))
+                {
+                    match = _directoryServers.FirstOrDefault(s =>
+                        string.Equals((s.Url ?? string.Empty).Trim().TrimEnd('/'), defaultUrl, StringComparison.OrdinalIgnoreCase));
+                }
+                else
+                {
+                    match = _directoryServers.FirstOrDefault(s =>
+                        !s.IsCustom &&
+                        string.Equals((s.Url ?? string.Empty).Trim().TrimEnd('/'), current, StringComparison.OrdinalIgnoreCase));
+                }
+
+                match ??= _directoryServers.FirstOrDefault(s => s.IsCustom) ?? CustomServerDirectoryEntry;
+
+                _suppressDirectorySelection = true;
+                try
+                {
+                    ApplySelectedDirectoryServer(match, syncServerUrl: false);
+                }
+                finally
+                {
+                    _suppressDirectorySelection = false;
+                }
+            }
+            catch
+            {
+            }
         }
-        finally
-        {
-            _suppressDirectorySelection = false;
-        }
-    }
-    catch
-    {
-    }
-}
 
         private async Task RefreshDirectoryServersAsync()
         {
@@ -2840,10 +3295,21 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                 await MainThread.InvokeOnMainThreadAsync(() =>
                 {
                     _directoryServers.Clear();
-                    _directoryServers.Add(CustomServerDirectoryEntry);
+                    _directoryServers.Add(BuiltinJoeDirectoryEntry);
                     foreach (var s in list)
-                        _directoryServers.Add(s);
+                    {
+                        if (s == null)
+                            continue;
 
+                        var listUrl = (s.Url ?? string.Empty).Trim().TrimEnd('/');
+                        var builtinJoeUrl = DefaultServerUrl.Trim().TrimEnd('/');
+                        if (string.Equals(listUrl, builtinJoeUrl, StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        _directoryServers.Add(ReuseOrUpdateDirectoryEntry(s));
+                    }
+
+                    _directoryServers.Add(CustomServerDirectoryEntry);
                     SyncSelectedDirectoryServerFromCurrentUrl();
                 });
 
@@ -2974,5 +3440,72 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
             [JsonPropertyName("trial_ends_at")]
             public string? TrialEndsAt { get; set; }
         }
+
+
+private void RebuildFilterRulesFromCurrentCalls_NoThrow()
+{
+    try
+    {
+        // Settings expects the filter list to be populated even if the user opens Settings
+        // before the next live call arrives. Rebuild from the current queue snapshot.
+        var snapshot = _mainViewModel?.Calls?.ToList();
+        if (snapshot == null || snapshot.Count == 0)
+            return;
+
+        // Keep it bounded to avoid doing too much work on page open.
+        const int MaxCalls = 250;
+        if (snapshot.Count > MaxCalls)
+            snapshot = snapshot.Skip(snapshot.Count - MaxCalls).ToList();
+
+        foreach (var call in snapshot)
+        {
+            try
+            {
+                _filterService.EnsureRulesForCall(call);
+            }
+            catch
+            {
+            }
+        }
+    }
+    catch
+    {
+    }
+}
+
+private void QueueFilterUiRefresh()
+{
+    if (Interlocked.Exchange(ref _filterUiRefreshQueued, 1) == 1)
+        return;
+
+    _ = MainThread.InvokeOnMainThreadAsync(async () =>
+    {
+        try
+        {
+            await Task.Delay(75);
+        }
+        catch
+        {
+        }
+
+        try
+        {
+            RefreshFilterRulesUi();
+        }
+        catch
+        {
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _filterUiRefreshQueued, 0);
+        }
+    });
+}
+
+private void RefreshFilterRulesUi()
+{
+}
+
+
     }
 }

@@ -190,14 +190,18 @@ public double? What3WordsLongitude
 public bool HasWhat3WordsCoordinates => _what3WordsLatitude.HasValue && _what3WordsLongitude.HasValue;
 
 public string What3WordsCoordinatesText
-{
-    get
     {
-        if (!HasWhat3WordsCoordinates)
-            return string.Empty;
-        return $"{_what3WordsLatitude.Value:F6}, {_what3WordsLongitude.Value:F6}";
+        get
+        {
+            var lat = _what3WordsLatitude;
+            var lon = _what3WordsLongitude;
+
+            if (!lat.HasValue || !lon.HasValue)
+                return string.Empty;
+
+            return $"{lat.Value:F6}, {lon.Value:F6}";
+        }
     }
-}
 
 
         public bool IsTranscriptionUpdate
@@ -245,6 +249,7 @@ public string What3WordsCoordinatesText
                 _callDurationSeconds = value;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(DurationDisplay));
+                OnPropertyChanged(nameof(DurationMmSsDisplay));
                 OnPropertyChanged(nameof(AccessibilitySummary));
                 OnPropertyChanged(nameof(AccessibilityAnnouncement));
             }
@@ -478,6 +483,24 @@ public string What3WordsCoordinatesText
             CallDurationSeconds <= 0
                 ? string.Empty
                 : $"{CallDurationSeconds:F1}s";
+
+        // Compact duration for UI where we want the call length in minutes.
+        // Examples: 0:12, 1:05, 12:34, 1:02:03
+        public string DurationMmSsDisplay
+        {
+            get
+            {
+                if (CallDurationSeconds <= 0)
+                    return string.Empty;
+
+                var ts = TimeSpan.FromSeconds(CallDurationSeconds);
+
+                if (ts.TotalHours >= 1)
+                    return $"{(int)ts.TotalHours}:{ts.Minutes:00}:{ts.Seconds:00}";
+
+                return $"{(int)ts.TotalMinutes}:{ts.Seconds:00}";
+            }
+        }
 
         // Receiver name shown in the UI.
         // Prefers VoiceReceiver, falls back to Source if receiver is not set.

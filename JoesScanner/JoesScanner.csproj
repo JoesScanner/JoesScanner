@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <!-- Multi target: Android, iOS, MacCatalyst, Windows (on .NET 10) -->
@@ -24,10 +24,10 @@
     <ApplicationId>app.joesscanner.com</ApplicationId>
 
     <!-- Display version is semantic -->
-    <ApplicationDisplayVersion>1.5.5</ApplicationDisplayVersion>
+    <ApplicationDisplayVersion>1.5.6</ApplicationDisplayVersion>
 
     <!-- ApplicationVersion must be an integer and should only ever go up -->
-    <ApplicationVersion>155</ApplicationVersion>
+    <ApplicationVersion>156</ApplicationVersion>
 
     <DefaultLanguage>en-us</DefaultLanguage>
 
@@ -70,6 +70,9 @@
     <!-- Work around occasional simulator builds failing in the generated registrar -->
     <MtouchLink>SdkOnly</MtouchLink>
     <MtouchExtraArgs>$(MtouchExtraArgs) --registrar:static</MtouchExtraArgs>
+    <ProvisioningType>automatic</ProvisioningType>
+    <CodesignKey>iPhone Distribution</CodesignKey>
+    <CodesignProvision>JoesScanner</CodesignProvision>
   </PropertyGroup>
 
   <!-- iOS runtime selection -->
@@ -90,7 +93,7 @@
   <PropertyGroup Condition="'$(TargetFramework)'=='net10.0-ios' And '$(RuntimeIdentifier)'!='iossimulator-arm64' And '$(RuntimeIdentifier)'!='iossimulator-x64'">
     <ProvisioningType>manual</ProvisioningType>
     <CodesignKey>Apple Distribution: LINDSAY KAY WILLIAMS (G3SJDUVZ9Y)</CodesignKey>
-    <CodesignProvision>JoesScannerProvision</CodesignProvision>
+    <CodesignProvision>JoesScanner</CodesignProvision>
   </PropertyGroup>
 
   <ItemGroup>
@@ -121,6 +124,10 @@
     <MauiImage Remove="Resources\Images\logo.png" />
     <MauiFont Include="Resources\Fonts\*" />
     <MauiAsset Include="Resources\Raw\**" LogicalName="%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="SettingsPage.xaml.cs" />
   </ItemGroup>
 
   <ItemGroup>

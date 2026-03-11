@@ -55,7 +55,6 @@ namespace JoesScanner.Services
             var prepSw = Stopwatch.StartNew();
             var downloadElapsedMs = 0L;
             var downloadBytes = 0L;
-            var preparedFromCache = false;
             var toneDetectionElapsedMs = 0L;
             var toneScanWindowMs = 0;
             if (string.IsNullOrWhiteSpace(audioUrl))
@@ -158,7 +157,7 @@ return toned with
                 && !string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase))
                 return prepared;
 
-            var cacheDir = Path.Combine(FileSystem.AppDataDirectory, "AudioFilterCache");
+            var cacheDir = Path.Combine(AppPaths.GetAppDataDirectorySafe(), "AudioFilterCache");
             Directory.CreateDirectory(cacheDir);
 
             // Settings hash is included so future DSP outputs do not collide.
@@ -176,7 +175,6 @@ return toned with
                     AppLog.Add(() => $"AudioFilter: cache hit. file={Path.GetFileName(cachePath)} prepMs={prepSw.ElapsedMilliseconds}");
                 }
                 catch { }
-                preparedFromCache = true;
                 var withLocal = prepared with
                 {
                     Url = new Uri(cachePath).AbsoluteUri,
@@ -252,7 +250,6 @@ return toned with
                 }
 
                 File.Move(tmpPath, cachePath);
-                preparedFromCache = true;
                 var withLocal = prepared with
                 {
                     Url = new Uri(cachePath).AbsoluteUri,
@@ -651,7 +648,7 @@ private static bool IsInAudioFilterCache(string localPath)
 {
     try
     {
-        var cacheDir = Path.Combine(FileSystem.AppDataDirectory, "AudioFilterCache");
+        var cacheDir = Path.Combine(AppPaths.GetAppDataDirectorySafe(), "AudioFilterCache");
         var full = Path.GetFullPath(localPath);
         var fullCache = Path.GetFullPath(cacheDir);
 
@@ -1188,22 +1185,22 @@ var frameMs = 20;
                 if (!prepared.StaticFilterEnabled || prepared.StaticAttenuatorVolume <= 0)
                     return;
 
-                var count = prepared.StaticSegments?.Count ?? 0;
-                if (count <= 0)
+                var segs = prepared.StaticSegments;
+                var count = segs?.Count ?? 0;
+                if (count <= 0 || segs == null)
                 {
                     AppLog.Add(() => $"AudioStatic: segments=0 file={Path.GetFileName(prepared.LocalPath)} vol={prepared.StaticAttenuatorVolume} elapsedMs={elapsedMs}");
                     return;
                 }
 
-                var first = prepared.StaticSegments[0];
-                var last = prepared.StaticSegments[count - 1];
+                var first = segs[0];
+                var last = segs[count - 1];
                 AppLog.Add(() => $"AudioStatic: segments={count} file={Path.GetFileName(prepared.LocalPath)} first={first.StartMs}-{first.EndMs} last={last.StartMs}-{last.EndMs} vol={prepared.StaticAttenuatorVolume} elapsedMs={elapsedMs}");
             }
             catch { }
         }
 
-
-private static DecodedAudio DecodeMp3ToMono(string mp3Path, CancellationToken cancellationToken, int maxAnalyzeSeconds)
+        private static DecodedAudio DecodeMp3ToMono(string mp3Path, CancellationToken cancellationToken, int maxAnalyzeSeconds)
 {
     cancellationToken.ThrowIfCancellationRequested();
 

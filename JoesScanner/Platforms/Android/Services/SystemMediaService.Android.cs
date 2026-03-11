@@ -1,4 +1,5 @@
 #if ANDROID
+using System;
 using global::Android.Content;
 using global::Android.OS;
 using JoesScanner.Platforms.Android.Services;
@@ -28,7 +29,7 @@ namespace JoesScanner.Services
                 if (ctx != null)
                 {
                     var intent = new Intent(ctx, typeof(AudioForegroundService));
-                    if (Build.VERSION.SdkInt >= BuildVersionCodes.O)
+                    if (OperatingSystem.IsAndroidVersionAtLeast(26))
                         ctx.StartForegroundService(intent);
                     else
                         ctx.StartService(intent);

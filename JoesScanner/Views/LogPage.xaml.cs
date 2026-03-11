@@ -25,8 +25,9 @@ namespace JoesScanner.Views
         {
             InitializeComponent();
 
-            LoggingSwitch.IsToggled = AppLog.IsEnabled;
-            SyncLoggingState();
+            var enabled = AppLog.ReloadEnabledStateFromStorage();
+            LoggingSwitch.IsToggled = enabled;
+            SyncLoggingState(enabled);
 
             SyncIntervalLabel();
             UpdateAutoRefreshButtonVisual();
@@ -35,6 +36,10 @@ namespace JoesScanner.Views
         protected override void OnAppearing()
         {
             base.OnAppearing();
+
+            var enabled = AppLog.ReloadEnabledStateFromStorage();
+            LoggingSwitch.IsToggled = enabled;
+            SyncLoggingState(enabled);
             RefreshLog();
 
             if (_autoRefreshEnabled)
@@ -100,14 +105,14 @@ namespace JoesScanner.Views
             {
                 if (!AppLog.IsEnabled)
                 {
-                    await DisplayAlert("Logs", "Logging is disabled.", "OK");
+                    await DisplayAlertAsync("Logs", "Logging is disabled.", "OK");
                     return;
                 }
 
                 var zipPath = await AppLog.ExportLogsAsync(maxLogFiles: 3, snapshotMaxLines: MaxLines);
                 if (string.IsNullOrWhiteSpace(zipPath) || !File.Exists(zipPath))
                 {
-                    await DisplayAlert("Logs", "Unable to export logs.", "OK");
+                    await DisplayAlertAsync("Logs", "Unable to export logs.", "OK");
                     return;
                 }
 
@@ -121,7 +126,7 @@ namespace JoesScanner.Views
             {
                 try
                 {
-                    await DisplayAlert("Logs", "Unable to export logs.", "OK");
+                    await DisplayAlertAsync("Logs", "Unable to export logs.", "OK");
                 }
                 catch
                 {
@@ -247,7 +252,7 @@ namespace JoesScanner.Views
         private void OnLoggingToggled(object sender, ToggledEventArgs e)
         {
             AppLog.SetEnabled(e.Value);
-            SyncLoggingState();
+            SyncLoggingState(e.Value);
 
             if (!e.Value)
             {
@@ -259,10 +264,12 @@ namespace JoesScanner.Views
             RefreshLog();
         }
 
-        private void SyncLoggingState()
+        private void SyncLoggingState(bool? enabled = null)
         {
+            var resolvedEnabled = enabled ?? AppLog.IsEnabled;
+
             // The Switch provides the visual state; this label provides explicit text.
-            LoggingStateLabel.Text = AppLog.IsEnabled ? "Enabled" : "Disabled";
+            LoggingStateLabel.Text = resolvedEnabled ? "Enabled" : "Disabled";
         }
 
         private async void OnCopyClicked(object sender, EventArgs e)

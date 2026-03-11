@@ -44,6 +44,7 @@ public static class MauiProgram
         builder.Services.AddSingleton<IAuthObservedTriplesSyncService, AuthObservedTriplesSyncService>();
         builder.Services.AddSingleton<IAddressDetectionService, AddressDetectionService>();
         builder.Services.AddSingleton<IWhat3WordsService, What3WordsService>();
+        builder.Services.AddSingleton<IAppUpdateService, AppUpdateService>();
 
         // Call downloading (single and range zip).
         builder.Services.AddSingleton<ICallDownloadService, CallDownloadService>();

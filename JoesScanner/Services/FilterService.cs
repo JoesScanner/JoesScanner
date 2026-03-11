@@ -1,69 +1,133 @@
-﻿using JoesScanner.Models;
+using JoesScanner.Models;
 using System.Collections.ObjectModel;
-using System.ComponentModel;
-using System.Threading;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Maui.ApplicationModel;
 
 namespace JoesScanner.Services
 {
-    // Central filter engine used by both the main page and settings.
-    // Owns the rules list, persists it, and answers filter decisions.
+    // V2 filter engine.
+    // Separates discovered hierarchy from explicit user state.
+    // Discovery is additive and server-scoped.
+    // State is local and server-scoped.
     internal sealed class FilterService
     {
+        private const string FilterDiscoveryDbKey = "filter_discovery_v2";
+        private const string FilterStateDbKey = "filter_state_v2";
 
-        // DB key used for the new DB-backed filter persistence.
-        private const string FiltersDbKey = "filter_rules_v1";
+        private readonly ObservableCollection<FilterRule> _rules = [];
+        private readonly Lock _gate = new();
+        private readonly Dictionary<string, DiscoveryNode> _discovery = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, FilterRuleStateRecord> _state = new(StringComparer.OrdinalIgnoreCase);
+
+        private static readonly Lazy<FilterService> _instance = new(static () => new FilterService());
+        public static FilterService Instance => _instance.Value;
 
         private string _currentServerKey = string.Empty;
 
+        private enum DiscoveryUpdateKind
+        {
+            None,
+            MetadataOnly,
+            Structural
+        }
+
+        public ObservableCollection<FilterRule> Rules => _rules;
         public event EventHandler? RulesChanged;
 
-        private readonly ObservableCollection<FilterRule> _rules = [];
-        public ObservableCollection<FilterRule> Rules => _rules;
-
-        public List<FilterRuleStateRecord> GetActiveStateRecords()
+        private FilterService()
         {
-            var list = new List<FilterRuleStateRecord>();
+            LoadCurrentServerFromStorage();
+            RebuildRenderedRules();
+        }
 
-            lock (_rulesGate)
+        public int PruneTalkgroupRulesNotInLookups(HistoryLookupData? lookups)
+        {
+            return 0;
+        }
+
+        public int PruneTalkgroupRulesNotInLookups(HistoryLookupData? lookups, IReadOnlyList<ObservedTriple>? localObserved)
+        {
+            return 0;
+        }
+
+        public void SeedFromObservedTriples(IReadOnlyList<ObservedTriple> triples)
+        {
+            if (triples == null || triples.Count == 0)
+                return;
+
+            var structureChanged = false;
+
+            lock (_gate)
             {
-                foreach (var r in _rules)
+                foreach (var triple in triples)
                 {
-                    if (!r.IsMuted && !r.IsDisabled)
+                    if (!TryMapObservedTriple(triple, out var node))
                         continue;
 
-                    list.Add(new FilterRuleStateRecord
-                    {
-                        Level = r.Level,
-                        Receiver = r.Receiver,
-                        Site = r.Site,
-                        Talkgroup = r.Talkgroup,
-                        IsMuted = r.IsMuted,
-                        IsDisabled = r.IsDisabled
-                    });
+                    var change = UpsertDiscovery_NoLock(node);
+                    if (change == DiscoveryUpdateKind.Structural)
+                        structureChanged = true;
                 }
             }
 
-            return list;
+            if (!structureChanged)
+                return;
+
+            SaveDiscoveryToStorage();
+            RebuildRenderedRules();
+        }
+
+        public int ReplaceFromObservedTriples(IReadOnlyList<ObservedTriple> triples)
+        {
+            lock (_gate)
+            {
+                _discovery.Clear();
+
+                if (triples != null)
+                {
+                    foreach (var triple in triples)
+                    {
+                        if (!TryMapObservedTriple(triple, out var node))
+                            continue;
+
+                        UpsertDiscovery_NoLock(node);
+                    }
+                }
+            }
+
+            SaveDiscoveryToStorage();
+            RebuildRenderedRules();
+            return _discovery.Count;
+        }
+
+        public List<FilterRuleStateRecord> GetActiveStateRecords()
+        {
+            lock (_gate)
+            {
+                return _state.Values
+                    .Where(x => x.IsMuted || x.IsDisabled)
+                    .Select(x => new FilterRuleStateRecord
+                    {
+                        Level = x.Level,
+                        Receiver = x.Receiver,
+                        Site = x.Site,
+                        Talkgroup = x.Talkgroup,
+                        IsMuted = x.IsMuted,
+                        IsDisabled = x.IsDisabled
+                    })
+                    .ToList();
+            }
         }
 
         public void ApplyStateRecords(IEnumerable<FilterRuleStateRecord> records, bool resetOthers)
         {
-            var incoming = records?.ToList() ?? new List<FilterRuleStateRecord>();
-
-            lock (_rulesGate)
+            lock (_gate)
             {
                 if (resetOthers)
-                {
-                    foreach (var r in _rules)
-                    {
-                        r.IsMuted = false;
-                        r.IsDisabled = false;
-                    }
-                }
+                    _state.Clear();
 
-                foreach (var rec in incoming)
+                foreach (var rec in records ?? Enumerable.Empty<FilterRuleStateRecord>())
                 {
                     if (rec == null)
                         continue;
@@ -71,74 +135,771 @@ namespace JoesScanner.Services
                     var receiver = Normalize(rec.Receiver);
                     var site = Normalize(rec.Site);
                     var talkgroup = Normalize(rec.Talkgroup);
-
                     if (!IsRuleValid(rec.Level, receiver, site, talkgroup))
                         continue;
 
-                    var match = _rules.FirstOrDefault(r =>
-                        r.Level == rec.Level &&
-                        string.Equals(Normalize(r.Receiver), receiver, StringComparison.OrdinalIgnoreCase) &&
-                        string.Equals(Normalize(r.Site), site, StringComparison.OrdinalIgnoreCase) &&
-                        string.Equals(Normalize(r.Talkgroup), talkgroup, StringComparison.OrdinalIgnoreCase));
-
-                    if (match == null)
+                    var state = new FilterRuleStateRecord
                     {
-                        match = new FilterRule
-                        {
-                            Level = rec.Level,
-                            Receiver = receiver,
-                            Site = site,
-                            Talkgroup = talkgroup,
-                            LastSeenUtc = DateTime.UtcNow
-                        };
+                        Level = rec.Level,
+                        Receiver = receiver,
+                        Site = site,
+                        Talkgroup = talkgroup,
+                        IsMuted = rec.IsMuted,
+                        IsDisabled = rec.IsDisabled
+                    };
 
-                        match.PropertyChanged += OnRulePropertyChanged;
-                        InsertRuleSorted_NoYield(match);
-                    }
-
-                    match.IsMuted = rec.IsMuted;
-                    match.IsDisabled = rec.IsDisabled;
+                    var key = state.Key;
+                    if (!state.IsMuted && !state.IsDisabled)
+                        _state.Remove(key);
+                    else
+                        _state[key] = state;
                 }
             }
 
-            SaveToStorage();
-            OnRulesChanged();
-        }
-
-        // Use System.Threading.Lock to satisfy IDE0330 and to guarantee safe snapshots.
-        private readonly Lock _rulesGate = new();
-
-        private static readonly Lazy<FilterService> _instance = new(static () => new FilterService());
-        public static FilterService Instance => _instance.Value;
-
-        private FilterService()
-        {
-            // Default to a blank context. The main view model will call SetServerUrl
-            // to switch context once the configured server is known.
-            LoadFromStorage(GetStorageKey());
-            PruneInvalidRules(saveIfChanged: true);
+            SaveStateToStorage();
+            RebuildRenderedRules();
         }
 
         public void SetServerUrl(string serverUrl)
         {
             var key = NormalizeServerKey(serverUrl);
-
             if (string.Equals(_currentServerKey, key, StringComparison.OrdinalIgnoreCase))
                 return;
 
             _currentServerKey = key;
-
-            LoadFromStorage(GetStorageKey());
-            PruneInvalidRules(saveIfChanged: false);
-            OnRulesChanged();
+            LoadCurrentServerFromStorage();
+            RebuildRenderedRules();
         }
 
-        private string GetStorageKey()
+        public void ToggleMute(FilterRule rule)
         {
-            var k = (_currentServerKey ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(k))
-                k = "none";
-            return $"{FiltersDbKey}::{k}";
+            if (rule == null)
+                return;
+
+            lock (_gate)
+            {
+                var state = GetOrCreateExplicitState_NoLock(rule.Level, Normalize(rule.Receiver), Normalize(rule.Site), Normalize(rule.Talkgroup));
+                state.IsMuted = !rule.IsMuted;
+                SaveOrRemoveState_NoLock(state);
+            }
+
+            SaveStateToStorage();
+            RebuildRenderedRules();
+        }
+
+        public void ToggleDisable(FilterRule rule)
+        {
+            if (rule == null)
+                return;
+
+            lock (_gate)
+            {
+                var state = GetOrCreateExplicitState_NoLock(rule.Level, Normalize(rule.Receiver), Normalize(rule.Site), Normalize(rule.Talkgroup));
+                state.IsDisabled = !rule.IsDisabled;
+                SaveOrRemoveState_NoLock(state);
+            }
+
+            SaveStateToStorage();
+            RebuildRenderedRules();
+        }
+
+        public void ClearRule(FilterRule rule)
+        {
+            if (rule == null)
+                return;
+
+            lock (_gate)
+            {
+                ClearEffectiveStatePath_NoLock(rule);
+            }
+
+            SaveStateToStorage();
+            RebuildRenderedRules();
+        }
+
+        public void EnsureRulesForCall(CallItem call)
+        {
+            if (call == null)
+                return;
+
+            if (IsErrorCall(call) || IsMetaOrNonTrafficCall(call))
+                return;
+
+            var receiver = Normalize(call.ReceiverName);
+            if (string.IsNullOrWhiteSpace(receiver))
+                return;
+
+            var site = Normalize(call.SystemName);
+            var talkgroup = Normalize(call.Talkgroup);
+            var nowUtc = DateTime.UtcNow;
+            var structureChanged = false;
+
+            lock (_gate)
+            {
+                if (!string.IsNullOrWhiteSpace(site) && !string.IsNullOrWhiteSpace(talkgroup) && !IsInvalidTalkgroupToken(talkgroup))
+                {
+                    var change = UpsertDiscovery_NoLock(new DiscoveryNode
+                    {
+                        ReceiverKey = receiver,
+                        SiteKey = site,
+                        TalkgroupKey = talkgroup,
+                        Receiver = receiver,
+                        Site = site,
+                        Talkgroup = talkgroup,
+                        LastSeenUtc = nowUtc
+                    });
+
+                    structureChanged = change == DiscoveryUpdateKind.Structural;
+                }
+                else
+                {
+                    var change = UpsertDiscovery_NoLock(new DiscoveryNode
+                    {
+                        ReceiverKey = receiver,
+                        SiteKey = string.Empty,
+                        TalkgroupKey = string.Empty,
+                        Receiver = receiver,
+                        Site = string.Empty,
+                        Talkgroup = string.Empty,
+                        LastSeenUtc = nowUtc
+                    });
+
+                    structureChanged = change == DiscoveryUpdateKind.Structural;
+                }
+            }
+
+            if (!structureChanged)
+                return;
+
+            SaveDiscoveryToStorage();
+            RebuildRenderedRules();
+        }
+
+        public bool ShouldHide(CallItem call)
+        {
+            var rule = GetBestMatchRuleForCall(call);
+            return rule != null && rule.IsDisabled;
+        }
+
+        public bool ShouldMute(CallItem call)
+        {
+            var rule = GetBestMatchRuleForCall(call);
+            if (rule == null)
+                return false;
+
+            return rule.IsDisabled || rule.IsMuted;
+        }
+
+        private void LoadCurrentServerFromStorage()
+        {
+            lock (_gate)
+            {
+                _discovery.Clear();
+                _state.Clear();
+
+                foreach (var item in LoadDiscoveryDtos())
+                {
+                    if (!IsDiscoveryValid(item.Receiver, item.Site, item.Talkgroup))
+                        continue;
+
+                    var node = new DiscoveryNode
+                    {
+                        ReceiverKey = Normalize(string.IsNullOrWhiteSpace(item.ReceiverKey) ? item.Receiver : item.ReceiverKey),
+                        SiteKey = Normalize(string.IsNullOrWhiteSpace(item.SiteKey) ? item.Site : item.SiteKey),
+                        TalkgroupKey = Normalize(string.IsNullOrWhiteSpace(item.TalkgroupKey) ? item.Talkgroup : item.TalkgroupKey),
+                        Receiver = Normalize(item.Receiver),
+                        Site = Normalize(item.Site),
+                        Talkgroup = Normalize(item.Talkgroup),
+                        LastSeenUtc = item.LastSeenUtc == default ? DateTime.UtcNow : item.LastSeenUtc
+                    };
+
+                    UpsertDiscovery_NoLock(node);
+                }
+
+                foreach (var state in LoadStateDtos())
+                {
+                    if (state == null)
+                        continue;
+
+                    var receiver = Normalize(state.Receiver);
+                    var site = Normalize(state.Site);
+                    var talkgroup = Normalize(state.Talkgroup);
+                    if (!IsRuleValid(state.Level, receiver, site, talkgroup))
+                        continue;
+
+                    state.Receiver = receiver;
+                    state.Site = site;
+                    state.Talkgroup = talkgroup;
+                    SaveOrRemoveState_NoLock(state);
+                }
+            }
+        }
+
+        private List<DiscoveryNodeDto> LoadDiscoveryDtos()
+        {
+            try
+            {
+                var json = AppStateStore.GetString(GetDiscoveryStorageKey(), string.Empty);
+                if (string.IsNullOrWhiteSpace(json))
+                    return new List<DiscoveryNodeDto>();
+
+                return JsonSerializer.Deserialize<List<DiscoveryNodeDto>>(json) ?? new List<DiscoveryNodeDto>();
+            }
+            catch
+            {
+                return new List<DiscoveryNodeDto>();
+            }
+        }
+
+        private List<FilterRuleStateRecord> LoadStateDtos()
+        {
+            try
+            {
+                var json = AppStateStore.GetString(GetStateStorageKey(), string.Empty);
+                if (string.IsNullOrWhiteSpace(json))
+                    return new List<FilterRuleStateRecord>();
+
+                return JsonSerializer.Deserialize<List<FilterRuleStateRecord>>(json) ?? new List<FilterRuleStateRecord>();
+            }
+            catch
+            {
+                return new List<FilterRuleStateRecord>();
+            }
+        }
+
+        private void SaveDiscoveryToStorage()
+        {
+            try
+            {
+                List<DiscoveryNodeDto> rows;
+                lock (_gate)
+                {
+                    rows = _discovery.Values
+                        .OrderBy(x => x.Receiver, NaturalComparer.Instance)
+                        .ThenBy(x => x.Site, NaturalComparer.Instance)
+                        .ThenBy(x => x.Talkgroup, NaturalComparer.Instance)
+                        .Select(x => new DiscoveryNodeDto
+                        {
+                            ReceiverKey = x.ReceiverKey,
+                            SiteKey = x.SiteKey,
+                            TalkgroupKey = x.TalkgroupKey,
+                            Receiver = x.Receiver,
+                            Site = x.Site,
+                            Talkgroup = x.Talkgroup,
+                            LastSeenUtc = x.LastSeenUtc
+                        })
+                        .ToList();
+                }
+
+                AppStateStore.SetString(GetDiscoveryStorageKey(), JsonSerializer.Serialize(rows));
+            }
+            catch
+            {
+            }
+        }
+
+        private void SaveStateToStorage()
+        {
+            try
+            {
+                List<FilterRuleStateRecord> rows;
+                lock (_gate)
+                {
+                    rows = _state.Values
+                        .Where(x => x.IsMuted || x.IsDisabled)
+                        .Select(x => new FilterRuleStateRecord
+                        {
+                            Level = x.Level,
+                            Receiver = x.Receiver,
+                            Site = x.Site,
+                            Talkgroup = x.Talkgroup,
+                            IsMuted = x.IsMuted,
+                            IsDisabled = x.IsDisabled
+                        })
+                        .ToList();
+                }
+
+                AppStateStore.SetString(GetStateStorageKey(), JsonSerializer.Serialize(rows));
+            }
+            catch
+            {
+            }
+        }
+
+        private string GetDiscoveryStorageKey()
+        {
+            var k = string.IsNullOrWhiteSpace(_currentServerKey) ? "none" : _currentServerKey.Trim();
+            return $"{FilterDiscoveryDbKey}::{k}";
+        }
+
+        private string GetStateStorageKey()
+        {
+            var k = string.IsNullOrWhiteSpace(_currentServerKey) ? "none" : _currentServerKey.Trim();
+            return $"{FilterStateDbKey}::{k}";
+        }
+
+        private void RebuildRenderedRules()
+        {
+            List<FilterRule> built;
+
+            lock (_gate)
+            {
+                var receiverRows = _discovery.Values
+                    .Where(x => !string.IsNullOrWhiteSpace(x.Receiver))
+                    .GroupBy(x => x.ReceiverKey, StringComparer.OrdinalIgnoreCase)
+                    .Select(g => g
+                        .OrderByDescending(x => x.LastSeenUtc)
+                        .ThenByDescending(x => x.Receiver?.Length ?? 0)
+                        .ThenBy(x => x.Receiver, NaturalComparer.Instance)
+                        .First())
+                    .OrderBy(x => x.Receiver, NaturalComparer.Instance)
+                    .ToList();
+
+                var siteRows = _discovery.Values
+                    .Where(x => !string.IsNullOrWhiteSpace(x.Receiver) && !string.IsNullOrWhiteSpace(x.Site))
+                    .GroupBy(x => (x.ReceiverKey, x.SiteKey), StringTupleComparer.Instance)
+                    .Select(g => g
+                        .OrderByDescending(x => x.LastSeenUtc)
+                        .ThenByDescending(x => x.Site?.Length ?? 0)
+                        .ThenBy(x => x.Site, NaturalComparer.Instance)
+                        .First())
+                    .OrderBy(x => x.Receiver, NaturalComparer.Instance)
+                    .ThenBy(x => x.Site, NaturalComparer.Instance)
+                    .ToList();
+
+                var talkgroupRows = _discovery.Values
+                    .Where(x => !string.IsNullOrWhiteSpace(x.Receiver) && !string.IsNullOrWhiteSpace(x.Site) && !string.IsNullOrWhiteSpace(x.Talkgroup))
+                    .GroupBy(x => BuildDiscoveryKey(x.ReceiverKey, x.SiteKey, x.TalkgroupKey, x.Receiver, x.Site, x.Talkgroup), StringComparer.OrdinalIgnoreCase)
+                    .Select(g => g
+                        .OrderByDescending(x => x.LastSeenUtc)
+                        .ThenByDescending(x => x.Talkgroup?.Length ?? 0)
+                        .ThenBy(x => x.Talkgroup, NaturalComparer.Instance)
+                        .First())
+                    .OrderBy(x => x.Receiver, NaturalComparer.Instance)
+                    .ThenBy(x => x.Site, NaturalComparer.Instance)
+                    .ThenBy(x => x.Talkgroup, NaturalComparer.Instance)
+                    .ToList();
+
+                built = new List<FilterRule>(receiverRows.Count + siteRows.Count + talkgroupRows.Count);
+
+                foreach (var receiverRow in receiverRows)
+                {
+                    var receiverState = TryGetState_NoLock(FilterLevel.Receiver, receiverRow.Receiver, string.Empty, string.Empty);
+                    built.Add(new FilterRule
+                    {
+                        Level = FilterLevel.Receiver,
+                        Receiver = receiverRow.Receiver,
+                        Site = string.Empty,
+                        Talkgroup = string.Empty,
+                        IsMuted = receiverState?.IsMuted ?? false,
+                        IsDisabled = receiverState?.IsDisabled ?? false,
+                        LastSeenUtc = receiverRow.LastSeenUtc
+                    });
+
+                    foreach (var siteRow in siteRows.Where(x => string.Equals(x.ReceiverKey, receiverRow.ReceiverKey, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        var siteState = TryGetState_NoLock(FilterLevel.Site, siteRow.Receiver, siteRow.Site, string.Empty);
+                        built.Add(new FilterRule
+                        {
+                            Level = FilterLevel.Site,
+                            Receiver = siteRow.Receiver,
+                            Site = siteRow.Site,
+                            Talkgroup = string.Empty,
+                            IsMuted = siteState?.IsMuted ?? receiverState?.IsMuted ?? false,
+                            IsDisabled = siteState?.IsDisabled ?? receiverState?.IsDisabled ?? false,
+                            LastSeenUtc = GetLatestLastSeen_NoLock(siteRow.Receiver, siteRow.Site, string.Empty)
+                        });
+
+                        foreach (var talkgroupRow in talkgroupRows.Where(x =>
+                                     string.Equals(x.ReceiverKey, siteRow.ReceiverKey, StringComparison.OrdinalIgnoreCase) &&
+                                     string.Equals(x.SiteKey, siteRow.SiteKey, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            var tgState = TryGetState_NoLock(FilterLevel.Talkgroup, talkgroupRow.Receiver, talkgroupRow.Site, talkgroupRow.Talkgroup);
+                            built.Add(new FilterRule
+                            {
+                                Level = FilterLevel.Talkgroup,
+                                Receiver = talkgroupRow.Receiver,
+                                Site = talkgroupRow.Site,
+                                Talkgroup = talkgroupRow.Talkgroup,
+                                IsMuted = tgState?.IsMuted ?? siteState?.IsMuted ?? receiverState?.IsMuted ?? false,
+                                IsDisabled = tgState?.IsDisabled ?? siteState?.IsDisabled ?? receiverState?.IsDisabled ?? false,
+                                LastSeenUtc = talkgroupRow.LastSeenUtc
+                            });
+                        }
+                    }
+                }
+            }
+
+            InvokeOnMainThreadSync(() => ApplyRenderedRulesSnapshot(built));
+
+            RulesChanged?.Invoke(this, EventArgs.Empty);
+        }
+
+
+        private void ApplyRenderedRulesSnapshot(List<FilterRule> built)
+        {
+            var existingByKey = new Dictionary<string, FilterRule>(StringComparer.OrdinalIgnoreCase);
+            var duplicateIndexes = new List<int>();
+
+            for (var i = 0; i < _rules.Count; i++)
+            {
+                var current = _rules[i];
+                var key = BuildRuleKey(current);
+                if (existingByKey.ContainsKey(key))
+                {
+                    duplicateIndexes.Add(i);
+                    continue;
+                }
+
+                existingByKey[key] = current;
+            }
+
+            for (var i = duplicateIndexes.Count - 1; i >= 0; i--)
+                _rules.RemoveAt(duplicateIndexes[i]);
+
+            var desired = new List<FilterRule>(built.Count);
+            var desiredKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var item in built)
+            {
+                var key = BuildRuleKey(item);
+                if (!desiredKeys.Add(key))
+                    continue;
+
+                if (existingByKey.TryGetValue(key, out var existing))
+                {
+                    UpdateRule(existing, item);
+                    desired.Add(existing);
+                }
+                else
+                {
+                    desired.Add(item);
+                }
+            }
+
+            for (var i = _rules.Count - 1; i >= 0; i--)
+            {
+                var current = _rules[i];
+                if (!desired.Contains(current))
+                    _rules.RemoveAt(i);
+            }
+
+            for (var i = 0; i < desired.Count; i++)
+            {
+                var desiredRule = desired[i];
+                if (i < _rules.Count)
+                {
+                    if (ReferenceEquals(_rules[i], desiredRule))
+                        continue;
+
+                    var existingIndex = _rules.IndexOf(desiredRule);
+                    if (existingIndex >= 0)
+                    {
+                        _rules.Move(existingIndex, i);
+                    }
+                    else
+                    {
+                        _rules.Insert(i, desiredRule);
+                    }
+                }
+                else
+                {
+                    _rules.Add(desiredRule);
+                }
+            }
+
+            while (_rules.Count > desired.Count)
+                _rules.RemoveAt(_rules.Count - 1);
+        }
+
+        private static void UpdateRule(FilterRule target, FilterRule source)
+        {
+            target.Level = source.Level;
+            target.Receiver = source.Receiver;
+            target.Site = source.Site;
+            target.Talkgroup = source.Talkgroup;
+            target.IsMuted = source.IsMuted;
+            target.IsDisabled = source.IsDisabled;
+            target.LastSeenUtc = source.LastSeenUtc;
+        }
+
+        private static string BuildRuleKey(FilterRule rule)
+        {
+            return FilterRuleStateRecord.BuildKey(rule.Level, Normalize(rule.Receiver), Normalize(rule.Site), Normalize(rule.Talkgroup));
+        }
+
+        private FilterRule? GetBestMatchRuleForCall(CallItem call)
+        {
+            if (call == null)
+                return null;
+
+            var receiver = Normalize(call.ReceiverName);
+            if (string.IsNullOrWhiteSpace(receiver))
+                return null;
+
+            var site = Normalize(call.SystemName);
+            var talkgroup = Normalize(call.Talkgroup);
+
+            FilterRule[] snapshot;
+            lock (_gate)
+            {
+                snapshot = _rules.ToArray();
+            }
+
+            FilterRule? receiverRule = null;
+            FilterRule? siteRule = null;
+            FilterRule? talkgroupRule = null;
+
+            foreach (var rule in snapshot)
+            {
+                if (!string.Equals(Normalize(rule.Receiver), receiver, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (rule.Level == FilterLevel.Receiver)
+                {
+                    receiverRule = rule;
+                    continue;
+                }
+
+                if (rule.Level == FilterLevel.Site)
+                {
+                    if (!string.IsNullOrWhiteSpace(site) && string.Equals(Normalize(rule.Site), site, StringComparison.OrdinalIgnoreCase))
+                        siteRule = rule;
+                    continue;
+                }
+
+                if (rule.Level == FilterLevel.Talkgroup)
+                {
+                    if (!string.IsNullOrWhiteSpace(site) &&
+                        !string.IsNullOrWhiteSpace(talkgroup) &&
+                        string.Equals(Normalize(rule.Site), site, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(Normalize(rule.Talkgroup), talkgroup, StringComparison.OrdinalIgnoreCase))
+                    {
+                        talkgroupRule = rule;
+                    }
+                }
+            }
+
+            return talkgroupRule ?? siteRule ?? receiverRule;
+        }
+
+        private static bool TryMapObservedTriple(ObservedTriple? triple, out DiscoveryNode node)
+        {
+            node = new DiscoveryNode();
+            if (triple == null)
+                return false;
+
+            // App-side filtering and matching operate on the rendered Receiver/Site/Talkgroup text,
+            // not on backend ids. Use normalized labels as the canonical keys so the Settings page
+            // does not show duplicate rows that differ only by hidden value ids.
+            var receiverLabel = Normalize(string.IsNullOrWhiteSpace(triple.ReceiverLabel) ? triple.ReceiverValue : triple.ReceiverLabel);
+            var siteLabel = Normalize(string.IsNullOrWhiteSpace(triple.SiteLabel) ? triple.SiteValue : triple.SiteLabel);
+            var talkgroupLabel = Normalize(string.IsNullOrWhiteSpace(triple.TalkgroupLabel) ? triple.TalkgroupValue : triple.TalkgroupLabel);
+
+            var receiverKey = receiverLabel;
+            var siteKey = siteLabel;
+            var talkgroupKey = talkgroupLabel;
+
+            if (!IsDiscoveryValid(receiverLabel, siteLabel, talkgroupLabel))
+                return false;
+
+            node = new DiscoveryNode
+            {
+                ReceiverKey = receiverKey,
+                SiteKey = siteKey,
+                TalkgroupKey = talkgroupKey,
+                Receiver = receiverLabel,
+                Site = siteLabel,
+                Talkgroup = talkgroupLabel,
+                LastSeenUtc = triple.LastSeenUtc == default ? DateTime.UtcNow : triple.LastSeenUtc
+            };
+            return true;
+        }
+
+        private DiscoveryUpdateKind UpsertDiscovery_NoLock(DiscoveryNode node)
+        {
+            var key = BuildDiscoveryKey(node.ReceiverKey, node.SiteKey, node.TalkgroupKey, node.Receiver, node.Site, node.Talkgroup);
+            if (_discovery.TryGetValue(key, out var existing))
+            {
+                var metadataChanged = false;
+
+                if (node.LastSeenUtc > existing.LastSeenUtc)
+                {
+                    existing.LastSeenUtc = node.LastSeenUtc;
+                    metadataChanged = true;
+                }
+
+                if (PreferLabel(node.Receiver, existing.Receiver))
+                {
+                    existing.Receiver = node.Receiver;
+                    metadataChanged = true;
+                }
+
+                if (PreferLabel(node.Site, existing.Site))
+                {
+                    existing.Site = node.Site;
+                    metadataChanged = true;
+                }
+
+                if (PreferLabel(node.Talkgroup, existing.Talkgroup))
+                {
+                    existing.Talkgroup = node.Talkgroup;
+                    metadataChanged = true;
+                }
+
+                return metadataChanged ? DiscoveryUpdateKind.MetadataOnly : DiscoveryUpdateKind.None;
+            }
+
+            _discovery[key] = node;
+            return DiscoveryUpdateKind.Structural;
+        }
+
+        private static string BuildDiscoveryKey(string receiverKey, string siteKey, string talkgroupKey, string receiverLabel, string siteLabel, string talkgroupLabel)
+        {
+            var receiver = Normalize(receiverKey);
+            var site = Normalize(siteKey);
+            var talkgroup = Normalize(talkgroupKey);
+
+            if (string.IsNullOrWhiteSpace(receiver))
+                receiver = Normalize(receiverLabel);
+            if (string.IsNullOrWhiteSpace(site))
+                site = Normalize(siteLabel);
+            if (string.IsNullOrWhiteSpace(talkgroup))
+                talkgroup = Normalize(talkgroupLabel);
+
+            return $"{receiver}\n{site}\n{talkgroup}".ToUpperInvariant();
+        }
+
+        private static bool PreferLabel(string candidate, string existing)
+        {
+            candidate = Normalize(candidate);
+            existing = Normalize(existing);
+
+            if (string.IsNullOrWhiteSpace(candidate))
+                return false;
+            if (string.IsNullOrWhiteSpace(existing))
+                return true;
+            if (string.Equals(candidate, existing, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var candidateHasLetters = candidate.Any(char.IsLetter);
+            var existingHasLetters = existing.Any(char.IsLetter);
+            if (candidateHasLetters != existingHasLetters)
+                return candidateHasLetters;
+
+            if (candidate.Length != existing.Length)
+                return candidate.Length > existing.Length;
+
+            return string.Compare(candidate, existing, StringComparison.OrdinalIgnoreCase) < 0;
+        }
+
+        private FilterRuleStateRecord GetOrCreateExplicitState_NoLock(FilterLevel level, string receiver, string site, string talkgroup)
+        {
+            var key = FilterRuleStateRecord.BuildKey(level, receiver, site, talkgroup);
+            if (_state.TryGetValue(key, out var existing))
+                return new FilterRuleStateRecord
+                {
+                    Level = existing.Level,
+                    Receiver = existing.Receiver,
+                    Site = existing.Site,
+                    Talkgroup = existing.Talkgroup,
+                    IsMuted = existing.IsMuted,
+                    IsDisabled = existing.IsDisabled
+                };
+
+            return new FilterRuleStateRecord
+            {
+                Level = level,
+                Receiver = receiver,
+                Site = site,
+                Talkgroup = talkgroup,
+                IsMuted = false,
+                IsDisabled = false
+            };
+        }
+
+        private void SaveOrRemoveState_NoLock(FilterRuleStateRecord state)
+        {
+            if (!state.IsMuted && !state.IsDisabled)
+            {
+                _state.Remove(state.Key);
+                return;
+            }
+
+            _state[state.Key] = new FilterRuleStateRecord
+            {
+                Level = state.Level,
+                Receiver = state.Receiver,
+                Site = state.Site,
+                Talkgroup = state.Talkgroup,
+                IsMuted = state.IsMuted,
+                IsDisabled = state.IsDisabled
+            };
+        }
+
+        private void ClearEffectiveStatePath_NoLock(FilterRule rule)
+        {
+            var receiver = Normalize(rule.Receiver);
+            var site = Normalize(rule.Site);
+            var talkgroup = Normalize(rule.Talkgroup);
+
+            // Clear must fully remove the active filter effect for the tapped row.
+            // Remove explicit state at this row and every inherited parent level that can
+            // still make the row appear muted or disabled. This avoids the common case where
+            // a row still looks unchanged because an ancestor state remained active.
+            switch (rule.Level)
+            {
+                case FilterLevel.Talkgroup:
+                    TryRemoveState_NoLock(FilterLevel.Talkgroup, receiver, site, talkgroup);
+                    TryRemoveState_NoLock(FilterLevel.Site, receiver, site, string.Empty);
+                    TryRemoveState_NoLock(FilterLevel.Receiver, receiver, string.Empty, string.Empty);
+                    break;
+
+                case FilterLevel.Site:
+                    TryRemoveState_NoLock(FilterLevel.Site, receiver, site, string.Empty);
+                    TryRemoveState_NoLock(FilterLevel.Receiver, receiver, string.Empty, string.Empty);
+                    break;
+
+                default:
+                    TryRemoveState_NoLock(FilterLevel.Receiver, receiver, string.Empty, string.Empty);
+                    break;
+            }
+        }
+
+        private bool TryRemoveState_NoLock(FilterLevel level, string receiver, string site, string talkgroup)
+        {
+            return _state.Remove(FilterRuleStateRecord.BuildKey(level, receiver, site, talkgroup));
+        }
+
+        private FilterRuleStateRecord? TryGetState_NoLock(FilterLevel level, string receiver, string site, string talkgroup)
+        {
+            _state.TryGetValue(FilterRuleStateRecord.BuildKey(level, receiver, site, talkgroup), out var record);
+            return record;
+        }
+
+        private DateTime GetLatestLastSeen_NoLock(string receiver, string site, string talkgroup)
+        {
+            receiver = Normalize(receiver);
+            site = Normalize(site);
+            talkgroup = Normalize(talkgroup);
+
+            var latest = DateTime.MinValue;
+            foreach (var item in _discovery.Values)
+            {
+                if (!string.Equals(item.Receiver, receiver, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (!string.IsNullOrWhiteSpace(site) && !string.Equals(item.Site, site, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (!string.IsNullOrWhiteSpace(talkgroup) && !string.Equals(item.Talkgroup, talkgroup, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (item.LastSeenUtc > latest)
+                    latest = item.LastSeenUtc;
+            }
+
+            return latest == DateTime.MinValue ? DateTime.UtcNow : latest;
         }
 
         private static string NormalizeServerKey(string? serverUrl)
@@ -169,11 +930,9 @@ namespace JoesScanner.Services
                 return raw;
             }
         }
+
         private static void InvokeOnMainThreadSync(Action action)
         {
-            if (action == null)
-                return;
-
             if (MainThread.IsMainThread)
             {
                 action();
@@ -182,185 +941,59 @@ namespace JoesScanner.Services
 
             Exception? captured = null;
             using var gate = new ManualResetEventSlim(false);
-
             MainThread.BeginInvokeOnMainThread(() =>
             {
-                try
-                {
-                    action();
-                }
-                catch (Exception ex)
-                {
-                    captured = ex;
-                }
-                finally
-                {
-                    gate.Set();
-                }
+                try { action(); }
+                catch (Exception ex) { captured = ex; }
+                finally { gate.Set(); }
             });
-
             gate.Wait();
-
             if (captured != null)
                 throw captured;
         }
 
-        private static void InvokeOnMainThreadAsync(Action action)
+        private static string Normalize(string? value)
         {
-            if (action == null)
-                return;
+            var v = (value ?? string.Empty).Trim();
+            if (v.Length == 0)
+                return string.Empty;
 
-            if (MainThread.IsMainThread)
+            var hasRun = false;
+            var prevWs = false;
+            for (var i = 0; i < v.Length; i++)
             {
-                action();
-                return;
-            }
-
-            MainThread.BeginInvokeOnMainThread(action);
-        }
-
-        public void ToggleMute(FilterRule rule)
-        {
-            if (rule == null)
-                return;
-
-            var newMuted = !rule.IsMuted;
-            var normReceiver = Normalize(rule.Receiver);
-            var normSite = Normalize(rule.Site);
-
-            var snapshot = GetRulesSnapshot();
-
-            if (rule.Level == FilterLevel.Receiver)
-            {
-                foreach (var r in snapshot)
+                var ws = char.IsWhiteSpace(v[i]);
+                if (ws && prevWs)
                 {
-                    if (string.Equals(Normalize(r.Receiver), normReceiver, StringComparison.OrdinalIgnoreCase))
-                        r.IsMuted = newMuted;
+                    hasRun = true;
+                    break;
                 }
+                prevWs = ws;
             }
-            else if (rule.Level == FilterLevel.Site)
+
+            if (!hasRun)
+                return v;
+
+            var sb = new StringBuilder(v.Length);
+            prevWs = false;
+            for (var i = 0; i < v.Length; i++)
             {
-                foreach (var r in snapshot)
+                var ch = v[i];
+                var ws = char.IsWhiteSpace(ch);
+                if (ws)
                 {
-                    if (string.Equals(Normalize(r.Receiver), normReceiver, StringComparison.OrdinalIgnoreCase) &&
-                        string.Equals(Normalize(r.Site), normSite, StringComparison.OrdinalIgnoreCase))
-                    {
-                        r.IsMuted = newMuted;
-                    }
+                    if (!prevWs)
+                        sb.Append(' ');
+                    prevWs = true;
+                    continue;
                 }
-            }
-            else
-            {
-                rule.IsMuted = newMuted;
+
+                sb.Append(ch);
+                prevWs = false;
             }
 
-            SaveToStorage();
-            OnRulesChanged();
+            return sb.ToString().Trim();
         }
-
-        public void ToggleDisable(FilterRule rule)
-        {
-            if (rule == null)
-                return;
-
-            var newDisabled = !rule.IsDisabled;
-            var normReceiver = Normalize(rule.Receiver);
-            var normSite = Normalize(rule.Site);
-
-            var snapshot = GetRulesSnapshot();
-
-            if (rule.Level == FilterLevel.Receiver)
-            {
-                foreach (var r in snapshot)
-                {
-                    if (string.Equals(Normalize(r.Receiver), normReceiver, StringComparison.OrdinalIgnoreCase))
-                        r.IsDisabled = newDisabled;
-                }
-            }
-            else if (rule.Level == FilterLevel.Site)
-            {
-                foreach (var r in snapshot)
-                {
-                    if (string.Equals(Normalize(r.Receiver), normReceiver, StringComparison.OrdinalIgnoreCase) &&
-                        string.Equals(Normalize(r.Site), normSite, StringComparison.OrdinalIgnoreCase))
-                    {
-                        r.IsDisabled = newDisabled;
-                    }
-                }
-            }
-            else
-            {
-                rule.IsDisabled = newDisabled;
-            }
-
-            SaveToStorage();
-            OnRulesChanged();
-        }
-
-        public void ClearRule(FilterRule rule)
-        {
-            if (rule == null)
-                return;
-
-            var removed = false;
-
-            lock (_rulesGate)
-            {
-                removed = _rules.Remove(rule);
-            }
-
-            if (removed)
-            {
-                SaveToStorage();
-                OnRulesChanged();
-            }
-        }
-
-        public void EnsureRulesForCall(CallItem call)
-        {
-            if (call == null)
-                return;
-
-            if (IsErrorCall(call) || IsMetaOrNonTrafficCall(call))
-                return;
-
-            var receiver = Normalize(call.ReceiverName);
-            var site = Normalize(call.SystemName);
-            var talkgroup = Normalize(call.Talkgroup);
-
-            if (string.IsNullOrWhiteSpace(receiver) || string.IsNullOrWhiteSpace(site))
-                return;
-
-            var nowUtc = DateTime.UtcNow;
-
-            EnsureRule(FilterLevel.Receiver, receiver, string.Empty, string.Empty, nowUtc);
-            EnsureRule(FilterLevel.Site, receiver, site, string.Empty, nowUtc);
-
-            if (!string.IsNullOrWhiteSpace(talkgroup) && !IsInvalidTalkgroupToken(talkgroup))
-                EnsureRule(FilterLevel.Talkgroup, receiver, site, talkgroup, nowUtc);
-        }
-
-        public bool ShouldHide(CallItem call)
-        {
-            var rule = GetBestMatchRuleForCall(call);
-            return rule != null && rule.IsDisabled;
-        }
-
-        public bool ShouldMute(CallItem call)
-        {
-            var rule = GetBestMatchRuleForCall(call);
-            if (rule == null)
-                return false;
-
-            if (rule.IsDisabled)
-                return true;
-
-            return rule.IsMuted;
-        }
-
-        private void OnRulesChanged() => RulesChanged?.Invoke(this, EventArgs.Empty);
-
-        private static string Normalize(string? value) => (value ?? string.Empty).Trim();
 
         private static bool IsErrorCall(CallItem call)
         {
@@ -375,17 +1008,13 @@ namespace JoesScanner.Services
                 return false;
 
             var upper = talkgroup.ToUpperInvariant();
-
-            return upper == "ERROR"
-                || upper == ">> ERROR"
-                || upper.Contains(" ERROR");
+            return upper == "ERROR" || upper == ">> ERROR" || upper.Contains(" ERROR", StringComparison.Ordinal);
         }
 
         private static bool IsMetaOrNonTrafficCall(CallItem call)
         {
             var receiverEmpty = string.IsNullOrWhiteSpace(call.ReceiverName);
             var siteEmpty = string.IsNullOrWhiteSpace(call.SystemName);
-
             if (!receiverEmpty || !siteEmpty)
                 return false;
 
@@ -394,13 +1023,10 @@ namespace JoesScanner.Services
                 return true;
 
             var upper = tg.ToUpperInvariant();
-
             if (upper == "HEARTBEAT" || upper == ">> HEARTBEAT")
                 return true;
-
             if (upper.StartsWith(">>", StringComparison.Ordinal))
                 return true;
-
             return IsInvalidTalkgroupToken(tg);
         }
 
@@ -409,8 +1035,19 @@ namespace JoesScanner.Services
             if (string.IsNullOrWhiteSpace(talkgroup))
                 return true;
 
-            var stripped = talkgroup.Replace(">", string.Empty).Trim();
+            var stripped = talkgroup.Replace(">", string.Empty, StringComparison.Ordinal).Trim();
             return stripped.Length == 0;
+        }
+
+        private static bool IsDiscoveryValid(string receiver, string site, string talkgroup)
+        {
+            if (string.IsNullOrWhiteSpace(receiver))
+                return false;
+
+            if (string.IsNullOrWhiteSpace(site) || string.IsNullOrWhiteSpace(talkgroup))
+                return true;
+
+            return IsRuleValid(FilterLevel.Talkgroup, receiver, site, talkgroup);
         }
 
         private static bool IsRuleValid(FilterLevel level, string receiver, string site, string talkgroup)
@@ -426,156 +1063,62 @@ namespace JoesScanner.Services
 
             if (string.IsNullOrWhiteSpace(site))
                 return false;
-
             if (string.IsNullOrWhiteSpace(talkgroup) || IsInvalidTalkgroupToken(talkgroup))
                 return false;
 
             var upper = talkgroup.Trim().ToUpperInvariant();
-
-            if (upper == "ERROR" || upper == ">> ERROR" || upper.Contains(" ERROR"))
+            if (upper == "ERROR" || upper == ">> ERROR" || upper.Contains(" ERROR", StringComparison.Ordinal))
                 return false;
-
             if (upper == "HEARTBEAT" || upper == ">> HEARTBEAT")
                 return false;
-
             if (upper.StartsWith(">>", StringComparison.Ordinal))
                 return false;
 
             return true;
         }
 
-        private void EnsureRule(FilterLevel level, string receiver, string site, string talkgroup, DateTime nowUtc)
+        private sealed class DiscoveryNode
         {
-            var normReceiver = Normalize(receiver);
-            var normSite = Normalize(site);
-            var normTalkgroup = Normalize(talkgroup);
-
-            if (!IsRuleValid(level, normReceiver, normSite, normTalkgroup))
-                return;
-
-            // IMPORTANT: iOS CollectionView requires that ObservableCollection changes
-            // and BindableObject property changes occur on the main thread. Calls can arrive
-            // on background threads, so we:
-            //   - detect existing rules under lock without mutating state
-            //   - marshal all mutations (inserts + LastSeenUtc updates) to the main thread
-            FilterRule? existing;
-
-            lock (_rulesGate)
-            {
-                existing = _rules.FirstOrDefault(r =>
-                    r.Level == level &&
-                    string.Equals(Normalize(r.Receiver), normReceiver, StringComparison.OrdinalIgnoreCase) &&
-                    string.Equals(Normalize(r.Site), normSite, StringComparison.OrdinalIgnoreCase) &&
-                    string.Equals(Normalize(r.Talkgroup), normTalkgroup, StringComparison.OrdinalIgnoreCase));
-            }
-
-            if (existing != null)
-            {
-                // Keep timestamps fresh, but do it on the UI thread.
-                InvokeOnMainThreadAsync(() => existing.LastSeenUtc = nowUtc);
-                return;
-            }
-
-            // New rule: insert on UI thread so bound controls update safely on iOS.
-            InvokeOnMainThreadSync(() =>
-            {
-                lock (_rulesGate)
-                {
-                    var alreadyThere = _rules.FirstOrDefault(r =>
-                        r.Level == level &&
-                        string.Equals(Normalize(r.Receiver), normReceiver, StringComparison.OrdinalIgnoreCase) &&
-                        string.Equals(Normalize(r.Site), normSite, StringComparison.OrdinalIgnoreCase) &&
-                        string.Equals(Normalize(r.Talkgroup), normTalkgroup, StringComparison.OrdinalIgnoreCase));
-
-                    if (alreadyThere != null)
-                    {
-                        alreadyThere.LastSeenUtc = nowUtc;
-                        return;
-                    }
-
-                    // New rules must inherit the current receiver or site state.
-                    // This ensures that new talkgroups discovered after a higher level mute or disable
-                    // remain muted or disabled until explicitly overridden.
-                    var inheritedMuted = false;
-                    var inheritedDisabled = false;
-
-                    if (level == FilterLevel.Site)
-                    {
-                        var receiverRule = _rules.FirstOrDefault(r =>
-                            r.Level == FilterLevel.Receiver &&
-                            string.Equals(Normalize(r.Receiver), normReceiver, StringComparison.OrdinalIgnoreCase));
-
-                        if (receiverRule != null)
-                        {
-                            inheritedMuted = receiverRule.IsMuted;
-                            inheritedDisabled = receiverRule.IsDisabled;
-                        }
-                    }
-                    else if (level == FilterLevel.Talkgroup)
-                    {
-                        var siteRule = _rules.FirstOrDefault(r =>
-                            r.Level == FilterLevel.Site &&
-                            string.Equals(Normalize(r.Receiver), normReceiver, StringComparison.OrdinalIgnoreCase) &&
-                            string.Equals(Normalize(r.Site), normSite, StringComparison.OrdinalIgnoreCase));
-
-                        if (siteRule != null)
-                        {
-                            inheritedMuted = siteRule.IsMuted;
-                            inheritedDisabled = siteRule.IsDisabled;
-                        }
-                        else
-                        {
-                            var receiverRule = _rules.FirstOrDefault(r =>
-                                r.Level == FilterLevel.Receiver &&
-                                string.Equals(Normalize(r.Receiver), normReceiver, StringComparison.OrdinalIgnoreCase));
-
-                            if (receiverRule != null)
-                            {
-                                inheritedMuted = receiverRule.IsMuted;
-                                inheritedDisabled = receiverRule.IsDisabled;
-                            }
-                        }
-                    }
-
-                    var rule = new FilterRule
-                    {
-                        Level = level,
-                        Receiver = receiver,
-                        Site = site,
-                        Talkgroup = talkgroup,
-                        IsMuted = inheritedMuted,
-                        IsDisabled = inheritedDisabled,
-                        LastSeenUtc = nowUtc
-                    };
-
-                    rule.PropertyChanged += OnRulePropertyChanged;
-
-                    InsertRuleSorted_NoYield(rule);
-                }
-
-                SaveToStorage();
-                OnRulesChanged();
-            });
+            public string ReceiverKey { get; set; } = string.Empty;
+            public string SiteKey { get; set; } = string.Empty;
+            public string TalkgroupKey { get; set; } = string.Empty;
+            public string Receiver { get; set; } = string.Empty;
+            public string Site { get; set; } = string.Empty;
+            public string Talkgroup { get; set; } = string.Empty;
+            public DateTime LastSeenUtc { get; set; }
         }
 
-        // Caller must hold _rulesGate.
-        private void InsertRuleSorted_NoYield(FilterRule rule)
+        private sealed class DiscoveryNodeDto
         {
-            var key = rule.DisplayKey ?? string.Empty;
+            public string ReceiverKey { get; set; } = string.Empty;
+            public string SiteKey { get; set; } = string.Empty;
+            public string TalkgroupKey { get; set; } = string.Empty;
+            public string Receiver { get; set; } = string.Empty;
+            public string Site { get; set; } = string.Empty;
+            public string Talkgroup { get; set; } = string.Empty;
+            public DateTime LastSeenUtc { get; set; }
+        }
 
-            for (int i = 0; i < _rules.Count; i++)
+        private sealed class NaturalComparer : IComparer<string>
+        {
+            public static readonly NaturalComparer Instance = new();
+            public int Compare(string? x, string? y) => NaturalCompareIgnoreCase(x ?? string.Empty, y ?? string.Empty);
+        }
+
+        private sealed class StringTupleComparer : IEqualityComparer<(string Receiver, string Site)>
+        {
+            public static readonly StringTupleComparer Instance = new();
+
+            public bool Equals((string Receiver, string Site) x, (string Receiver, string Site) y)
             {
-                var existingKey = _rules[i].DisplayKey ?? string.Empty;
-
-                // Natural sort so "2" comes before "10"
-                if (NaturalCompareIgnoreCase(key, existingKey) < 0)
-                {
-                    _rules.Insert(i, rule);
-                    return;
-                }
+                return string.Equals(x.Receiver, y.Receiver, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(x.Site, y.Site, StringComparison.OrdinalIgnoreCase);
             }
 
-            _rules.Add(rule);
+            public int GetHashCode((string Receiver, string Site) obj)
+            {
+                return HashCode.Combine(obj.Receiver.ToUpperInvariant(), obj.Site.ToUpperInvariant());
+            }
         }
 
         private static int NaturalCompareIgnoreCase(string a, string b)
@@ -583,43 +1126,28 @@ namespace JoesScanner.Services
             if (ReferenceEquals(a, b))
                 return 0;
 
-            a ??= string.Empty;
-            b ??= string.Empty;
-
             int ia = 0, ib = 0;
-
             while (ia < a.Length && ib < b.Length)
             {
                 var ca = a[ia];
                 var cb = b[ib];
-
                 var da = char.IsDigit(ca);
                 var db = char.IsDigit(cb);
 
                 if (da && db)
                 {
-                    // Compare numeric runs by value without allocating
                     int startA = ia;
                     int startB = ib;
-
-                    // Skip leading zeros for value comparison
                     while (startA < a.Length && a[startA] == '0') startA++;
                     while (startB < b.Length && b[startB] == '0') startB++;
-
                     int endA = startA;
                     int endB = startB;
-
                     while (endA < a.Length && char.IsDigit(a[endA])) endA++;
                     while (endB < b.Length && char.IsDigit(b[endB])) endB++;
-
                     int lenA = endA - startA;
                     int lenB = endB - startB;
-
-                    // Longer numeric value wins
                     if (lenA != lenB)
                         return lenA < lenB ? -1 : 1;
-
-                    // Same length, compare digit by digit
                     for (int k = 0; k < lenA; k++)
                     {
                         char x = a[startA + k];
@@ -627,31 +1155,19 @@ namespace JoesScanner.Services
                         if (x != y)
                             return x < y ? -1 : 1;
                     }
-
-                    // Values equal, fewer leading zeros sorts first
                     int runA = 0;
                     int runB = 0;
-
                     while (ia + runA < a.Length && char.IsDigit(a[ia + runA])) runA++;
                     while (ib + runB < b.Length && char.IsDigit(b[ib + runB])) runB++;
-
                     if (runA != runB)
                         return runA < runB ? -1 : 1;
-
                     ia += runA;
                     ib += runB;
                     continue;
                 }
 
-                if (da != db)
-                {
-                    // Put digit chunks before letter chunks
-                    return da ? -1 : 1;
-                }
-
                 var ua = char.ToUpperInvariant(ca);
                 var ub = char.ToUpperInvariant(cb);
-
                 if (ua != ub)
                     return ua < ub ? -1 : 1;
 
@@ -661,208 +1177,7 @@ namespace JoesScanner.Services
 
             if (ia == a.Length && ib == b.Length)
                 return 0;
-
             return ia == a.Length ? -1 : 1;
         }
-
-
-        private void OnRulePropertyChanged(object? sender, PropertyChangedEventArgs e)
-        {
-            if (sender is FilterRule)
-            {
-                SaveToStorage();
-                OnRulesChanged();
-            }
-        }
-
-        // Returns a single rule so callers can apply "most specific wins" semantics.
-        // This enables explicit overrides at lower levels, for example unmuting a talkgroup
-        // even while its receiver or site remains muted.
-        private FilterRule? GetBestMatchRuleForCall(CallItem call)
-        {
-            if (call == null)
-                return null;
-
-            var receiver = Normalize(call.ReceiverName);
-            if (string.IsNullOrWhiteSpace(receiver))
-                return null;
-
-            var site = Normalize(call.SystemName);
-            var talkgroup = Normalize(call.Talkgroup);
-
-            // Snapshot so nothing here can trigger CsWinRT1030.
-            var snapshot = GetRulesSnapshot();
-            if (snapshot.Length == 0)
-                return null;
-
-            FilterRule? receiverRule = null;
-            FilterRule? siteRule = null;
-            FilterRule? talkgroupRule = null;
-
-            foreach (var rule in snapshot)
-            {
-                if (!string.Equals(Normalize(rule.Receiver), receiver, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                if (rule.Level == FilterLevel.Receiver)
-                {
-                    receiverRule = rule;
-                    continue;
-                }
-
-                if (rule.Level == FilterLevel.Site)
-                {
-                    if (!string.IsNullOrWhiteSpace(site) &&
-                        string.Equals(Normalize(rule.Site), site, StringComparison.OrdinalIgnoreCase))
-                    {
-                        siteRule = rule;
-                    }
-
-                    continue;
-                }
-
-                if (rule.Level == FilterLevel.Talkgroup)
-                {
-                    if (!string.IsNullOrWhiteSpace(site) &&
-                        !string.IsNullOrWhiteSpace(talkgroup) &&
-                        string.Equals(Normalize(rule.Site), site, StringComparison.OrdinalIgnoreCase) &&
-                        string.Equals(Normalize(rule.Talkgroup), talkgroup, StringComparison.OrdinalIgnoreCase))
-                    {
-                        talkgroupRule = rule;
-                    }
-                }
-            }
-
-            return talkgroupRule ?? siteRule ?? receiverRule;
-        }
-
-        private FilterRule[] GetRulesSnapshot()
-        {
-            lock (_rulesGate)
-            {
-                return _rules.ToArray();
-            }
-        }
-
-        private sealed class FilterRuleDto
-        {
-            public FilterLevel Level { get; set; }
-            public string Receiver { get; set; } = string.Empty;
-            public string Site { get; set; } = string.Empty;
-            public string Talkgroup { get; set; } = string.Empty;
-            public bool IsMuted { get; set; }
-            public bool IsDisabled { get; set; }
-            public DateTime LastSeenUtc { get; set; }
-        }
-
-        private void LoadFromStorage(string storageKey)
-        {
-            try
-            {
-                string json = string.Empty;
-
-                // 1) DB is the source of truth.
-                json = AppStateStore.GetString(storageKey, string.Empty);
-
-                if (string.IsNullOrWhiteSpace(json))
-                    return;
-
-                var dtoList = JsonSerializer.Deserialize<List<FilterRuleDto>>(json);
-                if (dtoList == null)
-                    return;
-
-                lock (_rulesGate)
-                {
-                    _rules.Clear();
-
-                    foreach (var dto in dtoList)
-                    {
-                        var receiver = Normalize(dto.Receiver);
-                        var site = Normalize(dto.Site);
-                        var tg = Normalize(dto.Talkgroup);
-
-                        if (!IsRuleValid(dto.Level, receiver, site, tg))
-                            continue;
-
-                        var rule = new FilterRule
-                        {
-                            Level = dto.Level,
-                            Receiver = receiver,
-                            Site = site,
-                            Talkgroup = tg,
-                            IsMuted = dto.IsMuted,
-                            IsDisabled = dto.IsDisabled,
-                            LastSeenUtc = dto.LastSeenUtc
-                        };
-
-                        _rules.Add(rule);
-                    }
-                }
-            }
-            catch
-            {
-                // Ignore load failures. Filter rules will rebuild naturally from live traffic.
-            }
-        }
-
-        private void PruneInvalidRules(bool saveIfChanged)
-        {
-            var changed = false;
-
-            lock (_rulesGate)
-            {
-                for (int i = _rules.Count - 1; i >= 0; i--)
-                {
-                    var r = _rules[i];
-
-                    var receiver = Normalize(r.Receiver);
-                    var site = Normalize(r.Site);
-                    var tg = Normalize(r.Talkgroup);
-
-                    if (!IsRuleValid(r.Level, receiver, site, tg))
-                    {
-                        _rules.RemoveAt(i);
-                        changed = true;
-                    }
-                }
-            }
-
-            if (changed && saveIfChanged)
-            {
-                SaveToStorage();
-                OnRulesChanged();
-            }
-        }
-
-        private void SaveToStorage()
-        {
-            try
-            {
-                List<FilterRuleDto> dtoList;
-
-                lock (_rulesGate)
-                {
-                    dtoList = _rules.Select(r => new FilterRuleDto
-                    {
-                        Level = r.Level,
-                        Receiver = r.Receiver,
-                        Site = r.Site,
-                        Talkgroup = r.Talkgroup,
-                        IsMuted = r.IsMuted,
-                        IsDisabled = r.IsDisabled,
-                        LastSeenUtc = r.LastSeenUtc
-                    }).ToList();
-                }
-
-                var json = JsonSerializer.Serialize(dtoList);
-
-                AppStateStore.SetString(GetStorageKey(), json);
-            }
-            catch
-            {
-            }
-        }
-
-
     }
 }

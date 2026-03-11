@@ -239,7 +239,9 @@ namespace JoesScanner.Services
 
         public async Task TryReportAsync(string serverKey, HistoryLookupData data, CancellationToken cancellationToken, bool force = false)
         {
-            if (!IsEnabled())
+            // Manual sync must always be allowed when the user explicitly requests it, even if telemetry is disabled.
+            // Auto/background reporting remains telemetry-gated.
+            if (!force && !IsEnabled())
             {
                 AppLog.Add(() => "AuthLookups: report skipped (telemetry disabled).");
                 return;

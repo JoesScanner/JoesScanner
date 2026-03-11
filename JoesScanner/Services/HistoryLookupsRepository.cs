@@ -127,7 +127,7 @@ DO UPDATE SET
 
         private async Task EnsureSchemaAsync(CancellationToken cancellationToken)
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(_dbPath) ?? FileSystem.AppDataDirectory);
+            Directory.CreateDirectory(Path.GetDirectoryName(_dbPath) ?? AppPaths.GetAppDataDirectorySafe());
 
             await using var connection = new SqliteConnection($"Data Source={_dbPath};Cache=Shared");
             await connection.OpenAsync(cancellationToken);
