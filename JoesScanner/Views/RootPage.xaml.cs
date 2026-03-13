@@ -15,6 +15,8 @@ public partial class RootPage : ContentPage
     private readonly Dictionary<AppTab, ContentPage> _pages = new();
     private readonly Dictionary<AppTab, View> _views = new();
 
+    private static bool UseHostedViewCaching => DeviceInfo.Platform != DevicePlatform.iOS;
+
     private AppTab _current = AppTab.Main;
 
     private bool _hasAppearedOnce;
@@ -75,56 +77,63 @@ public partial class RootPage : ContentPage
         if (Interlocked.Exchange(ref _warmupStarted, 1) == 0)
         {
             // Pre-create Settings tab UI as soon as the UI is ready so the first tap is instant.
-            _ = MainThread.InvokeOnMainThreadAsync(async () =>
+            //
+            // IMPORTANT:
+            // iOS App Store / TestFlight builds are much less tolerant of reparenting a native-backed
+            // MAUI visual tree between hidden and visible hosts. Keep the warmup path off on iOS and
+            // let iOS create views only when they are actually shown.
+            if (DeviceInfo.Platform != DevicePlatform.iOS)
             {
-                try
+                _ = MainThread.InvokeOnMainThreadAsync(async () =>
                 {
-                    // Keep this delay very small. In production, users can often tap Settings
-                    // quickly after launch, so we want the heavy XAML tree built early.
-                    await Task.Yield();
-                    await Task.Delay(50);
-                    View settingsView;
-                    if (DeviceInfo.Platform == DevicePlatform.WinUI)
+                    try
                     {
-                        // Use a throwaway Settings instance for warmup so we never re-host the same View.
-                        var tmpPage = _services.GetRequiredService<SettingsPage>();
-                        settingsView = tmpPage.Content ?? new ContentView();
-                        tmpPage.Content = null;
-                        try { settingsView.BindingContext = tmpPage.BindingContext; } catch { }
-                    }
-                    else
-                    {
-                        var (_settingsPage, _settingsView) = GetOrCreate(AppTab.Settings);
-                        settingsView = _settingsView;
-                    }
-
-                    // IMPORTANT:
-                    // Creating the Settings page is not enough to eliminate the first-open hitch.
-                    // The hitch often comes from the first time MAUI creates native handlers and
-                    // runs the initial layout pass for the Settings visual tree.
-                    //
-                    // WarmupHost is an invisible, tiny host that forces handler creation and a
-                    // first layout pass without changing the visible UI.
-                    if (WarmupHost != null)
-                    {
-                        try
+                        // Keep this delay very small. In production, users can often tap Settings
+                        // quickly after launch, so we want the heavy XAML tree built early.
+                        await Task.Yield();
+                        await Task.Delay(50);
+                        View settingsView;
+                        if (DeviceInfo.Platform == DevicePlatform.WinUI)
                         {
-                            WarmupHost.Content = settingsView;
-
-                            // Give MAUI a moment to attach handlers and measure/arrange.
-                            await Task.Delay(20);
+                            // Use a throwaway Settings instance for warmup so we never re-host the same View.
+                            var tmpPage = _services.GetRequiredService<SettingsPage>();
+                            settingsView = tmpPage.Content ?? new ContentView();
+                            tmpPage.Content = null;
+                            try { settingsView.BindingContext = tmpPage.BindingContext; } catch { }
                         }
-                        finally
+                        else
                         {
-                            // Detach so the real tab switch can host the view later.
-                            WarmupHost.Content = null;
+                            var (_settingsPage, _settingsView) = GetOrCreate(AppTab.Settings);
+                            settingsView = _settingsView;
+                        }
+
+                        // Creating the Settings page is not enough to eliminate the first-open hitch.
+                        // The hitch often comes from the first time MAUI creates native handlers and
+                        // runs the initial layout pass for the Settings visual tree.
+                        //
+                        // WarmupHost is an invisible, tiny host that forces handler creation and a
+                        // first layout pass without changing the visible UI.
+                        if (WarmupHost != null)
+                        {
+                            try
+                            {
+                                WarmupHost.Content = settingsView;
+
+                                // Give MAUI a moment to attach handlers and measure/arrange.
+                                await Task.Delay(20);
+                            }
+                            finally
+                            {
+                                // Detach so the real tab switch can host the view later.
+                                WarmupHost.Content = null;
+                            }
                         }
                     }
-                }
-                catch
-                {
-                }
-            });
+                    catch
+                    {
+                    }
+                });
+            }
 
             // Prime DB and profile reads off the UI thread.
             _ = Task.Run(async () =>
@@ -184,7 +193,7 @@ public partial class RootPage : ContentPage
 
     private (ContentPage page, View view) GetOrCreate(AppTab tab)
     {
-        if (_pages.TryGetValue(tab, out var existingPage) && _views.TryGetValue(tab, out var existingView))
+        if (UseHostedViewCaching && _pages.TryGetValue(tab, out var existingPage) && _views.TryGetValue(tab, out var existingView))
             return (existingPage, existingView);
 
         var page = CreatePage(tab);
@@ -202,8 +211,11 @@ public partial class RootPage : ContentPage
         {
         }
 
-        _pages[tab] = page;
-        _views[tab] = view;
+        if (UseHostedViewCaching)
+        {
+            _pages[tab] = page;
+            _views[tab] = view;
+        }
 
         return (page, view);
     }
@@ -237,8 +249,10 @@ public partial class RootPage : ContentPage
             return;
         }
 
+        var previousTab = _current;
+
         // Tell the previous page it is going away so it can detach handlers.
-        if (_pages.TryGetValue(_current, out var oldPage))
+        if (_pages.TryGetValue(previousTab, out var oldPage))
         {
             try
             {
@@ -278,8 +292,25 @@ public partial class RootPage : ContentPage
             }
         }
 
-var (page, view) = GetOrCreate(tab);
+        // iOS release builds are particularly sensitive to reusing a detached native-backed view.
+        // Recreate the outgoing and incoming hosted views each time instead of caching them.
+        if (!UseHostedViewCaching)
+        {
+            try
+            {
+                _pages.Remove(previousTab);
+                _views.Remove(previousTab);
+                _pages.Remove(tab);
+                _views.Remove(tab);
+            }
+            catch
+            {
+            }
+        }
 
+        var (page, view) = GetOrCreate(tab);
+
+        ContentHost.Content = null;
         ContentHost.Content = view;
 
         // Tell the new page it is visible so it can attach handlers and refresh data.

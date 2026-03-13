@@ -1,3 +1,4 @@
+using CoreGraphics;
 using Microsoft.Maui.Controls;
 using Microsoft.Maui.Handlers;
 using Microsoft.Maui.Platform;
@@ -6,54 +7,66 @@ using JoesScanner.Views.Controls;
 
 namespace JoesScanner.Platforms.iOS
 {
-    // iOS-only handler to hide the blinking caret in secure (password) fields without ever revealing the text.
-    // We keep IsPassword intact and only hide the caret by making the native UITextField tint transparent.
+    // iOS-only handler that hides the blinking caret in secure (password) fields.
+    // Uses a MauiTextField subclass that returns CGRect.Empty from GetCaretRectForPosition
+    // when the caret should be hidden — this is reliable across all iOS versions,
+    // unlike the TintColor approach which stopped working on newer iOS.
     public sealed class CursorHidingEntryHandler : EntryHandler
     {
-        private UIColor? _originalTint;
         private static readonly IPropertyMapper<IEntry, CursorHidingEntryHandler> CursorMapper =
             new PropertyMapper<IEntry, CursorHidingEntryHandler>(EntryHandler.Mapper)
             {
-                [nameof(Entry.IsPassword)] = MapCursorTint,
-                [nameof(CursorHidingEntry.HideCursorWhenPassword)] = MapCursorTint
+                [nameof(Entry.IsPassword)] = MapIsPasswordAndCaret,
+                [nameof(CursorHidingEntry.HideCursorWhenPassword)] = MapCaretVisibility
             };
+
         public CursorHidingEntryHandler() : base(CursorMapper)
         {
+        }
+
+        protected override MauiTextField CreatePlatformView()
+        {
+            return new CaretHidingTextField();
         }
 
         protected override void ConnectHandler(MauiTextField platformView)
         {
             base.ConnectHandler(platformView);
-
-            _originalTint = platformView.TintColor;
-            UpdateCursorTint(platformView, VirtualView);
+            SyncCaretHidden(platformView, VirtualView);
         }
 
-        protected override void DisconnectHandler(MauiTextField platformView)
+        private static void MapIsPasswordAndCaret(CursorHidingEntryHandler handler, IEntry entry)
         {
-            if (_originalTint != null)
-                platformView.TintColor = _originalTint;
-
-            base.DisconnectHandler(platformView);
+            // Let the base EntryHandler apply SecureTextEntry first.
+            EntryHandler.MapIsPassword(handler, entry);
+            SyncCaretHidden(handler.PlatformView, entry);
         }
 
-        private static void MapCursorTint(CursorHidingEntryHandler handler, IEntry entry)
+        private static void MapCaretVisibility(CursorHidingEntryHandler handler, IEntry entry)
         {
-            handler.UpdateCursorTint(handler.PlatformView, entry);
+            SyncCaretHidden(handler.PlatformView, entry);
         }
 
-        private void UpdateCursorTint(MauiTextField? platformView, IEntry? entry)
+        private static void SyncCaretHidden(MauiTextField? platformView, IEntry? entry)
         {
-            if (platformView == null || entry == null)
+            if (platformView is not CaretHidingTextField caretField || entry == null)
                 return;
 
             var cursorHiding = entry as CursorHidingEntry;
             var hideCursor = cursorHiding?.HideCursorWhenPassword ?? false;
 
-            if (hideCursor && entry.IsPassword)
-                platformView.TintColor = UIColor.Clear;
-            else
-                platformView.TintColor = _originalTint ?? platformView.TintColor;
+            caretField.HideCaret = hideCursor && entry.IsPassword;
+        }
+
+        // UITextField subclass that can suppress the blinking caret entirely.
+        private sealed class CaretHidingTextField : MauiTextField
+        {
+            public bool HideCaret { get; set; }
+
+            public override CGRect GetCaretRectForPosition(UITextPosition? position)
+            {
+                return HideCaret ? CGRect.Empty : base.GetCaretRectForPosition(position);
+            }
         }
     }
 }

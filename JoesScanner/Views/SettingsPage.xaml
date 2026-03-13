@@ -322,12 +322,13 @@
                     VerticalOptions="Center"
                     TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
 
-                <Entry
+                <controls:CursorHidingEntry
                     x:Name="BasicAuthPasswordEntry"
                     Grid.Column="3"
                     Text="{Binding BasicAuthPassword, UpdateSourceEventName=Unfocused}"
                     Placeholder="password"
                     IsPassword="{Binding IsBasicAuthPasswordHidden}"
+                    HideCursorWhenPassword="True"
                     IsSpellCheckEnabled="False"
                     IsTextPredictionEnabled="False"
                     FontSize="12"
