@@ -42,25 +42,13 @@ namespace JoesScanner.ViewModels
         public bool IsBusy
         {
             get => _isBusy;
-            private set
-            {
-                if (_isBusy == value)
-                    return;
-                _isBusy = value;
-                OnPropertyChanged();
-            }
+            private set => SetIsBusy(value);
         }
 
         public string StatusText
         {
             get => _statusText;
-            private set
-            {
-                if (_statusText == value)
-                    return;
-                _statusText = value;
-                OnPropertyChanged();
-            }
+            private set => SetStatusText(value);
         }
 
 
@@ -168,6 +156,47 @@ namespace JoesScanner.ViewModels
             _isPolling = false;
             try { _pollCts?.Cancel(); } catch { }
             return Task.CompletedTask;
+        }
+
+        private void SetIsBusy(bool value)
+        {
+            if (MainThread.IsMainThread)
+            {
+                SetIsBusyCore(value);
+                return;
+            }
+
+            MainThread.BeginInvokeOnMainThread(() => SetIsBusyCore(value));
+        }
+
+        private void SetIsBusyCore(bool value)
+        {
+            if (_isBusy == value)
+                return;
+
+            _isBusy = value;
+            OnPropertyChanged(nameof(IsBusy));
+        }
+
+        private void SetStatusText(string? value)
+        {
+            var normalized = value ?? string.Empty;
+            if (MainThread.IsMainThread)
+            {
+                SetStatusTextCore(normalized);
+                return;
+            }
+
+            MainThread.BeginInvokeOnMainThread(() => SetStatusTextCore(normalized));
+        }
+
+        private void SetStatusTextCore(string value)
+        {
+            if (string.Equals(_statusText, value, StringComparison.Ordinal))
+                return;
+
+            _statusText = value;
+            OnPropertyChanged(nameof(StatusText));
         }
 
         private static bool IsAuthNotReadyMessage(string? message)
@@ -336,7 +365,12 @@ namespace JoesScanner.ViewModels
                     StatusText = string.Empty;
 
                 if (didAdd)
-                    ScrollToBottomRequested?.Invoke();
+                {
+                    if (MainThread.IsMainThread)
+                        ScrollToBottomRequested?.Invoke();
+                    else
+                        MainThread.BeginInvokeOnMainThread(() => ScrollToBottomRequested?.Invoke());
+                }
 
                 // MarkSeenUpTo already handled above.
             }

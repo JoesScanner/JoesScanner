@@ -81,6 +81,13 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
         private readonly object _pendingCallsLock = new();
         private readonly List<CallItem> _pendingCalls = new();
 
+        // One-call lookahead used to reduce dead air between backlog items when catch-up speed is active.
+        // This only prepares the upcoming call URL or authenticated temp file and does not start playback.
+        private readonly object _prefetchLock = new();
+        private CallItem? _prefetchedCall;
+        private Task<string?>? _prefetchedPlayableUrlTask;
+        private CancellationTokenSource? _prefetchCts;
+
         // Optional settings view model reference. Currently not used but kept for future wiring.
         public SettingsViewModel? SettingsViewModel { get; set; }
 
@@ -410,7 +417,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             });
         }
 
-        private const string ServiceAuthUsername = "secapppass";
+        private const string ServiceAuthUsername = "secappass";
         private const string ServiceAuthPassword = "7a65vBLeqLjdRut5bSav4eMYGUJPrmjHhgnPmEji3q3S7tZ3K5aadFZz2EZtbaE7";
 
         // True when connected to the server stream.
@@ -1071,6 +1078,155 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             return idx > 0;
         }
 
+        private bool IsPlayableForQueue(CallItem? call)
+        {
+            return call != null &&
+                   !string.IsNullOrWhiteSpace(call.AudioUrl) &&
+                   !_filterService.ShouldHide(call) &&
+                   !_filterService.ShouldMute(call);
+        }
+
+        private CallItem? PeekOldestPlayablePendingCall()
+        {
+            lock (_pendingCallsLock)
+            {
+                if (_pendingCalls.Count == 0)
+                    return null;
+
+                for (var i = _pendingCalls.Count - 1; i >= 0; i--)
+                {
+                    var candidate = _pendingCalls[i];
+                    if (IsPlayableForQueue(candidate))
+                        return candidate;
+                }
+            }
+
+            return null;
+        }
+
+        private CallItem? PeekNextPlayableQueuedCallAfter(CallItem? currentItem)
+        {
+            if (currentItem == null)
+                return null;
+
+            if (Calls.Count == 0)
+                return PeekOldestPlayablePendingCall();
+
+            var anchorIndex = Calls.IndexOf(currentItem);
+            if (anchorIndex < 0)
+                anchorIndex = Calls.Count - 1;
+
+            for (var i = anchorIndex - 1; i >= 0; i--)
+            {
+                var candidate = Calls[i];
+                if (IsPlayableForQueue(candidate))
+                    return candidate;
+            }
+
+            return PeekOldestPlayablePendingCall();
+        }
+
+        private void ClearPrefetchedPlayableUrl(bool deleteCompletedTempFile)
+        {
+            Task<string?>? priorTask = null;
+            CancellationTokenSource? priorCts = null;
+
+            lock (_prefetchLock)
+            {
+                priorTask = _prefetchedPlayableUrlTask;
+                priorCts = _prefetchCts;
+                _prefetchedPlayableUrlTask = null;
+                _prefetchedCall = null;
+                _prefetchCts = null;
+            }
+
+            try { priorCts?.Cancel(); } catch { }
+            try { priorCts?.Dispose(); } catch { }
+
+            if (!deleteCompletedTempFile || priorTask == null || !priorTask.IsCompletedSuccessfully)
+                return;
+
+            try
+            {
+                var cachedPath = priorTask.Result;
+                if (IsDownloadedAudioTempFile(cachedPath))
+                    TryDeleteFile(cachedPath);
+            }
+            catch
+            {
+            }
+        }
+
+        private async Task<string?> TryTakePrefetchedPlayableUrlAsync(CallItem item, CancellationToken cancellationToken)
+        {
+            Task<string?>? prefetchedTask = null;
+            CancellationTokenSource? prefetchedCts = null;
+
+            lock (_prefetchLock)
+            {
+                if (!ReferenceEquals(_prefetchedCall, item) || _prefetchedPlayableUrlTask == null)
+                    return null;
+
+                prefetchedTask = _prefetchedPlayableUrlTask;
+                prefetchedCts = _prefetchCts;
+                _prefetchedPlayableUrlTask = null;
+                _prefetchedCall = null;
+                _prefetchCts = null;
+            }
+
+            try
+            {
+                return await prefetchedTask.WaitAsync(cancellationToken);
+            }
+            catch
+            {
+                return null;
+            }
+            finally
+            {
+                try { prefetchedCts?.Dispose(); } catch { }
+            }
+        }
+
+        private void StartPlayableUrlPrefetchForUpcomingCall(CallItem currentItem)
+        {
+            var nextCall = PeekNextPlayableQueuedCallAfter(currentItem);
+            if (nextCall == null || string.IsNullOrWhiteSpace(nextCall.AudioUrl))
+            {
+                ClearPrefetchedPlayableUrl(deleteCompletedTempFile: true);
+                return;
+            }
+
+            lock (_prefetchLock)
+            {
+                if (ReferenceEquals(_prefetchedCall, nextCall) && _prefetchedPlayableUrlTask != null)
+                    return;
+            }
+
+            ClearPrefetchedPlayableUrl(deleteCompletedTempFile: true);
+
+            CancellationTokenSource? prefetchCts = null;
+            Task<string?>? prefetchTask = null;
+
+            try
+            {
+                prefetchCts = new CancellationTokenSource();
+                prefetchTask = GetPlayableAudioUrlAsync(nextCall.AudioUrl, prefetchCts.Token);
+            }
+            catch
+            {
+                try { prefetchCts?.Dispose(); } catch { }
+                return;
+            }
+
+            lock (_prefetchLock)
+            {
+                _prefetchedCall = nextCall;
+                _prefetchedPlayableUrlTask = prefetchTask;
+                _prefetchCts = prefetchCts;
+            }
+        }
+
         // Returns the next call to play from the backlog.
         // When the user is behind live, new incoming calls are held in _pendingCalls so playback remains stable.
         private CallItem? GetNextQueuedCall()
@@ -1426,6 +1582,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 
             _currentPlayingCall = null;
             ClearPendingCalls();
+            ClearPrefetchedPlayableUrl(deleteCompletedTempFile: true);
 
 
             if (Calls.Count > 0)
@@ -1828,7 +1985,8 @@ if (!string.IsNullOrWhiteSpace(existing.DebugInfo))
                     {
                         try
                         {
-                            await _audioPlaybackService.StopAsync();
+                            ClearPrefetchedPlayableUrl(deleteCompletedTempFile: true);
+                await _audioPlaybackService.StopAsync();
                         }
                         catch
                         {
@@ -1856,6 +2014,7 @@ if (!string.IsNullOrWhiteSpace(existing.DebugInfo))
             _userRequestedStop = true;
 
             ClearPendingCalls();
+            ClearPrefetchedPlayableUrl(deleteCompletedTempFile: true);
 
             if (_cts != null)
             {
@@ -1879,6 +2038,7 @@ if (!string.IsNullOrWhiteSpace(existing.DebugInfo))
 
             try
             {
+                ClearPrefetchedPlayableUrl(deleteCompletedTempFile: true);
                 await _audioPlaybackService.StopAsync();
             }
             catch
@@ -1972,6 +2132,7 @@ if (!string.IsNullOrWhiteSpace(existing.DebugInfo))
 
             try
             {
+                ClearPrefetchedPlayableUrl(deleteCompletedTempFile: true);
                 await _audioPlaybackService.StopAsync();
             }
             catch (Exception ex)
@@ -2240,9 +2401,8 @@ public async Task ApplyAudioMenuSelectionAsync(double? speedStep)
             await SetAudioEnabledAsync(true, "Audio menu set ON");
         }
 
-        await InterruptAudioForUserActionAsync($"Speed set to {SpeedStepToLabel(speedStep.Value)}");
         PlaybackSpeedStep = speedStep.Value;
-        LastQueueEvent = $"Speed set to {PlaybackSpeedLabel}";
+        LastQueueEvent = $"Catch-up speed set to {PlaybackSpeedLabel}";
     }
     catch (Exception ex)
     {
@@ -2361,8 +2521,7 @@ private static string SpeedStepToLabel(double step)
 
         private double GetEffectivePlaybackRate(CallItem item)
         {
-            var waiting = CallsWaiting;
-            if (waiting <= 0)
+            if (GetBacklogCountForStartingCall(item) <= 0)
                 return 1.0;
 
             var step = PlaybackSpeedStep;
@@ -2376,6 +2535,36 @@ private static string SpeedStepToLabel(double step)
                 4 => 2.0,
                 _ => 1.0
             };
+        }
+
+        private int GetBacklogCountForStartingCall(CallItem? item)
+        {
+            if (item == null)
+                return 0;
+
+            bool IsPlayable(CallItem c) =>
+                c != null &&
+                !string.IsNullOrWhiteSpace(c.AudioUrl) &&
+                !_filterService.ShouldHide(c) &&
+                !_filterService.ShouldMute(c);
+
+            var count = 0;
+
+            if (Calls != null && Calls.Count > 0)
+            {
+                var itemIndex = Calls.IndexOf(item);
+                if (itemIndex > 0)
+                {
+                    for (var i = itemIndex - 1; i >= 0; i--)
+                    {
+                        if (IsPlayable(Calls[i]))
+                            count++;
+                    }
+                }
+            }
+
+            count += GetPendingPlayableCount();
+            return count;
         }
 
         private void EnforceMaxCalls()
@@ -2680,7 +2869,12 @@ private static string SpeedStepToLabel(double step)
 
                 // IMPORTANT: Do not use the playback watchdog here.
                 // Backgrounded Android downloads can be slower and would trip the playback watchdog incorrectly.
-                var playbackUrl = await GetPlayableAudioUrlAsync(item.AudioUrl, downloadToken);
+                var playbackUrl = await TryTakePrefetchedPlayableUrlAsync(item, downloadToken);
+                if (string.IsNullOrWhiteSpace(playbackUrl))
+                {
+                    playbackUrl = await GetPlayableAudioUrlAsync(item.AudioUrl, downloadToken);
+                }
+
                 if (string.IsNullOrWhiteSpace(playbackUrl))
                 {
                     if (downloadWatchdogCts.IsCancellationRequested && !userCts.IsCancellationRequested)
@@ -2693,6 +2887,15 @@ private static string SpeedStepToLabel(double step)
                 {
                     downloadedTempPath = playbackUrl;
                     shouldDeleteTempFile = true;
+                }
+
+                if (rate > 1.0)
+                {
+                    StartPlayableUrlPrefetchForUpcomingCall(item);
+                }
+                else
+                {
+                    ClearPrefetchedPlayableUrl(deleteCompletedTempFile: true);
                 }
 
                 try
@@ -3241,16 +3444,16 @@ public void DismissAddressAlert(CallItem call)
             }
         }
 
-        private async Task DecreasePlaybackSpeedStepAsync()
+        private Task DecreasePlaybackSpeedStepAsync()
         {
-            await InterruptAudioForUserActionAsync("Speed down requested");
             DecreasePlaybackSpeedStep();
+            return Task.CompletedTask;
         }
 
-        private async Task IncreasePlaybackSpeedStepAsync()
+        private Task IncreasePlaybackSpeedStepAsync()
         {
-            await InterruptAudioForUserActionAsync("Speed up requested");
             IncreasePlaybackSpeedStep();
+            return Task.CompletedTask;
         }
 
         private void DecreasePlaybackSpeedStep()
@@ -3259,7 +3462,7 @@ public void DismissAddressAlert(CallItem call)
                 return;
 
             PlaybackSpeedStep = PlaybackSpeedStep - 1;
-            LastQueueEvent = $"Speed down to {PlaybackSpeedLabel}";
+            LastQueueEvent = $"Catch-up speed down to {PlaybackSpeedLabel}";
         }
 
         private void IncreasePlaybackSpeedStep()
@@ -3268,7 +3471,7 @@ public void DismissAddressAlert(CallItem call)
                 return;
 
             PlaybackSpeedStep = PlaybackSpeedStep + 1;
-            LastQueueEvent = $"Speed up to {PlaybackSpeedLabel}";
+            LastQueueEvent = $"Catch-up speed up to {PlaybackSpeedLabel}";
         }
 
         private async Task NavigateToAdjacentCallAsync(int direction)

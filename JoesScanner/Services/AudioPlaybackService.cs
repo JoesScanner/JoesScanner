@@ -238,6 +238,7 @@ namespace JoesScanner.Services
             _windowsPlayer ??= new WinMediaPlayer();
 
             var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var player = _windowsPlayer;
 
             void OnEnded(object? s, object e)
             {
@@ -251,17 +252,23 @@ namespace JoesScanner.Services
 
             try
             {
-                _windowsPlayer.MediaEnded += OnEnded;
-                _windowsPlayer.MediaFailed += OnFailed;
+                if (player is null)
+                {
+                    try { tcs.TrySetResult(); } catch { }
+                    return tcs.Task;
+                }
 
-                _windowsPlayer.Source = MediaSource.CreateFromUri(new global::System.Uri(prepared.Url));
-                _windowsPlayer.PlaybackSession.PlaybackRate = playbackRate;
+                player.MediaEnded += OnEnded;
+                player.MediaFailed += OnFailed;
+
+                player.Source = MediaSource.CreateFromUri(new global::System.Uri(prepared.Url));
+                player.PlaybackSession.PlaybackRate = playbackRate;
 
                 if (prepared.StaticFilterEnabled && 0 > 0)
                 {
-                    try { _windowsPlayer.Volume = Clamp01(1.0); } catch { }
+                    try { player.Volume = Clamp01(1.0); } catch { }
                 }
-                _windowsPlayer.Play();
+                player.Play();
 
                 if (prepared.StaticFilterEnabled || (prepared.ToneFilterEnabled && prepared.ToneDuckSegments.Count > 0))
                     _ = ApplyDynamicVolumeWindowsAsync(prepared, cancellationToken);
@@ -273,8 +280,11 @@ namespace JoesScanner.Services
 
             return WaitWithCleanupAsync(tcs.Task, cancellationToken, () =>
             {
-                try { _windowsPlayer.MediaEnded -= OnEnded; } catch { }
-                try { _windowsPlayer.MediaFailed -= OnFailed; } catch { }
+                if (player is null)
+                    return;
+
+                try { player.MediaEnded -= OnEnded; } catch { }
+                try { player.MediaFailed -= OnFailed; } catch { }
             });
         }
 
@@ -479,7 +489,9 @@ namespace JoesScanner.Services
                     _ = ApplyDynamicVolumeAndroidAsync(prepared, p0, cancellationToken);
 
                 // Primary completion path: Completion or Error event.
-                // Secondary safety: poll IsPlaying so we do not "finish instantly" due to event quirks.
+                // Secondary safety: poll IsPlaying, but do not treat a brief not-yet-playing window
+                // immediately after Start() as the end of playback.
+                var observedActivePlayback = false;
                 while (!cancellationToken.IsCancellationRequested)
                 {
                     if (finishedTcs.Task.IsCompleted)
@@ -487,9 +499,16 @@ namespace JoesScanner.Services
 
                     try
                     {
-                        if (player != null && !player.IsPlaying)
+                        if (player == null)
+                            break;
+
+                        if (player.IsPlaying)
                         {
-                            // If playback stopped and no completion fired, treat as finished.
+                            observedActivePlayback = true;
+                        }
+                        else if (observedActivePlayback)
+                        {
+                            // Playback was active and then stopped without a completion callback.
                             break;
                         }
                     }

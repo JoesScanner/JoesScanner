@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using Microsoft.Data.Sqlite;
 
@@ -17,6 +18,8 @@ namespace JoesScanner.Services;
 public static class DbBootstrapper
 {
     private const int CurrentSchemaVersion = 1;
+    private static readonly SemaphoreSlim InitializationGate = new(1, 1);
+    private static readonly ConcurrentDictionary<string, byte> InitializedDataSources = new(StringComparer.OrdinalIgnoreCase);
 
     public static async Task EnsureInitializedAsync(SqliteConnection connection, CancellationToken cancellationToken = default)
     {
@@ -25,32 +28,90 @@ public static class DbBootstrapper
 
         await ApplyPragmasAsync(connection, cancellationToken).ConfigureAwait(false);
 
-        var version = await GetUserVersionAsync(connection, cancellationToken).ConfigureAwait(false);
-        
+        var dataSource = GetInitializationKey(connection);
+        if (!string.IsNullOrWhiteSpace(dataSource) && InitializedDataSources.ContainsKey(dataSource))
+            return;
 
-        if (version > CurrentSchemaVersion)
-            throw new InvalidOperationException($"Database schema version {version} is newer than this app supports ({CurrentSchemaVersion}).");
-if (version < 0)
-            version = 0;
-
-        if (version < 1)
+        await InitializationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            await EnsureSchemaV1Async(connection, cancellationToken).ConfigureAwait(false);
-            await SetUserVersionAsync(connection, CurrentSchemaVersion, cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            // Even when the version looks current, still ensure missing objects.
-            await EnsureSchemaV1Async(connection, cancellationToken).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(dataSource) && InitializedDataSources.ContainsKey(dataSource))
+                return;
 
-            if (version != CurrentSchemaVersion)
+            var version = await GetUserVersionAsync(connection, cancellationToken).ConfigureAwait(false);
+            if (version > CurrentSchemaVersion)
+                throw new InvalidOperationException($"Database schema version {version} is newer than this app supports ({CurrentSchemaVersion}).");
+
+            if (version < 0)
+                version = 0;
+
+            if (version < 1)
+            {
+                await EnsureSchemaV1Async(connection, cancellationToken).ConfigureAwait(false);
                 await SetUserVersionAsync(connection, CurrentSchemaVersion, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                // Even when the version looks current, still ensure missing objects.
+                await EnsureSchemaV1Async(connection, cancellationToken).ConfigureAwait(false);
+
+                if (version != CurrentSchemaVersion)
+                    await SetUserVersionAsync(connection, CurrentSchemaVersion, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (!string.IsNullOrWhiteSpace(dataSource))
+                InitializedDataSources[dataSource] = 0;
+        }
+        finally
+        {
+            InitializationGate.Release();
         }
     }
 
     public static void EnsureInitialized(SqliteConnection connection)
     {
-        EnsureInitializedAsync(connection, CancellationToken.None).GetAwaiter().GetResult();
+        if (connection == null)
+            throw new ArgumentNullException(nameof(connection));
+
+        ApplyPragmasAsync(connection, CancellationToken.None).GetAwaiter().GetResult();
+
+        var dataSource = GetInitializationKey(connection);
+        if (!string.IsNullOrWhiteSpace(dataSource) && InitializedDataSources.ContainsKey(dataSource))
+            return;
+
+        InitializationGate.Wait();
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(dataSource) && InitializedDataSources.ContainsKey(dataSource))
+                return;
+
+            var version = GetUserVersionAsync(connection, CancellationToken.None).GetAwaiter().GetResult();
+            if (version > CurrentSchemaVersion)
+                throw new InvalidOperationException($"Database schema version {version} is newer than this app supports ({CurrentSchemaVersion}).");
+
+            if (version < 0)
+                version = 0;
+
+            if (version < 1)
+            {
+                EnsureSchemaV1Async(connection, CancellationToken.None).GetAwaiter().GetResult();
+                SetUserVersionAsync(connection, CurrentSchemaVersion, CancellationToken.None).GetAwaiter().GetResult();
+            }
+            else
+            {
+                EnsureSchemaV1Async(connection, CancellationToken.None).GetAwaiter().GetResult();
+
+                if (version != CurrentSchemaVersion)
+                    SetUserVersionAsync(connection, CurrentSchemaVersion, CancellationToken.None).GetAwaiter().GetResult();
+            }
+
+            if (!string.IsNullOrWhiteSpace(dataSource))
+                InitializedDataSources[dataSource] = 0;
+        }
+        finally
+        {
+            InitializationGate.Release();
+        }
     }
 
     public static async Task ApplyPragmasAsync(SqliteConnection connection, CancellationToken cancellationToken = default)
@@ -249,6 +310,19 @@ ON CONFLICT(id) DO UPDATE SET schema_version = excluded.schema_version, updated_
         }
 
 }
+
+
+    private static string GetInitializationKey(SqliteConnection connection)
+    {
+        try
+        {
+            return connection.DataSource ?? string.Empty;
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
 
     private static async Task<int> GetUserVersionAsync(SqliteConnection connection, CancellationToken cancellationToken)
     {

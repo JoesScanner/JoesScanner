@@ -5,6 +5,7 @@ using Microsoft.Maui.Devices;
 using Microsoft.Maui.ApplicationModel;
 using System;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace JoesScanner.Views;
 
@@ -15,13 +16,19 @@ public partial class RootPage : ContentPage
     private readonly Dictionary<AppTab, ContentPage> _pages = new();
     private readonly Dictionary<AppTab, View> _views = new();
 
-    private static bool UseHostedViewCaching => DeviceInfo.Platform != DevicePlatform.iOS;
+    private static bool UseHostedViewCaching =>
+        DeviceInfo.Platform != DevicePlatform.iOS && DeviceInfo.Platform != DevicePlatform.WinUI;
+
+    private static bool UsePersistentTabHosts =>
+        DeviceInfo.Platform == DevicePlatform.WinUI;
 
     private AppTab _current = AppTab.Main;
 
     private bool _hasAppearedOnce;
 
     private int _warmupStarted;
+
+    private int _navigationOverlayDepth;
 
     public RootPage(IServiceProvider services)
     {
@@ -82,7 +89,7 @@ public partial class RootPage : ContentPage
             // iOS App Store / TestFlight builds are much less tolerant of reparenting a native-backed
             // MAUI visual tree between hidden and visible hosts. Keep the warmup path off on iOS and
             // let iOS create views only when they are actually shown.
-            if (DeviceInfo.Platform != DevicePlatform.iOS)
+            if (DeviceInfo.Platform != DevicePlatform.iOS && DeviceInfo.Platform != DevicePlatform.WinUI)
             {
                 _ = MainThread.InvokeOnMainThreadAsync(async () =>
                 {
@@ -92,20 +99,15 @@ public partial class RootPage : ContentPage
                         // quickly after launch, so we want the heavy XAML tree built early.
                         await Task.Yield();
                         await Task.Delay(50);
-                        View settingsView;
-                        if (DeviceInfo.Platform == DevicePlatform.WinUI)
-                        {
-                            // Use a throwaway Settings instance for warmup so we never re-host the same View.
-                            var tmpPage = _services.GetRequiredService<SettingsPage>();
-                            settingsView = tmpPage.Content ?? new ContentView();
-                            tmpPage.Content = null;
-                            try { settingsView.BindingContext = tmpPage.BindingContext; } catch { }
-                        }
-                        else
-                        {
-                            var (_settingsPage, _settingsView) = GetOrCreate(AppTab.Settings);
-                            settingsView = _settingsView;
-                        }
+                        // Always use a throwaway Settings instance for warmup.
+                        // Reusing the cached hosted Settings view here can leave that same native-backed
+                        // view attached to WarmupHost, then Android throws "The specified child already has
+                        // a parent" when the user later opens Settings and ContentHost tries to attach it.
+                        // Warmup must never touch the real cached tab view.
+                        var tmpPage = _services.GetRequiredService<SettingsPage>();
+                        var settingsView = tmpPage.Content ?? new ContentView();
+                        tmpPage.Content = null;
+                        try { settingsView.BindingContext = tmpPage.BindingContext; } catch { }
 
                         // Creating the Settings page is not enough to eliminate the first-open hitch.
                         // The hitch often comes from the first time MAUI creates native handlers and
@@ -161,16 +163,114 @@ public partial class RootPage : ContentPage
         base.OnDisappearing();
     }
 
-    private void OnTabRequested(object? sender, AppTab tab)
+    private async void OnTabRequested(object? sender, AppTab tab)
     {
         try
         {
-            SwitchTo(tab);
+            await SwitchToWithFeedbackAsync(tab);
         }
         catch (Exception ex)
         {
             LogNavError($"RootPage.OnTabRequested({tab}) failed: {ex}");
             _ = SafeAlertAsync("Navigation error", $"Switching tabs failed:\n{FormatNavException(ex)}");
+        }
+    }
+
+    private async Task SwitchToWithFeedbackAsync(AppTab tab)
+    {
+        var shouldShowOverlay = _current != tab;
+
+        if (!shouldShowOverlay)
+        {
+            SwitchTo(tab);
+            return;
+        }
+
+        await ShowNavigationFeedbackAsync();
+
+        try
+        {
+            SwitchTo(tab);
+        }
+        finally
+        {
+            await HideNavigationFeedbackAsync();
+        }
+    }
+
+    private async Task ShowNavigationFeedbackAsync()
+    {
+        try
+        {
+            Interlocked.Increment(ref _navigationOverlayDepth);
+
+            if (NavigationFeedbackOverlay == null)
+                return;
+
+            NavigationFeedbackOverlay.IsVisible = true;
+            NavigationFeedbackOverlay.InputTransparent = false;
+
+            if (NavigationFeedbackSpinner != null)
+            {
+                NavigationFeedbackSpinner.IsVisible = false;
+                NavigationFeedbackSpinner.IsRunning = false;
+            }
+
+            await NavigationFeedbackOverlay.FadeTo(0.14, 70, Easing.CubicOut);
+
+            await Task.Yield();
+
+            if (NavigationFeedbackSpinner != null)
+            {
+                NavigationFeedbackSpinner.IsVisible = true;
+                NavigationFeedbackSpinner.IsRunning = true;
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private async Task HideNavigationFeedbackAsync()
+    {
+        try
+        {
+            if (Interlocked.Decrement(ref _navigationOverlayDepth) > 0)
+                return;
+
+            if (NavigationFeedbackOverlay == null)
+                return;
+
+            if (NavigationFeedbackSpinner != null)
+            {
+                NavigationFeedbackSpinner.IsRunning = false;
+                NavigationFeedbackSpinner.IsVisible = false;
+            }
+
+            await NavigationFeedbackOverlay.FadeTo(0, 90, Easing.CubicIn);
+            NavigationFeedbackOverlay.InputTransparent = true;
+            NavigationFeedbackOverlay.IsVisible = false;
+        }
+        catch
+        {
+            try
+            {
+                if (NavigationFeedbackSpinner != null)
+                {
+                    NavigationFeedbackSpinner.IsRunning = false;
+                    NavigationFeedbackSpinner.IsVisible = false;
+                }
+
+                if (NavigationFeedbackOverlay != null)
+                {
+                    NavigationFeedbackOverlay.Opacity = 0;
+                    NavigationFeedbackOverlay.InputTransparent = true;
+                    NavigationFeedbackOverlay.IsVisible = false;
+                }
+            }
+            catch
+            {
+            }
         }
     }
 
@@ -238,7 +338,7 @@ public partial class RootPage : ContentPage
 
     private void SwitchToCore(AppTab tab)
     {
-        if (_current == tab && ContentHost.Content != null)
+        if (_current == tab && HasActiveHostedContent())
         {
             // Even if the user is already on this tab, treat it as a show event.
             if (_pages.TryGetValue(_current, out var currentPage))
@@ -276,22 +376,6 @@ public partial class RootPage : ContentPage
         {
         }
 
-        
-        // WinUI can throw COMException 0x800F1000 when re-attaching a previously hosted view
-        // that has already been attached to a different parent (WarmupHost, ContentHost, etc).
-        // To keep Settings stable on Windows, always recreate the Settings tab view.
-        if (DeviceInfo.Platform == DevicePlatform.WinUI && tab == AppTab.Settings)
-        {
-            try
-            {
-                _pages.Remove(AppTab.Settings);
-                _views.Remove(AppTab.Settings);
-            }
-            catch
-            {
-            }
-        }
-
         // iOS release builds are particularly sensitive to reusing a detached native-backed view.
         // Recreate the outgoing and incoming hosted views each time instead of caching them.
         if (!UseHostedViewCaching)
@@ -310,14 +394,89 @@ public partial class RootPage : ContentPage
 
         var (page, view) = GetOrCreate(tab);
 
-        ContentHost.Content = null;
-        ContentHost.Content = view;
+        if (UsePersistentTabHosts)
+        {
+            ShowPersistentHostedView(view);
+        }
+        else
+        {
+            ContentHost.Children.Clear();
+            ContentHost.Children.Add(view);
+        }
 
         // Tell the new page it is visible so it can attach handlers and refresh data.
         try { page.SendAppearing(); } catch { }
     }
 
     
+    private bool HasActiveHostedContent()
+    {
+        try
+        {
+            if (ContentHost == null)
+                return false;
+
+            if (UsePersistentTabHosts)
+            {
+                foreach (var child in ContentHost.Children)
+                {
+                    if (child is View childView && childView.IsVisible)
+                        return true;
+                }
+
+                return false;
+            }
+
+            return ContentHost.Children.Count > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void ShowPersistentHostedView(View targetView)
+    {
+        if (ContentHost == null || targetView == null)
+            return;
+
+        try
+        {
+            if (targetView.Parent is Layout existingParent && existingParent != ContentHost)
+            {
+                existingParent.Remove(targetView);
+            }
+        }
+        catch
+        {
+        }
+
+        if (!ContentHost.Children.Contains(targetView))
+        {
+            targetView.IsVisible = false;
+            ContentHost.Children.Add(targetView);
+        }
+
+        foreach (var child in ContentHost.Children)
+        {
+            if (child is not View childView)
+                continue;
+
+            var isTarget = ReferenceEquals(childView, targetView);
+
+            childView.InputTransparent = !isTarget;
+            childView.IsVisible = isTarget;
+        }
+
+        try
+        {
+            targetView.ZIndex = 1;
+        }
+        catch
+        {
+        }
+    }
+
     private static string NormalizeServerKey(string? serverUrl)
     {
         var raw = (serverUrl ?? string.Empty).Trim();
@@ -352,7 +511,7 @@ public partial class RootPage : ContentPage
         // Detach current content first to prevent reparenting old views while we clear caches.
         try
         {
-            ContentHost.Content = null;
+            ContentHost.Children.Clear();
         }
         catch
         {

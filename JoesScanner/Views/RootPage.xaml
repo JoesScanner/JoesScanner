@@ -19,7 +19,7 @@
 
         <Grid Grid.Row="1">
 
-            <ContentView
+            <Grid
                 x:Name="ContentHost" />
 
             <!--
@@ -35,6 +35,23 @@
                 WidthRequest="1"
                 HorizontalOptions="Start"
                 VerticalOptions="Start" />
+
+            <Grid
+                x:Name="NavigationFeedbackOverlay"
+                IsVisible="False"
+                Opacity="0"
+                InputTransparent="True"
+                BackgroundColor="#80000000">
+
+                <ActivityIndicator
+                    x:Name="NavigationFeedbackSpinner"
+                    IsRunning="False"
+                    IsVisible="False"
+                    WidthRequest="32"
+                    HeightRequest="32"
+                    HorizontalOptions="Center"
+                    VerticalOptions="Center" />
+            </Grid>
 
         </Grid>
 
