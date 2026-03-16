@@ -5,12 +5,14 @@ namespace JoesScanner.Services;
 public interface IAppUpdateService
 {
     string SupportUrl { get; }
+    string PrivacyPolicyUrl { get; }
     string StoreUrl { get; }
     string StoreDisplayName { get; }
     string PlatformDisplayName { get; }
     string CurrentVersionDisplay { get; }
     Task<AppUpdateCheckResult> CheckForUpdatesAsync();
     Task OpenSupportSiteAsync();
+    Task OpenPrivacyPolicyAsync();
     Task OpenStorePageAsync();
 }
 

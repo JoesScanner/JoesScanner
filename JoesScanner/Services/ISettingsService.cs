@@ -78,6 +78,9 @@ namespace JoesScanner.Services
         string BluetoothLabelComposer { get; set; }
         string BluetoothLabelGenre { get; set; }
 
+        // When enabled on mobile platforms, Joe's Scanner will request audio playback that can
+        // continue while other apps are also playing audio.
+        bool MobileMixAudioWithOtherApps { get; set; }
 
         // what3words
         bool What3WordsLinksEnabled { get; set; }

@@ -32,6 +32,7 @@ namespace JoesScanner.Services
     {
         private readonly IAudioFilterService _audioFilterService;
         private readonly IToneAlertService _toneAlertService;
+        private readonly ISettingsService _settings;
 
         // Global interrupt token: ensures Stop/Skip actions cancel *all* in-flight work immediately,
         // including: filter preparation, downloads, and platform playback.
@@ -43,11 +44,14 @@ namespace JoesScanner.Services
         private string? _iosTempDownloadedFile;
 #endif
 
-        public AudioPlaybackService(IAudioFilterService audioFilterService, IToneAlertService toneAlertService)
+        public AudioPlaybackService(IAudioFilterService audioFilterService, IToneAlertService toneAlertService, ISettingsService settings)
         {
             _audioFilterService = audioFilterService;
             _toneAlertService = toneAlertService;
+            _settings = settings;
         }
+
+        private bool MobileMixAudioWithOtherAppsEnabled => _settings.MobileMixAudioWithOtherApps;
 
 #if WINDOWS
         private WinMediaPlayer? _windowsPlayer;
@@ -587,7 +591,8 @@ namespace JoesScanner.Services
 
 	#pragma warning disable CS0618
 #pragma warning disable CA1422
-                _audioManager.RequestAudioFocus(_focusListener, AMediaStream.Music, AudioFocus.Gain);
+                var focusMode = MobileMixAudioWithOtherAppsEnabled ? AudioFocus.GainTransientMayDuck : AudioFocus.Gain;
+                _audioManager.RequestAudioFocus(_focusListener, AMediaStream.Music, focusMode);
 #pragma warning restore CA1422
 #pragma warning restore CS0618
 	            }
@@ -631,8 +636,20 @@ namespace JoesScanner.Services
                 // App semantics: no pause, stop on focus loss.
                 try
                 {
-                    if (focusChange == AudioFocus.Loss || focusChange == AudioFocus.LossTransient)
+                    if (focusChange == AudioFocus.Loss)
+                    {
                         _ = _owner.StopAsync();
+                    }
+                    else if (focusChange == AudioFocus.LossTransientCanDuck)
+                    {
+                        if (!_owner.MobileMixAudioWithOtherAppsEnabled)
+                            _ = _owner.StopAsync();
+                    }
+                    else if (focusChange == AudioFocus.LossTransient)
+                    {
+                        if (!_owner.MobileMixAudioWithOtherAppsEnabled)
+                            _ = _owner.StopAsync();
+                    }
                 }
                 catch
                 {
@@ -681,9 +698,14 @@ namespace JoesScanner.Services
             try
             {
                 var session = AVAudioSession.SharedInstance();
+                var sessionOptions = AVAudioSessionCategoryOptions.AllowBluetooth |
+                    AVAudioSessionCategoryOptions.AllowBluetoothA2DP;
+                if (MobileMixAudioWithOtherAppsEnabled)
+                    sessionOptions |= AVAudioSessionCategoryOptions.MixWithOthers;
+
                 session.SetCategory(
                     AVAudioSessionCategory.Playback,
-                    AVAudioSessionCategoryOptions.AllowBluetooth | AVAudioSessionCategoryOptions.AllowBluetoothA2DP);
+                    sessionOptions);
                 session.SetActive(true);
 
 	                // When audio is downloaded to a local temp file, iOS needs a file URL.

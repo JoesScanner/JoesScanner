@@ -94,7 +94,11 @@ namespace JoesScanner.Services
             try
             {
                 var session = AVAudioSession.SharedInstance();
-                var options = AVAudioSessionCategoryOptions.AllowBluetooth | AVAudioSessionCategoryOptions.AllowBluetoothA2DP;
+                var options =
+                    AVAudioSessionCategoryOptions.AllowBluetooth |
+                    AVAudioSessionCategoryOptions.AllowBluetoothA2DP;
+                if (IsMobileMixAudioWithOtherAppsEnabled())
+                    options |= AVAudioSessionCategoryOptions.MixWithOthers;
                 session.SetCategory(AVAudioSessionCategory.Playback, options);
                 session.SetActive(true);
             }

@@ -3,10 +3,18 @@ namespace JoesScanner.Services
     // Cross platform entry point. Platform partial implementations do the real work.
     public partial class SystemMediaService : ISystemMediaService
     {
+        private readonly ISettingsService _settings;
         private Func<Task>? _onPlay;
         private Func<Task>? _onStop;
         private Func<Task>? _onNext;
         private Func<Task>? _onPrevious;
+
+        public SystemMediaService(ISettingsService settings)
+        {
+            _settings = settings;
+        }
+
+        private bool IsMobileMixAudioWithOtherAppsEnabled() => _settings.MobileMixAudioWithOtherApps;
 
         public void SetHandlers(Func<Task> onPlay, Func<Task> onStop, Func<Task>? onNext = null, Func<Task>? onPrevious = null)
         {

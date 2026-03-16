@@ -1058,6 +1058,24 @@ private async void OnOpenSupportSiteClicked(object sender, EventArgs e)
     }
 }
 
+private async void OnOpenPrivacyPolicyClicked(object sender, EventArgs e)
+{
+    if (_appUpdateService == null)
+    {
+        await UiDialogs.AlertAsync("Privacy Policy", "Privacy Policy link is not available in this build.", "Close");
+        return;
+    }
+
+    try
+    {
+        await _appUpdateService.OpenPrivacyPolicyAsync();
+    }
+    catch (Exception ex)
+    {
+        await UiDialogs.AlertAsync("Privacy Policy", $"Could not open the Privacy Policy:\n{ex.Message}", "Close");
+    }
+}
+
 private void RefreshLogText()
 {
     try

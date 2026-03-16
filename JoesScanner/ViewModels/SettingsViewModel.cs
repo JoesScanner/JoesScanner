@@ -354,7 +354,8 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
         private string _bluetoothLabelAlbumToken = BluetoothLabelMapping.TokenTalkgroup;
         private string _bluetoothLabelComposerToken = BluetoothLabelMapping.TokenSite;
         private string _bluetoothLabelGenreToken = BluetoothLabelMapping.TokenReceiver;
-
+        private bool _mobileMixAudioWithOtherApps = true;
+        private bool _savedMobileMixAudioWithOtherApps = true;
 
         // Audio filters (Phase 1 settings only; audio pipeline wiring in later phases)
         private bool _audioStaticFilterEnabled;
@@ -1510,6 +1511,21 @@ public bool WindowsAutoConnectOnStart
         }
 
 
+        public bool MobileMixAudioWithOtherApps
+        {
+            get => _mobileMixAudioWithOtherApps;
+            set
+            {
+                if (_mobileMixAudioWithOtherApps == value)
+                    return;
+
+                _mobileMixAudioWithOtherApps = value;
+                OnPropertyChanged();
+                UpdateHasChanges();
+                QueueAutosaveNonConnection("Bluetooth");
+            }
+        }
+
         public bool What3WordsLinksEnabled
         {
             get => _what3WordsLinksEnabled;
@@ -2034,6 +2050,10 @@ public bool WindowsStartWithWindows
             _bluetoothLabelGenreToken = BluetoothLabelMapping.NormalizeToken(_settings.BluetoothLabelGenre, BluetoothLabelMapping.TokenReceiver);
             _savedBluetoothLabelGenreToken = _bluetoothLabelGenreToken;
 
+            _mobileMixAudioWithOtherApps = _settings.MobileMixAudioWithOtherApps;
+            _savedMobileMixAudioWithOtherApps = _mobileMixAudioWithOtherApps;
+            OnPropertyChanged(nameof(MobileMixAudioWithOtherApps));
+
             // Ensure the pickers show the persisted selections when the Settings page opens.
             _bluetoothLabelArtistOption = GetBluetoothOptionOrDefault(_bluetoothLabelArtistToken, BluetoothLabelMapping.TokenAppName);
             _bluetoothLabelTitleOption = GetBluetoothOptionOrDefault(_bluetoothLabelTitleToken, BluetoothLabelMapping.TokenTranscription);
@@ -2319,6 +2339,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             _settings.BluetoothLabelAlbum = _bluetoothLabelAlbumToken;
             _settings.BluetoothLabelComposer = _bluetoothLabelComposerToken;
             _settings.BluetoothLabelGenre = _bluetoothLabelGenreToken;
+            _settings.MobileMixAudioWithOtherApps = _mobileMixAudioWithOtherApps;
 
             _settings.What3WordsLinksEnabled = _what3WordsLinksEnabled;
             _settings.What3WordsApiKey = _what3WordsApiKey;
@@ -2352,6 +2373,7 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
             _savedBluetoothLabelAlbumToken = _bluetoothLabelAlbumToken;
             _savedBluetoothLabelComposerToken = _bluetoothLabelComposerToken;
             _savedBluetoothLabelGenreToken = _bluetoothLabelGenreToken;
+            _savedMobileMixAudioWithOtherApps = _mobileMixAudioWithOtherApps;
 
             _savedWhat3WordsLinksEnabled = _what3WordsLinksEnabled;
             _savedWhat3WordsApiKey = _what3WordsApiKey;
@@ -3076,6 +3098,7 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                 || !string.Equals(_bluetoothLabelAlbumToken, _savedBluetoothLabelAlbumToken, StringComparison.Ordinal)
                 || !string.Equals(_bluetoothLabelComposerToken, _savedBluetoothLabelComposerToken, StringComparison.Ordinal)
                 || !string.Equals(_bluetoothLabelGenreToken, _savedBluetoothLabelGenreToken, StringComparison.Ordinal)
+                || _mobileMixAudioWithOtherApps != _savedMobileMixAudioWithOtherApps
                 || _what3WordsLinksEnabled != _savedWhat3WordsLinksEnabled
                 || !string.Equals(_what3WordsApiKey ?? string.Empty, _savedWhat3WordsApiKey ?? string.Empty, StringComparison.Ordinal)
                 || _audioStaticFilterEnabled != _savedAudioStaticFilterEnabled

@@ -167,7 +167,7 @@ public partial class RootPage : ContentPage
     {
         try
         {
-            await SwitchToWithFeedbackAsync(tab);
+            await MainThread.InvokeOnMainThreadAsync(() => SwitchToWithFeedbackAsync(tab));
         }
         catch (Exception ex)
         {
@@ -182,19 +182,19 @@ public partial class RootPage : ContentPage
 
         if (!shouldShowOverlay)
         {
-            SwitchTo(tab);
+            await MainThread.InvokeOnMainThreadAsync(() => SwitchTo(tab));
             return;
         }
 
-        await ShowNavigationFeedbackAsync();
+        await MainThread.InvokeOnMainThreadAsync(ShowNavigationFeedbackAsync);
 
         try
         {
-            SwitchTo(tab);
+            await MainThread.InvokeOnMainThreadAsync(() => SwitchTo(tab));
         }
         finally
         {
-            await HideNavigationFeedbackAsync();
+            await MainThread.InvokeOnMainThreadAsync(HideNavigationFeedbackAsync);
         }
     }
 

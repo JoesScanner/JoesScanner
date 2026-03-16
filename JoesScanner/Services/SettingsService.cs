@@ -40,6 +40,7 @@ namespace JoesScanner.Services
         private const string KeyBluetoothAlbum = "bt_label_album";
         private const string KeyBluetoothComposer = "bt_label_composer";
         private const string KeyBluetoothGenre = "bt_label_genre";
+        private const string KeyMobileMixAudioWithOtherApps = "mobile_mix_audio_with_other_apps";
 
         private const string KeyWhat3WordsLinksEnabled = "what3words_links_enabled";
         private const string KeyWhat3WordsApiKey = "what3words_api_key";
@@ -536,6 +537,11 @@ namespace JoesScanner.Services
             set => SetString(KeyBluetoothGenre, (value ?? "Receiver").Trim());
         }
 
+        public bool MobileMixAudioWithOtherApps
+        {
+            get => GetBool(KeyMobileMixAudioWithOtherApps, true);
+            set => SetBool(KeyMobileMixAudioWithOtherApps, value);
+        }
 
         public bool What3WordsLinksEnabled
         {

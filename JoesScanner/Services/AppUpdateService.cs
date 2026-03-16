@@ -19,6 +19,7 @@ namespace JoesScanner.Services;
 public sealed class AppUpdateService : IAppUpdateService
 {
     private const string DefaultSupportUrl = "https://joesscanner.com/support/";
+    private const string DefaultPrivacyPolicyUrl = "https://joesscanner.com/account/privacy-policy/";
     private const string WindowsStoreUrlConst = "https://apps.microsoft.com/detail/9n5hbztcnt4t?gl=US&hl=en-US";
     private const string AndroidStoreUrlConst = "https://play.google.com/store/apps/details?id=app.joesscanner.com";
     private const string AppleStoreUrlConst = "https://apps.apple.com/app/id6758413482";
@@ -28,6 +29,7 @@ public sealed class AppUpdateService : IAppUpdateService
     private static readonly HttpClient _httpClient = new();
 
     public string SupportUrl => DefaultSupportUrl;
+    public string PrivacyPolicyUrl => DefaultPrivacyPolicyUrl;
     public string StoreUrl => GetStoreUrl();
     public string StoreDisplayName => GetStoreDisplayName();
     public string PlatformDisplayName => GetPlatformDisplayName();
@@ -119,6 +121,11 @@ public sealed class AppUpdateService : IAppUpdateService
     public async Task OpenSupportSiteAsync()
     {
         await Launcher.Default.OpenAsync(new Uri(SupportUrl));
+    }
+
+    public async Task OpenPrivacyPolicyAsync()
+    {
+        await Launcher.Default.OpenAsync(new Uri(PrivacyPolicyUrl));
     }
 
     public async Task OpenStorePageAsync()
