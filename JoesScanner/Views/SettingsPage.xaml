@@ -55,14 +55,15 @@
                              2 = auto connect (Windows)
                              3 = filters
                              4 = audio filters
-                             5 = address detection
-                             6 = bluetooth labels
-                             7 = theme
-                             8 = telemetry
-                             9 = log
-                             10 = about -->
+                             5 = audio options
+                             6 = address detection
+                             7 = bluetooth labels
+                             8 = theme
+                             9 = telemetry
+                             10 = log
+                             11 = about -->
                 <Grid
-                            RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
+                            RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
                             ColumnDefinitions="*">
 
                     <!-- HEADER PANEL -->
@@ -941,9 +942,84 @@
 </Border>
 
 
-                    <!-- ADDRESS DETECTION CARD -->
+                    <!-- AUDIO OPTIONS CARD -->
                     <Border
                                     Grid.Row="5"
+                                    Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
+                                    StrokeThickness="1"
+                                    Padding="12"
+                                    BackgroundColor="{AppThemeBinding Light=#ffffff, Dark=#111827}"
+                                    StrokeShape="RoundRectangle 8"
+                                    Margin="0,0,0,10">
+
+    <VerticalStackLayout Spacing="8">
+
+        <Grid x:Name="AudioHeaderGrid" ColumnDefinitions="*,Auto" ColumnSpacing="12">
+            <Grid.GestureRecognizers>
+                <TapGestureRecognizer Tapped="OnAudioHeaderTapped" />
+            </Grid.GestureRecognizers>
+
+            <Label
+                Grid.Column="0"
+                Text="Audio options"
+                FontSize="16"
+                FontAttributes="Bold"
+                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+
+            <Label
+                x:Name="AudioChevronLabel"
+                Style="{StaticResource SettingsCardChevronStyle}"
+                Grid.Column="1"
+                Text="▶"
+                FontSize="14"
+                VerticalOptions="Center"
+                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+        </Grid>
+
+        <VerticalStackLayout x:Name="AudioBodyLayout" Spacing="6" IsVisible="False">
+            <Grid
+                RowDefinitions="Auto,Auto"
+                ColumnDefinitions="*,Auto"
+                RowSpacing="8"
+                ColumnSpacing="12"
+                Margin="0,0,0,4"
+                IsVisible="{OnPlatform WinUI=false, Default=true}">
+
+                <Label
+                    Grid.Row="0"
+                    Grid.Column="0"
+                    Text="Continue scanner audio while other apps are playing"
+                    FontSize="12"
+                    LineBreakMode="WordWrap"
+                    VerticalOptions="Center"
+                    HorizontalOptions="Fill"
+                    TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+
+                <controls:CompactToggleSwitch
+                    Grid.Row="0"
+                    Grid.Column="1"
+                    IsToggled="{Binding MobileMixAudioWithOtherApps}"
+                    Style="{StaticResource CompactToggleStyle}" />
+
+                <Label
+                    Grid.Row="1"
+                    Grid.Column="0"
+                    Grid.ColumnSpan="2"
+                    Text="When enabled on Android and iPhone, Joe's Scanner can keep playing alongside music, navigation, podcasts, or other app audio. This is not limited to Bluetooth."
+                    FontSize="11"
+                    Opacity="0.8"
+                    LineBreakMode="WordWrap"
+                    TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
+            </Grid>
+        </VerticalStackLayout>
+
+    </VerticalStackLayout>
+
+</Border>
+
+                    <!-- ADDRESS DETECTION CARD -->
+                    <Border
+                                    Grid.Row="6"
                                     Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
                                     StrokeThickness="1"
                                     Padding="12"
@@ -1188,7 +1264,7 @@
 
 <!-- BLUETOOTH LABELS CARD -->
                     <Border
-                                    Grid.Row="6"
+                                    Grid.Row="7"
                                     Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
                                     StrokeThickness="1"
                                     Padding="12"
@@ -1224,41 +1300,6 @@
         <!-- Body -->
         <VerticalStackLayout x:Name="BluetoothBodyLayout" Spacing="6" IsVisible="False">
             <VerticalStackLayout Spacing="6" x:Load="{Binding BluetoothBodyLoaded}">
-            <Grid
-                RowDefinitions="Auto,Auto"
-                ColumnDefinitions="*,Auto"
-                RowSpacing="8"
-                ColumnSpacing="12"
-                Margin="0,0,0,4"
-                IsVisible="{OnPlatform WinUI=false, Default=true}">
-
-                <Label
-                    Grid.Row="0"
-                    Grid.Column="0"
-                    Text="Play scanner audio while other apps are playing"
-                    FontSize="12"
-                    LineBreakMode="WordWrap"
-                    VerticalOptions="Center"
-                    HorizontalOptions="Fill"
-                    TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
-
-                <controls:CompactToggleSwitch
-                    Grid.Row="0"
-                    Grid.Column="1"
-                    IsToggled="{Binding MobileMixAudioWithOtherApps}"
-                    Style="{StaticResource CompactToggleStyle}" />
-
-                <Label
-                    Grid.Row="1"
-                    Grid.Column="0"
-                    Grid.ColumnSpan="2"
-                    Text="When enabled on Android and iPhone, Joe's Scanner can keep playing alongside music, navigation, or other app audio."
-                    FontSize="11"
-                    Opacity="0.8"
-                    LineBreakMode="WordWrap"
-                    TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
-            </Grid>
-
             <Label
                 Text="Choose which call fields show up on your Bluetooth device. Not all devices display all fields."
                 FontSize="12"
@@ -1325,7 +1366,7 @@
 
                     <!-- THEME CARD -->
                     <Border
-                                    Grid.Row="7"
+                                    Grid.Row="8"
                                     Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
                                     StrokeThickness="1"
                                     Padding="12"
@@ -1390,7 +1431,7 @@
 
                     <!-- TELEMETRY CARD (CUSTOM SERVERS ONLY) -->
                     <Border
-                                    Grid.Row="8"
+                                    Grid.Row="9"
                                     IsVisible="{Binding ShowTelemetryCard}"
                                     Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
                                     StrokeThickness="1"
@@ -1457,7 +1498,7 @@
 
                     <!-- LOG CARD -->
                     <Border
-                                    Grid.Row="9"
+                                    Grid.Row="10"
                                     Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
                                     StrokeThickness="1"
                                     Padding="12"
@@ -1509,8 +1550,8 @@
                 <controls:CompactToggleSwitch
                     x:Name="LogEnabledToggle"
                     Grid.Column="1"
-                    Style="{StaticResource CompactToggleStyle}"
-                    Toggled="OnLogEnabledToggled" />
+                    IsToggled="{Binding LogEnabled, Mode=TwoWay}"
+                    Style="{StaticResource CompactToggleStyle}" />
             </Grid>
 
 
@@ -1557,7 +1598,7 @@
 
                     <!-- ABOUT CARD -->
                     <Border
-                                    Grid.Row="10"
+                                    Grid.Row="11"
                                     Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
                                     StrokeThickness="1"
                                     Padding="12"

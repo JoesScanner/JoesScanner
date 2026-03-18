@@ -17,6 +17,7 @@ namespace JoesScanner.Services
     {
         private const string LogEnabledPreferenceKey = "app_log_enabled";
         private const string LogEnabledMarkerFileName = "app_log_enabled.txt";
+        private const string LogEnabledStateFileName = "app_log_enabled.state";
 
         private static readonly object Sync = new();
         private static readonly LinkedList<string> Buffer = new();
@@ -52,10 +53,10 @@ namespace JoesScanner.Services
 
         private static bool ReadEnabledPreference()
         {
-            // Logging must fail closed if we find any explicit disabled marker.
-            // This protects against path changes between packaged/unpackaged or early/late startup resolution.
-            if (TryReadEnabledMarker(out var markerEnabled))
-                return markerEnabled;
+            // Use one canonical state file as the authoritative source.
+            // Preferences and marker files are compatibility mirrors only.
+            if (TryReadEnabledStateFile(out var stateEnabled))
+                return stateEnabled;
 
             try
             {
@@ -63,8 +64,12 @@ namespace JoesScanner.Services
             }
             catch
             {
-                return false;
             }
+
+            if (TryReadEnabledMarker(out var markerEnabled))
+                return markerEnabled;
+
+            return false;
         }
 
         private static bool TryReadEnabledMarker(out bool enabled)
@@ -104,6 +109,77 @@ namespace JoesScanner.Services
 
             enabled = sawExplicitTrue;
             return sawExplicitTrue;
+        }
+
+        private static string? GetCanonicalLogsDirectory()
+        {
+            try
+            {
+                var dirs = GetCandidateLogsDirectories();
+                if (dirs.Count > 0)
+                    return dirs[0];
+            }
+            catch
+            {
+            }
+
+            return null;
+        }
+
+        private static bool TryReadEnabledStateFile(out bool enabled)
+        {
+            enabled = false;
+
+            try
+            {
+                var dir = GetCanonicalLogsDirectory();
+                if (string.IsNullOrWhiteSpace(dir))
+                    return false;
+
+                var path = Path.Combine(dir, LogEnabledStateFileName);
+                if (!File.Exists(path))
+                    return false;
+
+                var text = (File.ReadAllText(path) ?? string.Empty).Trim();
+
+                if (string.Equals(text, "1", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(text, "true", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(text, "on", StringComparison.OrdinalIgnoreCase))
+                {
+                    enabled = true;
+                    return true;
+                }
+
+                if (string.Equals(text, "0", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(text, "false", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(text, "off", StringComparison.OrdinalIgnoreCase))
+                {
+                    enabled = false;
+                    return true;
+                }
+            }
+            catch
+            {
+            }
+
+            return false;
+        }
+
+        private static void TryWriteEnabledStateFile(bool enabled)
+        {
+            try
+            {
+                var dir = GetCanonicalLogsDirectory();
+                if (string.IsNullOrWhiteSpace(dir))
+                    return;
+
+                Directory.CreateDirectory(dir);
+                var path = Path.Combine(dir, LogEnabledStateFileName);
+                File.WriteAllText(path, enabled ? "1" : "0");
+            }
+            catch
+            {
+            }
         }
 
         private static void TryWriteEnabledMarker(bool enabled)
@@ -194,9 +270,13 @@ namespace JoesScanner.Services
         public static bool ReloadEnabledStateFromStorage(bool purgePersistedLogs = true)
         {
             var enabled = ReadEnabledPreference();
-            TryWriteEnabledMarker(enabled);
             ApplyResolvedEnabledState(enabled, purgePersistedLogs: purgePersistedLogs && !enabled);
             return enabled;
+        }
+
+        public static bool GetStoredEnabledState()
+        {
+            return ReadEnabledPreference();
         }
 
         public static void DebugWriteLine(Func<string> messageFactory)
@@ -232,13 +312,14 @@ namespace JoesScanner.Services
 
         public static void SetEnabled(bool enabled)
         {
+            TryWriteEnabledStateFile(enabled);
+
             try
             {
                 Preferences.Set(LogEnabledPreferenceKey, enabled);
             }
             catch
             {
-                // Ignore; marker file still persists the preference.
             }
 
             TryWriteEnabledMarker(enabled);

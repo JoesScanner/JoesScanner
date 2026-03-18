@@ -25,7 +25,7 @@ namespace JoesScanner.Views
         {
             InitializeComponent();
 
-            var enabled = AppLog.ReloadEnabledStateFromStorage();
+            var enabled = AppLog.IsEnabled;
             LoggingSwitch.IsToggled = enabled;
             SyncLoggingState(enabled);
 
@@ -37,7 +37,7 @@ namespace JoesScanner.Views
         {
             base.OnAppearing();
 
-            var enabled = AppLog.ReloadEnabledStateFromStorage();
+            var enabled = AppLog.IsEnabled;
             LoggingSwitch.IsToggled = enabled;
             SyncLoggingState(enabled);
             RefreshLog();

@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Threading.Channels;
 using JoesScanner.Data;
 using Microsoft.Data.Sqlite;
+using JoesScanner.Helpers;
 
 namespace JoesScanner.Services;
 
@@ -55,7 +56,7 @@ public sealed class LocalCallsRepository : ILocalCallsRepository, IDisposable
         if (calls == null || calls.Count == 0)
             return Task.CompletedTask;
 
-        var normalizedServerKey = NormalizeServerKey(serverKey);
+        var normalizedServerKey = ServerKeyHelper.Normalize(serverKey);
 
         return EnqueueAsync(async (conn, ct) =>
         {
@@ -73,7 +74,7 @@ public sealed class LocalCallsRepository : ILocalCallsRepository, IDisposable
         if (string.IsNullOrWhiteSpace(serverKey) || string.IsNullOrWhiteSpace(backendId))
             return Task.CompletedTask;
 
-        var normalizedServerKey = NormalizeServerKey(serverKey);
+        var normalizedServerKey = ServerKeyHelper.Normalize(serverKey);
         var id = backendId.Trim();
 
         return EnqueueAsync(async (conn, ct) =>
@@ -461,10 +462,6 @@ WHERE server_key = $server_key
         return value.Trim().Length > 0;
     }
 
-private static string NormalizeServerKey(string serverKey)
-    {
-        return (serverKey ?? string.Empty).Trim().TrimEnd('/');
-    }
 
     private void ThrowIfDisposed()
     {
@@ -485,7 +482,7 @@ private static string NormalizeServerKey(string serverKey)
         await InitializeAsync(ct).ConfigureAwait(false);
 
         var resultTcs = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var serverKey = NormalizeServerKey(contextKey);
+        var serverKey = ServerKeyHelper.Normalize(contextKey);
 
         await EnqueueAsync(async (db, token) =>
         {

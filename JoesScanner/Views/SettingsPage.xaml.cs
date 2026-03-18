@@ -4,6 +4,7 @@ using JoesScanner.ViewModels;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
@@ -20,6 +21,7 @@ namespace JoesScanner.Views
     public partial class SettingsPage : ContentPage, ITabHidingAware
     {
         private readonly IAppUpdateService? _appUpdateService;
+        private SettingsViewModel? _observedSettingsViewModel;
 
         // Profile UI is managed via a simple Picker plus a Manage menu.
 
@@ -31,6 +33,7 @@ namespace JoesScanner.Views
             _appUpdateService = ResolveAppUpdateService();
             SetAppVersionTextSafe();
             SetAboutInfoTextSafe();
+            HookBindingContext();
             // No per page edit mode state.
         }
 
@@ -42,6 +45,7 @@ namespace JoesScanner.Views
             _appUpdateService = appUpdateService;
             SetAppVersionTextSafe();
             SetAboutInfoTextSafe();
+            HookBindingContext();
             // No per page edit mode state.
         }
 
@@ -76,6 +80,45 @@ namespace JoesScanner.Views
         }
 
 
+
+        protected override void OnBindingContextChanged()
+        {
+            base.OnBindingContextChanged();
+            HookBindingContext();
+        }
+
+        private void HookBindingContext()
+        {
+            if (_observedSettingsViewModel != null)
+            {
+                _observedSettingsViewModel.PropertyChanged -= OnSettingsViewModelPropertyChanged;
+                _observedSettingsViewModel = null;
+            }
+
+            if (BindingContext is SettingsViewModel vm)
+            {
+                _observedSettingsViewModel = vm;
+                vm.PropertyChanged += OnSettingsViewModelPropertyChanged;
+                vm.RefreshLogEnabledFromRuntime();
+            }
+        }
+
+        private void OnSettingsViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
+        {
+            if (e.PropertyName != nameof(SettingsViewModel.LogEnabled))
+                return;
+
+            MainThread.BeginInvokeOnMainThread(() =>
+            {
+                try
+                {
+                    RefreshLogText();
+                }
+                catch
+                {
+                }
+            });
+        }
 
         private static IAppUpdateService? ResolveAppUpdateService()
         {
@@ -164,17 +207,10 @@ namespace JoesScanner.Views
         {
             base.OnAppearing();
 
-            try
+            if (BindingContext is SettingsViewModel preVm)
             {
-                if (LogEnabledToggle != null)
-                {
-                    LogEnabledToggle.IsToggled = AppLog.ReloadEnabledStateFromStorage();
-                }
+                preVm.RefreshLogEnabledFromRuntime();
             }
-            catch
-            {
-            }
-
 
             if (BindingContext is SettingsViewModel vm)
             {
@@ -726,6 +762,7 @@ private void CollapseAllCards()
     CollapseSection(AutoplayFieldsGrid, AutoplayChevronLabel);
     CollapseSection(FiltersBodyLayout, FiltersChevronLabel);
     CollapseSection(AudioFiltersBodyLayout, AudioFiltersChevronLabel);
+    CollapseSection(AudioBodyLayout, AudioChevronLabel);
     CollapseSection(AddressDetectionBodyLayout, AddressDetectionChevronLabel);
     CollapseSection(BluetoothBodyLayout, BluetoothChevronLabel);
     CollapseSection(ThemeBodyLayout, ThemeChevronLabel);
@@ -737,6 +774,7 @@ private void CollapseAllCards()
         vm.SetSettingsCardOpenState("Autoplay", false);
         vm.SetSettingsCardOpenState("Filters", false);
         vm.SetSettingsCardOpenState("AudioFilters", false);
+        vm.SetSettingsCardOpenState("Audio", false);
         vm.SetSettingsCardOpenState("AddressDetection", false);
         vm.SetSettingsCardOpenState("Bluetooth", false);
         vm.SetSettingsCardOpenState("Theme", false);
@@ -837,6 +875,15 @@ private void OnAudioFiltersHeaderTapped(object sender, EventArgs e)
     }
 }
 
+private void OnAudioHeaderTapped(object sender, EventArgs e)
+{
+    ToggleSection(AudioBodyLayout, AudioChevronLabel);
+    if (BindingContext is SettingsViewModel vm)
+    {
+        vm.SetSettingsCardOpenState("Audio", AudioBodyLayout.IsVisible);
+    }
+}
+
 private void OnAddressDetectionHeaderTapped(object sender, EventArgs e)
 {
     var willOpen = !AddressDetectionBodyLayout.IsVisible;
@@ -932,21 +979,6 @@ private async void OnClearLogClicked(object sender, EventArgs e)
     }
 }
 
-private void OnLogEnabledToggled(object sender, ToggledEventArgs e)
-{
-    try
-    {
-        AppLog.SetEnabled(e.Value);
-
-        if (LogBodyLayout != null && LogBodyLayout.IsVisible)
-        {
-            RefreshLogText();
-        }
-    }
-    catch
-    {
-    }
-}
 
 private async void OnCopyLogClicked(object sender, EventArgs e)
 {
@@ -1080,7 +1112,7 @@ private void RefreshLogText()
 {
     try
     {
-        if (!AppLog.ReloadEnabledStateFromStorage())
+        if (!AppLog.IsEnabled)
         {
             LogEditor.Text = "Logging is disabled. Turn on Enable logging to capture entries."; 
             return;

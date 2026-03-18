@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Collections.Generic;
+using JoesScanner.Helpers;
 
 namespace JoesScanner.Services
 {
@@ -12,34 +13,6 @@ namespace JoesScanner.Services
     public sealed class AuthLookupsSyncService : IAuthLookupsSyncService, IDisposable
     {
         private const string DefaultAuthServerBaseUrl = "https://joesscanner.com";
-
-        private const string DefaultStreamServerUrl = "https://app.joesscanner.com";
-
-        private static readonly string[] ProvidedDefaultServerUrls =
-        {
-            DefaultStreamServerUrl
-        };
-
-        private static bool IsProvidedDefaultServerUrl(string? streamServerUrl)
-        {
-            var url = (streamServerUrl ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(url))
-                return false;
-
-            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
-                return false;
-
-            foreach (var candidate in ProvidedDefaultServerUrls)
-            {
-                if (!Uri.TryCreate(candidate, UriKind.Absolute, out var candidateUri))
-                    continue;
-
-                if (string.Equals(uri.Host, candidateUri.Host, StringComparison.OrdinalIgnoreCase))
-                    return true;
-            }
-
-            return false;
-        }
 
         private static readonly TimeSpan ReportMinInterval = TimeSpan.FromHours(20);
 
@@ -79,7 +52,7 @@ namespace JoesScanner.Services
         {
             // User requested strict gating: when telemetry is off, this feature is off silently.
             var selectedServer = _settings.ServerUrl;
-            if (IsProvidedDefaultServerUrl(selectedServer))
+            if (HostedServerRules.IsProvidedDefaultServerUrl(selectedServer))
                 return true;
 
             return _settings.TelemetryEnabled;
@@ -102,7 +75,7 @@ namespace JoesScanner.Services
             var appBuild = AppInfo.Current.BuildString ?? string.Empty;
             var platform = DeviceInfo.Platform.ToString();
             var type = DeviceInfo.Idiom.ToString();
-            var model = CombineDeviceModel(DeviceInfo.Manufacturer, DeviceInfo.Model);
+            var model = DeviceInfoHelper.CombineManufacturerAndModel(DeviceInfo.Manufacturer, DeviceInfo.Model);
             var osVersion = DeviceInfo.VersionString ?? string.Empty;
 
             // Keep the same parameter names as the existing Auth API endpoints.
@@ -133,34 +106,8 @@ namespace JoesScanner.Services
             return sb.ToString();
         }
 
-        private static string CombineDeviceModel(string? manufacturer, string? model)
-        {
-            var m = (manufacturer ?? string.Empty).Trim();
-            var d = (model ?? string.Empty).Trim();
-
-            if (string.IsNullOrWhiteSpace(m))
-                return d;
-            if (string.IsNullOrWhiteSpace(d))
-                return m;
-
-            if (d.StartsWith(m, StringComparison.OrdinalIgnoreCase))
-                return d;
-
-            return m + " " + d;
-        }
-
         private static string GetLastReportUtcKey(string serverKey) => "lookups_report_last_utc|" + (serverKey ?? string.Empty);
         private static string GetLastReportHashKey(string serverKey) => "lookups_report_last_hash|" + (serverKey ?? string.Empty);
-
-        private static DateTime? TryParseUtc(string raw)
-        {
-            if (string.IsNullOrWhiteSpace(raw))
-                return null;
-
-            return DateTime.TryParse(raw, null, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var dt)
-                ? dt.ToUniversalTime()
-                : null;
-        }
 
         public async Task<HistoryLookupData?> TryFetchSeedAsync(string serverKey, CancellationToken cancellationToken)
         {
@@ -270,7 +217,7 @@ namespace JoesScanner.Services
                     AppLog.Add(() => $"AuthLookups: report forced. server={serverKey}");
                 }
 
-                var lastUtc = TryParseUtc(AppStateStore.GetString(GetLastReportUtcKey(serverKey), string.Empty));
+                var lastUtc = DateParseHelper.TryParseUtc(AppStateStore.GetString(GetLastReportUtcKey(serverKey), string.Empty));
                 if (!force && lastUtc.HasValue && (DateTime.UtcNow - lastUtc.Value) < ReportMinInterval)
                 {
                     AppLog.Add(() => $"AuthLookups: report skipped (throttled). server={serverKey} lastUtc={lastUtc.Value:O}");
@@ -296,7 +243,7 @@ namespace JoesScanner.Services
                     // Telemetry identity
                     device_platform = DeviceInfo.Platform.ToString(),
                     device_type = DeviceInfo.Idiom.ToString(),
-                    device_model = CombineDeviceModel(DeviceInfo.Manufacturer, DeviceInfo.Model),
+                    device_model = DeviceInfoHelper.CombineManufacturerAndModel(DeviceInfo.Manufacturer, DeviceInfo.Model),
                     app_version = AppInfo.Current.VersionString ?? string.Empty,
                     app_build = AppInfo.Current.BuildString ?? string.Empty,
                     os_version = DeviceInfo.VersionString ?? string.Empty,

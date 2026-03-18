@@ -1,3 +1,4 @@
+using Microsoft.Extensions.DependencyInjection;
 using JoesScanner.Services;
 using JoesScanner.ViewModels;
 
@@ -42,8 +43,6 @@ namespace JoesScanner
             // The poller is best effort and will no-op until credentials are configured and the session is associated.
             try { _commsBadgeService.Start(); } catch { }
 
-            // Preload communications once per app start so the messages page is ready immediately.
-            BeginStartupCommsPreload();
 
             AppDomain.CurrentDomain.ProcessExit += (_, _) =>
             {
@@ -85,29 +84,20 @@ namespace JoesScanner
             });
         }
 
-        private void BeginStartupCommsPreload()
-        {
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    var vm = _services.GetService(typeof(CommunicationsViewModel)) as CommunicationsViewModel;
-                    if (vm == null)
-                        return;
-
-                    await Task.Delay(TimeSpan.FromMilliseconds(1200)).ConfigureAwait(false);
-
-                    await vm.PreloadOnAppStartAsync().ConfigureAwait(false);
-                }
-                catch
-                {
-                }
-            });
-        }
 
         protected override Window CreateWindow(IActivationState? activationState)
         {
-            var window = new Window(new AppShell(_services));
+            Page rootPage;
+#if IOS
+            // iOS launch is more stable when we avoid the extra Shell/DataTemplate hop and
+            // host the RootPage directly. RootPage already owns the tab strip and content area,
+            // so Shell does not add value on iOS here.
+            rootPage = _services.GetRequiredService<Views.RootPage>();
+#else
+            rootPage = new AppShell(_services);
+#endif
+
+            var window = new Window(rootPage);
 
 #if WINDOWS
             const double defaultWidth = 430;

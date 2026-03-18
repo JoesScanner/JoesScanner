@@ -2,11 +2,13 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using JoesScanner.Helpers;
 
 namespace JoesScanner.Services
 {
     public sealed class SubscriptionService : ISubscriptionService, IDisposable
-    {        private const string DefaultAuthServerBaseUrl = "https://joesscanner.com";
+    {
+        private const string DefaultAuthServerBaseUrl = "https://joesscanner.com";
 
         private readonly ISettingsService _settings;
         private readonly ITelemetryService _telemetryService;
@@ -41,7 +43,7 @@ namespace JoesScanner.Services
         public async Task<SubscriptionCheckResult> EnsureSubscriptionAsync(CancellationToken cancellationToken)
         {
             var basicUser = (_settings.BasicAuthUsername ?? string.Empty).Trim();
-            var basicPass = NormalizeSmartQuotes((_settings.BasicAuthPassword ?? string.Empty).Trim());
+            var basicPass = TextNormalizationHelper.NormalizeSmartQuotes((_settings.BasicAuthPassword ?? string.Empty).Trim());
 
             // Credentials are required for Joe's Scanner hosted servers.
             // If missing, do not allow connecting.
@@ -61,7 +63,7 @@ namespace JoesScanner.Services
 
             var platform = DeviceInfo.Platform.ToString();
             var type = DeviceInfo.Idiom.ToString();
-            var model = CombineDeviceModel(DeviceInfo.Manufacturer, DeviceInfo.Model);
+            var model = DeviceInfoHelper.CombineManufacturerAndModel(DeviceInfo.Manufacturer, DeviceInfo.Model);
             var osVersion = DeviceInfo.VersionString ?? string.Empty;
 
             var payload = new
@@ -125,7 +127,7 @@ namespace JoesScanner.Services
                     _settings.SubscriptionLastLevel = planLabel;
                     _settings.SubscriptionPriceId = priceText;
 
-                    _settings.SubscriptionExpiresUtc = TryParseUtc(sub?.ExpiresAt);
+                    _settings.SubscriptionExpiresUtc = DateParseHelper.TryParseUtc(sub?.ExpiresAt);
                     _settings.SubscriptionRenewalUtc = null;
 
                     _settings.SubscriptionLastMessage = (authResponse?.Message ?? response.ReasonPhrase ?? "Denied").Trim();
@@ -161,7 +163,7 @@ namespace JoesScanner.Services
                     _settings.SubscriptionLastLevel = planLabel;
                     _settings.SubscriptionPriceId = priceText;
 
-                    _settings.SubscriptionExpiresUtc = TryParseUtc(sub?.ExpiresAt);
+                    _settings.SubscriptionExpiresUtc = DateParseHelper.TryParseUtc(sub?.ExpiresAt);
                     _settings.SubscriptionRenewalUtc = null;
 
                     _settings.SubscriptionLastMessage = (authResponse.Message ?? "Denied").Trim();
@@ -185,7 +187,7 @@ namespace JoesScanner.Services
                     _settings.SubscriptionLastLevel = planLabel;
                     _settings.SubscriptionPriceId = priceText;
 
-                    _settings.SubscriptionExpiresUtc = TryParseUtc(subscription.ExpiresAt);
+                    _settings.SubscriptionExpiresUtc = DateParseHelper.TryParseUtc(subscription.ExpiresAt);
                     _settings.SubscriptionRenewalUtc = null;
 
                     _settings.SubscriptionLastMessage = (authResponse.Message ?? "No active subscription").Trim();
@@ -198,9 +200,9 @@ namespace JoesScanner.Services
                 // returning a false positive for an expired subscription.
                 if (subscription != null)
                 {
-                    var periodEnd = TryParseUtc(subscription.PeriodEndAt)
-                                    ?? TryParseUtc(subscription.ExpiresAt)
-                                    ?? TryParseUtc(subscription.TrialEndsAt);
+                    var periodEnd = DateParseHelper.TryParseUtc(subscription.PeriodEndAt)
+                                    ?? DateParseHelper.TryParseUtc(subscription.ExpiresAt)
+                                    ?? DateParseHelper.TryParseUtc(subscription.TrialEndsAt);
 
                     if (periodEnd.HasValue && periodEnd.Value < nowUtc)
                     {
@@ -236,14 +238,14 @@ namespace JoesScanner.Services
                 _settings.SubscriptionPriceId = price;
                 _settings.SubscriptionTierLevel = subscription?.TierLevel ?? 0;
 
-                _settings.SubscriptionExpiresUtc = TryParseUtc(subscription?.ExpiresAt);
+                _settings.SubscriptionExpiresUtc = DateParseHelper.TryParseUtc(subscription?.ExpiresAt);
 
                 var statusText = (subscription?.Status ?? string.Empty).Trim().ToLowerInvariant();
                 var renewalRaw = statusText == "trialing"
                     ? (subscription?.TrialEndsAt ?? subscription?.PeriodEndAt ?? subscription?.ExpiresAt)
                     : (subscription?.PeriodEndAt ?? subscription?.ExpiresAt ?? subscription?.TrialEndsAt);
 
-                var renewalUtc = TryParseUtc(renewalRaw);
+                var renewalUtc = DateParseHelper.TryParseUtc(renewalRaw);
 
                 // For trialing subscriptions, treat renewal as unknown and rely on the message summary instead.
                 _settings.SubscriptionRenewalUtc = statusText == "trialing" ? null : renewalUtc;
@@ -367,7 +369,7 @@ namespace JoesScanner.Services
                 ? (sub.TrialEndsAt ?? sub.PeriodEndAt ?? sub.ExpiresAt ?? string.Empty)
                 : (sub.PeriodEndAt ?? sub.ExpiresAt ?? sub.TrialEndsAt ?? string.Empty);
 
-            var dtUtc = TryParseUtc(periodRaw);
+            var dtUtc = DateParseHelper.TryParseUtc(periodRaw);
             var formattedDate = dtUtc.HasValue
                 ? DateTime.SpecifyKind(dtUtc.Value, DateTimeKind.Utc).ToLocalTime().ToString("yyyy-MM-dd")
                 : string.Empty;
@@ -408,55 +410,6 @@ namespace JoesScanner.Services
             return string.Empty;
         }
 
-        private static DateTime? TryParseUtc(string? raw)
-        {
-            var s = (raw ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(s))
-                return null;
-
-            if (DateTimeOffset.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var dto) ||
-                DateTimeOffset.TryParse(s, out dto))
-            {
-                return dto.UtcDateTime;
-            }
-
-            if (DateTime.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var dt) ||
-                DateTime.TryParse(s, out dt))
-            {
-                if (dt.Kind == DateTimeKind.Unspecified)
-                    dt = DateTime.SpecifyKind(dt, DateTimeKind.Utc);
-
-                return dt.ToUniversalTime();
-            }
-
-            return null;
-        }
-
-        private static string CombineDeviceModel(string? manufacturer, string? model)
-        {
-            var mfg = (manufacturer ?? string.Empty).Trim();
-            var mdl = (model ?? string.Empty).Trim();
-
-            if (string.IsNullOrWhiteSpace(mfg))
-                return mdl;
-
-            if (string.IsNullOrWhiteSpace(mdl))
-                return mfg;
-
-            return mfg + " " + mdl;
-        }
-
-        private static string NormalizeSmartQuotes(string value)
-        {
-            if (string.IsNullOrEmpty(value))
-                return value;
-
-            return value
-                .Replace('\u2018', '\'')
-                .Replace('\u2019', '\'')
-                .Replace('\u201C', '"')
-                .Replace('\u201D', '"');
-        }
 
         private sealed class AuthResponseDto
         {

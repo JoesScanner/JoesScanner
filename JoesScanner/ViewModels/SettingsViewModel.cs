@@ -13,6 +13,7 @@ using System.Windows.Input;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using JoesScanner.Helpers;
 
 namespace JoesScanner.ViewModels
 {
@@ -380,6 +381,8 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
         private bool _telemetryEnabled = true;
         private bool _savedTelemetryEnabled = true;
 
+        private bool _logEnabled;
+
         // Address detection
         private bool _addressDetectionEnabled;
 
@@ -421,6 +424,7 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
         private volatile bool _autoplayCardOpen;
         private volatile bool _filtersCardOpen;
         private volatile bool _audioFiltersCardOpen;
+        private volatile bool _audioCardOpen;
         private volatile bool _addressDetectionCardOpen;
         private volatile bool _bluetoothCardOpen;
         private volatile bool _themeCardOpen;
@@ -443,6 +447,8 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
                 _filtersCardOpen = isOpen;
             else if (string.Equals(key, "AudioFilters", StringComparison.OrdinalIgnoreCase))
                 _audioFiltersCardOpen = isOpen;
+            else if (string.Equals(key, "Audio", StringComparison.OrdinalIgnoreCase))
+                _audioCardOpen = isOpen;
             else if (string.Equals(key, "AddressDetection", StringComparison.OrdinalIgnoreCase))
                 _addressDetectionCardOpen = isOpen;
             else if (string.Equals(key, "Bluetooth", StringComparison.OrdinalIgnoreCase))
@@ -467,6 +473,9 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
 
             if (string.Equals(key, "AudioFilters", StringComparison.OrdinalIgnoreCase))
                 return _audioFiltersCardOpen;
+
+            if (string.Equals(key, "Audio", StringComparison.OrdinalIgnoreCase))
+                return _audioCardOpen;
 
             if (string.Equals(key, "AddressDetection", StringComparison.OrdinalIgnoreCase))
                 return _addressDetectionCardOpen;
@@ -533,23 +542,6 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
             return value;
         }
 
-        /// <summary>
-        /// Normalizes smart/curly quotes to their ASCII equivalents so passwords
-        /// typed on mobile keyboards (which silently substitute smart quotes)
-        /// match what the server expects.
-        /// </summary>
-        private static string NormalizeSmartQuotes(string value)
-        {
-            if (string.IsNullOrEmpty(value))
-                return value;
-
-            return value
-                .Replace('\u2018', '\'')  // left single quotation mark  → '
-                .Replace('\u2019', '\'')  // right single quotation mark → '
-                .Replace('\u201C', '"')   // left double quotation mark  → "
-                .Replace('\u201D', '"');   // right double quotation mark → "
-        }
-
 
         // Commands
         public ICommand ToggleMuteFilterCommand { get; }
@@ -565,35 +557,7 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
         // Password visibility command
         public ICommand ToggleBasicAuthPasswordVisibilityCommand { get; }
 
-        public const string DefaultServerUrl = "https://app.joesscanner.com";
-
-        // Default servers are provided by the app and always have telemetry on.
-        // Extend this list as additional built-in servers are added.
-        private static readonly string[] ProvidedDefaultServerUrls =
-        {
-            DefaultServerUrl
-        };
-
-        private static bool IsProvidedDefaultServerUrl(string? serverUrl)
-        {
-            var url = (serverUrl ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(url))
-                return false;
-
-            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
-                return false;
-
-            foreach (var candidate in ProvidedDefaultServerUrls)
-            {
-                if (!Uri.TryCreate(candidate, UriKind.Absolute, out var candidateUri))
-                    continue;
-
-                if (string.Equals(uri.Host, candidateUri.Host, StringComparison.OrdinalIgnoreCase))
-                    return true;
-            }
-
-            return false;
-        }
+        private const string DefaultServerUrl = HostedServerRules.DefaultServerUrl;
 
         private bool _isSyncingTalkgroupFilters;
         public bool IsSyncingTalkgroupFilters
@@ -983,7 +947,7 @@ catch
             {
                 _ = forceNetwork;
 
-                var serverKey = NormalizeServerKey(serverUrl);
+                var serverKey = ServerKeyHelper.Normalize(serverUrl);
                 if (string.IsNullOrWhiteSpace(serverKey))
                     return;
 
@@ -1033,7 +997,7 @@ catch
             // even though it exposes an async signature (Task.FromResult).
             //
             // Run the store call on a background thread, then marshal collection updates back to the UI thread.
-	            var serverKey = NormalizeServerKey(_settings.ServerUrl);
+	            var serverKey = ServerKeyHelper.Normalize(_settings.ServerUrl);
             var profiles = await Task.Run(async () => await _filterProfileStore.GetProfilesForServerAsync(serverKey, CancellationToken.None));
 
             await MainThread.InvokeOnMainThreadAsync(() =>
@@ -1084,7 +1048,7 @@ catch
             {
                 Id = profileId ?? string.Empty,
                 Name = name,
-	                ServerKey = NormalizeServerKey(_settings.ServerUrl),
+	                ServerKey = ServerKeyHelper.Normalize(_settings.ServerUrl),
                 Filters = existingFilters,
                 Rules = records
             };
@@ -1140,35 +1104,6 @@ catch
 
             var records = profile.Rules ?? new List<FilterRuleStateRecord>();
             _filterService.ApplyStateRecords(records, resetOthers: true);
-        }
-
-        private static string NormalizeServerKey(string? serverUrl)
-        {
-            var raw = (serverUrl ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(raw))
-                return string.Empty;
-
-            raw = raw.TrimEnd('/');
-
-            try
-            {
-                if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri))
-                    return raw;
-
-                var builder = new UriBuilder(uri)
-                {
-                    Path = string.Empty,
-                    Query = string.Empty,
-                    Fragment = string.Empty,
-                    Port = uri.IsDefaultPort ? -1 : uri.Port
-                };
-
-                return builder.Uri.ToString().TrimEnd('/');
-            }
-            catch
-            {
-                return raw;
-            }
         }
 
         // True when any setting on this page differs from what was last saved.
@@ -1357,7 +1292,7 @@ public bool IsDirectoryLoading
                 _serverUrl = newValue;
                 OnPropertyChanged();
 
-                var isDefault = IsProvidedDefaultServerUrl(_serverUrl);
+                var isDefault = HostedServerRules.IsProvidedDefaultServerUrl(_serverUrl);
 
                 if (_useDefaultConnection != isDefault)
                 {
@@ -1522,7 +1457,7 @@ public bool WindowsAutoConnectOnStart
                 _mobileMixAudioWithOtherApps = value;
                 OnPropertyChanged();
                 UpdateHasChanges();
-                QueueAutosaveNonConnection("Bluetooth");
+                QueueAutosaveNonConnection("Audio");
             }
         }
 
@@ -1779,9 +1714,9 @@ public bool WindowsStartWithWindows
             }
         }
 
-        public bool ShowTelemetryCard => !IsProvidedDefaultServerUrl(_serverUrl);
+        public bool ShowTelemetryCard => !HostedServerRules.IsProvidedDefaultServerUrl(_serverUrl);
 
-        public bool EffectiveTelemetryEnabled => IsProvidedDefaultServerUrl(_serverUrl) || _telemetryEnabled;
+        public bool EffectiveTelemetryEnabled => HostedServerRules.IsProvidedDefaultServerUrl(_serverUrl) || _telemetryEnabled;
 
         public bool TelemetryEnabled
         {
@@ -1798,6 +1733,30 @@ public bool WindowsStartWithWindows
                 UpdateHasChanges();
                 QueueAutosaveNonConnection("Telemetry");
             }
+        }
+
+        public bool LogEnabled
+        {
+            get => _logEnabled;
+            set
+            {
+                if (_logEnabled == value && AppLog.IsEnabled == value)
+                    return;
+
+                AppLog.SetEnabled(value);
+                _logEnabled = AppLog.IsEnabled;
+                OnPropertyChanged();
+            }
+        }
+
+        public void RefreshLogEnabledFromRuntime()
+        {
+            var enabled = AppLog.IsEnabled;
+            if (_logEnabled == enabled)
+                return;
+
+            _logEnabled = enabled;
+            OnPropertyChanged(nameof(LogEnabled));
         }
 
 
@@ -2016,7 +1975,7 @@ public bool WindowsStartWithWindows
             _basicAuthPassword = _settings.BasicAuthPassword ?? string.Empty;
 
             // Derived flag: treat built-in server(s) as the default connection.
-            _useDefaultConnection = IsProvidedDefaultServerUrl(_serverUrl);
+            _useDefaultConnection = HostedServerRules.IsProvidedDefaultServerUrl(_serverUrl);
 
 
             _autoPlay = _settings.AutoPlay;
@@ -2095,6 +2054,8 @@ public bool WindowsStartWithWindows
             _telemetryEnabled = _settings.TelemetryEnabled;
             _savedTelemetryEnabled = _telemetryEnabled;
 
+            _logEnabled = AppLog.IsEnabled;
+
 _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             _savedAddressDetectionEnabled = _addressDetectionEnabled;
 
@@ -2130,6 +2091,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                 OnPropertyChanged(nameof(EffectiveTelemetryEnabled));
                 OnPropertyChanged(nameof(CanSyncTalkgroupFilters));
                 OnPropertyChanged(nameof(TelemetryEnabled));
+            OnPropertyChanged(nameof(LogEnabled));
             OnPropertyChanged(nameof(BasicAuthUsername));
             OnPropertyChanged(nameof(BasicAuthPassword));
             OnPropertyChanged(nameof(AutoPlay));
@@ -2532,7 +2494,7 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                 if (isDefaultServer)
                 {
                     var accountUsername = (BasicAuthUsername ?? string.Empty).Trim();
-                    var accountPassword = NormalizeSmartQuotes((BasicAuthPassword ?? string.Empty).Trim());
+                    var accountPassword = TextNormalizationHelper.NormalizeSmartQuotes((BasicAuthPassword ?? string.Empty).Trim());
 
                     if (string.IsNullOrWhiteSpace(accountUsername) || string.IsNullOrWhiteSpace(accountPassword))
                     {
@@ -2564,7 +2526,7 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
 
                     var platform = DeviceInfo.Platform.ToString();
                     var type = DeviceInfo.Idiom.ToString();
-                    var model = CombineDeviceModel(DeviceInfo.Manufacturer, DeviceInfo.Model);
+                    var model = DeviceInfoHelper.CombineManufacturerAndModel(DeviceInfo.Manufacturer, DeviceInfo.Model);
                     var osVersion = DeviceInfo.VersionString ?? string.Empty;
 
                     var payload = new
@@ -2825,7 +2787,7 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                         if (includeAuth)
                         {
                             var u = (BasicAuthUsername ?? string.Empty).Trim();
-                            var p = NormalizeSmartQuotes((BasicAuthPassword ?? string.Empty).Trim());
+                            var p = TextNormalizationHelper.NormalizeSmartQuotes((BasicAuthPassword ?? string.Empty).Trim());
 
                             if (!string.IsNullOrWhiteSpace(u) || !string.IsNullOrWhiteSpace(p))
                             {
@@ -2943,7 +2905,7 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                                 _settings.ServerUrl = finalUrl;
 
                                 var effectiveUser = (BasicAuthUsername ?? string.Empty).Trim();
-                                var effectivePass = NormalizeSmartQuotes((BasicAuthPassword ?? string.Empty).Trim());
+                                var effectivePass = TextNormalizationHelper.NormalizeSmartQuotes((BasicAuthPassword ?? string.Empty).Trim());
 
                                 _settings.BasicAuthUsername = effectiveUser;
                                 _settings.BasicAuthPassword = effectivePass;
@@ -3406,20 +3368,6 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                 cleanPath = "/" + cleanPath;
 
             return baseUrl + cleanPath;
-        }
-
-        private static string CombineDeviceModel(string manufacturer, string model)
-        {
-            var mfg = (manufacturer ?? string.Empty).Trim();
-            var mdl = (model ?? string.Empty).Trim();
-
-            if (string.IsNullOrWhiteSpace(mfg))
-                return mdl;
-
-            if (string.IsNullOrWhiteSpace(mdl))
-                return mfg;
-
-            return mfg + " " + mdl;
         }
 
         class AuthResponseDto

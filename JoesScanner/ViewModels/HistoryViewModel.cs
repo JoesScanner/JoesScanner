@@ -10,6 +10,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Input;
 using Microsoft.Maui.ApplicationModel;
+using JoesScanner.Helpers;
 
 namespace JoesScanner.ViewModels
 {
@@ -1003,7 +1004,7 @@ public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
             //
             // Run the store call on a background thread, then marshal collection + selection updates back
             // to the UI thread.
-            var serverKey = NormalizeServerKey(_settingsService.ServerUrl);
+            var serverKey = ServerKeyHelper.Normalize(_settingsService.ServerUrl);
 
             // Ensure the in-memory rules list is scoped to the active server when History loads.
             FilterService.Instance.SetServerUrl(_settingsService.ServerUrl);
@@ -1057,7 +1058,7 @@ public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
             {
                 Id = profileId ?? string.Empty,
                 Name = name,
-                ServerKey = NormalizeServerKey(_settingsService.ServerUrl),
+                ServerKey = ServerKeyHelper.Normalize(_settingsService.ServerUrl),
                 Filters = new FilterProfileFilters
                 {
                     ReceiverValue = SelectedReceiver?.Value,
@@ -2906,7 +2907,7 @@ private async Task LoadMoreOlderAsync()
                 if (string.IsNullOrWhiteSpace(usernameCustom))
                     return null;
 
-                var passwordCustom = NormalizeSmartQuotes(_settingsService.BasicAuthPassword ?? string.Empty);
+                var passwordCustom = TextNormalizationHelper.NormalizeSmartQuotes(_settingsService.BasicAuthPassword ?? string.Empty);
                 var raw = $"{usernameCustom}:{passwordCustom}";
                 var bytes = Encoding.UTF8.GetBytes(raw);
                 var base64 = Convert.ToBase64String(bytes);
@@ -2916,18 +2917,6 @@ private async Task LoadMoreOlderAsync()
             {
                 return null;
             }
-        }
-
-        private static string NormalizeSmartQuotes(string value)
-        {
-            if (string.IsNullOrEmpty(value))
-                return value;
-
-            return value
-                .Replace('\u2018', '\'')
-                .Replace('\u2019', '\'')
-                .Replace('\u201C', '"')
-                .Replace('\u201D', '"');
         }
 
 
@@ -3369,35 +3358,6 @@ private void OnAddressDetectionSettingsChanged(object? sender, EventArgs e)
 			}
 			catch
 			{
-			}
-		}
-
-		private static string NormalizeServerKey(string? serverUrl)
-		{
-			var raw = (serverUrl ?? string.Empty).Trim();
-			if (string.IsNullOrWhiteSpace(raw))
-				return string.Empty;
-
-			raw = raw.TrimEnd('/');
-
-			try
-			{
-				if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri))
-					return raw;
-
-				var builder = new UriBuilder(uri)
-				{
-					Path = string.Empty,
-					Query = string.Empty,
-					Fragment = string.Empty,
-					Port = uri.IsDefaultPort ? -1 : uri.Port
-				};
-
-				return builder.Uri.ToString().TrimEnd('/');
-			}
-			catch
-			{
-				return raw;
 			}
 		}
 

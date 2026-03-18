@@ -3,6 +3,7 @@ using System.Linq;
 using System.Globalization;
 using Microsoft.Data.Sqlite;
 using JoesScanner.Models;
+using JoesScanner.Helpers;
 
 namespace JoesScanner.Services
 {
@@ -156,7 +157,7 @@ namespace JoesScanner.Services
         // and are keyed by the normalized server base URL.
         public bool TryGetServerCredentials(string serverUrl, out string username, out string password)
         {
-            var key = NormalizeServerKey(serverUrl);
+            var key = ServerKeyHelper.Normalize(serverUrl);
             if (string.IsNullOrWhiteSpace(key))
             {
                 username = string.Empty;
@@ -171,7 +172,7 @@ namespace JoesScanner.Services
                 return true;
 
             // Back-compat: try legacy keying (raw URL without path normalization) and migrate forward if found.
-            var legacyKey = LegacyNormalizeServerKey(serverUrl);
+            var legacyKey = ServerKeyHelper.NormalizeLegacy(serverUrl);
             if (!string.IsNullOrWhiteSpace(legacyKey) && !string.Equals(legacyKey, key, StringComparison.Ordinal))
             {
                 var legacyUser = GetString(GetServerCredUserKey(legacyKey), string.Empty).Trim();
@@ -197,7 +198,7 @@ namespace JoesScanner.Services
 
         public void SetServerCredentials(string serverUrl, string username, string password)
         {
-            var key = NormalizeServerKey(serverUrl);
+            var key = ServerKeyHelper.Normalize(serverUrl);
             if (string.IsNullOrWhiteSpace(key))
                 return;
 
@@ -217,7 +218,7 @@ namespace JoesScanner.Services
             // Also clear any legacy-stored creds for the same raw URL to avoid stale mismatches.
             try
             {
-                var legacyKey = LegacyNormalizeServerKey(serverUrl);
+                var legacyKey = ServerKeyHelper.NormalizeLegacy(serverUrl);
                 if (!string.IsNullOrWhiteSpace(legacyKey) && !string.Equals(legacyKey, key, StringComparison.Ordinal))
                 {
                     Remove(GetServerCredUserKey(legacyKey));
@@ -231,7 +232,7 @@ namespace JoesScanner.Services
 
         public void ClearServerCredentials(string serverUrl)
         {
-            var key = NormalizeServerKey(serverUrl);
+            var key = ServerKeyHelper.Normalize(serverUrl);
             if (string.IsNullOrWhiteSpace(key))
                 return;
 
@@ -241,7 +242,7 @@ namespace JoesScanner.Services
             // Back-compat: also clear legacy keyed values.
             try
             {
-                var legacyKey = LegacyNormalizeServerKey(serverUrl);
+                var legacyKey = ServerKeyHelper.NormalizeLegacy(serverUrl);
                 if (!string.IsNullOrWhiteSpace(legacyKey) && !string.Equals(legacyKey, key, StringComparison.Ordinal))
                 {
                     Remove(GetServerCredUserKey(legacyKey));
@@ -255,12 +256,12 @@ namespace JoesScanner.Services
 
         private static string GetServerCredUserKey(string normalizedServerUrl)
         {
-            return $"server_cred_user::{NormalizeServerKey(normalizedServerUrl)}";
+            return $"server_cred_user::{ServerKeyHelper.Normalize(normalizedServerUrl)}";
         }
 
         private static string GetServerCredPassKey(string normalizedServerUrl)
         {
-            return $"server_cred_pass::{NormalizeServerKey(normalizedServerUrl)}";
+            return $"server_cred_pass::{ServerKeyHelper.Normalize(normalizedServerUrl)}";
         }
 
 
@@ -941,7 +942,7 @@ ORDER BY is_official DESC, sort_order ASC, display_name ASC;";
                 s.Url = url;
 
                 // Directory entries use a stable key based on the URL.
-                var key = "dir::" + NormalizeServerKey(url);
+                var key = "dir::" + ServerKeyHelper.Normalize(url);
                 if (string.IsNullOrWhiteSpace(key) || key == "dir::")
                     continue;
 
@@ -1206,43 +1207,7 @@ ON CONFLICT(setting_key) DO UPDATE SET
             //   - auth state isn't accidentally split by path/query variations
             // If there is no configured server URL, treat auth context as empty.
             var url = GetString(KeyServerUrl, string.Empty);
-            return NormalizeServerKey(url);
-        }
-
-        private static string NormalizeServerKey(string serverKey)
-        {
-            var raw = (serverKey ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(raw))
-                return string.Empty;
-
-            raw = raw.TrimEnd('/');
-
-            try
-            {
-                if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri))
-                    return raw;
-
-                var builder = new UriBuilder(uri)
-                {
-                    Path = string.Empty,
-                    Query = string.Empty,
-                    Fragment = string.Empty,
-                    Port = uri.IsDefaultPort ? -1 : uri.Port
-                };
-
-                // UriBuilder normalizes the host casing; always trim trailing slash.
-                return builder.Uri.ToString().TrimEnd('/');
-            }
-            catch
-            {
-                return raw;
-            }
-        }
-
-        // Legacy behavior (pre-2026-02-22): key was the raw URL with only whitespace and trailing slash removed.
-        private static string LegacyNormalizeServerKey(string serverKey)
-        {
-            return (serverKey ?? string.Empty).Trim().TrimEnd('/');
+            return ServerKeyHelper.Normalize(url);
         }
 
         private void DeleteServerAuthStateRow(string normalizedServerKey)
@@ -1311,7 +1276,7 @@ ON CONFLICT(setting_key) DO UPDATE SET
         private ServerAuthStateRow ReadServerAuthState(string serverKey)
         {
             EnsureInitialized();
-            var key = NormalizeServerKey(serverKey);
+            var key = ServerKeyHelper.Normalize(serverKey);
             if (string.IsNullOrWhiteSpace(key))
                 return new ServerAuthStateRow();
 
@@ -1349,7 +1314,7 @@ LIMIT 1;";
             // Back-compat: attempt legacy key and migrate forward if found.
             try
             {
-                var legacyKey = LegacyNormalizeServerKey(serverKey);
+                var legacyKey = ServerKeyHelper.NormalizeLegacy(serverKey);
                 if (!string.IsNullOrWhiteSpace(legacyKey) && !string.Equals(legacyKey, key, StringComparison.Ordinal))
                 {
                     using var conn2 = OpenConnection();
@@ -1397,7 +1362,7 @@ LIMIT 1;";
         private void WriteServerAuthState(string serverKey, ServerAuthStateRow row)
         {
             EnsureInitialized();
-            var key = NormalizeServerKey(serverKey);
+            var key = ServerKeyHelper.Normalize(serverKey);
             if (string.IsNullOrWhiteSpace(key))
                 return;
 

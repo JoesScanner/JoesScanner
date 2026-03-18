@@ -3,6 +3,7 @@ using System.Collections.ObjectModel;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Maui.ApplicationModel;
+using JoesScanner.Helpers;
 
 namespace JoesScanner.Services
 {
@@ -162,7 +163,7 @@ namespace JoesScanner.Services
 
         public void SetServerUrl(string serverUrl)
         {
-            var key = NormalizeServerKey(serverUrl);
+            var key = ServerKeyHelper.Normalize(serverUrl);
             if (string.Equals(_currentServerKey, key, StringComparison.OrdinalIgnoreCase))
                 return;
 
@@ -900,35 +901,6 @@ namespace JoesScanner.Services
             }
 
             return latest == DateTime.MinValue ? DateTime.UtcNow : latest;
-        }
-
-        private static string NormalizeServerKey(string? serverUrl)
-        {
-            var raw = (serverUrl ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(raw))
-                return string.Empty;
-
-            raw = raw.TrimEnd('/');
-
-            try
-            {
-                if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri))
-                    return raw;
-
-                var builder = new UriBuilder(uri)
-                {
-                    Path = string.Empty,
-                    Query = string.Empty,
-                    Fragment = string.Empty,
-                    Port = uri.IsDefaultPort ? -1 : uri.Port
-                };
-
-                return builder.Uri.ToString().TrimEnd('/');
-            }
-            catch
-            {
-                return raw;
-            }
         }
 
         private static void InvokeOnMainThreadSync(Action action)

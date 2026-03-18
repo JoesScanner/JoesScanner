@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <!-- Multi target: Android, iOS, MacCatalyst, Windows (on .NET 10) -->
@@ -24,10 +24,10 @@
     <ApplicationId>app.joesscanner.com</ApplicationId>
 
     <!-- Display version is semantic -->
-    <ApplicationDisplayVersion>1.6.0</ApplicationDisplayVersion>
+    <ApplicationDisplayVersion>1.6.2</ApplicationDisplayVersion>
 
     <!-- ApplicationVersion must be an integer and should only ever go up -->
-    <ApplicationVersion>160</ApplicationVersion>
+    <ApplicationVersion>163</ApplicationVersion>
 
     <DefaultLanguage>en-us</DefaultLanguage>
 

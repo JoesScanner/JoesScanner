@@ -2,55 +2,37 @@ namespace JoesScanner.Services
 {
     public sealed class CommsBadgeService : ICommsBadgeService
     {
-        private readonly ISettingsService _settings;
-        private readonly ICommunicationsService _comms;
-
-        private CancellationTokenSource? _cts;
-        private Task? _loopTask;
-
-        private long _lastSeq;
-        private int _pollTick;
+        private readonly ICommunicationsSyncCoordinator _coordinator;
 
         private long _lastSeenId;
         private long _lastKnownId;
         private bool _hasUnread;
 
-        // Poll every 15 seconds, and force a snapshot about every 30 minutes.
-        private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(15);
-        private const int SnapshotEveryPolls = 120;
-
         public event Action? Changed;
 
         public bool HasUnread => _hasUnread;
 
-        public CommsBadgeService(ISettingsService settings, ICommunicationsService comms)
+        public CommsBadgeService(ICommunicationsSyncCoordinator coordinator)
         {
-            _settings = settings ?? throw new ArgumentNullException(nameof(settings));
-            _comms = comms ?? throw new ArgumentNullException(nameof(comms));
+            _coordinator = coordinator ?? throw new ArgumentNullException(nameof(coordinator));
 
             _lastSeenId = AppStateStore.GetLong("comms_last_seen_id", 0L);
             _lastKnownId = AppStateStore.GetLong("comms_last_known_id", 0L);
 
+            _coordinator.Changed += OnCoordinatorChanged;
+            SyncLastKnownFromCoordinator();
             RecomputeHasUnread(raiseEvent: false);
         }
 
         public void Start()
         {
-            if (_loopTask != null && !_loopTask.IsCompleted)
-                return;
-
-            _cts?.Cancel();
-            _cts = new CancellationTokenSource();
-
-            _lastSeq = 0;
-            _pollTick = 0;
-
-            _loopTask = Task.Run(() => PollLoopAsync(_cts.Token));
+            SyncLastKnownFromCoordinator();
+            _coordinator.Start();
         }
 
         public void Stop()
         {
-            try { _cts?.Cancel(); } catch { }
+            _coordinator.Stop();
         }
 
         public void MarkSeenUpTo(long messageId)
@@ -75,6 +57,8 @@ namespace JoesScanner.Services
 
         public void MarkAllKnownAsSeen()
         {
+            SyncLastKnownFromCoordinator();
+
             if (_lastKnownId <= 0)
                 return;
 
@@ -94,6 +78,22 @@ namespace JoesScanner.Services
             RecomputeHasUnread(raiseEvent: true);
         }
 
+        private void OnCoordinatorChanged()
+        {
+            SyncLastKnownFromCoordinator();
+        }
+
+        private void SyncLastKnownFromCoordinator()
+        {
+            try
+            {
+                UpdateLastKnown(_coordinator.LastKnownId);
+            }
+            catch
+            {
+            }
+        }
+
         private void RecomputeHasUnread(bool raiseEvent)
         {
             var newHasUnread = _lastKnownId > _lastSeenId;
@@ -106,81 +106,6 @@ namespace JoesScanner.Services
                 return;
 
             try { Changed?.Invoke(); } catch { }
-        }
-
-        private async Task PollLoopAsync(CancellationToken token)
-        {
-            // Poll immediately so the badge can update without waiting a full interval.
-            while (!token.IsCancellationRequested)
-            {
-                try
-                {
-                    await PollOnceAsync(token).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                }
-                catch
-                {
-                    // Best effort only. Connection and retry behavior is handled elsewhere.
-                }
-
-                try
-                {
-                    await Task.Delay(PollInterval, token).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                }
-            }
-        }
-
-        private async Task PollOnceAsync(CancellationToken token)
-        {
-            _pollTick++;
-            var forceSnapshot = (_pollTick % SnapshotEveryPolls) == 0 || _lastSeq == 0;
-
-            var serverUrl = (_settings.AuthServerBaseUrl ?? string.Empty).Trim();
-            var sessionToken = (_settings.AuthSessionToken ?? string.Empty).Trim();
-
-            if (string.IsNullOrWhiteSpace(sessionToken))
-                return;
-
-            var result = await _comms.SyncAsync(
-                serverUrl,
-                sessionToken,
-                _lastSeq,
-                forceSnapshot,
-                token).ConfigureAwait(false);
-
-            if (!result.Ok)
-                return;
-
-            long maxId = 0;
-
-            if (result.HasSnapshot && result.Snapshot.Count > 0)
-            {
-                maxId = result.Snapshot.Max(m => m.Id);
-            }
-            else if (result.Changes.Count > 0)
-            {
-                foreach (var ch in result.Changes)
-                {
-                    if (!string.Equals(ch.Type, "upsert", StringComparison.OrdinalIgnoreCase))
-                        continue;
-
-                    // Some servers only send MessageId for incremental upserts.
-                    var id = ch.Message?.Id ?? ch.MessageId;
-                    if (id > maxId)
-                        maxId = id;
-                }
-            }
-
-            if (maxId > 0)
-                UpdateLastKnown(maxId);
-
-            if (result.NextSeq > _lastSeq)
-                _lastSeq = result.NextSeq;
         }
     }
 }

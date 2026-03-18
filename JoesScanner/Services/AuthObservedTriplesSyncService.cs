@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Data.Sqlite;
+using JoesScanner.Helpers;
 
 namespace JoesScanner.Services;
 
@@ -45,27 +46,13 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
         return new Uri(baseUrl + "/wp-json/joes-scanner/v1/observed-triples-v2");
     }
 
-    private static string CombineDeviceModel(string? manufacturer, string? model)
-    {
-        var m = (manufacturer ?? string.Empty).Trim();
-        var d = (model ?? string.Empty).Trim();
-
-        if (string.IsNullOrWhiteSpace(m))
-            return d;
-        if (string.IsNullOrWhiteSpace(d))
-            return m;
-        if (d.StartsWith(m, StringComparison.OrdinalIgnoreCase))
-            return d;
-        return m + " " + d;
-    }
-
     private static string TelemetryQueryString(ISettingsService settings)
     {
         var appVersion = AppInfo.Current.VersionString ?? string.Empty;
         var appBuild = AppInfo.Current.BuildString ?? string.Empty;
         var platform = DeviceInfo.Platform.ToString();
         var type = DeviceInfo.Idiom.ToString();
-        var model = CombineDeviceModel(DeviceInfo.Manufacturer, DeviceInfo.Model);
+        var model = DeviceInfoHelper.CombineManufacturerAndModel(DeviceInfo.Manufacturer, DeviceInfo.Model);
         var osVersion = DeviceInfo.VersionString ?? string.Empty;
 
         var deviceId = settings.DeviceInstallId ?? string.Empty;
@@ -97,16 +84,6 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
 
     private static string GetLastReportUtcKey(string serverKey) => "observed_report_last_utc|" + (serverKey ?? string.Empty);
     private static string GetLastCutoffUtcKey(string serverKey) => "observed_report_cutoff_utc|" + (serverKey ?? string.Empty);
-
-    private static DateTime? TryParseUtc(string raw)
-    {
-        if (string.IsNullOrWhiteSpace(raw))
-            return null;
-
-        return DateTime.TryParse(raw, null, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var dt)
-            ? dt.ToUniversalTime()
-            : null;
-    }
 
     private static string CanonicalizeIdentityPart(string? primary, string? fallback)
     {
@@ -171,7 +148,7 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
                     TalkgroupValue = tgV,
                     TalkgroupLabel = string.IsNullOrWhiteSpace(it.TalkgroupLabel) ? tgV : it.TalkgroupLabel.Trim(),
                     SeenCount = it.SeenCount,
-                    LastSeenUtc = TryParseUtc(it.LastSeenUtcRaw ?? string.Empty) ?? DateTime.MinValue
+                    LastSeenUtc = DateParseHelper.TryParseUtc(it.LastSeenUtcRaw ?? string.Empty) ?? DateTime.MinValue
                 });
             }
 
@@ -196,7 +173,7 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
         var lastCutoffRaw = AppStateStore.GetString(GetLastCutoffUtcKey(serverKey), string.Empty);
         var sinceUtc = force
             ? DateTime.MinValue
-            : (TryParseUtc(lastCutoffRaw) ?? DateTime.UtcNow.AddDays(-7));
+            : (DateParseHelper.TryParseUtc(lastCutoffRaw) ?? DateTime.UtcNow.AddDays(-7));
 
         // Pull local deltas from the calls table.
         List<ObservedTripleReportItem> delta;
@@ -270,7 +247,7 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
         var lastCutoffRaw = AppStateStore.GetString(GetLastCutoffUtcKey(serverKey), string.Empty);
         var sinceUtc = force
             ? DateTime.MinValue
-            : (TryParseUtc(lastCutoffRaw) ?? DateTime.UtcNow.AddDays(-7));
+            : (DateParseHelper.TryParseUtc(lastCutoffRaw) ?? DateTime.UtcNow.AddDays(-7));
 
         List<ObservedTripleReportItem> delta;
         DateTime? maxLastSeen;
@@ -346,7 +323,7 @@ foreach (var it in dto.Items)
     var tgL = string.IsNullOrWhiteSpace(it.TalkgroupLabel) ? tgV : it.TalkgroupLabel.Trim();
 
     var seen = it.SeenCount;
-    var last = TryParseUtc(it.LastSeenUtcRaw ?? string.Empty) ?? DateTime.MinValue;
+    var last = DateParseHelper.TryParseUtc(it.LastSeenUtcRaw ?? string.Empty) ?? DateTime.MinValue;
 
     var key = MakeKey(rxV, siteV, tgV);
     if (!mergedMap.TryGetValue(key, out var existing))
@@ -453,7 +430,7 @@ LIMIT 5000;";
             if (string.IsNullOrWhiteSpace(receiverCanonical) || string.IsNullOrWhiteSpace(siteCanonical) || string.IsNullOrWhiteSpace(talkgroupCanonical))
                 continue;
 
-            var lastSeenUtc = TryParseUtc(lastSeenRaw) ?? DateTime.UtcNow;
+            var lastSeenUtc = DateParseHelper.TryParseUtc(lastSeenRaw) ?? DateTime.UtcNow;
 
             items.Add(new ObservedTriple
             {
@@ -521,7 +498,7 @@ LIMIT 5000;";
             if (string.IsNullOrWhiteSpace(receiverCanonical) || string.IsNullOrWhiteSpace(siteCanonical) || string.IsNullOrWhiteSpace(talkgroupCanonical))
                 continue;
 
-            var lastSeenUtc = TryParseUtc(lastSeenRaw) ?? DateTime.UtcNow;
+            var lastSeenUtc = DateParseHelper.TryParseUtc(lastSeenRaw) ?? DateTime.UtcNow;
             if (!maxLastSeen.HasValue || lastSeenUtc > maxLastSeen.Value)
                 maxLastSeen = lastSeenUtc;
 

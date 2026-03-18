@@ -65,6 +65,7 @@ public static class MauiProgram
         builder.Services.AddTransient(sp => new HttpClient());
 
         builder.Services.AddSingleton<ICommunicationsService, CommunicationsService>();
+        builder.Services.AddSingleton<ICommunicationsSyncCoordinator, CommunicationsSyncCoordinator>();
         builder.Services.AddSingleton<ICommsBadgeService, CommsBadgeService>();
         builder.Services.AddSingleton<IJoesScannerApiClient, JoesScannerApiClient>();
 

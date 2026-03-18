@@ -6,6 +6,7 @@ using Microsoft.Maui.ApplicationModel;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using JoesScanner.Helpers;
 
 namespace JoesScanner.Views;
 
@@ -29,6 +30,8 @@ public partial class RootPage : ContentPage
     private int _warmupStarted;
 
     private int _navigationOverlayDepth;
+
+    private int _initialNavigationStarted;
 
     public RootPage(IServiceProvider services)
     {
@@ -59,11 +62,36 @@ public partial class RootPage : ContentPage
         }
 
         _hasAppearedOnce = true;
-
         // Do not allow navigation exceptions to kill the app.
+        //
+        // iOS is more stable if the first hosted-content attach happens one dispatcher turn later,
+        // after the native page handler is fully ready.
         try
         {
-            SwitchTo(tab: _current);
+            if (DeviceInfo.Platform == DevicePlatform.iOS)
+            {
+                if (Interlocked.Exchange(ref _initialNavigationStarted, 1) == 0)
+                {
+                    _ = MainThread.InvokeOnMainThreadAsync(async () =>
+                    {
+                        try
+                        {
+                            await Task.Yield();
+                            await Task.Delay(1);
+                            SwitchTo(tab: _current);
+                        }
+                        catch (Exception ex)
+                        {
+                            LogNavError($"RootPage.OnAppearing deferred initial SwitchTo({_current}) failed: {ex}");
+                            _ = SafeAlertAsync("Navigation error", $"Settings navigation failed:\n{FormatNavException(ex)}");
+                        }
+                    });
+                }
+            }
+            else
+            {
+                SwitchTo(tab: _current);
+            }
         }
         catch (Exception ex)
         {
@@ -145,7 +173,7 @@ public partial class RootPage : ContentPage
                     _ = AppPaths.GetAppDataDirectorySafe();
 
                     var settings = _services.GetRequiredService<ISettingsService>();
-                    var serverKey = NormalizeServerKey(settings.ServerUrl);
+                    var serverKey = ServerKeyHelper.Normalize(settings.ServerUrl);
 
                     var store = _services.GetRequiredService<IFilterProfileStore>();
                     _ = await store.GetProfilesForServerAsync(serverKey, CancellationToken.None);
@@ -474,35 +502,6 @@ public partial class RootPage : ContentPage
         }
         catch
         {
-        }
-    }
-
-    private static string NormalizeServerKey(string? serverUrl)
-    {
-        var raw = (serverUrl ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(raw))
-            return string.Empty;
-
-        raw = raw.TrimEnd('/');
-
-        try
-        {
-            if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri))
-                return raw;
-
-            var builder = new UriBuilder(uri)
-            {
-                Path = string.Empty,
-                Query = string.Empty,
-                Fragment = string.Empty,
-                Port = uri.IsDefaultPort ? -1 : uri.Port
-            };
-
-            return builder.Uri.ToString().TrimEnd('/');
-        }
-        catch
-        {
-            return raw;
         }
     }
 

@@ -11,6 +11,7 @@ using System.Text.Json.Serialization;
 using System.Threading.Channels;
 using JoesScanner.Data;
 using JoesScanner.Services;
+using JoesScanner.Helpers;
 
 namespace JoesScanner.Services
 {
@@ -1063,7 +1064,7 @@ namespace JoesScanner.Services
 
                 // Custom servers: only apply Basic Auth if user provided a username.
                 var user = (_settingsService.BasicAuthUsername ?? string.Empty).Trim();
-                var pass = NormalizeSmartQuotes((_settingsService.BasicAuthPassword ?? string.Empty).Trim());
+                var pass = TextNormalizationHelper.NormalizeSmartQuotes((_settingsService.BasicAuthPassword ?? string.Empty).Trim());
                 if (string.IsNullOrWhiteSpace(user))
                 {
                     AppLog.Add(() => "CallStream: WS auth not applied (custom). reason=username_blank");
@@ -1079,18 +1080,6 @@ namespace JoesScanner.Services
                 AppLog.Add(() => $"CallStream: BuildBasicAuthHeaderValue failed. ex={ex.GetType().Name}: {ex.Message}");
                 return null;
             }
-        }
-
-        private static string NormalizeSmartQuotes(string value)
-        {
-            if (string.IsNullOrEmpty(value))
-                return value;
-
-            return value
-                .Replace('\u2018', '\'')
-                .Replace('\u2019', '\'')
-                .Replace('\u201C', '"')
-                .Replace('\u201D', '"');
         }
 
 

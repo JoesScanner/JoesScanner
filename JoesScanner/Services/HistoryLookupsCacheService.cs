@@ -1,4 +1,5 @@
 using System.Linq;
+using JoesScanner.Helpers;
 
 namespace JoesScanner.Services
 {
@@ -137,11 +138,6 @@ namespace JoesScanner.Services
             {
                 AppLog.Add(() => $"History: lookup preload failed. reason={reason} ex={ex.GetType().Name}: {ex.Message}");
             }
-        }
-
-        private static string NormalizeServerKey(string? serverUrl)
-        {
-            return GetServerKeys(serverUrl).Normalized;
         }
 
         private static (string Normalized, string Legacy) GetServerKeys(string? serverUrl)

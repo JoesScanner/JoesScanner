@@ -4,6 +4,7 @@ using System.Collections.ObjectModel;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Windows.Input;
+using JoesScanner.Helpers;
 
 namespace JoesScanner.ViewModels
 {
@@ -87,6 +88,9 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
         private CallItem? _prefetchedCall;
         private Task<string?>? _prefetchedPlayableUrlTask;
         private CancellationTokenSource? _prefetchCts;
+
+        // Timestamp of when the previous queue playback attempt finished. Used to measure audible gap drift.
+        private DateTimeOffset? _lastQueuePlaybackFinishedAtUtc;
 
         // Optional settings view model reference. Currently not used but kept for future wiring.
         public SettingsViewModel? SettingsViewModel { get; set; }
@@ -543,7 +547,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 						isMainAudioSoftMuted: _isMainAudioSoftMuted,
 						isAlreadyPlaying: _currentPlayingCall != null,
 						isQueuePlaybackRunning: _isQueuePlaybackRunning,
-						visibleQueueCount: Calls.Count);
+						visibleQueueCount: GetQueuedPlayableCandidateCount());
 
 					if (!canStart)
 						return;
@@ -1124,6 +1128,35 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             }
 
             return PeekOldestPlayablePendingCall();
+        }
+
+        private int GetQueuedPlayableCandidateCount()
+        {
+            var count = 0;
+
+            if (Calls != null && Calls.Count > 0)
+            {
+                var anchor = _currentPlayingCall ?? _lastPlayedCall;
+                var startIndex = Calls.Count - 1;
+
+                if (anchor != null)
+                {
+                    var anchorIndex = Calls.IndexOf(anchor);
+                    if (anchorIndex >= 0)
+                    {
+                        startIndex = anchorIndex - 1;
+                    }
+                }
+
+                for (var i = startIndex; i >= 0; i--)
+                {
+                    if (IsPlayableForQueue(Calls[i]))
+                        count++;
+                }
+            }
+
+            count += GetPendingPlayableCount();
+            return count;
         }
 
         private void ClearPrefetchedPlayableUrl(bool deleteCompletedTempFile)
@@ -2779,6 +2812,7 @@ private static string SpeedStepToLabel(double step)
                 // Consume the call so queue playback does not stall.
                 LastQueueEvent = $"Call hidden by filter at {DateTime.Now:T}";
                 _lastPlayedCall = item;
+                _lastQueuePlaybackFinishedAtUtc = DateTimeOffset.UtcNow;
                 if (_currentPlayingCall == item)
                     _currentPlayingCall = null;
 
@@ -2792,6 +2826,7 @@ private static string SpeedStepToLabel(double step)
                 // Consume the call so queue playback does not stall.
                 LastQueueEvent = $"Call muted by filter at {DateTime.Now:T}";
                 _lastPlayedCall = item;
+                _lastQueuePlaybackFinishedAtUtc = DateTimeOffset.UtcNow;
                 if (_currentPlayingCall == item)
                     _currentPlayingCall = null;
 
@@ -2851,6 +2886,15 @@ private static string SpeedStepToLabel(double step)
             try
             {
                 var rate = rateForTimeout;
+                var selectedAtUtc = DateTimeOffset.UtcNow;
+                var gapMs = _lastQueuePlaybackFinishedAtUtc.HasValue
+                    ? (selectedAtUtc - _lastQueuePlaybackFinishedAtUtc.Value).TotalMilliseconds
+                    : 0;
+
+                if (gapMs > 0)
+                {
+                    AppLog.Add(() => $"QueueTiming: selected backendId={item.BackendId ?? "(none)"} gapSincePriorFinishMs={gapMs:0}");
+                }
 
                 if (_isMainAudioSoftMuted)
                 {
@@ -2861,25 +2905,32 @@ private static string SpeedStepToLabel(double step)
 
                     seconds = Math.Clamp(seconds, 0.15, 10800);
                     await Task.Delay(TimeSpan.FromSeconds(seconds), playbackToken);
+                    _lastQueuePlaybackFinishedAtUtc = DateTimeOffset.UtcNow;
                     return;
                 }
 
                 string? downloadedTempPath = null;
                 var shouldDeleteTempFile = false;
+                var acquisitionStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
                 // IMPORTANT: Do not use the playback watchdog here.
                 // Backgrounded Android downloads can be slower and would trip the playback watchdog incorrectly.
                 var playbackUrl = await TryTakePrefetchedPlayableUrlAsync(item, downloadToken);
+                var usedPrefetchedPlayableUrl = !string.IsNullOrWhiteSpace(playbackUrl);
                 if (string.IsNullOrWhiteSpace(playbackUrl))
                 {
                     playbackUrl = await GetPlayableAudioUrlAsync(item.AudioUrl, downloadToken);
                 }
+
+                acquisitionStopwatch.Stop();
 
                 if (string.IsNullOrWhiteSpace(playbackUrl))
                 {
                     if (downloadWatchdogCts.IsCancellationRequested && !userCts.IsCancellationRequested)
                         LastQueueEvent = "Audio download timeout, skipping to next call";
 
+                    AppLog.Add(() => $"QueueTiming: backendId={item.BackendId ?? "(none)"} acquisitionFailed acquisitionMs={acquisitionStopwatch.Elapsed.TotalMilliseconds:0} prefetched={usedPrefetchedPlayableUrl}");
+                    _lastQueuePlaybackFinishedAtUtc = DateTimeOffset.UtcNow;
                     return;
                 }
 
@@ -2889,14 +2940,7 @@ private static string SpeedStepToLabel(double step)
                     shouldDeleteTempFile = true;
                 }
 
-                if (rate > 1.0)
-                {
-                    StartPlayableUrlPrefetchForUpcomingCall(item);
-                }
-                else
-                {
-                    ClearPrefetchedPlayableUrl(deleteCompletedTempFile: true);
-                }
+                StartPlayableUrlPrefetchForUpcomingCall(item);
 
                 try
                 {
@@ -2906,7 +2950,20 @@ private static string SpeedStepToLabel(double step)
                 {
                 }
 
+                AppLog.Add(() => $"QueueTiming: backendId={item.BackendId ?? "(none)"} acquisitionMs={acquisitionStopwatch.Elapsed.TotalMilliseconds:0} prefetched={usedPrefetchedPlayableUrl} rate={rate:0.###}");
+
+                if (gapMs > 0)
+                {
+                    var audibleGapMs = gapMs + acquisitionStopwatch.Elapsed.TotalMilliseconds;
+                    AppLog.Add(() => $"QueueTiming: backendId={item.BackendId ?? "(none)"} audibleGapEstimateMs={audibleGapMs:0}");
+                }
+
+                var playbackStopwatch = System.Diagnostics.Stopwatch.StartNew();
                 await _audioPlaybackService.PlayAsync(playbackUrl, rate, playbackToken);
+                playbackStopwatch.Stop();
+                _lastQueuePlaybackFinishedAtUtc = DateTimeOffset.UtcNow;
+
+                AppLog.Add(() => $"QueueTiming: backendId={item.BackendId ?? "(none)"} playbackMs={playbackStopwatch.Elapsed.TotalMilliseconds:0} totalCallSeconds={item.CallDurationSeconds:0.###}");
 
                 if (shouldDeleteTempFile && !string.IsNullOrWhiteSpace(downloadedTempPath))
                 {
@@ -2941,6 +2998,7 @@ private static string SpeedStepToLabel(double step)
                 item.IsPlaying = false;
 
                 _lastPlayedCall = item;
+                _lastQueuePlaybackFinishedAtUtc ??= DateTimeOffset.UtcNow;
 
                 if (_currentPlayingCall == item)
                     _currentPlayingCall = null;
@@ -3023,7 +3081,7 @@ private static string SpeedStepToLabel(double step)
             else
             {
                 username = _settingsService.BasicAuthUsername;
-                password = NormalizeSmartQuotes(_settingsService.BasicAuthPassword ?? string.Empty);
+                password = TextNormalizationHelper.NormalizeSmartQuotes(_settingsService.BasicAuthPassword ?? string.Empty);
             }
 
             if (string.IsNullOrWhiteSpace(username))
@@ -3084,18 +3142,6 @@ private static string SpeedStepToLabel(double step)
                 AppLog.DebugWriteLine(() => $"[MainViewModel] Error downloading audio with auth: {ex}");
                 return null;
             }
-        }
-
-        private static string NormalizeSmartQuotes(string value)
-        {
-            if (string.IsNullOrEmpty(value))
-                return value;
-
-            return value
-                .Replace('\u2018', '\'')
-                .Replace('\u2019', '\'')
-                .Replace('\u201C', '"')
-                .Replace('\u201D', '"');
         }
 
         private async Task OpenDonateAsync()

@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using JoesScanner.Helpers;
 
 namespace JoesScanner.Services
 {
@@ -18,16 +19,16 @@ namespace JoesScanner.Services
 
         public async Task TouchLastUsedUtcAsync(string serverUrl, DateTime utcNow, CancellationToken cancellationToken = default)
         {
-            var (serverKey, canonicalUrl) = NormalizeServerUrl(serverUrl);
-            if (string.IsNullOrWhiteSpace(serverKey))
+            var canonicalUrl = NormalizeCanonicalUrl(serverUrl);
+            var serverKey = ServerKeyHelper.Normalize(serverUrl);
+            if (string.IsNullOrWhiteSpace(serverKey) || string.IsNullOrWhiteSpace(canonicalUrl))
                 return;
 
-            await EnsureSchemaAsync(cancellationToken);
-
             await using var connection = new SqliteConnection($"Data Source={_dbPath};Cache=Shared");
-            await connection.OpenAsync(cancellationToken);
+            await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+            await DbBootstrapper.EnsureInitializedAsync(connection, cancellationToken).ConfigureAwait(false);
 
-            var cmd = connection.CreateCommand();
+            await using var cmd = connection.CreateCommand();
             cmd.CommandText = @"
 INSERT INTO servers (
     server_key,
@@ -61,83 +62,23 @@ DO UPDATE SET
             cmd.Parameters.AddWithValue("$base_url", canonicalUrl);
             cmd.Parameters.AddWithValue("$last_used_utc", utcNow.ToUniversalTime().ToString("O"));
 
-            await cmd.ExecuteNonQueryAsync(cancellationToken);
+            await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        private async Task EnsureSchemaAsync(CancellationToken cancellationToken)
-        {
-            await using var connection = new SqliteConnection($"Data Source={_dbPath};Cache=Shared");
-            await connection.OpenAsync(cancellationToken);
-
-            var cmd = connection.CreateCommand();
-            cmd.CommandText = @"
-PRAGMA foreign_keys=ON;
-PRAGMA busy_timeout=5000;
-
-CREATE TABLE IF NOT EXISTS servers (
-    server_key TEXT PRIMARY KEY,
-    display_name TEXT NOT NULL,
-    base_url TEXT NOT NULL,
-    enabled INTEGER NOT NULL DEFAULT 1,
-    sort_order INTEGER NOT NULL DEFAULT 0,
-    is_builtin INTEGER NOT NULL DEFAULT 0,
-    created_utc TEXT NOT NULL,
-    updated_utc TEXT NOT NULL,
-    last_used_utc TEXT NULL
-);";
-
-            await cmd.ExecuteNonQueryAsync(cancellationToken);
-
-            // Upgrade older installs that had a minimal servers table.
-            await EnsureColumnExistsAsync(connection, "servers", "display_name", "TEXT NOT NULL DEFAULT ''", cancellationToken);
-            await EnsureColumnExistsAsync(connection, "servers", "enabled", "INTEGER NOT NULL DEFAULT 1", cancellationToken);
-            await EnsureColumnExistsAsync(connection, "servers", "sort_order", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
-            await EnsureColumnExistsAsync(connection, "servers", "is_builtin", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
-            await EnsureColumnExistsAsync(connection, "servers", "created_utc", "TEXT NOT NULL DEFAULT ''", cancellationToken);
-            await EnsureColumnExistsAsync(connection, "servers", "updated_utc", "TEXT NOT NULL DEFAULT ''", cancellationToken);
-            await EnsureColumnExistsAsync(connection, "servers", "last_used_utc", "TEXT NULL", cancellationToken);
-        }
-
-        private static async Task EnsureColumnExistsAsync(SqliteConnection conn, string tableName, string columnName, string columnDefinition, CancellationToken ct)
-        {
-            await using var pragma = conn.CreateCommand();
-            pragma.CommandText = $"PRAGMA table_info({tableName});";
-
-            await using var reader = await pragma.ExecuteReaderAsync(ct);
-            while (await reader.ReadAsync(ct))
-            {
-                var name = reader.GetString(1);
-                if (string.Equals(name, columnName, StringComparison.OrdinalIgnoreCase))
-                    return;
-            }
-
-            await using var alter = conn.CreateCommand();
-            alter.CommandText = $"ALTER TABLE {tableName} ADD COLUMN {columnName} {columnDefinition};";
-            await alter.ExecuteNonQueryAsync(ct);
-        }
-
-        private static (string ServerKey, string CanonicalUrl) NormalizeServerUrl(string serverUrl)
+        private static string NormalizeCanonicalUrl(string serverUrl)
         {
             if (string.IsNullOrWhiteSpace(serverUrl))
-                return (string.Empty, string.Empty);
+                return string.Empty;
 
             if (!Uri.TryCreate(serverUrl.Trim(), UriKind.Absolute, out var uri))
-                return (string.Empty, string.Empty);
+                return string.Empty;
 
-            // Canonical form: scheme://host[:port]
             var builder = new UriBuilder(uri.Scheme, uri.Host)
             {
                 Port = uri.IsDefaultPort ? -1 : uri.Port
             };
 
-            var canonical = builder.Uri.ToString().TrimEnd('/');
-
-            // Include the default port explicitly in the key so we do not collide keys.
-            // This matches the behavior used by the HistoryLookupsCacheService.
-            var port = uri.IsDefaultPort ? (uri.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase) ? 443 : 80) : uri.Port;
-            var key = $"{uri.Scheme.ToLowerInvariant()}://{uri.Host.ToLowerInvariant()}:{port}";
-
-            return (key, canonical);
+            return builder.Uri.ToString().TrimEnd('/');
         }
     }
 }

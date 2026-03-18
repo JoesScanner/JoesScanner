@@ -10,6 +10,7 @@ using System.Linq;
 using JoesScanner.Data;
 using System.Threading;
 using System.Net.Http;
+using JoesScanner.Helpers;
 
 namespace JoesScanner.Services
 {
@@ -110,7 +111,7 @@ public CallHistoryService(
             // Best-effort cache write per server. Never blocks the UI if it fails.
             try
             {
-                var serverKey = NormalizeServerKey(_settingsService.ServerUrl);
+                var serverKey = ServerKeyHelper.Normalize(_settingsService.ServerUrl);
                 if (!string.IsNullOrWhiteSpace(serverKey))
                     await _lookupsRepository.UpsertAsync(serverKey, result, DateTime.UtcNow, cancellationToken);
             }
@@ -484,34 +485,6 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
         {
             var baseUrl = (url ?? string.Empty).Trim();
             return baseUrl.TrimEnd('/');
-        }
-
-        private static string NormalizeServerKey(string? serverUrl)
-        {
-            if (string.IsNullOrWhiteSpace(serverUrl))
-                return string.Empty;
-
-            var raw = serverUrl.Trim().TrimEnd('/');
-
-            try
-            {
-                if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri))
-                    return raw;
-
-                var builder = new UriBuilder(uri)
-                {
-                    Path = string.Empty,
-                    Query = string.Empty,
-                    Fragment = string.Empty,
-                    Port = uri.IsDefaultPort ? -1 : uri.Port
-                };
-
-                return builder.Uri.ToString().TrimEnd('/');
-            }
-            catch
-            {
-                return raw;
-            }
         }
 
         private void UpdateAuthorizationHeader()
