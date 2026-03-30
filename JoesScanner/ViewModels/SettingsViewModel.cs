@@ -1,4 +1,4 @@
-using JoesScanner.Models;
+﻿using JoesScanner.Models;
 using JoesScanner.Services;
 using Microsoft.Maui.ApplicationModel;
 using System.Collections.ObjectModel;
@@ -25,6 +25,7 @@ namespace JoesScanner.ViewModels
         private readonly ISettingsService _settings;
         private readonly MainViewModel _mainViewModel;
         private readonly ITelemetryService _telemetryService;
+        private readonly ISystemMediaService _systemMediaService;
         private readonly IHistoryLookupsCacheService _historyLookupsCacheService;
         private readonly IAuthObservedTriplesSyncService _authObservedTriplesSyncService;
         private readonly HttpClient _httpClient;
@@ -305,6 +306,7 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
             Name = "Joe's Scanner",
             Url = DefaultServerUrl,
             IsOfficial = true,
+            UsesApiFirewallCredentials = true,
             Badge = "Official",
             BadgeLabel = "Official"
         };
@@ -583,6 +585,7 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
             ISettingsService settingsService,
             MainViewModel mainViewModel,
             ITelemetryService telemetryService,
+            ISystemMediaService systemMediaService,
             IFilterProfileStore filterProfileStore,
             IHistoryLookupsCacheService historyLookupsCacheService,
             IAuthObservedTriplesSyncService authObservedTriplesSyncService)
@@ -590,6 +593,7 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
             _settings = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
             _mainViewModel = mainViewModel ?? throw new ArgumentNullException(nameof(mainViewModel));
             _telemetryService = telemetryService ?? throw new ArgumentNullException(nameof(telemetryService));
+            _systemMediaService = systemMediaService ?? throw new ArgumentNullException(nameof(systemMediaService));
 
             _filterProfileStore = filterProfileStore ?? throw new ArgumentNullException(nameof(filterProfileStore));
 
@@ -1222,7 +1226,7 @@ catch
         // The picker should remain on what the user selected.
         private int _suppressDirectorySelectionSync;
 
-        private void ApplySelectedDirectoryServer(ServerDirectoryEntry? value, bool syncServerUrl)
+        private void ApplySelectedDirectoryServer(ServerDirectoryEntry? value, bool syncServerUrl, bool forceNotify = false)
         {
             var selectionChanged = !ReferenceEquals(_selectedDirectoryServer, value);
             _selectedDirectoryServer = value;
@@ -1231,7 +1235,7 @@ catch
             var customVisibilityChanged = _showCustomServerUrlRow != showCustom;
             _showCustomServerUrlRow = showCustom;
 
-            if (selectionChanged)
+            if (selectionChanged || forceNotify)
                 OnPropertyChanged(nameof(SelectedDirectoryServer));
 
             if (selectionChanged || customVisibilityChanged)
@@ -1243,6 +1247,9 @@ catch
             var url = (value.Url ?? string.Empty).Trim();
             if (url.Length > 0)
                 ServerUrl = url;
+
+            if (value != null && !value.IsCustom)
+                _ = EnsureServerFirewallCredentialsAsync(value, false);
         }
 
         public async Task EnsureDirectoryServersFreshAsync(bool force)
@@ -1455,6 +1462,7 @@ public bool WindowsAutoConnectOnStart
                     return;
 
                 _mobileMixAudioWithOtherApps = value;
+                AppLog.Add(() => $"Settings: MobileMixAudioWithOtherApps changed to {_mobileMixAudioWithOtherApps}. Autosave queued.");
                 OnPropertyChanged();
                 UpdateHasChanges();
                 QueueAutosaveNonConnection("Audio");
@@ -2302,6 +2310,16 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             _settings.BluetoothLabelComposer = _bluetoothLabelComposerToken;
             _settings.BluetoothLabelGenre = _bluetoothLabelGenreToken;
             _settings.MobileMixAudioWithOtherApps = _mobileMixAudioWithOtherApps;
+            AppLog.Add(() => $"Settings: MobileMixAudioWithOtherApps saved as {_settings.MobileMixAudioWithOtherApps}.");
+            try
+            {
+                await _systemMediaService.RefreshAudioSessionAsync(_mainViewModel.AudioEnabled, "SettingsSave:MobileMixAudioWithOtherApps");
+                AppLog.Add("Settings: requested live iOS audio-session refresh after MobileMixAudioWithOtherApps save.");
+            }
+            catch (Exception ex)
+            {
+                AppLog.Add(() => $"Settings: live audio-session refresh failed after MobileMixAudioWithOtherApps save. {ex.GetType().Name}: {ex.Message}");
+            }
 
             _settings.What3WordsLinksEnabled = _what3WordsLinksEnabled;
             _settings.What3WordsApiKey = _what3WordsApiKey;
@@ -2375,9 +2393,9 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
 
         private async Task SaveThenValidateServerUrlAsync()
         {
-            // If the user is changing the TR server URL, we must stop playback/monitoring
-            // after the new server has been validated. The user will explicitly press Play
-            // again from the queue when they are ready.
+            // Validation can change connection/auth state even when the selected server URL is the same.
+            // Always stop the active connection after a successful validation so the next play/connect
+            // starts from a clean validated state.
             var previousServerUrlSnapshot = _savedServerUrl ?? string.Empty;
 
             await SaveNonConnectionSettingsAsync();
@@ -2398,29 +2416,24 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                 _savedBasicAuthPassword = _settings.BasicAuthPassword ?? string.Empty;
 
                 UpdateHasChanges();
-            }
 
-            // Only stop when validation succeeded and the server actually changed.
-            // Normalize by trimming whitespace and trailing slashes.
-            if (!ServerValidationIsError)
-            {
+                try
+                {
+                    await _mainViewModel.StopMonitoringAsync();
+                }
+                catch
+                {
+                }
+
                 var newServerUrl = _settings.ServerUrl ?? string.Empty;
 
+                // When switching servers, also clear any existing main queue items and address alerts so
+                // the user never falls back into calls that belong to a different server.
                 if (!string.Equals(
                         NormalizeUrlForCompare(previousServerUrlSnapshot),
                         NormalizeUrlForCompare(newServerUrl),
                         StringComparison.OrdinalIgnoreCase))
                 {
-                    try
-                    {
-                        await _mainViewModel.StopMonitoringAsync();
-                    }
-                    catch
-                    {
-                    }
-
-                    // When switching servers, clear any existing main queue items and address alerts so
-                    // the user never falls back into calls that belong to a different server.
                     try
                     {
                         await _mainViewModel.ClearQueueForServerSwitchAsync();
@@ -2573,12 +2586,6 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                         _settings.AuthSessionToken = string.Empty;
                         _settings.SubscriptionLastMessage = ServerValidationMessage;
                         _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
-
-                        try { _settings.ClearServerCredentials(DefaultServerUrl); } catch { }
-
-                        try { _settings.ClearServerCredentials(DefaultServerUrl); } catch { }
-
-                        try { _settings.ClearServerCredentials(DefaultServerUrl); } catch { }
 
                         try { _settings.ClearServerCredentials(DefaultServerUrl); } catch { }
 
@@ -2738,6 +2745,21 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                     _settings.BasicAuthPassword = accountPassword;
                     _settings.SetServerCredentials(DefaultServerUrl, accountUsername, accountPassword);
                     _settings.LastAuthUsername = accountUsername;
+
+                    try
+                    {
+                        await EnsureServerFirewallCredentialsAsync(new ServerDirectoryEntry
+                        {
+                            DirectoryId = -1,
+                            Name = "Joe's Scanner Default",
+                            Url = DefaultServerUrl,
+                            UsesApiFirewallCredentials = true,
+                            IsOfficial = true
+                        }, true);
+                    }
+                    catch
+                    {
+                    }
 
                     _mainViewModel.ServerUrl = DefaultServerUrl;
 
@@ -3199,7 +3221,11 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                 _suppressDirectorySelection = true;
                 try
                 {
-                    ApplySelectedDirectoryServer(match, syncServerUrl: false);
+                    // Force a SelectedDirectoryServer property notification even when the matched
+                    // object reference has not changed. On some platforms the Picker can render
+                    // blank after the card becomes visible or after the ItemsSource is rebuilt
+                    // unless the selected value is re-published to the binding layer.
+                    ApplySelectedDirectoryServer(match, syncServerUrl: false, forceNotify: true);
                 }
                 finally
                 {
@@ -3265,7 +3291,8 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                         MapAnchor = s.MapAnchor ?? string.Empty,
                         IsOfficial = s.IsOfficial,
                         Badge = s.Badge ?? string.Empty,
-                        BadgeLabel = s.BadgeLabel ?? string.Empty
+                        BadgeLabel = s.BadgeLabel ?? string.Empty,
+                        UsesApiFirewallCredentials = s.UsesApiFirewallCredentials
                     };
 
                     if (string.IsNullOrWhiteSpace(entry.Url))
@@ -3276,6 +3303,17 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
 
                 // Persist cache first.
                 try { _settings.UpsertCachedDirectoryServers(list); } catch { }
+
+                foreach (var entry in list)
+                {
+                    if (entry == null || string.IsNullOrWhiteSpace(entry.Url))
+                        continue;
+
+                    if (!entry.UsesApiFirewallCredentials)
+                    {
+                        try { _settings.ClearServerFirewallCredentials(entry.Url); } catch { }
+                    }
+                }
 
                 await MainThread.InvokeOnMainThreadAsync(() =>
                 {
@@ -3301,6 +3339,16 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                 DirectoryStatusText = list.Count == 0
                     ? "No servers are currently listed."
                     : $"Loaded {list.Count} server(s).";
+
+                try
+                {
+                    var selected = _selectedDirectoryServer;
+                    if (selected != null && !selected.IsCustom)
+                        await EnsureServerFirewallCredentialsAsync(selected, false);
+                }
+                catch
+                {
+                }
             }
             catch (Exception ex)
             {
@@ -3315,6 +3363,83 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
             }
         }
 
+
+        private async Task EnsureServerFirewallCredentialsAsync(ServerDirectoryEntry entry, bool forceRefresh)
+        {
+            if (entry == null || entry.IsCustom)
+                return;
+
+            var serverUrl = (entry.Url ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(serverUrl))
+                return;
+
+            if (!entry.UsesApiFirewallCredentials)
+            {
+                try { _settings.ClearServerFirewallCredentials(serverUrl); } catch { }
+                return;
+            }
+
+            var sessionToken = (_settings.AuthSessionToken ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(sessionToken))
+                return;
+
+            if (!forceRefresh && _settings.TryGetServerFirewallCredentials(serverUrl, out _, out _))
+                return;
+
+            try
+            {
+                var payload = new
+                {
+                    session_token = sessionToken,
+                    directory_id = entry.DirectoryId > 0 ? entry.DirectoryId : (int?)null,
+                    server_url = serverUrl,
+                    device_id = _settings.DeviceInstallId ?? string.Empty
+                };
+
+                using var content = new StringContent(
+                    JsonSerializer.Serialize(payload),
+                    Encoding.UTF8,
+                    "application/json");
+
+                using var response = await _httpClient.PostAsync(
+                    BuildAuthServerUrl("/wp-json/joes-scanner/v1/server-firewall-credentials"),
+                    content);
+
+                var body = await response.Content.ReadAsStringAsync();
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    try { AppLog.Add(() => $"Directory: firewall credentials load failed for {serverUrl}. HTTP {(int)response.StatusCode}."); } catch { }
+                    return;
+                }
+
+                ServerFirewallCredentialsResponseDto? parsed = null;
+                try
+                {
+                    parsed = JsonSerializer.Deserialize<ServerFirewallCredentialsResponseDto>(
+                        body,
+                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                }
+                catch
+                {
+                }
+
+                if (parsed == null || !parsed.Ok)
+                    return;
+
+                var username = (parsed.Username ?? string.Empty).Trim();
+                var password = (parsed.Password ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
+                    return;
+
+                _settings.SetServerFirewallCredentials(serverUrl, username, password);
+            }
+            catch (Exception ex)
+            {
+                try { AppLog.Add(() => $"Directory: firewall credentials load exception for {serverUrl}. {ex.Message}"); } catch { }
+            }
+        }
+
         private sealed class ServerDirectoryResponseDto
         {
             [JsonPropertyName("ok")]
@@ -3322,6 +3447,18 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
 
             [JsonPropertyName("servers")]
             public List<ServerDirectoryServerDto>? Servers { get; set; }
+        }
+
+        private sealed class ServerFirewallCredentialsResponseDto
+        {
+            [JsonPropertyName("ok")]
+            public bool Ok { get; set; }
+
+            [JsonPropertyName("username")]
+            public string? Username { get; set; }
+
+            [JsonPropertyName("password")]
+            public string? Password { get; set; }
         }
 
         private sealed class ServerDirectoryServerDto
@@ -3352,6 +3489,9 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
 
             [JsonPropertyName("badge_label")]
             public string? BadgeLabel { get; set; }
+
+            [JsonPropertyName("uses_api_firewall_credentials")]
+            public bool UsesApiFirewallCredentials { get; set; }
         }
 
         private string BuildAuthServerUrl(string path)

@@ -295,9 +295,8 @@ namespace JoesScanner.Views
                 ? "No log entries yet."
                 : string.Join(Environment.NewLine, lines);
 
-            // We want server URL and username from the settings VM for the file header
+            // We include server URL in the log export header, but never credentials.
             string serverUrl = "(unknown)";
-            string username = "(none)";
 
             if (BindingContext is SettingsViewModel vm)
             {
@@ -305,25 +304,22 @@ namespace JoesScanner.Views
                     ? "(not set)"
                     : vm.ServerUrl;
 
-                username = string.IsNullOrWhiteSpace(vm.BasicAuthUsername)
-                    ? "(none)"
-                    : vm.BasicAuthUsername;
             }
 
             var viewer = new LogViewerPage(bodyText, async () =>
             {
-                await SaveLogFileInteractiveAsync(bodyText, serverUrl, username);
+                await SaveLogFileInteractiveAsync(bodyText, serverUrl);
             });
 
             await Navigation.PushModalAsync(new NavigationPage(viewer));
         }
 
-        private async Task SaveLogFileInteractiveAsync(string bodyText, string serverUrl, string username)
+        private async Task SaveLogFileInteractiveAsync(string bodyText, string serverUrl)
         {
             try
             {
                 var snapshotTime = DateTime.Now;
-                var fileContent = BuildLogFileContent(snapshotTime, bodyText, serverUrl, username);
+                var fileContent = BuildLogFileContent(snapshotTime, bodyText, serverUrl);
 
                 // Build filename prefix with date and time (24 hour, no seconds)
                 var stamp = snapshotTime.ToString("yyyy-MM-dd_HH-mm");
@@ -344,7 +340,7 @@ namespace JoesScanner.Views
             }
         }
 
-        private static string BuildLogFileContent(DateTime snapshotTime, string bodyText, string serverUrl, string username)
+        private static string BuildLogFileContent(DateTime snapshotTime, string bodyText, string serverUrl)
         {
             var platform = DeviceInfo.Current.Platform.ToString();
             var osVersion = DeviceInfo.Current.VersionString;
@@ -359,7 +355,6 @@ namespace JoesScanner.Views
         $"App: v{appVersion} ({appBuild})",
         $"Package: {appId}",
         $"Server URL: {serverUrl}",
-        $"Username: {username}",
         $"Platform: {platform} {osVersion}",
         "Max log file size: 1 MB",
         string.Empty
@@ -1007,15 +1002,12 @@ private async void OnDownloadLogClicked(object sender, EventArgs e)
 
         // Pull basic connection info for the header if available.
         var serverUrl = string.Empty;
-        var username = string.Empty;
-
         if (BindingContext is SettingsViewModel vm)
         {
             serverUrl = vm.ServerUrl ?? string.Empty;
-            username = vm.BasicAuthUsername ?? string.Empty;
         }
 
-        var fileContent = BuildLogFileContent(snapshotTime, bodyText, serverUrl, username);
+        var fileContent = BuildLogFileContent(snapshotTime, bodyText, serverUrl);
 
         var stamp = snapshotTime.ToString("yyyy-MM-dd_HH-mm");
         var fileName = $"{stamp}_JoesScannerLog.txt";

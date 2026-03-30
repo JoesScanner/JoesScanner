@@ -945,6 +945,7 @@
                     <!-- AUDIO OPTIONS CARD -->
                     <Border
                                     Grid.Row="5"
+                                    IsVisible="{OnPlatform WinUI=false, Default=true}"
                                     Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
                                     StrokeThickness="1"
                                     Padding="12"

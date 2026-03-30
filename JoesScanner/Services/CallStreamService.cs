@@ -19,9 +19,6 @@ namespace JoesScanner.Services
     // to the UI, using server fields for time, receiver, site, talkgroup, transcription, and audio.
     public class CallStreamService : ICallStreamService
     {
-        private const string ServiceAuthUsername = "secappass";
-        private const string ServiceAuthPassword = "7a65vBLeqLjdRut5bSav4eMYGUJPrmjHhgnPmEji3q3S7tZ3K5aadFZz2EZtbaE7";
-
         private const string AppleIosTestAccountEmail = "iostest@joesscanner.com";
         private const string AppleIosTestAccountEmailLegacy = "iostest@jeosscanner.com";
 
@@ -47,6 +44,10 @@ namespace JoesScanner.Services
 
         // DataTables draw counter used by the calljson endpoint.
         private int _draw = 1;
+
+        // Tracks the actual auth mode and username most recently applied to outbound call-server requests.
+        private volatile string _lastAuthModeForLog = "none";
+        private volatile string _lastAppliedAuthUsernameForLog = "(none)";
 
         // Creates a new call stream service with an HttpClient configured for the calljson endpoint.
         public CallStreamService(ISettingsService settingsService, ILocalCallsRepository localCallsRepository, IAddressDetectionService addressDetectionService)
@@ -176,7 +177,7 @@ namespace JoesScanner.Services
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
             var isAppleTestAccount = IsAppleIosTestAccount();
-            AppLog.Add(() => $"AppleTest: enabled={isAppleTestAccount}, user={_settingsService.BasicAuthUsername}");
+            AppLog.Add(() => $"AppleTest: enabled={isAppleTestAccount}");
 
             // New connection: by default clear any previously seen IDs and suppress the first batch
             // so we only show calls that arrive after the user connects.
@@ -217,8 +218,7 @@ namespace JoesScanner.Services
             while (!cancellationToken.IsCancellationRequested)
             {
                 var baseUrl = (_settingsService.ServerUrl ?? string.Empty).TrimEnd('/');
-                var username = _settingsService.BasicAuthUsername;
-                var usernameForLog = string.IsNullOrWhiteSpace(username) ? "(none)" : username;
+                var usernameForLog = GetLastAppliedAuthUsernameForLog();
 
                 if (string.IsNullOrWhiteSpace(baseUrl))
                 {
@@ -286,7 +286,8 @@ namespace JoesScanner.Services
                         {
                             hasReportedIdleConnection = true;
 
-                            AppLog.Add(() => $"CallStream: WEBSOCKET CONNECTED. [ServerUrl={baseUrl}, Path=/Calls, Username={usernameForLog}]");
+                            var authModeForLog = GetLastAppliedAuthModeForLog();
+                            AppLog.Add(() => $"CallStream: WEBSOCKET CONNECTED. [ServerUrl={baseUrl}, Path=/Calls, AuthMode={authModeForLog}]");
 
                             yield return new CallItem
                             {
@@ -393,7 +394,8 @@ namespace JoesScanner.Services
                           "Verify the basic auth username/password and any firewall authentication."
                         : $"Error talking to {callsUrl}: {errorMessage}";
 
-                    AppLog.Add(() => $"CallStream: {talkgroup} - {transcription} [ServerUrl={callsUrl}, Username={usernameForLog}]");
+                    var authModeForLog = GetLastAppliedAuthModeForLog();
+                    AppLog.Add(() => $"CallStream: {talkgroup} - {transcription} [ServerUrl={callsUrl}, AuthMode={authModeForLog}]");
 
                     // Clear error row for the UI.
                     yield return new CallItem
@@ -419,7 +421,7 @@ namespace JoesScanner.Services
                         hasReportedIdleConnection = true;
 
                         AppLog.Add(() => $"CallStream: HEARTBEAT - connected to server, waiting for calls. " +
-                            $"[ServerUrl={baseUrl}/calljson, Username={usernameForLog}]");
+                            $"[ServerUrl={baseUrl}/calljson, Username={usernameForLog}, AuthMode={GetLastAppliedAuthModeForLog()}]");
 
                         yield return new CallItem
                         {
@@ -447,7 +449,7 @@ namespace JoesScanner.Services
                         hasReportedIdleConnection = true;
 
                         AppLog.Add(() => $"CallStream: HEARTBEAT - connected to server, waiting for calls. " +
-                            $"[ServerUrl={baseUrl}/calljson, Username={usernameForLog}]");
+                            $"[ServerUrl={baseUrl}/calljson, Username={usernameForLog}, AuthMode={GetLastAppliedAuthModeForLog()}]");
 
                         yield return new CallItem
                         {
@@ -1019,64 +1021,61 @@ namespace JoesScanner.Services
             return null;
         }
 
+
+private void SetLastAppliedAuthForLog(string mode, string? username)
+{
+    _lastAuthModeForLog = string.IsNullOrWhiteSpace(mode) ? "none" : mode.Trim();
+    _lastAppliedAuthUsernameForLog = string.IsNullOrWhiteSpace(username) ? "(none)" : username.Trim();
+}
+
+private string GetLastAppliedAuthUsernameForLog()
+{
+    return string.IsNullOrWhiteSpace(_lastAppliedAuthUsernameForLog) ? "(none)" : _lastAppliedAuthUsernameForLog;
+}
+
+private string GetLastAppliedAuthModeForLog()
+{
+    return string.IsNullOrWhiteSpace(_lastAuthModeForLog) ? "none" : _lastAuthModeForLog;
+}
+
         private string? BuildBasicAuthHeaderValue(Uri serverUri)
         {
             try
             {
-                // Hosted Joe's Scanner server: Trunking Recorder endpoints use a service account,
-                // but ONLY after the user has a currently valid authorization via the Auth API.
-                if (string.Equals(serverUri.Host, "app.joesscanner.com", StringComparison.OrdinalIgnoreCase))
+                var serverKey = serverUri.GetLeftPart(UriPartial.Authority);
+                var firewallToken = HostedServerRules.GetApiFirewallBasicAuthParameterEnsuredAsync(_settingsService, serverKey).GetAwaiter().GetResult();
+                if (!string.IsNullOrWhiteSpace(firewallToken))
                 {
-                    if (_settingsService.SubscriptionTierLevel < 1)
-                    {
-                        AppLog.Add(() => "CallStream: WS auth not applied (hosted). reason=tier<1");
-                        return null;
-                    }
-
-                    var ok = _settingsService.SubscriptionLastStatusOk;
-                    var expires = _settingsService.SubscriptionExpiresUtc;
-
-                    if (!ok)
-                    {
-                        AppLog.Add(() => "CallStream: WS auth not applied (hosted). reason=sub_status_not_ok");
-                        return null;
-                    }
-
-                    if (!expires.HasValue)
-                    {
-                        AppLog.Add(() => "CallStream: WS auth not applied (hosted). reason=no_expiry");
-                        return null;
-                    }
-
-                    if (expires.Value.ToUniversalTime() <= DateTime.UtcNow)
-                    {
-                        AppLog.Add(() => $"CallStream: WS auth not applied (hosted). reason=expired expiresUtc={expires.Value:o}");
-                        return null;
-                    }
-
-                    // NOTE: These are the hard-coded service credentials for app.joesscanner.com and must not be changed.
-                    const string serviceUser = "secappass";
-                    const string servicePass = "7a65vBLeqLjdRut5bSav4eMYGUJPrmjHhgnPmEji3q3S7tZ3K5aadFZz2EZtbaE7";
-                    var serviceToken = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{serviceUser}:{servicePass}"));
-                    AppLog.Add(() => "CallStream: WS auth applied (hosted service creds).");
-                    return $"Basic {serviceToken}";
+                    SetLastAppliedAuthForLog("api_firewall", null);
+                    AppLog.Add(() => "CallStream: WS auth applied (API firewall creds).");
+                    return $"Basic {firewallToken}";
                 }
 
-                // Custom servers: only apply Basic Auth if user provided a username.
+                if (HostedServerRules.RequiresApiFirewallCredentials(_settingsService, serverKey))
+                {
+                    SetLastAppliedAuthForLog("api_firewall_unavailable", null);
+                    AppLog.Add(() => "CallStream: WS auth not applied. reason=api_firewall_credentials_unavailable");
+                    return null;
+                }
+
+                // Custom/manual servers: only apply Basic Auth if user provided a username.
                 var user = (_settingsService.BasicAuthUsername ?? string.Empty).Trim();
                 var pass = TextNormalizationHelper.NormalizeSmartQuotes((_settingsService.BasicAuthPassword ?? string.Empty).Trim());
                 if (string.IsNullOrWhiteSpace(user))
                 {
+                    SetLastAppliedAuthForLog("custom_blank", null);
                     AppLog.Add(() => "CallStream: WS auth not applied (custom). reason=username_blank");
                     return null;
                 }
 
                 var token = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{user}:{pass}"));
+                SetLastAppliedAuthForLog("custom", null);
                 AppLog.Add(() => "CallStream: WS auth applied (custom creds).");
                 return $"Basic {token}";
             }
             catch (Exception ex)
             {
+                SetLastAppliedAuthForLog("error", null);
                 AppLog.Add(() => $"CallStream: BuildBasicAuthHeaderValue failed. ex={ex.GetType().Name}: {ex.Message}");
                 return null;
             }

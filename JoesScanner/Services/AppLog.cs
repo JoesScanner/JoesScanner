@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -7,6 +7,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
+using System.Text.RegularExpressions;
 using Microsoft.Maui.Storage;
 
 namespace JoesScanner.Services
@@ -39,6 +40,14 @@ namespace JoesScanner.Services
         private static int _writeGeneration;
 
         private static volatile bool _isEnabled;
+
+
+        private static readonly Regex AuthorizationHeaderRegex = new(@"(?i)(authorization\s*[:=]\s*)(basic|bearer)\s+[^,;\s]+", RegexOptions.Compiled);
+        private static readonly Regex BasicTokenRegex = new(@"(?i)(\bBasic\s+)[A-Za-z0-9+/=]{8,}", RegexOptions.Compiled);
+        private static readonly Regex BearerTokenRegex = new(@"(?i)(\bBearer\s+)[A-Za-z0-9._~+/-]{8,}", RegexOptions.Compiled);
+        private static readonly Regex PasswordValueRegex = new(@"(?i)([\"']?password[\"']?\s*[:=]\s*)(\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^,;\r\n}\]]+)", RegexOptions.Compiled);
+        private static readonly Regex SessionTokenRegex = new(@"(?i)([\"']?session[_-]?token[\"']?\s*[:=]\s*)(\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^,;\r\n}\]]+)", RegexOptions.Compiled);
+        private static readonly Regex UsernameValueRegex = new(@"(?i)([\"']?username[\"']?\s*[:=]\s*)(\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^,;\r\n}\]]+)", RegexOptions.Compiled);
 
         static AppLog()
         {
@@ -517,7 +526,11 @@ namespace JoesScanner.Services
             if (!_isEnabled || string.IsNullOrWhiteSpace(message))
                 return;
 
-            var line = $"{DateTime.Now:HH:mm:ss}  {message}";
+            var sanitized = SanitizeLogMessage(message);
+            if (string.IsNullOrWhiteSpace(sanitized))
+                return;
+
+            var line = $"{DateTime.Now:HH:mm:ss}  {sanitized}";
 
             lock (Sync)
             {
@@ -531,6 +544,23 @@ namespace JoesScanner.Services
             // If the channel is full, DropOldest mode makes this succeed while keeping recent logs.
             var generation = Volatile.Read(ref _writeGeneration);
             FileChannel.Writer.TryWrite(new LogWriteItem(line, generation));
+        }
+
+        private static string SanitizeLogMessage(string message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+                return string.Empty;
+
+            var sanitized = message;
+
+            try { sanitized = AuthorizationHeaderRegex.Replace(sanitized, "$1$2 [REDACTED]"); } catch { }
+            try { sanitized = BasicTokenRegex.Replace(sanitized, "$1[REDACTED]"); } catch { }
+            try { sanitized = BearerTokenRegex.Replace(sanitized, "$1[REDACTED]"); } catch { }
+            try { sanitized = PasswordValueRegex.Replace(sanitized, "$1[REDACTED]"); } catch { }
+            try { sanitized = SessionTokenRegex.Replace(sanitized, "$1[REDACTED]"); } catch { }
+            try { sanitized = UsernameValueRegex.Replace(sanitized, "$1[REDACTED]"); } catch { }
+
+            return sanitized;
         }
 
         // Returns a snapshot of up to maxLines log entries as an array.

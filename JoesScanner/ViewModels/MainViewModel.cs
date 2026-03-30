@@ -421,9 +421,6 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             });
         }
 
-        private const string ServiceAuthUsername = "secappass";
-        private const string ServiceAuthPassword = "7a65vBLeqLjdRut5bSav4eMYGUJPrmjHhgnPmEji3q3S7tZ3K5aadFZz2EZtbaE7";
-
         // True when connected to the server stream.
         public bool IsRunning
         {
@@ -923,7 +920,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             if (!Uri.TryCreate(serverUrl, UriKind.Absolute, out var uri))
                 return false;
 
-            return string.Equals(uri.Host, "app.joesscanner.com", StringComparison.OrdinalIgnoreCase);
+            return HostedServerRules.IsHostedServerUri(uri);
         }
 
         // Public hook so SettingsViewModel can refresh the header badge after a validation run.
@@ -1523,7 +1520,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             if (Uri.TryCreate(serverUrl, UriKind.Absolute, out var serverUri))
             {
                 isJoesScannerServer =
-                    string.Equals(serverUri.Host, "app.joesscanner.com", StringComparison.OrdinalIgnoreCase);
+                    HostedServerRules.IsHostedServerUri(serverUri);
             }
 
             _telemetryService.TrackConnectionAttempt(serverUrl, isJoesScannerServer);
@@ -1532,8 +1529,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 
             if (isJoesScannerServer)
             {
-                AppLog.Add(() => $"Subscription check: server={serverUrl}, user={username}");
-
+                AppLog.Add(() => $"Subscription check: server={serverUrl}");
 
                 var password = _settingsService.BasicAuthPassword ?? string.Empty;
 
@@ -3067,34 +3063,27 @@ private static string SpeedStepToLabel(double step)
                 return audioUrl;
             }
 
-            var isJoesScannerHost =
-                string.Equals(baseUri.Host, "app.joesscanner.com", StringComparison.OrdinalIgnoreCase);
-
-            string username;
-            string password;
-
-            if (isJoesScannerHost)
+            var serverKey = baseUri.GetLeftPart(UriPartial.Authority);
+            var basicAuthParameter = await HostedServerRules.GetApiFirewallBasicAuthParameterEnsuredAsync(_settingsService, serverKey, cancellationToken);
+            if (string.IsNullOrWhiteSpace(basicAuthParameter))
             {
-                username = ServiceAuthUsername;
-                password = ServiceAuthPassword;
-            }
-            else
-            {
-                username = _settingsService.BasicAuthUsername;
-                password = TextNormalizationHelper.NormalizeSmartQuotes(_settingsService.BasicAuthPassword ?? string.Empty);
-            }
+                if (HostedServerRules.RequiresApiFirewallCredentials(_settingsService, serverKey))
+                    return audioUrl;
 
-            if (string.IsNullOrWhiteSpace(username))
-                return audioUrl;
+                var username = (_settingsService.BasicAuthUsername ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(username))
+                    return audioUrl;
+
+                var password = TextNormalizationHelper.NormalizeSmartQuotes(_settingsService.BasicAuthPassword ?? string.Empty);
+                var raw = $"{username}:{password}";
+                var bytes = Encoding.UTF8.GetBytes(raw);
+                basicAuthParameter = Convert.ToBase64String(bytes);
+            }
 
             try
             {
-                var raw = $"{username}:{password}";
-                var bytes = Encoding.UTF8.GetBytes(raw);
-                var base64 = Convert.ToBase64String(bytes);
-
                 using var request = new HttpRequestMessage(HttpMethod.Get, audioUri);
-                request.Headers.Authorization = new AuthenticationHeaderValue("Basic", base64);
+                request.Headers.Authorization = new AuthenticationHeaderValue("Basic", basicAuthParameter);
 
                 using var response = await _audioHttpClient.SendAsync(
                     request,

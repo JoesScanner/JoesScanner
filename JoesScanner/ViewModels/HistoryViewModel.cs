@@ -19,9 +19,6 @@ namespace JoesScanner.ViewModels
     // Playback and media controls are independent from the Main tab.
     public sealed class HistoryViewModel : BindableObject
     {
-        private const string ServiceAuthUsername = "secappass";
-        private const string ServiceAuthPassword = "7a65vBLeqLjdRut5bSav4eMYGUJPrmjHhgnPmEji3q3S7tZ3K5aadFZz2EZtbaE7";
-
         private readonly ICallHistoryService _callHistoryService;
         private readonly IAudioPlaybackService _audioPlaybackService;
         private readonly ISettingsService _settingsService;
@@ -1438,7 +1435,7 @@ public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
                 if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri))
                     return false;
 
-                return string.Equals(uri.Host, "app.joesscanner.com", StringComparison.OrdinalIgnoreCase);
+                return HostedServerRules.IsHostedServerUri(uri);
             }
             catch
             {
@@ -2786,7 +2783,7 @@ private async Task LoadMoreOlderAsync()
 
                 // Hosted audio requires an active validated account. If we cannot produce the
                 // service authorization header, do not attempt playback.
-                if (string.Equals(sanitized.Host, "app.joesscanner.com", StringComparison.OrdinalIgnoreCase) &&
+                if (HostedServerRules.IsHostedServerUri(sanitized) &&
                     string.IsNullOrWhiteSpace(authHeader))
                 {
                     return null;
@@ -2801,7 +2798,7 @@ private async Task LoadMoreOlderAsync()
                 if (string.IsNullOrWhiteSpace(cacheDir))
                 {
                     // Without cache, we cannot safely play hosted audio (would require auth on the stream).
-                    return string.Equals(sanitized.Host, "app.joesscanner.com", StringComparison.OrdinalIgnoreCase)
+                    return HostedServerRules.IsHostedServerUri(sanitized)
                         ? null
                         : sanitized.ToString();
                 }
@@ -2815,7 +2812,7 @@ private async Task LoadMoreOlderAsync()
                 using var resp = await _audioHttpClient.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, token);
                 if (!resp.IsSuccessStatusCode)
                 {
-                    return string.Equals(sanitized.Host, "app.joesscanner.com", StringComparison.OrdinalIgnoreCase)
+                    return HostedServerRules.IsHostedServerUri(sanitized)
                         ? null
                         : sanitized.ToString();
                 }
@@ -2869,40 +2866,15 @@ private async Task LoadMoreOlderAsync()
         {
             try
             {
-                // Hosted Joe's Scanner server: the Trunking Recorder endpoints use a service account,
-                // but ONLY after the user has a currently valid authorization via the Auth API.
-                if (string.Equals(serverUri.Host, "app.joesscanner.com", StringComparison.OrdinalIgnoreCase))
-                {
-                    var user = (_settingsService.BasicAuthUsername ?? string.Empty).Trim();
-                    var pass = (_settingsService.BasicAuthPassword ?? string.Empty).Trim();
-                    if (string.IsNullOrWhiteSpace(user) || string.IsNullOrWhiteSpace(pass))
-                        return null;
+                var serverKey = serverUri.GetLeftPart(UriPartial.Authority);
+                var firewallToken = HostedServerRules.GetApiFirewallBasicAuthParameterEnsuredAsync(_settingsService, serverKey).GetAwaiter().GetResult();
+                if (!string.IsNullOrWhiteSpace(firewallToken))
+                    return $"Basic {firewallToken}";
 
-                    if (!_settingsService.TryGetServerCredentials("https://app.joesscanner.com", out var savedUser, out var savedPass))
-                        return null;
+                if (HostedServerRules.RequiresApiFirewallCredentials(_settingsService, serverKey))
+                    return null;
 
-                    if (!string.Equals(savedUser?.Trim() ?? string.Empty, user, StringComparison.Ordinal) ||
-                        !string.Equals(savedPass?.Trim() ?? string.Empty, pass, StringComparison.Ordinal))
-                    {
-                        return null;
-                    }
-
-                    var expires = _settingsService.SubscriptionExpiresUtc;
-                    var isAllowed =
-                        _settingsService.SubscriptionLastStatusOk &&
-                        expires.HasValue &&
-                        expires.Value > DateTime.UtcNow;
-
-                    if (!isAllowed)
-                        return null;
-
-                    var rawHosted = $"{ServiceAuthUsername}:{ServiceAuthPassword}";
-                    var bytesHosted = Encoding.ASCII.GetBytes(rawHosted);
-                    var base64Hosted = Convert.ToBase64String(bytesHosted);
-                    return $"Basic {base64Hosted}";
-                }
-
-                // Custom servers: only apply Basic Auth if the user provided a username.
+                // Custom/manual servers: only apply Basic Auth if the user provided a username.
                 var usernameCustom = _settingsService.BasicAuthUsername?.Trim() ?? string.Empty;
                 if (string.IsNullOrWhiteSpace(usernameCustom))
                     return null;

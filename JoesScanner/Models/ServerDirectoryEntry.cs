@@ -20,6 +20,7 @@ namespace JoesScanner.Models
 
         public bool IsCustom { get; set; }
 
+        public bool UsesApiFirewallCredentials { get; set; }
 
         public string Badge { get; set; } = string.Empty;
 

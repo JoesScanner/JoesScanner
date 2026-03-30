@@ -499,35 +499,22 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
             if (string.IsNullOrWhiteSpace(serverKey))
                 return;
 
-            var hostedJoe = string.Equals(serverKey.TrimEnd('/'), "https://app.joesscanner.com", StringComparison.OrdinalIgnoreCase);
-            var useServiceCreds = false;
-
-            // Only use the hosted Trunking Recorder service credentials after the user's account has been validated
-            // via the Auth server AND that validation is still valid (not expired).
-            if (hostedJoe)
+            var firewallToken = HostedServerRules.GetApiFirewallBasicAuthParameterEnsuredAsync(_settingsService, serverKey).GetAwaiter().GetResult();
+            if (!string.IsNullOrWhiteSpace(firewallToken))
             {
-                var ok = _settingsService.SubscriptionLastStatusOk;
-                var expires = _settingsService.SubscriptionExpiresUtc;
-                var tier = _settingsService.SubscriptionTierLevel;
-
-                if (ok && tier >= 1 && expires.HasValue && expires.Value.ToUniversalTime() > DateTime.UtcNow)
-                {
-                    useServiceCreds = true;
-                    AppLog.Add(() => "History: auth applied (hosted service creds).");
-                }
-                else
-                {
-                    AppLog.Add(() => $"History: hosted auth NOT applied. ok={ok} tier={tier} expiresUtc={(expires.HasValue ? expires.Value.ToUniversalTime().ToString("O") : "null")}");
-                    return;
-                }
+                AppLog.Add(() => "History: auth applied (API firewall creds).");
+                _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", firewallToken);
+                return;
             }
 
-            // Hosted gateway uses built-in service credentials.
-            const string serviceUser = "secappass";
-            const string servicePass = "7a65vBLeqLjdRut5bSav4eMYGUJPrmjHhgnPmEji3q3S7tZ3K5aadFZz2EZtbaE7";
+            if (HostedServerRules.RequiresApiFirewallCredentials(_settingsService, serverKey))
+            {
+                AppLog.Add(() => "History: auth not applied. reason=api_firewall_credentials_unavailable");
+                return;
+            }
 
-            var username = useServiceCreds ? serviceUser : (_settingsService.BasicAuthUsername ?? string.Empty).Trim();
-            var password = useServiceCreds ? servicePass : (_settingsService.BasicAuthPassword ?? string.Empty);
+            var username = (_settingsService.BasicAuthUsername ?? string.Empty).Trim();
+            var password = _settingsService.BasicAuthPassword ?? string.Empty;
 
             if (string.IsNullOrWhiteSpace(username))
                 return;
@@ -536,6 +523,7 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
             var bytes = Encoding.ASCII.GetBytes(raw);
             var base64 = Convert.ToBase64String(bytes);
 
+            AppLog.Add(() => "History: auth applied (custom creds).");
             _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", base64);
         }private static string Truncate(string? value, int maxChars)
         {

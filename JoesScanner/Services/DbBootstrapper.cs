@@ -145,7 +145,8 @@ CREATE TABLE IF NOT EXISTS servers (
   is_builtin INTEGER NOT NULL DEFAULT 0,
   created_utc TEXT NOT NULL,
   updated_utc TEXT NOT NULL,
-  last_used_utc TEXT NULL
+  last_used_utc TEXT NULL,
+  uses_api_firewall_credentials INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS server_runtime_state (

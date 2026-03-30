@@ -15,6 +15,7 @@ using AUri = Android.Net.Uri;
 #if IOS || MACCATALYST
 using AVFoundation;
 using Foundation;
+using UIKit;
 #endif
 
 using System.IO;
@@ -33,6 +34,7 @@ namespace JoesScanner.Services
         private readonly IAudioFilterService _audioFilterService;
         private readonly IToneAlertService _toneAlertService;
         private readonly ISettingsService _settings;
+        private readonly ISystemMediaService _systemMediaService;
 
         // Global interrupt token: ensures Stop/Skip actions cancel *all* in-flight work immediately,
         // including: filter preparation, downloads, and platform playback.
@@ -44,11 +46,12 @@ namespace JoesScanner.Services
         private string? _iosTempDownloadedFile;
 #endif
 
-        public AudioPlaybackService(IAudioFilterService audioFilterService, IToneAlertService toneAlertService, ISettingsService settings)
+        public AudioPlaybackService(IAudioFilterService audioFilterService, IToneAlertService toneAlertService, ISettingsService settings, ISystemMediaService systemMediaService)
         {
             _audioFilterService = audioFilterService;
             _toneAlertService = toneAlertService;
             _settings = settings;
+            _systemMediaService = systemMediaService;
         }
 
         private bool MobileMixAudioWithOtherAppsEnabled => _settings.MobileMixAudioWithOtherApps;
@@ -697,16 +700,19 @@ namespace JoesScanner.Services
 
             try
             {
-                var session = AVAudioSession.SharedInstance();
-                var sessionOptions = AVAudioSessionCategoryOptions.AllowBluetooth |
-                    AVAudioSessionCategoryOptions.AllowBluetoothA2DP;
-                if (MobileMixAudioWithOtherAppsEnabled)
-                    sessionOptions |= AVAudioSessionCategoryOptions.MixWithOthers;
+                var mixEnabled = MobileMixAudioWithOtherAppsEnabled;
 
-                session.SetCategory(
-                    AVAudioSessionCategory.Playback,
-                    sessionOptions);
-                session.SetActive(true);
+                try
+                {
+                    var session = AVAudioSession.SharedInstance();
+                    var appState = UIApplication.SharedApplication.ApplicationState;
+                    AppLog.Add(() => $"AudioSession(iOS): preparing clip playback. mixEnabled={mixEnabled} appState={appState} otherAudioPlaying={session.OtherAudioPlaying}");
+                }
+                catch
+                {
+                }
+
+                await _systemMediaService.RefreshAudioSessionAsync(true, "ClipPlaybackStart");
 
 	                // When audio is downloaded to a local temp file, iOS needs a file URL.
 	                // Passing a raw filesystem path into NSUrl.FromString often fails.
@@ -843,8 +849,10 @@ namespace JoesScanner.Services
                     item);
 
                 player.Play();
+                try { AppLog.Add(() => $"Audio(iOS): player.Play invoked. mixEnabled={mixEnabled} rate={playbackRate}"); } catch { }
 
                 try { player.Rate = (float)playbackRate; } catch { }
+                try { AppLog.Add(() => $"Audio(iOS): player.Rate applied={player.Rate}"); } catch { }
 
                 if (prepared.StaticFilterEnabled || (prepared.ToneFilterEnabled && prepared.ToneDuckSegments.Count > 0))
                     _ = ApplyDynamicVolumeAppleAsync(prepared, player, cancellationToken);
@@ -903,6 +911,7 @@ namespace JoesScanner.Services
                     try { _iosPlayer.Pause(); } catch { }
                     try { _iosPlayer.ReplaceCurrentItemWithPlayerItem(null); } catch { }
                     try { _iosPlayer.Dispose(); } catch { }
+                    try { AppLog.Add("Audio(iOS): player stopped and disposed."); } catch { }
                 }
             }
             catch

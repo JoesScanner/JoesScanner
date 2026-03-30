@@ -23,6 +23,11 @@ namespace JoesScanner.Services
         {
         }
 
+        private partial Task PlatformRefreshAudioSessionAsync(bool audioEnabled, string reason)
+        {
+            return Task.CompletedTask;
+        }
+
         private partial void PlatformClear()
         {
         }

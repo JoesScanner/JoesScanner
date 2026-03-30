@@ -52,6 +52,11 @@ namespace JoesScanner.Services
             PlatformUpdateNowPlaying(metadata ?? new NowPlayingMetadata(), audioEnabled);
         }
 
+        public Task RefreshAudioSessionAsync(bool audioEnabled, string reason)
+        {
+            return PlatformRefreshAudioSessionAsync(audioEnabled, reason ?? string.Empty);
+        }
+
         public void Clear()
         {
             PlatformClear();
@@ -122,6 +127,8 @@ namespace JoesScanner.Services
         private partial Task PlatformStartSessionAsync(bool audioEnabled);
         private partial Task PlatformStopSessionAsync();
         private partial void PlatformUpdateNowPlaying(NowPlayingMetadata metadata, bool audioEnabled);
+        private partial Task PlatformRefreshAudioSessionAsync(bool audioEnabled, string reason);
+
         private partial void PlatformClear();
     }
 }

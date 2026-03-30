@@ -19,6 +19,10 @@ namespace JoesScanner.Services
         void SetServerCredentials(string serverUrl, string username, string password);
         void ClearServerCredentials(string serverUrl);
 
+        bool TryGetServerFirewallCredentials(string serverUrl, out string username, out string password);
+        void SetServerFirewallCredentials(string serverUrl, string username, string password);
+        void ClearServerFirewallCredentials(string serverUrl);
+
         // Last non-empty username used for Auth API checks. Helps features that need to know
         // which account was used even when the scanner stream itself uses a service account.
         string LastAuthUsername { get; set; }

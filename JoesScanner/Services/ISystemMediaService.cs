@@ -27,6 +27,9 @@ namespace JoesScanner.Services
         // Update the OS visible now playing metadata (Bluetooth controls, lock screen, car UI).
         void UpdateNowPlaying(NowPlayingMetadata metadata, bool audioEnabled);
 
+        // Reapply platform audio-session policy after setting changes, playback starts, or system events.
+        Task RefreshAudioSessionAsync(bool audioEnabled, string reason);
+
         // Clear metadata and reset state.
         void Clear();
     }

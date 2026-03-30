@@ -254,6 +254,49 @@ namespace JoesScanner.Services
             }
         }
 
+        public bool TryGetServerFirewallCredentials(string serverUrl, out string username, out string password)
+        {
+            var key = ServerKeyHelper.Normalize(serverUrl);
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                username = string.Empty;
+                password = string.Empty;
+                return false;
+            }
+
+            username = GetString(GetServerFirewallCredUserKey(key), string.Empty).Trim();
+            password = GetString(GetServerFirewallCredPassKey(key), string.Empty).Trim();
+            return !string.IsNullOrWhiteSpace(username) && !string.IsNullOrWhiteSpace(password);
+        }
+
+        public void SetServerFirewallCredentials(string serverUrl, string username, string password)
+        {
+            var key = ServerKeyHelper.Normalize(serverUrl);
+            if (string.IsNullOrWhiteSpace(key))
+                return;
+
+            var u = (username ?? string.Empty).Trim();
+            var p = (password ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(u) || string.IsNullOrWhiteSpace(p))
+            {
+                ClearServerFirewallCredentials(serverUrl);
+                return;
+            }
+
+            SetString(GetServerFirewallCredUserKey(key), u);
+            SetString(GetServerFirewallCredPassKey(key), p);
+        }
+
+        public void ClearServerFirewallCredentials(string serverUrl)
+        {
+            var key = ServerKeyHelper.Normalize(serverUrl);
+            if (string.IsNullOrWhiteSpace(key))
+                return;
+
+            Remove(GetServerFirewallCredUserKey(key));
+            Remove(GetServerFirewallCredPassKey(key));
+        }
+
         private static string GetServerCredUserKey(string normalizedServerUrl)
         {
             return $"server_cred_user::{ServerKeyHelper.Normalize(normalizedServerUrl)}";
@@ -262,6 +305,16 @@ namespace JoesScanner.Services
         private static string GetServerCredPassKey(string normalizedServerUrl)
         {
             return $"server_cred_pass::{ServerKeyHelper.Normalize(normalizedServerUrl)}";
+        }
+
+        private static string GetServerFirewallCredUserKey(string normalizedServerUrl)
+        {
+            return $"server_firewall_cred_user::{ServerKeyHelper.Normalize(normalizedServerUrl)}";
+        }
+
+        private static string GetServerFirewallCredPassKey(string normalizedServerUrl)
+        {
+            return $"server_firewall_cred_pass::{ServerKeyHelper.Normalize(normalizedServerUrl)}";
         }
 
 
@@ -727,6 +780,7 @@ CREATE INDEX IF NOT EXISTS idx_servers_enabled_sort ON servers(enabled, sort_ord
             EnsureColumnExists(conn, TableServers, "badge", "TEXT NOT NULL DEFAULT ''");
             EnsureColumnExists(conn, TableServers, "badge_label", "TEXT NOT NULL DEFAULT ''");
             EnsureColumnExists(conn, TableServers, "source", "TEXT NOT NULL DEFAULT ''");
+            EnsureColumnExists(conn, TableServers, "uses_api_firewall_credentials", "INTEGER NOT NULL DEFAULT 0");
 
             // Upgrade older installs that had a minimal auth state table.
             EnsureColumnExists(conn, TableServerAuthState, "validated_online", "INTEGER NOT NULL DEFAULT 0");
@@ -890,7 +944,7 @@ WHERE server_key IN ($joe, $custom);";
             using var conn = OpenConnection();
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
-SELECT directory_id, display_name, base_url, info_url, area_label, map_anchor, is_official, badge, badge_label
+SELECT directory_id, display_name, base_url, info_url, area_label, map_anchor, is_official, badge, badge_label, uses_api_firewall_credentials
 FROM servers
 WHERE source = 'directory'
 ORDER BY is_official DESC, sort_order ASC, display_name ASC;";
@@ -908,7 +962,8 @@ ORDER BY is_official DESC, sort_order ASC, display_name ASC;";
                     MapAnchor = SafeGetString(reader, 5),
                     IsOfficial = SafeGetInt(reader, 6) != 0,
                     Badge = SafeGetString(reader, 7),
-                    BadgeLabel = SafeGetString(reader, 8)
+                    BadgeLabel = SafeGetString(reader, 8),
+                    UsesApiFirewallCredentials = SafeGetInt(reader, 9) != 0
                 };
 
                 // Skip entries that do not have a usable URL.
@@ -963,11 +1018,11 @@ ORDER BY is_official DESC, sort_order ASC, display_name ASC;";
                 cmd.CommandText = @"
 INSERT INTO servers (
   server_key, display_name, base_url, enabled, sort_order, is_builtin, created_utc, updated_utc, last_used_utc,
-  info_url, area_label, map_anchor, is_official, directory_id, badge, badge_label, source
+  info_url, area_label, map_anchor, is_official, directory_id, badge, badge_label, source, uses_api_firewall_credentials
 )
 VALUES (
   $k, $n, $u, 1, $s, 0, $c, $m, NULL,
-  $info, $area, $anchor, $official, $dirId, $badge, $badgeLabel, 'directory'
+  $info, $area, $anchor, $official, $dirId, $badge, $badgeLabel, 'directory', $usesApiFw
 )
 ON CONFLICT(server_key) DO UPDATE SET
   display_name = excluded.display_name,

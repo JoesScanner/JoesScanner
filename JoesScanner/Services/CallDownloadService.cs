@@ -1,4 +1,5 @@
 using JoesScanner.Models;
+using JoesScanner.Helpers;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http.Headers;
@@ -14,9 +15,6 @@ namespace JoesScanner.Services
 {
     public sealed class CallDownloadService : ICallDownloadService
     {
-        private const string ServiceAuthUsername = "secappass";
-        private const string ServiceAuthPassword = "7a65vBLeqLjdRut5bSav4eMYGUJPrmjHhgnPmEji3q3S7tZ3K5aadFZz2EZtbaE7";
-
         private readonly ISettingsService _settingsService;
         private readonly HttpClient _httpClient;
 
@@ -224,24 +222,22 @@ namespace JoesScanner.Services
         {
             try
             {
-                // Hosted Joe's Scanner server: use service credentials if subscription is valid.
-                if (string.Equals(audioUri.Host, "app.joesscanner.com", StringComparison.OrdinalIgnoreCase))
+                var serverKey = audioUri.GetLeftPart(UriPartial.Authority);
+                var firewallToken = HostedServerRules.GetApiFirewallBasicAuthParameterEnsuredAsync(_settingsService, serverKey).GetAwaiter().GetResult();
+                if (!string.IsNullOrWhiteSpace(firewallToken))
                 {
-                    var ok = _settingsService.SubscriptionLastStatusOk;
-                    var expires = _settingsService.SubscriptionExpiresUtc;
-                    var tier = _settingsService.SubscriptionTierLevel;
-
-                    if (ok && tier >= 1 && expires.HasValue && expires.Value.ToUniversalTime() > DateTime.UtcNow)
-                    {
-                        var rawCreds = $"{ServiceAuthUsername}:{ServiceAuthPassword}";
-                        var bytes = Encoding.ASCII.GetBytes(rawCreds);
-                        request.Headers.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(bytes));
-                    }
-
+                    AppLog.Add(() => "Download: auth applied (API firewall creds).");
+                    request.Headers.Authorization = new AuthenticationHeaderValue("Basic", firewallToken);
                     return;
                 }
 
-                // Custom servers: use configured Basic Auth credentials if available.
+                if (HostedServerRules.RequiresApiFirewallCredentials(_settingsService, serverKey))
+                {
+                    AppLog.Add(() => "Download: auth not applied. reason=api_firewall_credentials_unavailable");
+                    return;
+                }
+
+                // Custom/manual servers: use configured Basic Auth credentials if available.
                 var username = (_settingsService.BasicAuthUsername ?? string.Empty).Trim();
                 if (string.IsNullOrWhiteSpace(username))
                     return;
@@ -250,6 +246,7 @@ namespace JoesScanner.Services
 
                 var rawAuth = $"{username}:{password}";
                 var authBytes = Encoding.UTF8.GetBytes(rawAuth);
+                AppLog.Add(() => "Download: auth applied (custom creds).");
                 request.Headers.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(authBytes));
             }
             catch
