@@ -13,15 +13,26 @@ namespace JoesScanner.Services
         private static readonly NSString AudioSessionMediaServicesWereResetNotificationName = new NSString("AVAudioSessionMediaServicesWereResetNotification");
         private static readonly NSString UIApplicationDidBecomeActiveNotificationName = new NSString("UIApplicationDidBecomeActiveNotification");
         private static readonly NSString UIApplicationWillEnterForegroundNotificationName = new NSString("UIApplicationWillEnterForegroundNotification");
+        private static readonly NSString UIApplicationWillResignActiveNotificationName = new NSString("UIApplicationWillResignActiveNotification");
+        private static readonly NSString UIApplicationDidEnterBackgroundNotificationName = new NSString("UIApplicationDidEnterBackgroundNotification");
         private static readonly NSString AVAudioSessionInterruptionTypeKeyName = new NSString("AVAudioSessionInterruptionTypeKey");
         private static readonly NSString AVAudioSessionInterruptionOptionKeyName = new NSString("AVAudioSessionInterruptionOptionKey");
         private static readonly NSString AVAudioSessionRouteChangeReasonKeyName = new NSString("AVAudioSessionRouteChangeReasonKey");
 
         private readonly object _audioSessionGate = new();
         private bool _sessionStarted;
+        private bool _transientClipSessionActive;
+        private bool _clipPlaybackActive;
+        private bool _sessionConfigured;
+        private bool _sessionActivated;
         private bool _remoteEventsStarted;
+        private bool _remoteCommandsEnabled;
         private bool _lastAudioEnabled = true;
         private bool _observersRegistered;
+        private bool _isAppForegroundActive = true;
+        private bool _isInterrupted;
+        private AVAudioSessionCategoryOptions _lastConfiguredOptions;
+        private NowPlayingMetadata _lastNowPlayingMetadata = new();
         private MPMediaItemArtwork? _cachedArtwork;
         private AVAudioPlayer? _silenceKeepAlivePlayer;
         private NSObject? _interruptionObserver;
@@ -29,6 +40,8 @@ namespace JoesScanner.Services
         private NSObject? _mediaServicesResetObserver;
         private NSObject? _didBecomeActiveObserver;
         private NSObject? _willEnterForegroundObserver;
+        private NSObject? _willResignActiveObserver;
+        private NSObject? _didEnterBackgroundObserver;
 
         // 1 second of silence (PCM 16-bit, 44.1kHz, mono) wrapped in a WAV header.
         // This is used as a keepalive so iOS does not suspend the process between discrete audio clips while locked.
@@ -50,13 +63,6 @@ namespace JoesScanner.Services
             try
             {
                 var center = MPRemoteCommandCenter.Shared;
-
-                center.PlayCommand.Enabled = true;
-                center.PauseCommand.Enabled = true;
-                center.StopCommand.Enabled = true;
-
-                center.NextTrackCommand.Enabled = onNext != null;
-                center.PreviousTrackCommand.Enabled = onPrevious != null;
 
                 center.PlayCommand.AddTarget((MPRemoteCommandEvent evt) =>
                 {
@@ -97,92 +103,101 @@ namespace JoesScanner.Services
             catch
             {
             }
+
+            UpdateRemoteTransportState("SetHandlers");
         }
 
         private partial Task PlatformStartSessionAsync(bool audioEnabled)
         {
             _sessionStarted = true;
             _lastAudioEnabled = audioEnabled;
+            _isAppForegroundActive = IsForegroundActive();
+            _lastNowPlayingMetadata = new NowPlayingMetadata
+            {
+                Title = "Connected",
+                Artist = "Joes Scanner"
+            };
 
             EnsureAudioSessionObserversRegistered();
-            ConfigurePlaybackSession("StartSession", audioEnabled, deactivateFirst: true);
-
-            try
-            {
-                if (!_remoteEventsStarted)
-                {
-                    UIApplication.SharedApplication.BeginReceivingRemoteControlEvents();
-                    _remoteEventsStarted = true;
-                }
-            }
-            catch
-            {
-            }
-
-            UpdateNowPlaying("Connected", "Joes Scanner", audioEnabled);
+            EnsurePlaybackSessionConfigured("StartSession", audioEnabled, forceCategoryUpdate: true);
+            UpdateKeepAliveState("StartSession");
+            UpdateRemoteTransportState("StartSession");
+            RefreshNowPlayingState("StartSession");
             return Task.CompletedTask;
         }
 
         private partial Task PlatformStopSessionAsync()
         {
-            if (!_sessionStarted)
-                return Task.CompletedTask;
-
             _sessionStarted = false;
+            _clipPlaybackActive = false;
+
+            ClearPublishedNowPlaying("StopSession");
 
             try
             {
-                SetNowPlaying(null);
-                try { AppLog.Add("AudioSession(iOS): NowPlaying cleared."); } catch { }
+                if (!_transientClipSessionActive)
+                    DeactivatePlaybackSession("StopSession", removeObserversWhenIdle: true);
+                else
+                    UpdateKeepAliveState("StopSession");
             }
             catch
             {
             }
 
-            try
-            {
-                StopSilenceKeepAlive();
-            }
-            catch
-            {
-            }
-
-            try
-            {
-                var session = AVAudioSession.SharedInstance();
-                session.SetActive(false);
-                AppLog.Add("AudioSession(iOS): SetActive(false) success. reason=StopSession");
-            }
-            catch (Exception ex)
-            {
-                try { AppLog.Add(() => $"AudioSession(iOS): SetActive(false) failed. reason=StopSession error={ex.Message}"); } catch { }
-            }
-
-            RemoveAudioSessionObservers();
-
-            try
-            {
-                if (_remoteEventsStarted)
-                {
-                    UIApplication.SharedApplication.EndReceivingRemoteControlEvents();
-                    _remoteEventsStarted = false;
-                }
-            }
-            catch
-            {
-            }
-
+            UpdateRemoteTransportState("StopSession");
             return Task.CompletedTask;
         }
 
         private partial Task PlatformRefreshAudioSessionAsync(bool audioEnabled, string reason)
         {
             _lastAudioEnabled = audioEnabled;
+            _isAppForegroundActive = IsForegroundActive();
 
-            if (_sessionStarted)
+            if (IsPlaybackSessionOwned())
+            {
+                EnsureAudioSessionObserversRegistered();
+                EnsurePlaybackSessionConfigured(reason, audioEnabled, forceCategoryUpdate: true);
+                UpdateKeepAliveState(reason);
+            }
+
+            UpdateRemoteTransportState(reason);
+            RefreshNowPlayingState(reason);
+            return Task.CompletedTask;
+        }
+
+        private partial Task PlatformSetClipPlaybackStateAsync(bool isPlaying, bool audioEnabled, string reason)
+        {
+            _lastAudioEnabled = audioEnabled;
+            _isAppForegroundActive = IsForegroundActive();
+
+            if (isPlaying)
+            {
+                _clipPlaybackActive = true;
                 EnsureAudioSessionObserversRegistered();
 
-            ConfigurePlaybackSession(reason, audioEnabled, deactivateFirst: true);
+                if (!_sessionStarted)
+                    _transientClipSessionActive = true;
+
+                EnsurePlaybackSessionConfigured(reason, audioEnabled, forceCategoryUpdate: !_sessionStarted);
+                UpdateKeepAliveState(reason);
+            }
+            else
+            {
+                _clipPlaybackActive = false;
+
+                if (_sessionStarted)
+                {
+                    UpdateKeepAliveState(reason);
+                }
+                else if (_transientClipSessionActive)
+                {
+                    _transientClipSessionActive = false;
+                    DeactivatePlaybackSession(reason, removeObserversWhenIdle: true);
+                }
+            }
+
+            UpdateRemoteTransportState(reason);
+            RefreshNowPlayingState(reason);
             return Task.CompletedTask;
         }
 
@@ -191,38 +206,8 @@ namespace JoesScanner.Services
             try
             {
                 _lastAudioEnabled = audioEnabled;
-
-                var info = new NSMutableDictionary();
-                var title = metadata?.Title ?? string.Empty;
-                var artistRaw = metadata?.Artist ?? string.Empty;
-                var album = metadata?.Album ?? string.Empty;
-                var composer = metadata?.Composer ?? string.Empty;
-                var genre = metadata?.Genre ?? string.Empty;
-
-                info[KeyTitle] = new NSString(title);
-
-                var artist = audioEnabled ? artistRaw : (artistRaw + " (Audio Off)");
-                info[KeyArtist] = new NSString(artist);
-
-                if (!string.IsNullOrWhiteSpace(album))
-                    info[KeyAlbumTitle] = new NSString(album);
-
-                if (!string.IsNullOrWhiteSpace(composer))
-                    info[KeyComposer] = new NSString(composer);
-
-                if (!string.IsNullOrWhiteSpace(genre))
-                    info[KeyGenre] = new NSString(genre);
-
-                info[KeyIsLiveStream] = NSNumber.FromBoolean(false);
-                info[KeyDefaultPlaybackRate] = NSNumber.FromDouble(1.0);
-                info[KeyPlaybackRate] = NSNumber.FromDouble(_sessionStarted ? 1.0 : 0.0);
-
-                var artwork = GetOrCreateArtwork();
-                if (artwork != null)
-                    info[KeyArtwork] = artwork;
-
-                SetNowPlaying(info);
-                try { AppLog.Add(() => $"AudioSession(iOS): NowPlaying updated. title='{title}' artist='{artist}' audioEnabled={audioEnabled} sessionStarted={_sessionStarted}"); } catch { }
+                _lastNowPlayingMetadata = CloneMetadata(metadata);
+                RefreshNowPlayingState("MetadataUpdate");
             }
             catch
             {
@@ -233,8 +218,8 @@ namespace JoesScanner.Services
         {
             try
             {
-                SetNowPlaying(null);
-                try { AppLog.Add("AudioSession(iOS): NowPlaying cleared via Clear."); } catch { }
+                _lastNowPlayingMetadata = new NowPlayingMetadata();
+                ClearPublishedNowPlaying("Clear");
             }
             catch
             {
@@ -253,9 +238,12 @@ namespace JoesScanner.Services
                 _interruptionObserver = center.AddObserver(AudioSessionInterruptionNotificationName, OnAudioSessionInterrupted);
                 _routeChangeObserver = center.AddObserver(AudioSessionRouteChangeNotificationName, OnAudioSessionRouteChanged);
                 _mediaServicesResetObserver = center.AddObserver(AudioSessionMediaServicesWereResetNotificationName, OnAudioSessionMediaServicesWereReset);
-                _didBecomeActiveObserver = center.AddObserver(UIApplicationDidBecomeActiveNotificationName, _ => ReapplyAudioSessionAsync("AppDidBecomeActive"));
-                _willEnterForegroundObserver = center.AddObserver(UIApplicationWillEnterForegroundNotificationName, _ => ReapplyAudioSessionAsync("AppWillEnterForeground"));
+                _didBecomeActiveObserver = center.AddObserver(UIApplicationDidBecomeActiveNotificationName, _ => OnApplicationDidBecomeActive());
+                _willEnterForegroundObserver = center.AddObserver(UIApplicationWillEnterForegroundNotificationName, _ => OnApplicationWillEnterForeground());
+                _willResignActiveObserver = center.AddObserver(UIApplicationWillResignActiveNotificationName, _ => OnApplicationWillResignActive());
+                _didEnterBackgroundObserver = center.AddObserver(UIApplicationDidEnterBackgroundNotificationName, _ => OnApplicationDidEnterBackground());
                 _observersRegistered = true;
+                _isAppForegroundActive = IsForegroundActive();
                 AppLog.Add("AudioSession(iOS): observers registered.");
             }
             catch (Exception ex)
@@ -277,6 +265,8 @@ namespace JoesScanner.Services
                 RemoveObserver(center, ref _mediaServicesResetObserver);
                 RemoveObserver(center, ref _didBecomeActiveObserver);
                 RemoveObserver(center, ref _willEnterForegroundObserver);
+                RemoveObserver(center, ref _willResignActiveObserver);
+                RemoveObserver(center, ref _didEnterBackgroundObserver);
                 _observersRegistered = false;
                 AppLog.Add("AudioSession(iOS): observers removed.");
             }
@@ -301,26 +291,78 @@ namespace JoesScanner.Services
             }
         }
 
+        private void OnApplicationWillResignActive()
+        {
+            _isAppForegroundActive = false;
+            ReevaluatePlaybackStateAsync("AppWillResignActive", forceCategoryUpdate: false);
+        }
+
+        private void OnApplicationDidEnterBackground()
+        {
+            _isAppForegroundActive = false;
+            ReevaluatePlaybackStateAsync("AppDidEnterBackground", forceCategoryUpdate: false);
+        }
+
+        private void OnApplicationWillEnterForeground()
+        {
+            _isAppForegroundActive = true;
+            ReevaluatePlaybackStateAsync("AppWillEnterForeground", forceCategoryUpdate: false);
+        }
+
+        private void OnApplicationDidBecomeActive()
+        {
+            _isAppForegroundActive = true;
+            ReevaluatePlaybackStateAsync("AppDidBecomeActive", forceCategoryUpdate: false);
+        }
+
         private void OnAudioSessionInterrupted(NSNotification notification)
         {
             try
             {
-                ulong typeValue = 0;
-                ulong optionValue = 0;
+                AVAudioSessionInterruptionType? interruptionType = null;
+                var interruptionOptions = (AVAudioSessionInterruptionOptions)0;
 
                 if (notification.UserInfo != null)
                 {
                     if (notification.UserInfo[AVAudioSessionInterruptionTypeKeyName] is NSNumber typeNumber)
-                        typeValue = typeNumber.UInt64Value;
+                        interruptionType = (AVAudioSessionInterruptionType)(nuint)typeNumber.UInt64Value;
 
                     if (notification.UserInfo[AVAudioSessionInterruptionOptionKeyName] is NSNumber optionNumber)
-                        optionValue = optionNumber.UInt64Value;
+                        interruptionOptions = (AVAudioSessionInterruptionOptions)(nuint)optionNumber.UInt64Value;
                 }
 
-                AppLog.Add(() => $"AudioSession(iOS): interruption observed. type={typeValue} options={optionValue} sessionStarted={_sessionStarted}");
+                var shouldResume = interruptionOptions.HasFlag(AVAudioSessionInterruptionOptions.ShouldResume);
+                AppLog.Add(() => $"AudioSession(iOS): interruption observed. type={interruptionType?.ToString() ?? "unknown"} shouldResume={shouldResume} sessionStarted={_sessionStarted} transientSession={_transientClipSessionActive} clipPlaybackActive={_clipPlaybackActive}");
 
-                if (typeValue == 1)
-                    ReapplyAudioSessionAsync("InterruptionEnded");
+                if (interruptionType == AVAudioSessionInterruptionType.Began)
+                {
+                    _isInterrupted = true;
+
+                    lock (_audioSessionGate)
+                    {
+                        _sessionActivated = false;
+                    }
+
+                    UpdateKeepAliveState("InterruptionBegan");
+                    UpdateRemoteTransportState("InterruptionBegan");
+                    RefreshNowPlayingState("InterruptionBegan");
+                    return;
+                }
+
+                if (interruptionType == AVAudioSessionInterruptionType.Ended)
+                {
+                    _isInterrupted = false;
+
+                    if (shouldResume)
+                    {
+                        ReevaluatePlaybackStateAsync("InterruptionEnded", forceCategoryUpdate: false);
+                    }
+                    else
+                    {
+                        UpdateRemoteTransportState("InterruptionEndedNoResume");
+                        RefreshNowPlayingState("InterruptionEndedNoResume");
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -332,12 +374,16 @@ namespace JoesScanner.Services
         {
             try
             {
-                ulong reasonValue = 0;
+                var routeChangeReason = AVAudioSessionRouteChangeReason.Unknown;
                 if (notification.UserInfo != null && notification.UserInfo[AVAudioSessionRouteChangeReasonKeyName] is NSNumber reasonNumber)
-                    reasonValue = reasonNumber.UInt64Value;
+                    routeChangeReason = (AVAudioSessionRouteChangeReason)(nuint)reasonNumber.UInt64Value;
 
-                AppLog.Add(() => $"AudioSession(iOS): route change observed. reason={reasonValue} sessionStarted={_sessionStarted}");
-                ReapplyAudioSessionAsync($"RouteChange:{reasonValue}");
+                AppLog.Add(() => $"AudioSession(iOS): route change observed. reason={routeChangeReason} sessionStarted={_sessionStarted} transientSession={_transientClipSessionActive} interrupted={_isInterrupted}");
+
+                if (routeChangeReason == AVAudioSessionRouteChangeReason.CategoryChange)
+                    return;
+
+                UpdateKeepAliveState($"RouteChange:{routeChangeReason}");
             }
             catch (Exception ex)
             {
@@ -355,22 +401,169 @@ namespace JoesScanner.Services
             {
             }
 
-            ReapplyAudioSessionAsync("MediaServicesReset");
+            lock (_audioSessionGate)
+            {
+                _sessionConfigured = false;
+                _sessionActivated = false;
+                _lastConfiguredOptions = 0;
+            }
+
+            _isInterrupted = false;
+            ReevaluatePlaybackStateAsync("MediaServicesReset", forceCategoryUpdate: true);
         }
 
-        private void ReapplyAudioSessionAsync(string reason)
+        private void ReevaluatePlaybackStateAsync(string reason, bool forceCategoryUpdate)
         {
-            _ = Task.Run(async () =>
+            _ = Task.Run(() =>
             {
                 try
                 {
-                    await PlatformRefreshAudioSessionAsync(_lastAudioEnabled, reason);
+                    if (!IsPlaybackSessionOwned())
+                    {
+                        UpdateRemoteTransportState(reason);
+                        RefreshNowPlayingState(reason);
+                        return;
+                    }
+
+                    EnsurePlaybackSessionConfigured(reason, _lastAudioEnabled, forceCategoryUpdate);
+                    UpdateKeepAliveState(reason);
+                    UpdateRemoteTransportState(reason);
+                    RefreshNowPlayingState(reason);
                 }
                 catch (Exception ex)
                 {
-                    try { AppLog.Add(() => $"AudioSession(iOS): async reapply failed. reason={reason} error={ex.Message}"); } catch { }
+                    try { AppLog.Add(() => $"AudioSession(iOS): async reevaluate failed. reason={reason} error={ex.Message}"); } catch { }
                 }
             });
+        }
+
+        private bool IsPlaybackSessionOwned()
+        {
+            return _sessionStarted || _transientClipSessionActive;
+        }
+
+        private bool ShouldRegisterAsNowPlayingCandidate()
+        {
+            if (!IsPlaybackSessionOwned())
+                return false;
+
+            if (_isInterrupted)
+                return false;
+
+            if (!_sessionActivated)
+                return false;
+
+            return !IsMobileMixAudioWithOtherAppsEnabled();
+        }
+
+        private void UpdateRemoteTransportState(string reason)
+        {
+            try
+            {
+                var shouldEnable = ShouldRegisterAsNowPlayingCandidate() && _onPlay != null && _onStop != null;
+                var center = MPRemoteCommandCenter.Shared;
+
+                center.PlayCommand.Enabled = shouldEnable;
+                center.PauseCommand.Enabled = shouldEnable;
+                center.StopCommand.Enabled = shouldEnable;
+                center.NextTrackCommand.Enabled = shouldEnable && _onNext != null;
+                center.PreviousTrackCommand.Enabled = shouldEnable && _onPrevious != null;
+
+                if (shouldEnable && !_remoteEventsStarted)
+                {
+                    UIApplication.SharedApplication.BeginReceivingRemoteControlEvents();
+                    _remoteEventsStarted = true;
+                }
+                else if (!shouldEnable && _remoteEventsStarted)
+                {
+                    UIApplication.SharedApplication.EndReceivingRemoteControlEvents();
+                    _remoteEventsStarted = false;
+                }
+
+                if (_remoteCommandsEnabled != shouldEnable)
+                {
+                    _remoteCommandsEnabled = shouldEnable;
+                    AppLog.Add(() => $"AudioSession(iOS): remote transport {(shouldEnable ? "enabled" : "disabled")}. reason={reason} mixEnabled={IsMobileMixAudioWithOtherAppsEnabled()} sessionStarted={_sessionStarted} transientSession={_transientClipSessionActive} interrupted={_isInterrupted}");
+                }
+            }
+            catch (Exception ex)
+            {
+                try { AppLog.Add(() => $"AudioSession(iOS): remote transport update failed. reason={reason} error={ex.Message}"); } catch { }
+            }
+        }
+
+        private void RefreshNowPlayingState(string reason)
+        {
+            try
+            {
+                if (ShouldRegisterAsNowPlayingCandidate())
+                    PublishNowPlaying(_lastNowPlayingMetadata, _lastAudioEnabled, reason);
+                else
+                    ClearPublishedNowPlaying(reason);
+            }
+            catch (Exception ex)
+            {
+                try { AppLog.Add(() => $"AudioSession(iOS): now playing refresh failed. reason={reason} error={ex.Message}"); } catch { }
+            }
+        }
+
+        private void PublishNowPlaying(NowPlayingMetadata metadata, bool audioEnabled, string reason)
+        {
+            var info = new NSMutableDictionary();
+            var title = metadata?.Title ?? string.Empty;
+            var artistRaw = metadata?.Artist ?? string.Empty;
+            var album = metadata?.Album ?? string.Empty;
+            var composer = metadata?.Composer ?? string.Empty;
+            var genre = metadata?.Genre ?? string.Empty;
+
+            info[KeyTitle] = new NSString(title);
+
+            var artist = audioEnabled ? artistRaw : (artistRaw + " (Audio Off)");
+            info[KeyArtist] = new NSString(artist);
+
+            if (!string.IsNullOrWhiteSpace(album))
+                info[KeyAlbumTitle] = new NSString(album);
+
+            if (!string.IsNullOrWhiteSpace(composer))
+                info[KeyComposer] = new NSString(composer);
+
+            if (!string.IsNullOrWhiteSpace(genre))
+                info[KeyGenre] = new NSString(genre);
+
+            info[KeyIsLiveStream] = NSNumber.FromBoolean(false);
+            info[KeyDefaultPlaybackRate] = NSNumber.FromDouble(1.0);
+            info[KeyPlaybackRate] = NSNumber.FromDouble(_clipPlaybackActive ? 1.0 : 0.0);
+
+            var artwork = GetOrCreateArtwork();
+            if (artwork != null)
+                info[KeyArtwork] = artwork;
+
+            SetNowPlaying(info);
+            try { AppLog.Add(() => $"AudioSession(iOS): NowPlaying published. reason={reason} title='{title}' artist='{artist}' audioEnabled={audioEnabled} clipPlaybackActive={_clipPlaybackActive}"); } catch { }
+        }
+
+        private void ClearPublishedNowPlaying(string reason)
+        {
+            try
+            {
+                SetNowPlaying(null);
+                AppLog.Add(() => $"AudioSession(iOS): NowPlaying cleared. reason={reason}");
+            }
+            catch
+            {
+            }
+        }
+
+        private static NowPlayingMetadata CloneMetadata(NowPlayingMetadata? metadata)
+        {
+            return new NowPlayingMetadata
+            {
+                Title = metadata?.Title ?? string.Empty,
+                Artist = metadata?.Artist ?? string.Empty,
+                Album = metadata?.Album ?? string.Empty,
+                Composer = metadata?.Composer ?? string.Empty,
+                Genre = metadata?.Genre ?? string.Empty
+            };
         }
 
         private static void SetNowPlaying(NSDictionary? value)
@@ -436,52 +629,91 @@ namespace JoesScanner.Services
                 }
                 catch { }
 
-                AppLog.Add(() => $"AudioSession(iOS): reason={reason} mixEnabled={mixEnabled} requestedOptions={requestedOptions} category={category} mode={mode} otherAudioPlaying={otherAudioPlaying} appState={(IsForegroundActive() ? "Active" : "BackgroundLike")} keepAliveDesired={keepAliveDesired} keepAliveRunning={_silenceKeepAlivePlayer != null} route={currentRoute}");
+                AppLog.Add(() => $"AudioSession(iOS): reason={reason} mixEnabled={mixEnabled} requestedOptions={requestedOptions} category={category} mode={mode} otherAudioPlaying={otherAudioPlaying} appState={(_isAppForegroundActive ? "Active" : "BackgroundLike")} clipPlaybackActive={_clipPlaybackActive} sessionStarted={_sessionStarted} transientSession={_transientClipSessionActive} interrupted={_isInterrupted} keepAliveDesired={keepAliveDesired} keepAliveRunning={_silenceKeepAlivePlayer != null} route={currentRoute}");
             }
             catch
             {
             }
         }
 
-        private void ConfigurePlaybackSession(string reason, bool audioEnabled, bool deactivateFirst)
+        private AVAudioSessionCategoryOptions BuildRequestedOptions(bool mixEnabled)
+        {
+            var options = AVAudioSessionCategoryOptions.AllowBluetooth | AVAudioSessionCategoryOptions.AllowBluetoothA2DP;
+            if (mixEnabled)
+                options |= AVAudioSessionCategoryOptions.MixWithOthers;
+
+            return options;
+        }
+
+        private bool ShouldKeepAlive(bool mixEnabled)
+        {
+            if (!IsPlaybackSessionOwned())
+                return false;
+
+            if (_isInterrupted)
+                return false;
+
+            if (!_sessionActivated)
+                return false;
+
+            if (_clipPlaybackActive)
+                return false;
+
+            return !mixEnabled || !_isAppForegroundActive;
+        }
+
+        private void EnsurePlaybackSessionConfigured(string reason, bool audioEnabled, bool forceCategoryUpdate)
         {
             lock (_audioSessionGate)
             {
+                if (!IsPlaybackSessionOwned())
+                    return;
+
+                if (_isInterrupted)
+                {
+                    try { AppLog.Add(() => $"AudioSession(iOS): configure skipped during interruption. reason={reason}"); } catch { }
+                    return;
+                }
+
                 var mixEnabled = IsMobileMixAudioWithOtherAppsEnabled();
-                var keepAliveDesired = !mixEnabled || !IsForegroundActive();
+                var keepAliveDesired = ShouldKeepAlive(mixEnabled);
 
                 try
                 {
                     var session = AVAudioSession.SharedInstance();
-                    var options = AVAudioSessionCategoryOptions.AllowBluetooth | AVAudioSessionCategoryOptions.AllowBluetoothA2DP;
-                    if (mixEnabled)
-                        options |= AVAudioSessionCategoryOptions.MixWithOthers;
+                    var requestedOptions = BuildRequestedOptions(mixEnabled);
+                    var shouldSetCategory = forceCategoryUpdate || !_sessionConfigured || _lastConfiguredOptions != requestedOptions;
 
-                    if (deactivateFirst)
+                    if (shouldSetCategory)
                     {
-                        try
-                        {
-                            session.SetActive(false);
-                            AppLog.Add(() => $"AudioSession(iOS): SetActive(false) success. reason={reason} step=preconfigure");
-                        }
-                        catch (Exception ex)
-                        {
-                            try { AppLog.Add(() => $"AudioSession(iOS): SetActive(false) failed. reason={reason} step=preconfigure error={ex.Message}"); } catch { }
-                        }
+                        session.SetCategory(AVAudioSessionCategory.Playback, requestedOptions);
+                        _lastConfiguredOptions = requestedOptions;
+                        _sessionConfigured = true;
+                        AppLog.Add(() => $"AudioSession(iOS): SetCategory success. reason={reason} category=Playback options={requestedOptions} audioEnabled={audioEnabled}");
                     }
 
-                    session.SetCategory(AVAudioSessionCategory.Playback, options);
-                    AppLog.Add(() => $"AudioSession(iOS): SetCategory success. reason={reason} category=Playback options={options} audioEnabled={audioEnabled}");
+                    if (!_sessionActivated || forceCategoryUpdate)
+                    {
+                        session.SetActive(true);
+                        _sessionActivated = true;
+                        AppLog.Add(() => $"AudioSession(iOS): SetActive(true) success. reason={reason}");
+                    }
 
-                    session.SetActive(true);
-                    AppLog.Add(() => $"AudioSession(iOS): SetActive(true) success. reason={reason}");
-
-                    LogAudioSessionState(reason, session, options, mixEnabled, keepAliveDesired);
+                    LogAudioSessionState(reason, session, requestedOptions, mixEnabled, keepAliveDesired);
                 }
                 catch (Exception ex)
                 {
                     try { AppLog.Add(() => $"AudioSession(iOS): configure failed. reason={reason} error={ex.Message}"); } catch { }
                 }
+            }
+        }
+
+        private void UpdateKeepAliveState(string reason)
+        {
+            lock (_audioSessionGate)
+            {
+                var mixEnabled = IsMobileMixAudioWithOtherAppsEnabled();
+                var keepAliveDesired = ShouldKeepAlive(mixEnabled);
 
                 try
                 {
@@ -489,12 +721,51 @@ namespace JoesScanner.Services
                         StartSilenceKeepAlive();
                     else
                         StopSilenceKeepAlive();
+
+                    AppLog.Add(() => $"AudioSession(iOS): keepalive evaluated. reason={reason} desired={keepAliveDesired} mixEnabled={mixEnabled} clipPlaybackActive={_clipPlaybackActive} appForeground={_isAppForegroundActive} sessionStarted={_sessionStarted} transientSession={_transientClipSessionActive} interrupted={_isInterrupted}");
                 }
                 catch (Exception ex)
                 {
                     try { AppLog.Add(() => $"AudioSession(iOS): keepalive transition failed. reason={reason} error={ex.Message}"); } catch { }
                 }
             }
+        }
+
+        private void DeactivatePlaybackSession(string reason, bool removeObserversWhenIdle)
+        {
+            lock (_audioSessionGate)
+            {
+                try
+                {
+                    StopSilenceKeepAlive();
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    if (_sessionActivated || _sessionConfigured)
+                    {
+                        var session = AVAudioSession.SharedInstance();
+                        session.SetActive(false);
+                        AppLog.Add(() => $"AudioSession(iOS): SetActive(false) success. reason={reason}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    try { AppLog.Add(() => $"AudioSession(iOS): SetActive(false) failed. reason={reason} error={ex.Message}"); } catch { }
+                }
+                finally
+                {
+                    _sessionActivated = false;
+                    _sessionConfigured = false;
+                    _lastConfiguredOptions = 0;
+                }
+            }
+
+            if (removeObserversWhenIdle && !IsPlaybackSessionOwned())
+                RemoveAudioSessionObservers();
         }
 
         private void StartSilenceKeepAlive()

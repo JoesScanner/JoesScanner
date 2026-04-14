@@ -689,7 +689,19 @@ catch
                     var localObserved = await _authObservedTriplesSyncService.GetLocalObservedAsync(_settings.ServerUrl, DateTime.MinValue, CancellationToken.None);
                     localSeeded = localObserved?.Count ?? 0;
                     if (localObserved != null && localObserved.Count > 0)
+                    {
                         _filterService.SeedFromObservedTriples(localObserved);
+                    }
+                    else
+                    {
+                        var localDiscovery = _filterService.GetDiscoveredTriplesSnapshot();
+                        localSeeded = localDiscovery?.Count ?? 0;
+                        if (localDiscovery != null && localDiscovery.Count > 0)
+                        {
+                            _filterService.SeedFromObservedTriples(localDiscovery);
+                            AppLog.Add(() => $"Settings: manual lookup sync using locally persisted discovery fallback. server='{_settings.ServerUrl}' count={localSeeded}");
+                        }
+                    }
                 }
                 catch
                 {
@@ -937,6 +949,7 @@ catch
 
         public void EnsureSectionLoaded(string sectionKey)
         {
+            if (string.Equals(sectionKey, "Filters", StringComparison.OrdinalIgnoreCase)) FiltersBodyLoaded = true;
             if (string.Equals(sectionKey, "AudioFilters", StringComparison.OrdinalIgnoreCase)) AudioFiltersBodyLoaded = true;
             if (string.Equals(sectionKey, "AddressDetection", StringComparison.OrdinalIgnoreCase)) AddressDetectionBodyLoaded = true;
             if (string.Equals(sectionKey, "Bluetooth", StringComparison.OrdinalIgnoreCase)) BluetoothBodyLoaded = true;
@@ -961,7 +974,18 @@ catch
                 {
                     var localObserved = await _authObservedTriplesSyncService.GetLocalObservedAsync(serverKey, DateTime.MinValue, CancellationToken.None);
                     if (localObserved != null && localObserved.Count > 0)
+                    {
                         _filterService.SeedFromObservedTriples(localObserved);
+                    }
+                    else
+                    {
+                        var localDiscovery = _filterService.GetDiscoveredTriplesSnapshot();
+                        if (localDiscovery != null && localDiscovery.Count > 0)
+                        {
+                            _filterService.SeedFromObservedTriples(localDiscovery);
+                            AppLog.Add(() => $"Settings: seeded filters from locally persisted discovery fallback. server='{serverKey}' count={localDiscovery.Count}");
+                        }
+                    }
                 }
                 catch
                 {

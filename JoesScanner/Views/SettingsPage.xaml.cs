@@ -22,6 +22,19 @@ namespace JoesScanner.Views
     {
         private readonly IAppUpdateService? _appUpdateService;
         private SettingsViewModel? _observedSettingsViewModel;
+        private bool _isPreparingFiltersSection;
+
+        public static readonly BindableProperty FiltersTextTranslationXProperty = BindableProperty.Create(
+            nameof(FiltersTextTranslationX),
+            typeof(double),
+            typeof(SettingsPage),
+            0d);
+
+        public double FiltersTextTranslationX
+        {
+            get => (double)GetValue(FiltersTextTranslationXProperty);
+            set => SetValue(FiltersTextTranslationXProperty, value);
+        }
 
         // Profile UI is managed via a simple Picker plus a Manage menu.
 
@@ -201,6 +214,43 @@ namespace JoesScanner.Views
     }
 }
 
+        private void OnMuteFilterClicked(object? sender, EventArgs e)
+        {
+            if (BindingContext is not SettingsViewModel vm)
+                return;
+
+            if (sender is not BindableObject bindable || bindable.BindingContext is not FilterRule rule)
+                return;
+
+            if (vm.ToggleMuteFilterCommand?.CanExecute(rule) == true)
+                vm.ToggleMuteFilterCommand.Execute(rule);
+        }
+
+        private void OnDisableFilterClicked(object? sender, EventArgs e)
+        {
+            if (BindingContext is not SettingsViewModel vm)
+                return;
+
+            if (sender is not BindableObject bindable || bindable.BindingContext is not FilterRule rule)
+                return;
+
+            if (vm.ToggleDisableFilterCommand?.CanExecute(rule) == true)
+                vm.ToggleDisableFilterCommand.Execute(rule);
+        }
+
+        private async void OnFiltersScrollSliderValueChanged(object? sender, ValueChangedEventArgs e)
+        {
+            try
+            {
+                FiltersTextTranslationX = -e.NewValue;
+
+                if (FiltersTextScrollView != null)
+                    await FiltersTextScrollView.ScrollToAsync(e.NewValue, 0, false);
+            }
+            catch
+            {
+            }
+        }
 
 
         protected override void OnAppearing()
@@ -235,31 +285,10 @@ namespace JoesScanner.Views
                 });
             }
         }
-        private async void OnFilterTextSliderValueChanged(object sender, ValueChangedEventArgs e)
+        private void OnFilterTextSliderValueChanged(object sender, ValueChangedEventArgs e)
         {
-            await ApplyFilterTextHorizontalScrollAsync(e.NewValue);
-        }
-
-        private async void OnFilterRulesTextScrollViewLoaded(object sender, EventArgs e)
-        {
-            if (BindingContext is SettingsViewModel vm)
-            {
-                await ApplyFilterTextHorizontalScrollAsync(vm.FilterTextHorizontalOffset);
-            }
-        }
-
-        private async Task ApplyFilterTextHorizontalScrollAsync(double offset)
-        {
-            try
-            {
-                if (FilterRulesTextScrollView == null)
-                    return;
-
-                await FilterRulesTextScrollView.ScrollToAsync(offset, 0, false);
-            }
-            catch
-            {
-            }
+            // The filter rows bind directly to FilterTextHorizontalTranslation on the page view model.
+            // No imperative scroll synchronization is needed here.
         }
 
 
@@ -632,7 +661,7 @@ namespace JoesScanner.Views
 
             base.OnDisappearing();
         }
-
+        
 
         // Tap handler for the Mute (M) cell in the Filters grid.
         // Invokes SettingsViewModel.ToggleMuteFilterCommand with the FilterRule.
@@ -830,29 +859,45 @@ private void OnAutoplayHeaderTapped(object sender, EventArgs e)
     }
 }
 
-private void OnFiltersHeaderTapped(object sender, EventArgs e)
+private async void OnFiltersHeaderTapped(object sender, EventArgs e)
 {
-    var willOpen = !FiltersBodyLayout.IsVisible;
-
-    ToggleSection(FiltersBodyLayout, FiltersChevronLabel);
-    if (BindingContext is SettingsViewModel vm)
-        vm.SetSettingsCardOpenState("Filters", FiltersBodyLayout.IsVisible);
-
-    if (!willOpen || BindingContext is not SettingsViewModel loadVm)
+    if (FiltersBodyLayout == null || FiltersChevronLabel == null)
         return;
 
-    MainThread.BeginInvokeOnMainThread(async () =>
+    if (FiltersBodyLayout.IsVisible)
     {
-        try
+        ToggleSection(FiltersBodyLayout, FiltersChevronLabel);
+        if (BindingContext is SettingsViewModel closeVm)
+            closeVm.SetSettingsCardOpenState("Filters", false);
+        return;
+    }
+
+    if (_isPreparingFiltersSection)
+        return;
+
+    _isPreparingFiltersSection = true;
+
+    try
+    {
+        if (BindingContext is SettingsViewModel loadVm)
         {
-            await Task.Yield();
+            loadVm.SetSettingsCardOpenState("Filters", false);
             await loadVm.EnsureFiltersReadyAsync();
         }
-        catch (Exception ex)
-        {
-            try { AppLog.DebugWriteLine(() => $"SettingsPage: filters load failed: {ex}"); } catch { }
-        }
-    });
+
+        ToggleSection(FiltersBodyLayout, FiltersChevronLabel);
+
+        if (BindingContext is SettingsViewModel openVm)
+            openVm.SetSettingsCardOpenState("Filters", true);
+    }
+    catch (Exception ex)
+    {
+        try { AppLog.DebugWriteLine(() => $"SettingsPage: filters load failed: {ex}"); } catch { }
+    }
+    finally
+    {
+        _isPreparingFiltersSection = false;
+    }
 }
 
 

@@ -132,6 +132,72 @@
         </Setter>
     </Style>
 
+
+    <Style x:Key="FilterActionButtonStyle" TargetType="Button" BasedOn="{StaticResource PillButtonStyle}">
+        <Setter Property="HeightRequest" Value="28" />
+        <Setter Property="MinimumHeightRequest" Value="28" />
+        <Setter Property="MinimumWidthRequest" Value="0" />
+        <Setter Property="Padding" Value="8,0" />
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="CornerRadius" Value="10" />
+        <Setter Property="HorizontalOptions" Value="Start" />
+        <Setter Property="VerticalOptions" Value="Center" />
+        <Setter Property="LineBreakMode" Value="NoWrap" />
+    </Style>
+
+    <Style x:Key="FilterMuteButtonStyle" TargetType="Button" BasedOn="{StaticResource FilterActionButtonStyle}">
+        <Setter Property="Padding" Value="8,0" />
+    </Style>
+
+    <Style x:Key="FilterDisableButtonStyle" TargetType="Button" BasedOn="{StaticResource FilterActionButtonStyle}">
+        <Setter Property="Padding" Value="9,0" />
+    </Style>
+
+    <Style x:Key="FilterActionChipStyle" TargetType="Border">
+        <Setter Property="HeightRequest" Value="28" />
+        <Setter Property="MinimumHeightRequest" Value="28" />
+        <Setter Property="MinimumWidthRequest" Value="0" />
+        <Setter Property="Padding" Value="8,0" />
+        <Setter Property="StrokeThickness" Value="1" />
+        <Setter Property="StrokeShape">
+            <Setter.Value>
+                <RoundRectangle CornerRadius="10" />
+            </Setter.Value>
+        </Setter>
+        <Setter Property="HorizontalOptions" Value="Start" />
+        <Setter Property="VerticalOptions" Value="Center" />
+    </Style>
+
+    <Style x:Key="FilterMuteChipStyle" TargetType="Border" BasedOn="{StaticResource FilterActionChipStyle}">
+        <Setter Property="Padding" Value="10,0" />
+        <Setter Property="MinimumWidthRequest" Value="48" />
+    </Style>
+
+    <Style x:Key="FilterDisableChipStyle" TargetType="Border" BasedOn="{StaticResource FilterActionChipStyle}">
+        <Setter Property="Padding" Value="10,0" />
+        <Setter Property="MinimumWidthRequest" Value="62" />
+    </Style>
+
+    <Style x:Key="FilterActionChipTextStyle" TargetType="Label">
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="VerticalTextAlignment" Value="Center" />
+        <Setter Property="HorizontalTextAlignment" Value="Center" />
+        <Setter Property="LineBreakMode" Value="NoWrap" />
+        <Setter Property="MaxLines" Value="1" />
+        <Setter Property="Margin" Value="0" />
+        <Setter Property="Padding" Value="0" />
+    </Style>
+
+    <Style x:Key="FilterRowLabelStyle" TargetType="Label">
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="HeightRequest" Value="28" />
+        <Setter Property="Padding" Value="8,0" />
+        <Setter Property="VerticalTextAlignment" Value="Center" />
+        <Setter Property="VerticalOptions" Value="Center" />
+        <Setter Property="LineBreakMode" Value="NoWrap" />
+        <Setter Property="MaxLines" Value="1" />
+    </Style>
+
     <!-- Secondary pill button style for actions like Settings and Donate -->
     <Style x:Key="SecondaryPillButtonStyle"
            TargetType="Button"

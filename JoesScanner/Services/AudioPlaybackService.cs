@@ -18,8 +18,11 @@ using Foundation;
 using UIKit;
 #endif
 
+using JoesScanner.Helpers;
 using System.IO;
+using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
 using System.Linq;
@@ -64,8 +67,11 @@ namespace JoesScanner.Services
         private Android.Media.MediaPlayer? _androidPlayer;
         private AudioManager? _audioManager;
         private AudioFocusChangeListener? _focusListener;
-	        // Android audio focus request object is intentionally not used here.
-	        // The .NET Android bindings for AudioFocusRequest vary across TFMs/SDKs.
+        private AudioFocusRequestClass? _audioFocusRequest;
+        private readonly object _androidAudioFocusLock = new object();
+        private CancellationTokenSource? _androidDeferredFocusAbandonCts;
+        private bool _androidAudioFocusHeld;
+        private DateTimeOffset _androidAudioFocusPreserveUntilUtc;
 #endif
 
 #if IOS || MACCATALYST
@@ -77,10 +83,15 @@ namespace JoesScanner.Services
 
         public Task PlayAsync(string audioUrl, CancellationToken cancellationToken = default)
         {
-            return PlayAsync(audioUrl, 1.0, cancellationToken);
+            return PlayAsync(audioUrl, 1.0, false, cancellationToken);
         }
 
-        public async Task PlayAsync(string audioUrl, double playbackRate, CancellationToken cancellationToken = default)
+        public Task PlayAsync(string audioUrl, double playbackRate, CancellationToken cancellationToken = default)
+        {
+            return PlayAsync(audioUrl, playbackRate, false, cancellationToken);
+        }
+
+        public async Task PlayAsync(string audioUrl, double playbackRate, bool preserveAudioFocusForImmediateNextPlayback, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(audioUrl))
                 return;
@@ -195,7 +206,7 @@ namespace JoesScanner.Services
 #if WINDOWS
                 await PlayOnWindowsAsync(prepared, playbackRate, linkedToken);
 #elif ANDROID
-                await PlayOnAndroidAsync(prepared, playbackRate, linkedToken);
+                await PlayOnAndroidAsync(prepared, playbackRate, preserveAudioFocusForImmediateNextPlayback, linkedToken);
 #elif IOS || MACCATALYST
                 await PlayOnAppleAsync(prepared, playbackRate, linkedToken);
 #else
@@ -376,15 +387,31 @@ namespace JoesScanner.Services
 #endif
 
 #if ANDROID
-        private async Task PlayOnAndroidAsync(PreparedAudio prepared, double playbackRate, CancellationToken cancellationToken)
+        private async Task PlayOnAndroidAsync(PreparedAudio prepared, double playbackRate, bool preserveAudioFocusForImmediateNextPlayback, CancellationToken cancellationToken)
         {
-            await StopOnAndroidAsync();
+            var reusingPreservedAudioFocusForImmediatePlayback = CanReusePreservedAndroidAudioFocusForImmediatePlayback();
+
+            if (reusingPreservedAudioFocusForImmediatePlayback)
+            {
+                CleanupAndroidPlayer(_androidPlayer, abandonFocus: false, stopPlaybackFirst: false);
+
+                try { AppLog.Add("Audio(Android): preserving existing focus for immediate playback handoff."); } catch { }
+            }
+            else
+            {
+                await StopOnAndroidAsync();
+            }
 
             var ctx = Platform.CurrentActivity ?? Platform.AppContext;
             if (ctx == null)
                 return;
 
-            RequestAudioFocus(ctx);
+            var focusGranted = RequestAudioFocus(ctx);
+            if (!focusGranted)
+            {
+                try { AppLog.Add("Audio(Android): audio focus request failed; skipping clip playback."); } catch { }
+                return;
+            }
 
             var startedTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var finishedTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -400,13 +427,12 @@ namespace JoesScanner.Services
                 if (p0 == null)
                     return;
 
+                var attrs = BuildAndroidPlaybackAudioAttributes();
+
                 try
                 {
-                    var attrsBuilder = new AudioAttributes.Builder();
-                    attrsBuilder.SetUsage(AudioUsageKind.Media);
-                    attrsBuilder.SetContentType(AudioContentType.Speech);
-                    var attrs = attrsBuilder.Build();
-                    p0.SetAudioAttributes(attrs);
+                    if (attrs != null)
+                        p0.SetAudioAttributes(attrs);
                 }
                 catch
                 {
@@ -539,6 +565,14 @@ namespace JoesScanner.Services
             {
                 // Swallow playback failures; queue logic handles skipping.
             }
+            finally
+            {
+                var preserveFocus = preserveAudioFocusForImmediateNextPlayback;
+                CleanupAndroidPlayer(player, abandonFocus: !preserveFocus, stopPlaybackFirst: false);
+
+                if (preserveFocus)
+                    ScheduleAndroidAudioFocusAbandon(TimeSpan.FromMilliseconds(500));
+            }
         }
 
         private static bool LooksLikeNetworkOrContentUri(string src)
@@ -560,70 +594,282 @@ namespace JoesScanner.Services
 
         private Task StopOnAndroidAsync()
         {
+            CleanupAndroidPlayer(_androidPlayer, abandonFocus: true, stopPlaybackFirst: true);
+            return Task.CompletedTask;
+        }
+
+        private AudioAttributes? BuildAndroidPlaybackAudioAttributes()
+        {
             try
             {
-                if (_androidPlayer != null)
+                var attrsBuilder = new AudioAttributes.Builder();
+                attrsBuilder.SetUsage(AudioUsageKind.Media);
+                attrsBuilder.SetContentType(AudioContentType.Speech);
+                return attrsBuilder.Build();
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private AudioFocus GetAndroidFocusGain()
+        {
+            return MobileMixAudioWithOtherAppsEnabled ? AudioFocus.GainTransientMayDuck : AudioFocus.GainTransient;
+        }
+
+        private void CleanupAndroidPlayer(Android.Media.MediaPlayer? player, bool abandonFocus, bool stopPlaybackFirst)
+        {
+            if (player == null)
+            {
+                if (abandonFocus)
+                    AbandonAudioFocus();
+
+                return;
+            }
+
+            try
+            {
+                if (stopPlaybackFirst)
                 {
-                    try { _androidPlayer.Stop(); } catch { }
-                    try { _androidPlayer.Reset(); } catch { }
-                    try { _androidPlayer.Release(); } catch { }
-                    try { _androidPlayer.Dispose(); } catch { }
+                    try { player.Stop(); } catch { }
                 }
+
+                try { player.Reset(); } catch { }
+                try { player.Release(); } catch { }
+                try { player.Dispose(); } catch { }
             }
             catch
             {
             }
             finally
             {
-                _androidPlayer = null;
-                AbandonAudioFocus();
-            }
+                if (ReferenceEquals(_androidPlayer, player))
+                    _androidPlayer = null;
 
-            return Task.CompletedTask;
+                if (abandonFocus && !(_androidPlayer != null && !ReferenceEquals(_androidPlayer, player)))
+                    AbandonAudioFocus();
+            }
         }
 
-	        private void RequestAudioFocus(Context context)
-	        {
-	            try
-	            {
-	                _audioManager ??= (AudioManager?)context.GetSystemService(Context.AudioService);
-	                if (_audioManager == null)
-	                    return;
+        private bool CanReusePreservedAndroidAudioFocusForImmediatePlayback()
+        {
+            lock (_androidAudioFocusLock)
+            {
+                return _androidPlayer == null
+                    && _androidAudioFocusHeld
+                    && DateTimeOffset.UtcNow <= _androidAudioFocusPreserveUntilUtc;
+            }
+        }
 
-	                _focusListener ??= new AudioFocusChangeListener(this);
+        private bool RequestAudioFocus(Context context)
+        {
+            try
+            {
+                _audioManager ??= (AudioManager?)context.GetSystemService(Context.AudioService);
+                if (_audioManager == null)
+                    return false;
 
-	#pragma warning disable CS0618
+                _focusListener ??= new AudioFocusChangeListener(this);
+
+                lock (_androidAudioFocusLock)
+                {
+                    try
+                    {
+                        _androidDeferredFocusAbandonCts?.Cancel();
+                        _androidDeferredFocusAbandonCts?.Dispose();
+                    }
+                    catch
+                    {
+                    }
+                    finally
+                    {
+                        _androidDeferredFocusAbandonCts = null;
+                    }
+
+                    if (_androidAudioFocusHeld && DateTimeOffset.UtcNow <= _androidAudioFocusPreserveUntilUtc)
+                    {
+                        _androidAudioFocusPreserveUntilUtc = DateTimeOffset.MinValue;
+                        try { AppLog.Add("Audio(Android): reusing preserved audio focus for immediate playback handoff."); } catch { }
+                        return true;
+                    }
+
+                    _androidAudioFocusPreserveUntilUtc = DateTimeOffset.MinValue;
+                }
+
+                var focusMode = GetAndroidFocusGain();
+
+                if (OperatingSystem.IsAndroidVersionAtLeast(26))
+                {
+                    var builder = new AudioFocusRequestClass.Builder(focusMode);
+
+                    var attrs = BuildAndroidPlaybackAudioAttributes();
+                    if (attrs != null)
+                        builder.SetAudioAttributes(attrs);
+
+                    builder.SetOnAudioFocusChangeListener(_focusListener);
+                    _audioFocusRequest = builder.Build();
+
+                    var result = _audioManager.RequestAudioFocus(_audioFocusRequest);
+                    var granted = result == AudioFocusRequest.Granted;
+                    lock (_androidAudioFocusLock)
+                    {
+                        _androidAudioFocusHeld = granted;
+                        if (!granted)
+                            _androidAudioFocusPreserveUntilUtc = DateTimeOffset.MinValue;
+                    }
+
+                    try { AppLog.Add(() => $"Audio(Android): requestAudioFocus(AudioFocusRequest) result={result} gain={focusMode}."); } catch { }
+                    return granted;
+                }
+
+#pragma warning disable CS0618
 #pragma warning disable CA1422
-                var focusMode = MobileMixAudioWithOtherAppsEnabled ? AudioFocus.GainTransientMayDuck : AudioFocus.Gain;
-                _audioManager.RequestAudioFocus(_focusListener, AMediaStream.Music, focusMode);
+                var legacyResult = _audioManager.RequestAudioFocus(_focusListener, AMediaStream.Music, focusMode);
 #pragma warning restore CA1422
 #pragma warning restore CS0618
-	            }
-	            catch
-	            {
-	            }
-	        }
+                var legacyGranted = legacyResult == AudioFocusRequest.Granted;
+                lock (_androidAudioFocusLock)
+                {
+                    _androidAudioFocusHeld = legacyGranted;
+                    if (!legacyGranted)
+                        _androidAudioFocusPreserveUntilUtc = DateTimeOffset.MinValue;
+                }
 
-	        private void AbandonAudioFocus()
-	        {
-	            try
-	            {
-	                if (_audioManager == null)
-	                    return;
+                try { AppLog.Add(() => $"Audio(Android): requestAudioFocus(legacy) result={legacyResult} gain={focusMode}."); } catch { }
+                return legacyGranted;
+            }
+            catch
+            {
+                lock (_androidAudioFocusLock)
+                {
+                    _androidAudioFocusHeld = false;
+                    _androidAudioFocusPreserveUntilUtc = DateTimeOffset.MinValue;
+                }
 
-	                if (_focusListener == null)
-	                    return;
+                return false;
+            }
+        }
 
-	#pragma warning disable CS0618
+        private void ScheduleAndroidAudioFocusAbandon(TimeSpan delay)
+        {
+            CancellationTokenSource? cts = null;
+
+            lock (_androidAudioFocusLock)
+            {
+                if (!_androidAudioFocusHeld)
+                    return;
+
+                try
+                {
+                    _androidDeferredFocusAbandonCts?.Cancel();
+                    _androidDeferredFocusAbandonCts?.Dispose();
+                }
+                catch
+                {
+                }
+
+                _androidAudioFocusPreserveUntilUtc = DateTimeOffset.UtcNow.Add(delay);
+                _androidDeferredFocusAbandonCts = new CancellationTokenSource();
+                cts = _androidDeferredFocusAbandonCts;
+            }
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    if (cts == null)
+                        return;
+
+                    await Task.Delay(delay, cts.Token);
+                    AbandonAudioFocus();
+                }
+                catch (global::System.OperationCanceledException)
+                {
+                }
+                catch
+                {
+                }
+            });
+        }
+
+        private void AbandonAudioFocus()
+        {
+            CancellationTokenSource? pendingAbandon = null;
+
+            try
+            {
+                lock (_androidAudioFocusLock)
+                {
+                    pendingAbandon = _androidDeferredFocusAbandonCts;
+                    _androidDeferredFocusAbandonCts = null;
+                    _androidAudioFocusPreserveUntilUtc = DateTimeOffset.MinValue;
+                }
+
+                try { pendingAbandon?.Cancel(); } catch { }
+                try { pendingAbandon?.Dispose(); } catch { }
+
+                if (_audioManager == null)
+                {
+                    lock (_androidAudioFocusLock)
+                    {
+                        _androidAudioFocusHeld = false;
+                    }
+                    return;
+                }
+
+                if (OperatingSystem.IsAndroidVersionAtLeast(26))
+                {
+                    var focusRequest = _audioFocusRequest;
+                    _audioFocusRequest = null;
+
+                    if (focusRequest == null)
+                    {
+                        lock (_androidAudioFocusLock)
+                        {
+                            _androidAudioFocusHeld = false;
+                        }
+                        return;
+                    }
+
+                    var result = _audioManager.AbandonAudioFocusRequest(focusRequest);
+                    lock (_androidAudioFocusLock)
+                    {
+                        _androidAudioFocusHeld = false;
+                    }
+                    try { AppLog.Add(() => $"Audio(Android): abandonAudioFocusRequest result={result}."); } catch { }
+                    return;
+                }
+
+                if (_focusListener == null)
+                {
+                    lock (_androidAudioFocusLock)
+                    {
+                        _androidAudioFocusHeld = false;
+                    }
+                    return;
+                }
+
+#pragma warning disable CS0618
 #pragma warning disable CA1422
-                _audioManager.AbandonAudioFocus(_focusListener);
+                var legacyResult = _audioManager.AbandonAudioFocus(_focusListener);
 #pragma warning restore CA1422
 #pragma warning restore CS0618
-	            }
-	            catch
-	            {
-	            }
-	        }
+                lock (_androidAudioFocusLock)
+                {
+                    _androidAudioFocusHeld = false;
+                }
+                try { AppLog.Add(() => $"Audio(Android): abandonAudioFocus(legacy) result={legacyResult}."); } catch { }
+            }
+            catch
+            {
+                lock (_androidAudioFocusLock)
+                {
+                    _androidAudioFocusHeld = false;
+                    _androidAudioFocusPreserveUntilUtc = DateTimeOffset.MinValue;
+                }
+            }
+        }
 
         private sealed class AudioFocusChangeListener : Java.Lang.Object, AudioManager.IOnAudioFocusChangeListener
         {
@@ -697,6 +943,7 @@ namespace JoesScanner.Services
             await StopOnAppleAsync();
 
             var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var clipPlaybackStateNotified = false;
 
             try
             {
@@ -711,8 +958,6 @@ namespace JoesScanner.Services
                 catch
                 {
                 }
-
-                await _systemMediaService.RefreshAudioSessionAsync(true, "ClipPlaybackStart");
 
 	                // When audio is downloaded to a local temp file, iOS needs a file URL.
 	                // Passing a raw filesystem path into NSUrl.FromString often fails.
@@ -848,6 +1093,9 @@ namespace JoesScanner.Services
                     },
                     item);
 
+                await _systemMediaService.SetClipPlaybackStateAsync(true, true, "ClipPlaybackStart");
+                clipPlaybackStateNotified = true;
+
                 player.Play();
                 try { AppLog.Add(() => $"Audio(iOS): player.Play invoked. mixEnabled={mixEnabled} rate={playbackRate}"); } catch { }
 
@@ -864,7 +1112,7 @@ namespace JoesScanner.Services
 
                 await tcs.Task;
             }
-            catch (OperationCanceledException)
+            catch (global::System.OperationCanceledException)
             {
                 throw;
             }
@@ -881,6 +1129,17 @@ namespace JoesScanner.Services
             }
             finally
             {
+                if (clipPlaybackStateNotified)
+                {
+                    try
+                    {
+                        await _systemMediaService.SetClipPlaybackStateAsync(false, true, "ClipPlaybackStop");
+                    }
+                    catch
+                    {
+                    }
+                }
+
                 try
                 {
                     if (_iosEndObserver != null)
@@ -961,7 +1220,7 @@ namespace JoesScanner.Services
             return Task.CompletedTask;
         }
 
-	        private static async Task<string> DownloadToTempFileAsync(string url, CancellationToken cancellationToken)
+	        private async Task<string> DownloadToTempFileAsync(string url, CancellationToken cancellationToken)
 	        {
 	            // Use the managed HTTP stack so http:// sources work even when the native stack is constrained.
 	            var handler = new SocketsHttpHandler
@@ -971,10 +1230,15 @@ namespace JoesScanner.Services
 
 	            using var http = new HttpClient(handler)
 	            {
-	                Timeout = TimeSpan.FromSeconds(15)
+	                Timeout = TimeSpan.FromSeconds(15),
+	                DefaultRequestVersion = HttpVersion.Version11,
+	                DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower
 	            };
 
-	            using var response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+	            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+	            ApplyAuthorizationHeader(request);
+
+	            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
 	            response.EnsureSuccessStatusCode();
 
 	            var tmpRoot = Path.Combine(Path.GetTempPath(), "joesscanner-audio");
@@ -1008,9 +1272,46 @@ namespace JoesScanner.Services
 
 	            return tmpPath;
 	        }
+
+	        private void ApplyAuthorizationHeader(HttpRequestMessage request)
+	        {
+	            try
+	            {
+	                if (request.RequestUri == null)
+	                    return;
+
+	                var serverKey = request.RequestUri.GetLeftPart(UriPartial.Authority);
+	                var firewallToken = HostedServerRules.GetApiFirewallBasicAuthParameterEnsuredAsync(_settings, serverKey).GetAwaiter().GetResult();
+	                if (!string.IsNullOrWhiteSpace(firewallToken))
+	                {
+	                    AppLog.Add(() => "Audio(iOS): temp download auth applied (API firewall creds).");
+	                    request.Headers.Authorization = new AuthenticationHeaderValue("Basic", firewallToken);
+	                    return;
+	                }
+
+	                if (HostedServerRules.RequiresApiFirewallCredentials(_settings, serverKey))
+	                {
+	                    AppLog.Add(() => "Audio(iOS): temp download auth not applied. reason=api_firewall_credentials_unavailable");
+	                    return;
+	                }
+
+	                var username = (_settings.BasicAuthUsername ?? string.Empty).Trim();
+	                if (string.IsNullOrWhiteSpace(username))
+	                    return;
+
+	                var password = TextNormalizationHelper.NormalizeSmartQuotes((_settings.BasicAuthPassword ?? string.Empty).Trim());
+	                var rawAuth = $"{username}:{password}";
+	                var authBytes = Encoding.UTF8.GetBytes(rawAuth);
+	                AppLog.Add(() => "Audio(iOS): temp download auth applied (custom creds).");
+	                request.Headers.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(authBytes));
+	            }
+	            catch
+	            {
+	                // Auth failure should not prevent the request from being attempted.
+	            }
+	        }
 #endif
 
-        
         private static double SmoothVolume(double current, double target, int tickMs)
         {
             // Fast drop (attack), slower rise (release) to avoid chattering.

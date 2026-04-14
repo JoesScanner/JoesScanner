@@ -3,6 +3,7 @@ using JoesScanner.Services;
 using System.Collections.ObjectModel;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Threading;
 using System.Windows.Input;
 using JoesScanner.Helpers;
 
@@ -40,6 +41,8 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
         // Used to decide whether we should clear the "last connected" intent across restarts.
         private volatile bool _userRequestedStop;
 
+        // Prevent overlapping start/stop transitions when the user taps play or stop repeatedly during startup/shutdown.
+        private int _monitoringTransitionState;
 
         private int _audioToggleSerial;
         // When true, the live queue continues to run but audio output is suppressed.
@@ -386,12 +389,15 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
         {
             return MainThread.InvokeOnMainThreadAsync(async () =>
             {
+                if (IsMonitoringTransitionInProgress)
+                    return;
+
                 if (!IsRunning)
                     await StartMonitoringAsync();
-            
-                    if (IsRunning && AudioEnabled)
-                        _ = RequestQueuePlaybackAsync("UserPlay", true);
-});
+
+                if (IsRunning && AudioEnabled)
+                    _ = RequestQueuePlaybackAsync("UserPlay", true);
+            });
         }
 
         private Task SystemStopAsync()
@@ -444,6 +450,8 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                 }
             }
         }
+
+        private bool IsMonitoringTransitionInProgress => Volatile.Read(ref _monitoringTransitionState) != 0;
 
         // Indicates whether audio playback is enabled.
         // This does not affect streaming, only whether audio is played.
@@ -1502,137 +1510,154 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             if (IsRunning)
                 return;
 
-            // Starting a new monitoring run resets any prior user-stop intent.
-            _userRequestedStop = false;
-
-            var serverUrl = _settingsService.ServerUrl ?? string.Empty;
-
-            if (string.IsNullOrWhiteSpace(serverUrl) || !Uri.TryCreate(serverUrl, UriKind.Absolute, out _))
+            if (Interlocked.CompareExchange(ref _monitoringTransitionState, 1, 0) != 0)
             {
-                var msg = "Select a server in Settings and press Validate before connecting.";
-                try { AppLog.Add(() => $"Connect blocked: missing or invalid server url: '{serverUrl}'"); } catch { }
-                SetConnectionStatus(ConnectionStatus.Error, msg);
+                AppLog.Add(() => "Connect ignored: monitoring transition already in progress.");
                 return;
             }
 
-            var isJoesScannerServer = false;
-
-            if (Uri.TryCreate(serverUrl, UriKind.Absolute, out var serverUri))
+            try
             {
-                isJoesScannerServer =
-                    HostedServerRules.IsHostedServerUri(serverUri);
-            }
+                if (IsRunning)
+                    return;
 
-            _telemetryService.TrackConnectionAttempt(serverUrl, isJoesScannerServer);
+                SetConnectionStatus(ConnectionStatus.Connecting);
 
-            var username = _settingsService.BasicAuthUsername ?? string.Empty;
+                // Starting a new monitoring run resets any prior user-stop intent.
+                _userRequestedStop = false;
 
-            if (isJoesScannerServer)
-            {
-                AppLog.Add(() => $"Subscription check: server={serverUrl}");
+                var serverUrl = _settingsService.ServerUrl ?? string.Empty;
 
-                var password = _settingsService.BasicAuthPassword ?? string.Empty;
-
-                // Hosted Joe's Scanner server requires a valid website account.
-                // Do not attempt to connect unless the user has entered credentials.
-                if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
+                if (string.IsNullOrWhiteSpace(serverUrl) || !Uri.TryCreate(serverUrl, UriKind.Absolute, out _))
                 {
-                    var msg = "Enter your Joe's Scanner username and password in Settings before connecting to the hosted server.";
-                    AppLog.Add(() => "Subscription check blocked: missing credentials for hosted server.");
-
-                    try
-                    {
-                        _settingsService.SubscriptionLastStatusOk = false;
-                        _settingsService.SubscriptionLastMessage = msg;
-                        _settingsService.SubscriptionLastCheckUtc = DateTime.UtcNow;
-                    }
-                    catch { }
-
-                    UpdateSubscriptionSummaryFromSettings();
-                    SetConnectionStatus(ConnectionStatus.AuthFailed, msg);
+                    var msg = "Select a server in Settings and press Validate before connecting.";
+                    try { AppLog.Add(() => $"Connect blocked: missing or invalid server url: '{serverUrl}'"); } catch { }
+                    SetConnectionStatus(ConnectionStatus.Error, msg);
                     return;
                 }
-                try
+
+                var isJoesScannerServer = false;
+
+                if (Uri.TryCreate(serverUrl, UriKind.Absolute, out var serverUri))
                 {
-                    var subResult = await _subscriptionService.EnsureSubscriptionAsync(CancellationToken.None);
-                    if (!subResult.IsAllowed)
+                    isJoesScannerServer =
+                        HostedServerRules.IsHostedServerUri(serverUri);
+                }
+
+                _telemetryService.TrackConnectionAttempt(serverUrl, isJoesScannerServer);
+
+                var username = _settingsService.BasicAuthUsername ?? string.Empty;
+
+                if (isJoesScannerServer)
+                {
+                    AppLog.Add(() => $"Subscription check: server={serverUrl}");
+
+                    var password = _settingsService.BasicAuthPassword ?? string.Empty;
+
+                    // Hosted Joe's Scanner server requires a valid website account.
+                    // Do not attempt to connect unless the user has entered credentials.
+                    if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
                     {
-                        AppLog.Add(() => $"Subscription check failed: {subResult.ErrorCode} {subResult.Message}");
+                        var msg = "Enter your Joe's Scanner username and password in Settings before connecting to the hosted server.";
+                        AppLog.Add(() => "Subscription check blocked: missing credentials for hosted server.");
 
-                        SetConnectionStatus(ConnectionStatus.AuthFailed,
-                            subResult.Message ?? "Subscription not active");
+                        try
+                        {
+                            _settingsService.SubscriptionLastStatusOk = false;
+                            _settingsService.SubscriptionLastMessage = msg;
+                            _settingsService.SubscriptionLastCheckUtc = DateTime.UtcNow;
+                        }
+                        catch { }
 
+                        UpdateSubscriptionSummaryFromSettings();
+                        SetConnectionStatus(ConnectionStatus.AuthFailed, msg);
                         return;
                     }
 
-                    AppLog.Add(() => "Subscription check passed, starting stream.");
-                    UpdateSubscriptionSummaryFromSettings();
+                    try
+                    {
+                        var subResult = await _subscriptionService.EnsureSubscriptionAsync(CancellationToken.None);
+                        if (!subResult.IsAllowed)
+                        {
+                            AppLog.Add(() => $"Subscription check failed: {subResult.ErrorCode} {subResult.Message}");
+
+                            SetConnectionStatus(ConnectionStatus.AuthFailed,
+                                subResult.Message ?? "Subscription not active");
+
+                            return;
+                        }
+
+                        AppLog.Add(() => "Subscription check passed, starting stream.");
+                        UpdateSubscriptionSummaryFromSettings();
+                    }
+                    catch (Exception ex)
+                    {
+                        AppLog.Add(() => $"Subscription check error: {ex.Message}");
+                        SetConnectionStatus(ConnectionStatus.Error, "Subscription check error");
+                        return;
+                    }
                 }
-                catch (Exception ex)
+                else
                 {
-                    AppLog.Add(() => $"Subscription check error: {ex.Message}");
-                    SetConnectionStatus(ConnectionStatus.Error, "Subscription check error");
-                    return;
+                    AppLog.Add(() => $"Custom server detected ({serverUrl}), skipping Joe's Scanner subscription check.");
+                    ShowSubscriptionSummary = false;
+                    SubscriptionSummary = string.Empty;
                 }
+
+                if (_cts != null)
+                {
+                    try { _cts.Cancel(); } catch { }
+
+                    _cts.Dispose();
+                    _cts = null;
+                }
+
+                _cts = new CancellationTokenSource();
+                var token = _cts.Token;
+
+                AppStateStore.SetBool("last_connected_on_exit", true);
+
+                IsRunning = true;
+
+                if (IsAppleIosTestAccount())
+                {
+                    // Ensure Apple review account immediately produces audible playback.
+                    AudioEnabled = true;
+                    AutoPlay = true;
+                }
+
+                await EnsureSystemMediaSessionStartedAsync();
+
+                _telemetryService.StartMonitoringHeartbeat(serverUrl);
+
+                _currentPlayingCall = null;
+                ClearPendingCalls();
+                ClearPrefetchedPlayableUrl(deleteCompletedTempFile: true);
+
+                if (Calls.Count > 0)
+                {
+                    _lastPlayedCall = Calls[0];
+                }
+                else
+                {
+                    _lastPlayedCall = null;
+                }
+
+                UpdateQueueDerivedState();
+
+                _ = Task.Run(() => RunCallStreamLoopAsync(token));
+
+                // Best-effort preload of History lookups. Never blocks connecting.
+                // If it fails, History page can still load lookups on demand and cache later.
+                _ = Task.Run(() => _historyLookupsCacheService.PreloadAsync(
+                    forceReload: false,
+                    reason: "connect",
+                    cancellationToken: CancellationToken.None));
             }
-            else
+            finally
             {
-                AppLog.Add(() => $"Custom server detected ({serverUrl}), skipping Joe's Scanner subscription check.");
-                ShowSubscriptionSummary = false;
-                SubscriptionSummary = string.Empty;
+                Interlocked.Exchange(ref _monitoringTransitionState, 0);
             }
-
-            if (_cts != null)
-            {
-                try { _cts.Cancel(); } catch { }
-
-                _cts.Dispose();
-                _cts = null;
-            }
-
-            _cts = new CancellationTokenSource();
-            var token = _cts.Token;
-
-            AppStateStore.SetBool("last_connected_on_exit", true);
-
-            SetConnectionStatus(ConnectionStatus.Connecting);
-            IsRunning = true;
-
-            if (IsAppleIosTestAccount())
-            {
-                // Ensure Apple review account immediately produces audible playback.
-                AudioEnabled = true;
-                AutoPlay = true;
-            }
-
-            await EnsureSystemMediaSessionStartedAsync();
-
-            _telemetryService.StartMonitoringHeartbeat(serverUrl);
-
-            _currentPlayingCall = null;
-            ClearPendingCalls();
-            ClearPrefetchedPlayableUrl(deleteCompletedTempFile: true);
-
-
-            if (Calls.Count > 0)
-            {
-                _lastPlayedCall = Calls[0];
-            }
-            else
-            {
-                _lastPlayedCall = null;
-            }
-
-            UpdateQueueDerivedState();
-
-            _ = Task.Run(() => RunCallStreamLoopAsync(token));
-
-            // Best-effort preload of History lookups. Never blocks connecting.
-            // If it fails, History page can still load lookups on demand and cache later.
-            _ = Task.Run(() => _historyLookupsCacheService.PreloadAsync(
-                forceReload: false,
-                reason: "connect",
-                cancellationToken: CancellationToken.None));
         }
 
         public async Task StartMonitoringWithAutoplayAsync()
@@ -2036,7 +2061,15 @@ if (!string.IsNullOrWhiteSpace(existing.DebugInfo))
 
         public async Task StopMonitoringAsync()
         {
-            AppLog.Add(() => "User clicked Stop monitoring.");
+            if (Interlocked.CompareExchange(ref _monitoringTransitionState, 1, 0) != 0)
+            {
+                AppLog.Add(() => "Stop ignored: monitoring transition already in progress.");
+                return;
+            }
+
+            try
+            {
+                AppLog.Add(() => "User clicked Stop monitoring.");
             _telemetryService.StopMonitoringHeartbeat("user_stop");
 
             // Explicit user disconnect. This should clear the "auto reconnect" intent.
@@ -2094,6 +2127,11 @@ if (!string.IsNullOrWhiteSpace(existing.DebugInfo))
             UpdateQueueDerivedState();
 
             AppStateStore.SetBool("last_connected_on_exit", false);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _monitoringTransitionState, 0);
+            }
         }
 
         // Clears the visible main queue (Calls), any pending calls, and any address alerts.
@@ -2258,11 +2296,21 @@ if (!string.IsNullOrWhiteSpace(existing.DebugInfo))
 						call.IsPlaying = false;
 				}
 
+				var shouldResumeQueueAfterManualPlayback =
+					AudioEnabled &&
+					IsRunning &&
+					(
+						_settingsService.AutoPlay ||
+						_userRunShouldDriveQueue ||
+						wasQueuePlaybackRunning ||
+						continueQueueFromPlayedCall
+					);
+
 				// Mark it as the current selection while it plays.
 				_currentPlayingCall = item;
 				UpdateQueueDerivedState();
 
-				await PlayAudioAsync(item, allowMutedPlayback: true);
+				await PlayAudioAsync(item, allowMutedPlayback: true, preserveAndroidAudioFocusForImmediateQueueResume: shouldResumeQueueAfterManualPlayback);
 
 				// After a user-initiated play, do not leave the VM thinking something is still playing.
 				// Otherwise the queue restart gate can refuse to start.
@@ -2286,17 +2334,7 @@ if (!string.IsNullOrWhiteSpace(existing.DebugInfo))
 					UpdateQueueDerivedState();
 				}
 
-				var shouldResumeQueue =
-					AudioEnabled &&
-					IsRunning &&
-					(
-						_settingsService.AutoPlay ||
-						_userRunShouldDriveQueue ||
-						wasQueuePlaybackRunning ||
-						continueQueueFromPlayedCall
-					);
-
-				if (shouldResumeQueue)
+				if (shouldResumeQueueAfterManualPlayback)
 				{
 					LastQueueEvent = "Tapped call finished; restarting queue";
 					_ = RequestQueuePlaybackAsync("TappedCallFinished", true);
@@ -2795,7 +2833,7 @@ private static string SpeedStepToLabel(double step)
             }
         }
 
-        private async Task PlayAudioAsync(CallItem? item, bool allowMutedPlayback = false)
+        private async Task PlayAudioAsync(CallItem? item, bool allowMutedPlayback = false, bool preserveAndroidAudioFocusForImmediateQueueResume = false)
         {
             if (item == null || string.IsNullOrWhiteSpace(item.AudioUrl))
                 return;
@@ -2955,7 +2993,7 @@ private static string SpeedStepToLabel(double step)
                 }
 
                 var playbackStopwatch = System.Diagnostics.Stopwatch.StartNew();
-                await _audioPlaybackService.PlayAsync(playbackUrl, rate, playbackToken);
+                await _audioPlaybackService.PlayAsync(playbackUrl, rate, preserveAndroidAudioFocusForImmediateQueueResume, playbackToken);
                 playbackStopwatch.Stop();
                 _lastQueuePlaybackFinishedAtUtc = DateTimeOffset.UtcNow;
 
@@ -3447,6 +3485,12 @@ public void DismissAddressAlert(CallItem call)
 
         private async Task ToggleConnectionAsync()
         {
+            if (IsMonitoringTransitionInProgress)
+            {
+                AppLog.Add(() => "Toggle ignored: monitoring transition already in progress.");
+                return;
+            }
+
             if (IsRunning)
             {
                 await StopMonitoringAsync();

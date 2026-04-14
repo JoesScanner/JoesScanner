@@ -538,7 +538,7 @@ private void OnAlertDismissInvoked(object? sender, EventArgs e)
                 title: "Receiver",
                 getItems: () => _viewModel.Receivers,
                 getCurrent: () => _viewModel.SelectedReceiver,
-                setSelected: item => _viewModel.SelectedReceiver = item);
+                setSelected: item => _viewModel.SelectReceiverFilter(item));
         }
 
         private async void OnSiteTapped(object sender, TappedEventArgs e)
@@ -547,7 +547,7 @@ private void OnAlertDismissInvoked(object? sender, EventArgs e)
                 title: "Site",
                 getItems: () => _viewModel.Sites,
                 getCurrent: () => _viewModel.SelectedSite,
-                setSelected: item => _viewModel.SelectedSite = item);
+                setSelected: item => _viewModel.SelectSiteFilter(item));
         }
 
         private async void OnTalkgroupTapped(object sender, TappedEventArgs e)
@@ -586,7 +586,8 @@ private void OnAlertDismissInvoked(object? sender, EventArgs e)
                 _isDropdownOpen = true;
 
                 const string cancel = "Cancel";
-                var labels = items.Select(i => i.Label).Where(s => !string.IsNullOrWhiteSpace(s)).ToArray();
+                var choiceEntries = BuildLookupChoiceEntries(items);
+                var labels = choiceEntries.Select(x => x.Display).ToArray();
                 if (labels.Length == 0)
                     return;
 
@@ -595,7 +596,15 @@ private void OnAlertDismissInvoked(object? sender, EventArgs e)
                 if (useModalLookup)
                 {
                     var modal = new LookupModalPage(title, cancel, labels);
-                    await Navigation.PushModalAsync(modal, animated: true);
+                    var navigation = GetActiveNavigation();
+                    if (navigation == null)
+                    {
+                        AppLog.Add(() => $"History: dropdown '{title}' could not open modal picker because no active navigation host was found.");
+                        return;
+                    }
+
+                    AppLog.Add(() => $"History: opening modal dropdown '{title}'. count={labels.Length}");
+                    await navigation.PushModalAsync(modal, animated: true);
                     choice = await modal.Result;
                 }
                 else
@@ -605,7 +614,7 @@ private void OnAlertDismissInvoked(object? sender, EventArgs e)
                         return;
                 }
 
-                var selected = items.FirstOrDefault(i => string.Equals(i.Label, choice, StringComparison.Ordinal));
+                var selected = choiceEntries.FirstOrDefault(x => string.Equals(x.Display, choice, StringComparison.Ordinal))?.Item;
                 if (selected == null)
                     return;
 
@@ -623,6 +632,68 @@ private void OnAlertDismissInvoked(object? sender, EventArgs e)
                 _isDropdownOpen = false;
             }
         }
+
+
+
+        private static INavigation? GetActiveNavigation()
+        {
+            try
+            {
+                if (Shell.Current?.Navigation != null)
+                    return Shell.Current.Navigation;
+
+                var app = Application.Current;
+                var windows = app?.Windows;
+                if (windows != null && windows.Count > 0 && windows[0].Page?.Navigation != null)
+                    return windows[0].Page.Navigation;
+
+#pragma warning disable CS0618
+                if (app?.MainPage?.Navigation != null)
+                    return app.MainPage.Navigation;
+#pragma warning restore CS0618
+            }
+            catch
+            {
+            }
+
+            return null;
+        }
+
+        private static List<LookupChoiceEntry> BuildLookupChoiceEntries(IReadOnlyList<HistoryLookupItem> items)
+        {
+            var results = new List<LookupChoiceEntry>();
+            if (items == null || items.Count == 0)
+                return results;
+
+            var labelCounts = items
+                .Where(i => !string.IsNullOrWhiteSpace(i?.Label))
+                .GroupBy(i => i.Label.Trim(), StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
+
+            foreach (var item in items)
+            {
+                if (item == null)
+                    continue;
+
+                var label = (item.Label ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(label))
+                    continue;
+
+                var display = label;
+                if (labelCounts.TryGetValue(label, out var count) && count > 1)
+                {
+                    var value = (item.Value ?? string.Empty).Trim();
+                    if (!string.IsNullOrWhiteSpace(value) && !string.Equals(value, label, StringComparison.OrdinalIgnoreCase))
+                        display = $"{label} [{value}]";
+                }
+
+                results.Add(new LookupChoiceEntry(display, item));
+            }
+
+            return results;
+        }
+
+        private sealed record LookupChoiceEntry(string Display, HistoryLookupItem Item);
 
         // iOS: the near-transparent native pickers can be hard to reliably tap.
         // We explicitly focus them when the styled border is tapped.

@@ -57,7 +57,7 @@ namespace JoesScanner.Services
             if (triples == null || triples.Count == 0)
                 return;
 
-            var structureChanged = false;
+            var discoveryChanged = false;
 
             lock (_gate)
             {
@@ -68,11 +68,11 @@ namespace JoesScanner.Services
 
                     var change = UpsertDiscovery_NoLock(node);
                     if (change == DiscoveryUpdateKind.Structural)
-                        structureChanged = true;
+                        discoveryChanged = true;
                 }
             }
 
-            if (!structureChanged)
+            if (!discoveryChanged)
                 return;
 
             SaveDiscoveryToStorage();
@@ -233,7 +233,7 @@ namespace JoesScanner.Services
             var site = Normalize(call.SystemName);
             var talkgroup = Normalize(call.Talkgroup);
             var nowUtc = DateTime.UtcNow;
-            var structureChanged = false;
+            var discoveryChanged = false;
 
             lock (_gate)
             {
@@ -250,7 +250,7 @@ namespace JoesScanner.Services
                         LastSeenUtc = nowUtc
                     });
 
-                    structureChanged = change == DiscoveryUpdateKind.Structural;
+                    discoveryChanged = change != DiscoveryUpdateKind.None;
                 }
                 else
                 {
@@ -265,15 +265,41 @@ namespace JoesScanner.Services
                         LastSeenUtc = nowUtc
                     });
 
-                    structureChanged = change == DiscoveryUpdateKind.Structural;
+                    discoveryChanged = change != DiscoveryUpdateKind.None;
                 }
             }
 
-            if (!structureChanged)
+            if (!discoveryChanged)
                 return;
 
             SaveDiscoveryToStorage();
             RebuildRenderedRules();
+        }
+
+
+        public IReadOnlyList<ObservedTriple> GetDiscoveredTriplesSnapshot()
+        {
+            lock (_gate)
+            {
+                return _discovery.Values
+                    .Where(x => !string.IsNullOrWhiteSpace(x.Receiver)
+                             && !string.IsNullOrWhiteSpace(x.Site)
+                             && !string.IsNullOrWhiteSpace(x.Talkgroup))
+                    .Select(x => new ObservedTriple
+                    {
+                        ReceiverValue = x.ReceiverKey,
+                        ReceiverLabel = x.Receiver,
+                        SiteValue = x.SiteKey,
+                        SiteLabel = x.Site,
+                        TalkgroupValue = x.TalkgroupKey,
+                        TalkgroupLabel = x.Talkgroup,
+                        LastSeenUtc = x.LastSeenUtc
+                    })
+                    .OrderBy(x => x.ReceiverLabel, NaturalComparer.Instance)
+                    .ThenBy(x => x.SiteLabel, NaturalComparer.Instance)
+                    .ThenBy(x => x.TalkgroupLabel, NaturalComparer.Instance)
+                    .ToList();
+            }
         }
 
         public bool ShouldHide(CallItem call)
@@ -539,24 +565,19 @@ namespace JoesScanner.Services
 
         private void ApplyRenderedRulesSnapshot(List<FilterRule> built)
         {
+            // WinUI has been the least tolerant platform here when the settings talkgroup filter UI
+            // is live and we issue a dense sequence of Move/Insert/Remove collection changes against
+            // the BindableLayout-backed rows. Replacing the rendered snapshot with a simple Clear/Add
+            // sequence is less fancy, but it is much more stable across platforms and still keeps the
+            // filter card responsive because the rule count is modest.
             var existingByKey = new Dictionary<string, FilterRule>(StringComparer.OrdinalIgnoreCase);
-            var duplicateIndexes = new List<int>();
-
             for (var i = 0; i < _rules.Count; i++)
             {
                 var current = _rules[i];
                 var key = BuildRuleKey(current);
-                if (existingByKey.ContainsKey(key))
-                {
-                    duplicateIndexes.Add(i);
-                    continue;
-                }
-
-                existingByKey[key] = current;
+                if (!existingByKey.ContainsKey(key))
+                    existingByKey[key] = current;
             }
-
-            for (var i = duplicateIndexes.Count - 1; i >= 0; i--)
-                _rules.RemoveAt(duplicateIndexes[i]);
 
             var desired = new List<FilterRule>(built.Count);
             var desiredKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -578,39 +599,9 @@ namespace JoesScanner.Services
                 }
             }
 
-            for (var i = _rules.Count - 1; i >= 0; i--)
-            {
-                var current = _rules[i];
-                if (!desired.Contains(current))
-                    _rules.RemoveAt(i);
-            }
-
-            for (var i = 0; i < desired.Count; i++)
-            {
-                var desiredRule = desired[i];
-                if (i < _rules.Count)
-                {
-                    if (ReferenceEquals(_rules[i], desiredRule))
-                        continue;
-
-                    var existingIndex = _rules.IndexOf(desiredRule);
-                    if (existingIndex >= 0)
-                    {
-                        _rules.Move(existingIndex, i);
-                    }
-                    else
-                    {
-                        _rules.Insert(i, desiredRule);
-                    }
-                }
-                else
-                {
-                    _rules.Add(desiredRule);
-                }
-            }
-
-            while (_rules.Count > desired.Count)
-                _rules.RemoveAt(_rules.Count - 1);
+            _rules.Clear();
+            foreach (var rule in desired)
+                _rules.Add(rule);
         }
 
         private static void UpdateRule(FilterRule target, FilterRule source)

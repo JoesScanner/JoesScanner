@@ -28,6 +28,11 @@ namespace JoesScanner.Services
             return Task.CompletedTask;
         }
 
+        private partial Task PlatformSetClipPlaybackStateAsync(bool isPlaying, bool audioEnabled, string reason)
+        {
+            return Task.CompletedTask;
+        }
+
         private partial void PlatformClear()
         {
         }

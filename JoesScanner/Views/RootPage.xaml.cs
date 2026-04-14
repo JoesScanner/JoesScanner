@@ -48,8 +48,11 @@ public partial class RootPage : ContentPage
 
         // iOS can tear down native handlers across a kill and relaunch cycle.
         // Reusing cached hosted views can then crash when MAUI tries to reattach them.
-        // To keep Settings and other tabs stable, recreate the hosted tab content after the first appearance.
-        if (_hasAppearedOnce && DeviceInfo.Platform == DevicePlatform.iOS)
+        // Only rebuild hosted tabs when the active host is actually empty.
+        //
+        // Rebuilding on every re-appearance can clear ContentHost after returning from a modal
+        // picker and leave only the tab/header area visible until the user taps the tab again.
+        if (_hasAppearedOnce && DeviceInfo.Platform == DevicePlatform.iOS && !HasActiveHostedContent())
         {
             try
             {
@@ -64,29 +67,40 @@ public partial class RootPage : ContentPage
         _hasAppearedOnce = true;
         // Do not allow navigation exceptions to kill the app.
         //
-        // iOS is more stable if the first hosted-content attach happens one dispatcher turn later,
+        // iOS is more stable if the hosted-content attach happens one dispatcher turn later,
         // after the native page handler is fully ready.
         try
         {
             if (DeviceInfo.Platform == DevicePlatform.iOS)
             {
-                if (Interlocked.Exchange(ref _initialNavigationStarted, 1) == 0)
+                _ = MainThread.InvokeOnMainThreadAsync(async () =>
                 {
-                    _ = MainThread.InvokeOnMainThreadAsync(async () =>
+                    try
                     {
-                        try
+                        await Task.Yield();
+                        await Task.Delay(1);
+
+                        // First appearance: perform the normal initial attach once.
+                        if (Interlocked.Exchange(ref _initialNavigationStarted, 1) == 0)
                         {
-                            await Task.Yield();
-                            await Task.Delay(1);
+                            SwitchTo(tab: _current);
+                            return;
+                        }
+
+                        // Later iOS appearances, including returning from modal pickers:
+                        // if the hosted content was cleared, reattach the current tab.
+                        if (!HasActiveHostedContent())
+                        {
+                            LogNavError($"RootPage.OnAppearing detected empty host on iOS. Reattaching {_current}.");
                             SwitchTo(tab: _current);
                         }
-                        catch (Exception ex)
-                        {
-                            LogNavError($"RootPage.OnAppearing deferred initial SwitchTo({_current}) failed: {ex}");
-                            _ = SafeAlertAsync("Navigation error", $"Settings navigation failed:\n{FormatNavException(ex)}");
-                        }
-                    });
-                }
+                    }
+                    catch (Exception ex)
+                    {
+                        LogNavError($"RootPage.OnAppearing deferred SwitchTo({_current}) failed: {ex}");
+                        _ = SafeAlertAsync("Navigation error", $"Settings navigation failed:\n{FormatNavException(ex)}");
+                    }
+                });
             }
             else
             {
@@ -371,6 +385,15 @@ public partial class RootPage : ContentPage
             // Even if the user is already on this tab, treat it as a show event.
             if (_pages.TryGetValue(_current, out var currentPage))
             {
+                try
+                {
+                    if (currentPage is ITabShowingAware showingAware)
+                        showingAware.OnTabShowing();
+                }
+                catch
+                {
+                }
+
                 try { currentPage.SendAppearing(); } catch { }
             }
 
@@ -432,7 +455,21 @@ public partial class RootPage : ContentPage
             ContentHost.Children.Add(view);
         }
 
-        // Tell the new page it is visible so it can attach handlers and refresh data.
+        // In this app, many tabs are hosted by detaching a page's Content and reparenting the
+        // resulting view inside RootPage. That hosting pattern is fast, but the normal MAUI page
+        // lifecycle is not reliable enough to be the only signal for tab visibility.
+        //
+        // Give pages an explicit tab-shown callback first, then still send the normal appearing
+        // event as a best-effort fallback for handlers that rely on it.
+        try
+        {
+            if (page is ITabShowingAware showingAware)
+                showingAware.OnTabShowing();
+        }
+        catch
+        {
+        }
+
         try { page.SendAppearing(); } catch { }
     }
 

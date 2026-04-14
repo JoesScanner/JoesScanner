@@ -93,6 +93,10 @@
 
                 _isMuted = value;
                 OnPropertyChanged();
+                OnPropertyChanged(nameof(MuteButtonText));
+                OnPropertyChanged(nameof(MuteButtonBackgroundColor));
+                OnPropertyChanged(nameof(MuteButtonBorderColor));
+                OnPropertyChanged(nameof(MuteButtonTextColor));
             }
         }
 
@@ -107,8 +111,29 @@
 
                 _isDisabled = value;
                 OnPropertyChanged();
+                OnPropertyChanged(nameof(DisableButtonText));
+                OnPropertyChanged(nameof(DisableButtonBackgroundColor));
+                OnPropertyChanged(nameof(DisableButtonBorderColor));
+                OnPropertyChanged(nameof(DisableButtonTextColor));
             }
         }
+
+
+        public string MuteButtonText => IsMuted ? "Unmute" : "Mute";
+
+        public string MuteButtonBackgroundColor => IsMuted ? "#1d4ed8" : "White";
+
+        public string MuteButtonBorderColor => IsMuted ? "#93c5fd" : "#cbd5e1";
+
+        public string MuteButtonTextColor => IsMuted ? "White" : "Black";
+
+        public string DisableButtonText => IsDisabled ? "Enable" : "Disable";
+
+        public string DisableButtonBackgroundColor => IsDisabled ? "#dc2626" : "White";
+
+        public string DisableButtonBorderColor => IsDisabled ? "#fca5a5" : "#cbd5e1";
+
+        public string DisableButtonTextColor => IsDisabled ? "White" : "Black";
 
         // Last time this rule matched traffic, stored as UTC.
         // Used for informational purposes and potential future cleanup.

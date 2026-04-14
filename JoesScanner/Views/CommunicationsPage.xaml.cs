@@ -2,7 +2,7 @@ using JoesScanner.ViewModels;
 
 namespace JoesScanner.Views
 {
-    public partial class CommunicationsPage : ContentPage
+    public partial class CommunicationsPage : ContentPage, ITabShowingAware, ITabHidingAware
     {
         private readonly CommunicationsViewModel _viewModel;
 
@@ -16,7 +16,27 @@ namespace JoesScanner.Views
         protected override async void OnAppearing()
         {
             base.OnAppearing();
+            await ShowPageAsync();
+        }
 
+        protected override async void OnDisappearing()
+        {
+            await HidePageAsync();
+            base.OnDisappearing();
+        }
+
+        public void OnTabShowing()
+        {
+            _ = ShowPageAsync();
+        }
+
+        public void OnTabHiding()
+        {
+            _ = HidePageAsync();
+        }
+
+        private async Task ShowPageAsync()
+        {
             try
             {
                 // Clear the badge immediately when navigating to the page.
@@ -28,7 +48,7 @@ namespace JoesScanner.Views
             }
         }
 
-        protected override async void OnDisappearing()
+        private async Task HidePageAsync()
         {
             try
             {
@@ -37,8 +57,6 @@ namespace JoesScanner.Views
             catch
             {
             }
-
-            base.OnDisappearing();
         }
     }
 }

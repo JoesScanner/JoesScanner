@@ -45,9 +45,9 @@ namespace JoesScanner.Services
         private static readonly Regex AuthorizationHeaderRegex = new(@"(?i)(authorization\s*[:=]\s*)(basic|bearer)\s+[^,;\s]+", RegexOptions.Compiled);
         private static readonly Regex BasicTokenRegex = new(@"(?i)(\bBasic\s+)[A-Za-z0-9+/=]{8,}", RegexOptions.Compiled);
         private static readonly Regex BearerTokenRegex = new(@"(?i)(\bBearer\s+)[A-Za-z0-9._~+/-]{8,}", RegexOptions.Compiled);
-        private static readonly Regex PasswordValueRegex = new(@"(?i)([\"']?password[\"']?\s*[:=]\s*)(\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^,;\r\n}\]]+)", RegexOptions.Compiled);
-        private static readonly Regex SessionTokenRegex = new(@"(?i)([\"']?session[_-]?token[\"']?\s*[:=]\s*)(\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^,;\r\n}\]]+)", RegexOptions.Compiled);
-        private static readonly Regex UsernameValueRegex = new(@"(?i)([\"']?username[\"']?\s*[:=]\s*)(\"(?:\\.|[^\"])*\"|'(?:\\.|[^'])*'|[^,;\r\n}\]]+)", RegexOptions.Compiled);
+        private static readonly Regex PasswordValueRegex = new(@"(?i)([""']?password[""']?\s*[:=]\s*)(""(?:\\.|[^""])*""|'(?:\\.|[^'])*'|[^,;\r\n}\]]+)", RegexOptions.Compiled);
+        private static readonly Regex SessionTokenRegex = new(@"(?i)([""']?session[_-]?token[""']?\s*[:=]\s*)(""(?:\\.|[^""])*""|'(?:\\.|[^'])*'|[^,;\r\n}\]]+)", RegexOptions.Compiled);
+        private static readonly Regex UsernameValueRegex = new(@"(?i)([""']?username[""']?\s*[:=]\s*)(""(?:\\.|[^""])*""|'(?:\\.|[^'])*'|[^,;\r\n}\]]+)", RegexOptions.Compiled);
 
         static AppLog()
         {

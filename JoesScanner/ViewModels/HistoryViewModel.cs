@@ -578,6 +578,30 @@ private HistorySearchFilters? _activeSearchFilters;
         public string SelectedReceiverDisplay =>
             !string.IsNullOrWhiteSpace(_selectedReceiver?.Label) ? _selectedReceiver.Label : "All";
 
+        public void SelectReceiverFilter(HistoryLookupItem? item)
+        {
+            var previousReceiverValue = _selectedReceiver?.Value ?? string.Empty;
+            var nextReceiverValue = item?.Value ?? string.Empty;
+            var changed = !string.Equals(previousReceiverValue, nextReceiverValue, StringComparison.Ordinal);
+
+            SelectedReceiver = item;
+
+            if (!changed)
+                return;
+
+            // Receiver changes invalidate downstream selections. Keep them at a safe default so
+            // History searches do not combine a new receiver with stale site/talkgroup values.
+            if (Sites.Count > 0)
+                SelectedSite = Sites.FirstOrDefault();
+            else
+                SelectedSite = null;
+
+            if (Talkgroups.Count > 0)
+                SelectedTalkgroup = Talkgroups.FirstOrDefault();
+            else
+                SelectedTalkgroup = null;
+        }
+
         public HistoryLookupItem? SelectedSite
         {
             get => _selectedSite;
@@ -594,6 +618,25 @@ private HistorySearchFilters? _activeSearchFilters;
 
         public string SelectedSiteDisplay =>
             !string.IsNullOrWhiteSpace(_selectedSite?.Label) ? _selectedSite.Label : "All";
+
+        public void SelectSiteFilter(HistoryLookupItem? item)
+        {
+            var previousSiteValue = _selectedSite?.Value ?? string.Empty;
+            var nextSiteValue = item?.Value ?? string.Empty;
+            var changed = !string.Equals(previousSiteValue, nextSiteValue, StringComparison.Ordinal);
+
+            SelectedSite = item;
+
+            if (!changed)
+                return;
+
+            // Site changes can leave a stale talkgroup selected that no longer belongs to the
+            // chosen site. Reset to a neutral selection to keep the next search predictable.
+            if (Talkgroups.Count > 0)
+                SelectedTalkgroup = Talkgroups.FirstOrDefault();
+            else
+                SelectedTalkgroup = null;
+        }
 
         public HistoryLookupItem? SelectedTalkgroup
         {
@@ -1578,8 +1621,11 @@ private async Task SearchAsync()
                 _historyUpperLimitReached = false;
                 _historyCutoffNotified = false;
 
-                // Premium/custom servers can also narrow History by date or date range.
-                // This is applied client-side as a soft window over the server's calljson stream.
+                var target = GetSelectedTargetLocal();
+
+                // Premium/custom servers can narrow History by a true lower and upper bound.
+                // The selected start time is part of the lower bound, so a search that starts at
+                // 16:43 must not return a 15:01 call from the same day.
                 if (!_enforceHistory24HourLimit)
                 {
                     var from = SelectedDateFrom.Date;
@@ -1591,11 +1637,14 @@ private async Task SearchAsync()
                         to = tmp;
                     }
 
-                    _historyCutoffLocal = from;
-                    _historyUpperLimitLocal = to.AddDays(1).AddTicks(-1);
-                }
+                    var rangeLower = from == target.Date
+                        ? target
+                        : new DateTime(from.Year, from.Month, from.Day, 0, 0, 0, DateTimeKind.Local);
+                    var rangeUpper = new DateTime(to.Year, to.Month, to.Day, 23, 59, 59, 999, DateTimeKind.Local);
 
-                var target = GetSelectedTargetLocal();
+                    _historyCutoffLocal = rangeLower;
+                    _historyUpperLimitLocal = rangeUpper;
+                }
 
                 if (_enforceHistory24HourLimit && target < _historyCutoffLocal)
                 {
