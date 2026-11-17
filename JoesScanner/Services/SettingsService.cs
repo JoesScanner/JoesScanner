@@ -254,49 +254,6 @@ namespace JoesScanner.Services
             }
         }
 
-        public bool TryGetServerFirewallCredentials(string serverUrl, out string username, out string password)
-        {
-            var key = ServerKeyHelper.Normalize(serverUrl);
-            if (string.IsNullOrWhiteSpace(key))
-            {
-                username = string.Empty;
-                password = string.Empty;
-                return false;
-            }
-
-            username = GetString(GetServerFirewallCredUserKey(key), string.Empty).Trim();
-            password = GetString(GetServerFirewallCredPassKey(key), string.Empty).Trim();
-            return !string.IsNullOrWhiteSpace(username) && !string.IsNullOrWhiteSpace(password);
-        }
-
-        public void SetServerFirewallCredentials(string serverUrl, string username, string password)
-        {
-            var key = ServerKeyHelper.Normalize(serverUrl);
-            if (string.IsNullOrWhiteSpace(key))
-                return;
-
-            var u = (username ?? string.Empty).Trim();
-            var p = (password ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(u) || string.IsNullOrWhiteSpace(p))
-            {
-                ClearServerFirewallCredentials(serverUrl);
-                return;
-            }
-
-            SetString(GetServerFirewallCredUserKey(key), u);
-            SetString(GetServerFirewallCredPassKey(key), p);
-        }
-
-        public void ClearServerFirewallCredentials(string serverUrl)
-        {
-            var key = ServerKeyHelper.Normalize(serverUrl);
-            if (string.IsNullOrWhiteSpace(key))
-                return;
-
-            Remove(GetServerFirewallCredUserKey(key));
-            Remove(GetServerFirewallCredPassKey(key));
-        }
-
         private static string GetServerCredUserKey(string normalizedServerUrl)
         {
             return $"server_cred_user::{ServerKeyHelper.Normalize(normalizedServerUrl)}";
@@ -305,16 +262,6 @@ namespace JoesScanner.Services
         private static string GetServerCredPassKey(string normalizedServerUrl)
         {
             return $"server_cred_pass::{ServerKeyHelper.Normalize(normalizedServerUrl)}";
-        }
-
-        private static string GetServerFirewallCredUserKey(string normalizedServerUrl)
-        {
-            return $"server_firewall_cred_user::{ServerKeyHelper.Normalize(normalizedServerUrl)}";
-        }
-
-        private static string GetServerFirewallCredPassKey(string normalizedServerUrl)
-        {
-            return $"server_firewall_cred_pass::{ServerKeyHelper.Normalize(normalizedServerUrl)}";
         }
 
 
@@ -378,7 +325,13 @@ namespace JoesScanner.Services
             set => SetString(KeyThemeMode, (value ?? "System").Trim());
         }
 
-        // Subscription cache is stored per server base URL (ServerUrl) in server_auth_state.
+        public bool HasActiveHostedSubscription()
+        {
+            var state = ReadServerAuthState(HostedServerRules.DefaultServerUrl);
+            return state.IsValidated && state.TierLevel >= 1 && ParseUtc(state.ExpiresUtc) > DateTime.UtcNow;
+        }
+
+        // WordPress account state is shared by the protected scanner servers.
         public DateTime? SubscriptionLastCheckUtc
         {
             get
@@ -1254,16 +1207,7 @@ ON CONFLICT(setting_key) DO UPDATE SET
             cmd.ExecuteNonQuery();
         }
 
-        private string GetAuthContextKey()
-        {
-            // Subscription/auth state is scoped to the configured server URL.
-            // IMPORTANT: Normalize to scheme + host (+ port) only so:
-            //   - credentials saved for https://host/path still match https://host
-            //   - auth state isn't accidentally split by path/query variations
-            // If there is no configured server URL, treat auth context as empty.
-            var url = GetString(KeyServerUrl, string.Empty);
-            return ServerKeyHelper.Normalize(url);
-        }
+        private static string GetAuthContextKey() => HostedServerRules.DefaultServerUrl;
 
         private void DeleteServerAuthStateRow(string normalizedServerKey)
         {

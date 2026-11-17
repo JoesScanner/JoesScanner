@@ -42,11 +42,21 @@ namespace JoesScanner.Services
 
         public async Task<SubscriptionCheckResult> EnsureSubscriptionAsync(CancellationToken cancellationToken)
         {
-            var basicUser = (_settings.BasicAuthUsername ?? string.Empty).Trim();
-            var basicPass = TextNormalizationHelper.NormalizeSmartQuotes((_settings.BasicAuthPassword ?? string.Empty).Trim());
+            string basicUser;
+            string basicPass;
+            if (HostedServerRules.IsHostedStreamServerUrl(_settings.ServerUrl))
+            {
+                basicUser = _settings.BasicAuthUsername.Trim();
+                basicPass = _settings.BasicAuthPassword.Trim();
+            }
+            else
+            {
+                // Directory and custom selections store independent scanner settings. Use the
+                // saved WordPress account when verifying a protected directory connection.
+                _settings.TryGetServerCredentials(HostedServerRules.DefaultServerUrl, out basicUser, out basicPass);
+            }
 
-            // Credentials are required for Joe's Scanner hosted servers.
-            // If missing, do not allow connecting.
+            basicPass = TextNormalizationHelper.NormalizeSmartQuotes(basicPass);
             if (string.IsNullOrWhiteSpace(basicUser) || string.IsNullOrWhiteSpace(basicPass))
             {
                 return new SubscriptionCheckResult(false, "missing_credentials",
@@ -462,7 +472,7 @@ namespace JoesScanner.Services
 
         // Some deployments may serialize numeric fields as strings.
         // Accept both JSON number and JSON string for tier level.
-        private sealed class FlexibleIntConverter : JsonConverter<int>
+        internal sealed class FlexibleIntConverter : JsonConverter<int>
         {
             public override int Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
             {

@@ -3,7 +3,6 @@ using JoesScanner.Services;
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.Linq;
-using System.Net.Http.Headers;
 using System.Text;
 using System.Threading.Tasks;
 using System.Text.RegularExpressions;
@@ -232,10 +231,8 @@ private HistorySearchFilters? _activeSearchFilters;
             MinuteOptions = Enumerable.Range(0, 60).ToList();
             SecondOptions = Enumerable.Range(0, 60).ToList();
 
-            _audioHttpClient = new HttpClient
-            {
-                Timeout = Timeout.InfiniteTimeSpan
-            };
+            _audioHttpClient = ServerAuthenticationHandler.CreateClient(_settingsService);
+            _audioHttpClient.Timeout = Timeout.InfiniteTimeSpan;
 
             var savedSpeed = AppStateStore.GetDouble("history_playback_speed_step", 0.0);
             HistoryPlaybackSpeedStep = savedSpeed;
@@ -1759,11 +1756,11 @@ private async Task SearchAsync()
                     RefreshCommandStates();
                 }).ConfigureAwait(false);
             }
-            catch
+            catch (Exception ex)
             {
                 await RunOnMainThreadAsync(() =>
                 {
-                    StatusText = "Search failed";
+                    StatusText = ex is FirewallAuthenticationException ? ex.Message : "Search failed";
                     RefreshCommandStates();
                 }).ConfigureAwait(false);
             }
@@ -2794,6 +2791,10 @@ private async Task LoadMoreOlderAsync()
 
                 await _audioPlaybackService.PlayAsync(url, rate, token);
             }
+            catch (FirewallAuthenticationException ex)
+            {
+                await RunOnMainThreadAsync(() => StatusText = ex.Message);
+            }
             catch
             {
             }
@@ -2803,7 +2804,7 @@ private async Task LoadMoreOlderAsync()
             }
         }
 
-                private async Task<string?> GetPlayableAudioUrlAsync(string audioUrl, CancellationToken token)
+        private async Task<string?> GetPlayableAudioUrlAsync(string audioUrl, CancellationToken token)
         {
             try
             {
@@ -2811,12 +2812,8 @@ private async Task LoadMoreOlderAsync()
                 // percent signs have been percent-encoded (e.g. %2520 instead of %20). That
                 // produces 404s when requesting the file. Normalize '%25' back to '%'.
                 var normalizedAudioUrl = Regex.Replace(audioUrl, "(?i)%25", "%");
-                if (!string.Equals(normalizedAudioUrl, audioUrl, StringComparison.Ordinal))
-                    AppLog.Add(() => $"History: normalized media url encoding. before='{audioUrl}' after='{normalizedAudioUrl}'");
-
                 if (!Uri.TryCreate(normalizedAudioUrl, UriKind.Absolute, out var uri))
                     return normalizedAudioUrl;
-
 
                 // Remove embedded credentials, always.
                 var sanitizedBuilder = new UriBuilder(uri)
@@ -2827,43 +2824,27 @@ private async Task LoadMoreOlderAsync()
 
                 var sanitized = sanitizedBuilder.Uri;
 
-                // Determine whether we can and should apply authorization for this host.
-                var authHeader = BuildBasicAuthHeaderValueForAudio(sanitized);
-
-                // Hosted audio requires an active validated account. If we cannot produce the
-                // service authorization header, do not attempt playback.
-                if (HostedServerRules.IsHostedServerUri(sanitized) &&
-                    string.IsNullOrWhiteSpace(authHeader))
-                {
-                    return null;
-                }
-
-                // Custom servers: if the user did not configure Basic Auth, just return the sanitized URL.
-                if (string.IsNullOrWhiteSpace(authHeader))
-                    return sanitized.ToString();
+                var authentication = ServerAuthentication.For(_settingsService);
+                if (!authentication.RequiresFirewall(sanitized) && authentication.GetCustomAuthorization(sanitized) == null)
+                    return sanitized.AbsoluteUri;
 
                 // Download to local temp to avoid credentialed URLs.
                 var cacheDir = FileSystem.CacheDirectory;
                 if (string.IsNullOrWhiteSpace(cacheDir))
                 {
                     // Without cache, we cannot safely play hosted audio (would require auth on the stream).
-                    return HostedServerRules.IsHostedServerUri(sanitized)
-                        ? null
-                        : sanitized.ToString();
+                    return null;
                 }
 
                 var fileName = "hist_" + Guid.NewGuid().ToString("N") + ".mp3";
                 var path = Path.Combine(cacheDir, fileName);
 
                 using var req = new HttpRequestMessage(HttpMethod.Get, sanitized);
-                ApplyAudioAuth(req, sanitized);
 
                 using var resp = await _audioHttpClient.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, token);
                 if (!resp.IsSuccessStatusCode)
                 {
-                    return HostedServerRules.IsHostedServerUri(sanitized)
-                        ? null
-                        : sanitized.ToString();
+                    return null;
                 }
 
                 await using (var fs = File.Create(path))
@@ -2875,72 +2856,16 @@ private async Task LoadMoreOlderAsync()
                 // Other platforms also accept file:// URIs.
                 return new Uri(path).AbsoluteUri;
             }
-            catch
+            catch (Exception ex) when (ex is OperationCanceledException or FirewallAuthenticationException)
             {
-                try
-                {
-                    // If we already have a local file path, normalize it to a file URI.
-                    if (!string.IsNullOrWhiteSpace(audioUrl) && File.Exists(audioUrl))
-                        return new Uri(audioUrl).AbsoluteUri;
-                }
-                catch
-                {
-                }
-
-                return audioUrl;
+                throw;
             }
-        }
-
-        private void ApplyAudioAuth(HttpRequestMessage req, Uri serverUri)
-        {
-            try
+            catch (Exception ex)
             {
-                var header = BuildBasicAuthHeaderValueForAudio(serverUri);
-                if (string.IsNullOrWhiteSpace(header))
-                    return;
-
-                var token = header.StartsWith("Basic ", StringComparison.OrdinalIgnoreCase)
-                    ? header.Substring("Basic ".Length).Trim()
-                    : header.Trim();
-
-                if (!string.IsNullOrWhiteSpace(token))
-                    req.Headers.Authorization = new AuthenticationHeaderValue("Basic", token);
-            }
-            catch
-            {
-            }
-        }
-
-        private string? BuildBasicAuthHeaderValueForAudio(Uri serverUri)
-        {
-            try
-            {
-                var serverKey = serverUri.GetLeftPart(UriPartial.Authority);
-                var firewallToken = HostedServerRules.GetApiFirewallBasicAuthParameterEnsuredAsync(_settingsService, serverKey).GetAwaiter().GetResult();
-                if (!string.IsNullOrWhiteSpace(firewallToken))
-                    return $"Basic {firewallToken}";
-
-                if (HostedServerRules.RequiresApiFirewallCredentials(_settingsService, serverKey))
-                    return null;
-
-                // Custom/manual servers: only apply Basic Auth if the user provided a username.
-                var usernameCustom = _settingsService.BasicAuthUsername?.Trim() ?? string.Empty;
-                if (string.IsNullOrWhiteSpace(usernameCustom))
-                    return null;
-
-                var passwordCustom = TextNormalizationHelper.NormalizeSmartQuotes(_settingsService.BasicAuthPassword ?? string.Empty);
-                var raw = $"{usernameCustom}:{passwordCustom}";
-                var bytes = Encoding.UTF8.GetBytes(raw);
-                var base64 = Convert.ToBase64String(bytes);
-                return $"Basic {base64}";
-            }
-            catch
-            {
+                AppLog.Add(() => $"History audio download failed. {ex.Message}");
                 return null;
             }
         }
-
-
         private int FindSnapshotIndex(CallItem call)
         {
             if (call == null)

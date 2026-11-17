@@ -28,7 +28,9 @@ namespace JoesScanner.ViewModels
         private readonly ISystemMediaService _systemMediaService;
         private readonly IHistoryLookupsCacheService _historyLookupsCacheService;
         private readonly IAuthObservedTriplesSyncService _authObservedTriplesSyncService;
+        private readonly ISubscriptionService _subscriptionService;
         private readonly HttpClient _httpClient;
+        private readonly HttpClient _scannerValidationClient;
         private readonly FilterService _filterService = FilterService.Instance;
 
         private readonly IFilterProfileStore _filterProfileStore;
@@ -588,7 +590,8 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
             ISystemMediaService systemMediaService,
             IFilterProfileStore filterProfileStore,
             IHistoryLookupsCacheService historyLookupsCacheService,
-            IAuthObservedTriplesSyncService authObservedTriplesSyncService)
+            IAuthObservedTriplesSyncService authObservedTriplesSyncService,
+            ISubscriptionService subscriptionService)
         {
             _settings = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
             _mainViewModel = mainViewModel ?? throw new ArgumentNullException(nameof(mainViewModel));
@@ -608,26 +611,17 @@ catch
 
             _historyLookupsCacheService = historyLookupsCacheService ?? throw new ArgumentNullException(nameof(historyLookupsCacheService));
             _authObservedTriplesSyncService = authObservedTriplesSyncService ?? throw new ArgumentNullException(nameof(authObservedTriplesSyncService));
+            _subscriptionService = subscriptionService;
 
-            // IMPORTANT (Apple + HTTP): iOS/macOS native networking enforces App Transport Security (ATS).
-            // We support user-configured HTTP custom servers, so for validation requests we force the
-            // managed HTTP stack on Apple to avoid ATS blocks in the native handler.
-#if IOS || MACCATALYST
-            var handler = new SocketsHttpHandler
-            {
-                AllowAutoRedirect = true
-            };
-
-            _httpClient = new HttpClient(handler)
+            _httpClient = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
             {
                 Timeout = TimeSpan.FromSeconds(3)
             };
-#else
-            _httpClient = new HttpClient
-            {
-                Timeout = TimeSpan.FromSeconds(3)
-            };
-#endif
+
+            // Use managed networking for custom HTTP server validation on Apple.
+            _scannerValidationClient = ServerAuthenticationHandler.CreateClient(_settings,
+                new SocketsHttpHandler { AllowAutoRedirect = false });
+            _scannerValidationClient.Timeout = TimeSpan.FromSeconds(15);
 
             // Seed the profile name options immediately so the Settings profile picker never renders empty
             // while profiles are still loading.
@@ -1273,7 +1267,7 @@ catch
                 ServerUrl = url;
 
             if (value != null && !value.IsCustom)
-                _ = EnsureServerFirewallCredentialsAsync(value, false);
+                _ = WarmFirewallCredentialsAsync(value);
         }
 
         public async Task EnsureDirectoryServersFreshAsync(bool force)
@@ -2486,9 +2480,7 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
 
             if (!string.IsNullOrEmpty(url))
             {
-                var isDefaultServerForHeader =
-                    string.Equals(url, DefaultServerUrl, StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(url.TrimEnd('/'), DefaultServerUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase);
+                var isDefaultServerForHeader = HostedServerRules.IsHostedStreamServerUrl(url);
 
                 _lastValidationWasAccountValidation = isDefaultServerForHeader;
                 OnPropertyChanged(nameof(ValidationSuccessHeaderText));
@@ -2512,9 +2504,7 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                 return;
             }
 
-            var isDefaultServer =
-                string.Equals(url, DefaultServerUrl, StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(url.TrimEnd('/'), DefaultServerUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase);
+            var isDefaultServer = HostedServerRules.IsHostedStreamServerUrl(url);
 
             try
             {
@@ -2528,8 +2518,15 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
 
             try
             {
+                var destination = new Uri(url, UriKind.Absolute);
+                if (destination.Scheme is not ("http" or "https") || destination.UserInfo.Length != 0)
+                    throw new HttpRequestException("Use an HTTP or HTTPS scanner server URL without embedded credentials.");
+
                 if (isDefaultServer)
                 {
+                    if (!HostedServerRules.SameOrigin(destination, new Uri(DefaultServerUrl)))
+                        throw new FirewallAuthenticationException("Use the default HTTPS address for Joe's Scanner.");
+
                     var accountUsername = (BasicAuthUsername ?? string.Empty).Trim();
                     var accountPassword = TextNormalizationHelper.NormalizeSmartQuotes((BasicAuthPassword ?? string.Empty).Trim());
 
@@ -2748,6 +2745,10 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                     ServerValidationMessage = "Joe's Scanner account validated.";
                     ServerValidationIsError = false;
 
+                    _settings.ServerUrl = DefaultServerUrl;
+                    _settings.AuthServerBaseUrl = AuthServerBaseUrl;
+                    _settings.SubscriptionTierLevel = sub.TierLevel;
+                    _settings.SubscriptionExpiresUtc = DateParseHelper.TryParseUtc(sub.ExpiresAt);
                     var nowUtc = DateTime.UtcNow;
                     _settings.SubscriptionLastCheckUtc = nowUtc;
                     _settings.SubscriptionLastStatusOk = true;
@@ -2763,27 +2764,11 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
 
                     
 
-                    // Persist active server and credentials only after a successful account validation.
-                    _settings.ServerUrl = DefaultServerUrl;
+                    // Persist the WordPress account after successful account validation.
                     _settings.BasicAuthUsername = accountUsername;
                     _settings.BasicAuthPassword = accountPassword;
                     _settings.SetServerCredentials(DefaultServerUrl, accountUsername, accountPassword);
                     _settings.LastAuthUsername = accountUsername;
-
-                    try
-                    {
-                        await EnsureServerFirewallCredentialsAsync(new ServerDirectoryEntry
-                        {
-                            DirectoryId = -1,
-                            Name = "Joe's Scanner Default",
-                            Url = DefaultServerUrl,
-                            UsesApiFirewallCredentials = true,
-                            IsOfficial = true
-                        }, true);
-                    }
-                    catch
-                    {
-                    }
 
                     _mainViewModel.ServerUrl = DefaultServerUrl;
 
@@ -2812,6 +2797,35 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
 
                     SetShowValidationPrefix(true);
                     UpdateSubscriptionSummaryFromSettings();
+                    await ServerAuthentication.For(_settings).GetFirewallAuthorizationAsync(
+                        new Uri(DefaultServerUrl), CancellationToken.None);
+                }
+                else if (HostedServerRules.RequiresApiFirewallCredentials(_settings, destination) ||
+                         (selectedDirectoryServerAtStart?.UsesApiFirewallCredentials == true &&
+                          Uri.TryCreate(selectedDirectoryServerUrlAtStart, UriKind.Absolute, out var selectedUri) &&
+                          HostedServerRules.SameOrigin(destination, selectedUri)))
+                {
+                    if (!HostedServerRules.RequiresApiFirewallCredentials(_settings, destination))
+                        throw new FirewallAuthenticationException("Could not load the server's firewall configuration. Refresh the server directory and try again.");
+
+                    var subscription = await _subscriptionService.EnsureSubscriptionAsync(CancellationToken.None);
+                    if (!subscription.IsAllowed)
+                        throw new FirewallAuthenticationException(subscription.Message ?? "Verify your Joe's Scanner account in Settings.");
+
+                    using var request = new HttpRequestMessage(HttpMethod.Head, destination);
+                    using var response = await _scannerValidationClient.SendAsync(request);
+                    if (!response.IsSuccessStatusCode && response.StatusCode != HttpStatusCode.NotImplemented)
+                        throw new HttpRequestException($"Scanner server verification failed (HTTP {(int)response.StatusCode}).");
+
+                    _settings.ServerUrl = url;
+                    _settings.BasicAuthUsername = string.Empty;
+                    _settings.BasicAuthPassword = string.Empty;
+                    _settings.ClearServerCredentials(url);
+                    BasicAuthUsername = string.Empty;
+                    BasicAuthPassword = string.Empty;
+                    _mainViewModel.ServerUrl = url;
+                    ServerValidationMessage = "Server verified with API-issued firewall credentials.";
+                    ServerValidationIsError = false;
                 }
                 else
                 {
@@ -2820,7 +2834,8 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
 
                     async Task<HttpResponseMessage> SendHeadAsync(bool includeAuth)
                     {
-                        var req = new HttpRequestMessage(HttpMethod.Head, url);
+                        using var req = new HttpRequestMessage(HttpMethod.Head, destination);
+                        req.Options.Set(ServerAuthenticationHandler.CustomProbe, true);
 
                         try
                         {
@@ -2845,7 +2860,7 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                             }
                         }
 
-                        return await _httpClient.SendAsync(req);
+                        return await _scannerValidationClient.SendAsync(req);
                     }
 
                     // For custom servers, always try without basic auth first.
@@ -2981,6 +2996,11 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                         ServerValidationIsError = true;
                     }
                 }
+            }
+            catch (FirewallAuthenticationException ex)
+            {
+                ServerValidationMessage = ex.Message;
+                ServerValidationIsError = true;
             }
             catch (HttpRequestException ex)
             {
@@ -3328,17 +3348,6 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                 // Persist cache first.
                 try { _settings.UpsertCachedDirectoryServers(list); } catch { }
 
-                foreach (var entry in list)
-                {
-                    if (entry == null || string.IsNullOrWhiteSpace(entry.Url))
-                        continue;
-
-                    if (!entry.UsesApiFirewallCredentials)
-                    {
-                        try { _settings.ClearServerFirewallCredentials(entry.Url); } catch { }
-                    }
-                }
-
                 await MainThread.InvokeOnMainThreadAsync(() =>
                 {
                     _directoryServers.Clear();
@@ -3368,7 +3377,7 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                 {
                     var selected = _selectedDirectoryServer;
                     if (selected != null && !selected.IsCustom)
-                        await EnsureServerFirewallCredentialsAsync(selected, false);
+                        await WarmFirewallCredentialsAsync(selected);
                 }
                 catch
                 {
@@ -3388,79 +3397,18 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
         }
 
 
-        private async Task EnsureServerFirewallCredentialsAsync(ServerDirectoryEntry entry, bool forceRefresh)
+        private async Task WarmFirewallCredentialsAsync(ServerDirectoryEntry entry)
         {
-            if (entry == null || entry.IsCustom)
-                return;
-
-            var serverUrl = (entry.Url ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(serverUrl))
-                return;
-
-            if (!entry.UsesApiFirewallCredentials)
-            {
-                try { _settings.ClearServerFirewallCredentials(serverUrl); } catch { }
-                return;
-            }
-
-            var sessionToken = (_settings.AuthSessionToken ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(sessionToken))
-                return;
-
-            if (!forceRefresh && _settings.TryGetServerFirewallCredentials(serverUrl, out _, out _))
+            if (!entry.UsesApiFirewallCredentials || !Uri.TryCreate(entry.Url, UriKind.Absolute, out var uri))
                 return;
 
             try
             {
-                var payload = new
-                {
-                    session_token = sessionToken,
-                    directory_id = entry.DirectoryId > 0 ? entry.DirectoryId : (int?)null,
-                    server_url = serverUrl,
-                    device_id = _settings.DeviceInstallId ?? string.Empty
-                };
-
-                using var content = new StringContent(
-                    JsonSerializer.Serialize(payload),
-                    Encoding.UTF8,
-                    "application/json");
-
-                using var response = await _httpClient.PostAsync(
-                    BuildAuthServerUrl("/wp-json/joes-scanner/v1/server-firewall-credentials"),
-                    content);
-
-                var body = await response.Content.ReadAsStringAsync();
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    try { AppLog.Add(() => $"Directory: firewall credentials load failed for {serverUrl}. HTTP {(int)response.StatusCode}."); } catch { }
-                    return;
-                }
-
-                ServerFirewallCredentialsResponseDto? parsed = null;
-                try
-                {
-                    parsed = JsonSerializer.Deserialize<ServerFirewallCredentialsResponseDto>(
-                        body,
-                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                }
-                catch
-                {
-                }
-
-                if (parsed == null || !parsed.Ok)
-                    return;
-
-                var username = (parsed.Username ?? string.Empty).Trim();
-                var password = (parsed.Password ?? string.Empty).Trim();
-                if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
-                    return;
-
-                _settings.SetServerFirewallCredentials(serverUrl, username, password);
+                await ServerAuthentication.For(_settings).GetFirewallAuthorizationAsync(uri, CancellationToken.None);
             }
             catch (Exception ex)
             {
-                try { AppLog.Add(() => $"Directory: firewall credentials load exception for {serverUrl}. {ex.Message}"); } catch { }
+                AppLog.Add(() => $"Firewall credential prefetch failed ({ex.GetType().Name}).");
             }
         }
 
@@ -3471,18 +3419,6 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
 
             [JsonPropertyName("servers")]
             public List<ServerDirectoryServerDto>? Servers { get; set; }
-        }
-
-        private sealed class ServerFirewallCredentialsResponseDto
-        {
-            [JsonPropertyName("ok")]
-            public bool Ok { get; set; }
-
-            [JsonPropertyName("username")]
-            public string? Username { get; set; }
-
-            [JsonPropertyName("password")]
-            public string? Password { get; set; }
         }
 
         private sealed class ServerDirectoryServerDto
@@ -3568,6 +3504,13 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
 
             [JsonPropertyName("price_id")]
             public string? PriceId { get; set; }
+
+            [JsonPropertyName("tier_level")]
+            [JsonConverter(typeof(SubscriptionService.FlexibleIntConverter))]
+            public int TierLevel { get; set; }
+
+            [JsonPropertyName("expires_at")]
+            public string? ExpiresAt { get; set; }
 
             [JsonPropertyName("period_end_at")]
             public string? PeriodEndAt { get; set; }

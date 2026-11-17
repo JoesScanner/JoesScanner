@@ -1,4 +1,5 @@
 ﻿// Services/JoesScannerApiClient.cs
+using JoesScanner.Helpers;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
@@ -11,19 +12,26 @@ namespace JoesScanner.Services
         private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
         private readonly HttpClient _httpClient;
+        private readonly ISettingsService _settings;
+        private Uri? _accountBase;
 
-        public JoesScannerApiClient(HttpClient httpClient)
+        public JoesScannerApiClient(HttpClient httpClient, ISettingsService settings)
         {
             _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
             _httpClient.Timeout = TimeSpan.FromSeconds(15);
+            _settings = settings;
         }
 
         public async Task<ApiPingResult> PingAsync(CancellationToken cancellationToken = default)
         {
             try
             {
-                // BaseAddress is expected to already be set by the caller via SetBaseUrl.
-                using var response = await _httpClient.GetAsync("wp-json/joes-scanner/v1/ping", cancellationToken).ConfigureAwait(false);
+                var accountBase = _accountBase ?? _httpClient.BaseAddress;
+                if (accountBase == null)
+                    return new ApiPingResult { Ok = false, Message = "WordPress URL is required." };
+
+                using var response = await _httpClient.GetAsync(
+                    new Uri(accountBase, "wp-json/joes-scanner/v1/ping"), cancellationToken).ConfigureAwait(false);
                 var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
                 if (!response.IsSuccessStatusCode)
@@ -56,20 +64,25 @@ namespace JoesScanner.Services
 
             try
             {
-                SetBaseUrl(serverUrl);
+                var accountBase = new Uri(serverUrl.Trim().TrimEnd('/') + "/", UriKind.Absolute);
+                if (accountBase.Scheme != Uri.UriSchemeHttps || accountBase.UserInfo.Length != 0 ||
+                    HostedServerRules.RequiresApiFirewallCredentials(_settings, accountBase))
+                {
+                    return new ApiAuthResult { Ok = false, Message = "Account sign-in requires the WordPress HTTPS endpoint." };
+                }
 
-                ApplyBasicAuth(username, password);
-
+                _accountBase = accountBase;
                 var payload = new
                 {
                     device_id = deviceId
                 };
 
-                using var response = await _httpClient.PostAsJsonAsync(
-                    "wp-json/joes-scanner/v1/auth",
-                    payload,
-                    JsonOptions,
-                    cancellationToken).ConfigureAwait(false);
+                using var request = new HttpRequestMessage(HttpMethod.Post,
+                    new Uri(accountBase, "wp-json/joes-scanner/v1/auth"));
+                request.Content = JsonContent.Create(payload, options: JsonOptions);
+                request.Headers.Authorization = new AuthenticationHeaderValue("Basic",
+                    Convert.ToBase64String(Encoding.UTF8.GetBytes($"{username}:{password}")));
+                using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
                 if (!response.IsSuccessStatusCode)
                 {
@@ -104,22 +117,6 @@ namespace JoesScanner.Services
             {
                 return new ApiAuthResult { Ok = false, Message = $"Auth exception: {ex.Message}" };
             }
-        }
-
-        private void SetBaseUrl(string serverUrl)
-        {
-            var trimmed = serverUrl.Trim();
-
-            if (!trimmed.EndsWith("/", StringComparison.Ordinal))
-                trimmed += "/";
-
-            _httpClient.BaseAddress = new Uri(trimmed, UriKind.Absolute);
-        }
-
-        private void ApplyBasicAuth(string username, string password)
-        {
-            var token = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{username}:{password}"));
-            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", token);
         }
 
         private static bool TryGetBool(JsonElement root, string name)

@@ -22,9 +22,6 @@ using JoesScanner.Helpers;
 using System.IO;
 using System.Net;
 using System.Net.Http;
-using System.Net.Http.Headers;
-using System.Security.Cryptography;
-using System.Text;
 using System.Linq;
 
 namespace JoesScanner.Services
@@ -103,6 +100,7 @@ namespace JoesScanner.Services
             // immediately even if the caller token isn't canceled yet.
             CancellationToken linkedToken;
             CancellationTokenSource? linkedCts = null;
+            string? authenticatedDownload = null;
             try
             {
                 CancellationToken interruptToken;
@@ -130,6 +128,21 @@ namespace JoesScanner.Services
 
             try
             {
+                if (Uri.TryCreate(audioUrl, UriKind.Absolute, out var source) && source.Scheme is "http" or "https")
+                {
+                    if (!string.IsNullOrEmpty(source.UserInfo))
+                        source = new UriBuilder(source) { UserName = string.Empty, Password = string.Empty }.Uri;
+
+                    var authentication = ServerAuthentication.For(_settings);
+                    if (authentication.RequiresFirewall(source) || authentication.GetCustomAuthorization(source) != null)
+                    {
+                        authenticatedDownload = await DownloadToTempFileAsync(source.AbsoluteUri, linkedToken);
+                        source = new Uri(authenticatedDownload);
+                    }
+
+                    audioUrl = source.AbsoluteUri;
+                }
+
                 // Phase 2+: when audio filters are enabled, ensure we have a local file URL.
                 // Phase 3: carry static filter fade hints without altering queue behavior.
                 PreparedAudio prepared;
@@ -215,6 +228,9 @@ namespace JoesScanner.Services
             }
             finally
             {
+                if (authenticatedDownload != null)
+                    DeleteTemporaryAudio(authenticatedDownload);
+
                 try { linkedCts?.Dispose(); } catch { }
             }
         }
@@ -1220,97 +1236,46 @@ namespace JoesScanner.Services
             return Task.CompletedTask;
         }
 
-	        private async Task<string> DownloadToTempFileAsync(string url, CancellationToken cancellationToken)
-	        {
-	            // Use the managed HTTP stack so http:// sources work even when the native stack is constrained.
-	            var handler = new SocketsHttpHandler
-	            {
-	                AllowAutoRedirect = true
-	            };
-
-	            using var http = new HttpClient(handler)
-	            {
-	                Timeout = TimeSpan.FromSeconds(15),
-	                DefaultRequestVersion = HttpVersion.Version11,
-	                DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower
-	            };
-
-	            using var request = new HttpRequestMessage(HttpMethod.Get, url);
-	            ApplyAuthorizationHeader(request);
-
-	            using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-	            response.EnsureSuccessStatusCode();
-
-	            var tmpRoot = Path.Combine(Path.GetTempPath(), "joesscanner-audio");
-	            Directory.CreateDirectory(tmpRoot);
-
-	            // Stable filename per URL to avoid re-downloading when replaying the same call.
-	            using var sha = SHA256.Create();
-	            var hashBytes = sha.ComputeHash(Encoding.UTF8.GetBytes(url));
-	            var hash = Convert.ToHexString(hashBytes).ToLowerInvariant();
-
-	            var ext = ".bin";
-	            try
-	            {
-	                var uri = new Uri(url);
-	                var path = uri.AbsolutePath;
-	                var candidate = Path.GetExtension(path);
-	                if (!string.IsNullOrWhiteSpace(candidate) && candidate.Length <= 8)
-	                    ext = candidate;
-	            }
-	            catch
-	            {
-	            }
-
-	            var tmpPath = Path.Combine(tmpRoot, $"{hash}{ext}");
-
-	            await using (var fs = File.Open(tmpPath, FileMode.Create, FileAccess.Write, FileShare.Read))
-	            await using (var stream = await response.Content.ReadAsStreamAsync(cancellationToken))
-	            {
-	                await stream.CopyToAsync(fs, cancellationToken);
-	            }
-
-	            return tmpPath;
-	        }
-
-	        private void ApplyAuthorizationHeader(HttpRequestMessage request)
-	        {
-	            try
-	            {
-	                if (request.RequestUri == null)
-	                    return;
-
-	                var serverKey = request.RequestUri.GetLeftPart(UriPartial.Authority);
-	                var firewallToken = HostedServerRules.GetApiFirewallBasicAuthParameterEnsuredAsync(_settings, serverKey).GetAwaiter().GetResult();
-	                if (!string.IsNullOrWhiteSpace(firewallToken))
-	                {
-	                    AppLog.Add(() => "Audio(iOS): temp download auth applied (API firewall creds).");
-	                    request.Headers.Authorization = new AuthenticationHeaderValue("Basic", firewallToken);
-	                    return;
-	                }
-
-	                if (HostedServerRules.RequiresApiFirewallCredentials(_settings, serverKey))
-	                {
-	                    AppLog.Add(() => "Audio(iOS): temp download auth not applied. reason=api_firewall_credentials_unavailable");
-	                    return;
-	                }
-
-	                var username = (_settings.BasicAuthUsername ?? string.Empty).Trim();
-	                if (string.IsNullOrWhiteSpace(username))
-	                    return;
-
-	                var password = TextNormalizationHelper.NormalizeSmartQuotes((_settings.BasicAuthPassword ?? string.Empty).Trim());
-	                var rawAuth = $"{username}:{password}";
-	                var authBytes = Encoding.UTF8.GetBytes(rawAuth);
-	                AppLog.Add(() => "Audio(iOS): temp download auth applied (custom creds).");
-	                request.Headers.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(authBytes));
-	            }
-	            catch
-	            {
-	                // Auth failure should not prevent the request from being attempted.
-	            }
-	        }
 #endif
+
+        private async Task<string> DownloadToTempFileAsync(string url, CancellationToken cancellationToken)
+        {
+            // Keep HTTP support when the Apple native networking stack is constrained.
+            using var http = ServerAuthenticationHandler.CreateClient(_settings,
+                new SocketsHttpHandler { AllowAutoRedirect = false });
+            http.Timeout = TimeSpan.FromSeconds(15);
+
+            var source = new Uri(url);
+            using var response = await http.GetAsync(source, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            response.EnsureSuccessStatusCode();
+
+            var tempRoot = Path.Combine(Path.GetTempPath(), "joesscanner-audio");
+            Directory.CreateDirectory(tempRoot);
+            var extension = Path.GetExtension(source.AbsolutePath);
+            if (string.IsNullOrWhiteSpace(extension) || extension.Length > 8)
+                extension = ".bin";
+
+            var path = Path.Combine(tempRoot, $"{Guid.NewGuid():N}{extension}");
+            try
+            {
+                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                await using var file = File.Open(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+                await stream.CopyToAsync(file, cancellationToken);
+                return path;
+            }
+            catch
+            {
+                DeleteTemporaryAudio(path);
+                throw;
+            }
+        }
+
+        private static void DeleteTemporaryAudio(string path)
+        {
+            try { File.Delete(path); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
 
         private static double SmoothVolume(double current, double target, int tickMs)
         {

@@ -1,7 +1,6 @@
 using JoesScanner.Models;
 using JoesScanner.Services;
 using System.Collections.ObjectModel;
-using System.Net.Http.Headers;
 using System.Text;
 using System.Threading;
 using System.Windows.Input;
@@ -218,12 +217,8 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 
             AddressAlerts.CollectionChanged += (_, __) => OnPropertyChanged(nameof(HasAddressAlerts));
 
-            _audioHttpClient = new HttpClient
-            {
-                // Do not use HttpClient.Timeout for long call downloads.
-                // Per call watchdog timeouts are enforced via CancellationToken.
-                Timeout = Timeout.InfiniteTimeSpan
-            };
+            _audioHttpClient = ServerAuthenticationHandler.CreateClient(_settingsService);
+            _audioHttpClient.Timeout = Timeout.InfiniteTimeSpan;
 
             // Initialize server URL from settings.
             // IMPORTANT: Do not force a default URL into storage here.
@@ -1546,33 +1541,9 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 
                 _telemetryService.TrackConnectionAttempt(serverUrl, isJoesScannerServer);
 
-                var username = _settingsService.BasicAuthUsername ?? string.Empty;
-
-                if (isJoesScannerServer)
+                if (HostedServerRules.RequiresApiFirewallCredentials(_settingsService, serverUrl))
                 {
-                    AppLog.Add(() => $"Subscription check: server={serverUrl}");
-
-                    var password = _settingsService.BasicAuthPassword ?? string.Empty;
-
-                    // Hosted Joe's Scanner server requires a valid website account.
-                    // Do not attempt to connect unless the user has entered credentials.
-                    if (string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password))
-                    {
-                        var msg = "Enter your Joe's Scanner username and password in Settings before connecting to the hosted server.";
-                        AppLog.Add(() => "Subscription check blocked: missing credentials for hosted server.");
-
-                        try
-                        {
-                            _settingsService.SubscriptionLastStatusOk = false;
-                            _settingsService.SubscriptionLastMessage = msg;
-                            _settingsService.SubscriptionLastCheckUtc = DateTime.UtcNow;
-                        }
-                        catch { }
-
-                        UpdateSubscriptionSummaryFromSettings();
-                        SetConnectionStatus(ConnectionStatus.AuthFailed, msg);
-                        return;
-                    }
+                    AppLog.Add(() => "Verifying Joe's Scanner subscription before connecting.");
 
                     try
                     {
@@ -1762,7 +1733,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                                     // Status sentinel messages
                                     if (string.Equals(call.Talkgroup, "AUTH", StringComparison.OrdinalIgnoreCase))
                                     {
-                                        SetConnectionStatus(ConnectionStatus.AuthFailed);
+                                        SetConnectionStatus(ConnectionStatus.AuthFailed, call.Transcription);
                                         return;
                                     }
 
@@ -2823,6 +2794,10 @@ private static string SpeedStepToLabel(double step)
 
                 await _audioPlaybackService.PlayAsync(playbackUrl, 1.0);
             }
+            catch (FirewallAuthenticationException ex)
+            {
+                LastQueueEvent = ex.Message;
+            }
             catch (Exception ex)
             {
                 AppLog.DebugWriteLine(() => $"Error in PlaySingleCallWithoutQueueAsync: {ex}");
@@ -3023,6 +2998,10 @@ private static string SpeedStepToLabel(double step)
                     }
                 }
             }
+            catch (FirewallAuthenticationException ex)
+            {
+                LastQueueEvent = ex.Message;
+            }
             catch (Exception ex)
             {
                 AppLog.DebugWriteLine(() => $"Error in PlayAudioAsync: {ex}");
@@ -3089,39 +3068,19 @@ private static string SpeedStepToLabel(double step)
             if (!Uri.TryCreate(audioUrl, UriKind.Absolute, out var audioUri))
                 return audioUrl;
 
-            var serverUrl = _settingsService.ServerUrl;
-            if (!Uri.TryCreate(serverUrl, UriKind.Absolute, out var baseUri))
-            {
+            if (audioUri.Scheme is not ("http" or "https"))
                 return audioUrl;
-            }
 
-            if (!string.Equals(audioUri.Host, baseUri.Host, StringComparison.OrdinalIgnoreCase) ||
-                !string.Equals(audioUri.Scheme, baseUri.Scheme, StringComparison.OrdinalIgnoreCase))
-            {
-                return audioUrl;
-            }
+            if (!string.IsNullOrEmpty(audioUri.UserInfo))
+                audioUri = new UriBuilder(audioUri) { UserName = string.Empty, Password = string.Empty }.Uri;
 
-            var serverKey = baseUri.GetLeftPart(UriPartial.Authority);
-            var basicAuthParameter = await HostedServerRules.GetApiFirewallBasicAuthParameterEnsuredAsync(_settingsService, serverKey, cancellationToken);
-            if (string.IsNullOrWhiteSpace(basicAuthParameter))
-            {
-                if (HostedServerRules.RequiresApiFirewallCredentials(_settingsService, serverKey))
-                    return audioUrl;
-
-                var username = (_settingsService.BasicAuthUsername ?? string.Empty).Trim();
-                if (string.IsNullOrWhiteSpace(username))
-                    return audioUrl;
-
-                var password = TextNormalizationHelper.NormalizeSmartQuotes(_settingsService.BasicAuthPassword ?? string.Empty);
-                var raw = $"{username}:{password}";
-                var bytes = Encoding.UTF8.GetBytes(raw);
-                basicAuthParameter = Convert.ToBase64String(bytes);
-            }
+            var authentication = ServerAuthentication.For(_settingsService);
+            if (!authentication.RequiresFirewall(audioUri) && authentication.GetCustomAuthorization(audioUri) == null)
+                return audioUri.AbsoluteUri;
 
             try
             {
                 using var request = new HttpRequestMessage(HttpMethod.Get, audioUri);
-                request.Headers.Authorization = new AuthenticationHeaderValue("Basic", basicAuthParameter);
 
                 using var response = await _audioHttpClient.SendAsync(
                     request,
@@ -3160,7 +3119,7 @@ private static string SpeedStepToLabel(double step)
                     throw;
                 }
             }
-            catch (OperationCanceledException)
+            catch (Exception ex) when (ex is OperationCanceledException or FirewallAuthenticationException)
             {
                 throw;
             }

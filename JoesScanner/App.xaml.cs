@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using JoesScanner.Helpers;
 using JoesScanner.Services;
 using JoesScanner.ViewModels;
 
@@ -66,13 +67,8 @@ namespace JoesScanner
                     if (!Uri.TryCreate(serverUrl, UriKind.Absolute, out var serverUri))
                         return;
 
-                    // Only the hosted Joe's Scanner backend requires subscription checks.
-                    if (!string.Equals(serverUri.Host, "app.joesscanner.com", StringComparison.OrdinalIgnoreCase))
-                        return;
-
-                    var user = (_settings.BasicAuthUsername ?? string.Empty).Trim();
-                    var pass = (_settings.BasicAuthPassword ?? string.Empty).Trim();
-                    if (string.IsNullOrWhiteSpace(user) || string.IsNullOrWhiteSpace(pass))
+                    // Register the process session with WordPress for protected scanner servers.
+                    if (!HostedServerRules.RequiresApiFirewallCredentials(_settings, serverUri))
                         return;
 
                     await _subscriptionService.EnsureSubscriptionAsync(CancellationToken.None).ConfigureAwait(false);

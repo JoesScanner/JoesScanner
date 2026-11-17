@@ -47,7 +47,7 @@ namespace JoesScanner.Services
         public AudioFilterService(ISettingsService settings)
         {
             _settings = settings;
-            _http = new HttpClient();
+            _http = ServerAuthenticationHandler.CreateClient(_settings);
         }
 
         public async Task<PreparedAudio> PrepareForPlaybackAsync(string audioUrl, CancellationToken cancellationToken = default)

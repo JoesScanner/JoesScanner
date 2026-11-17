@@ -2,7 +2,6 @@ using JoesScanner.Models;
 using JoesScanner.Helpers;
 using System.IO.Compression;
 using System.Net;
-using System.Net.Http.Headers;
 using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.Maui.ApplicationModel;
@@ -24,17 +23,16 @@ namespace JoesScanner.Services
 
             var handler = new HttpClientHandler
             {
+                AllowAutoRedirect = false,
                 AutomaticDecompression =
                     DecompressionMethods.GZip |
                     DecompressionMethods.Deflate
             };
 
-            _httpClient = new HttpClient(handler)
-            {
-                Timeout = TimeSpan.FromSeconds(25),
-                DefaultRequestVersion = HttpVersion.Version11,
-                DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower
-            };
+            _httpClient = ServerAuthenticationHandler.CreateClient(_settingsService, handler);
+            _httpClient.Timeout = TimeSpan.FromSeconds(25);
+            _httpClient.DefaultRequestVersion = HttpVersion.Version11;
+            _httpClient.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
         }
 
         public async Task DownloadSingleAsync(CallItem call, CancellationToken cancellationToken = default)
@@ -55,7 +53,6 @@ namespace JoesScanner.Services
             try
             {
                 using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-                ApplyAuthorizationHeader(request, uri);
 
                 using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
 
@@ -107,6 +104,7 @@ namespace JoesScanner.Services
 
                 await using var zipFileStream = File.Create(zipPath);
                 using var zip = new ZipArchive(zipFileStream, ZipArchiveMode.Create, leaveOpen: false);
+                string? firewallError = null;
 
                 var downloadedCount = 0;
                 var failedCount = 0;
@@ -123,13 +121,9 @@ namespace JoesScanner.Services
                         continue;
                     }
 
-                    var entryName = BuildZipEntryName(i + 1, call, uri);
-                    var entry = zip.CreateEntry(entryName, CompressionLevel.Optimal);
-
                     try
                     {
                         using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-                        ApplyAuthorizationHeader(request, uri);
 
                         using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
 
@@ -140,6 +134,8 @@ namespace JoesScanner.Services
                             continue;
                         }
 
+                        var entryName = BuildZipEntryName(i + 1, call, uri);
+                        var entry = zip.CreateEntry(entryName, CompressionLevel.Optimal);
                         await using var inStream = await response.Content.ReadAsStreamAsync(cancellationToken);
                         await using var entryStream = entry.Open();
                         await inStream.CopyToAsync(entryStream, cancellationToken);
@@ -148,6 +144,11 @@ namespace JoesScanner.Services
                     catch (TaskCanceledException)
                     {
                         throw;
+                    }
+                    catch (FirewallAuthenticationException ex)
+                    {
+                        firewallError ??= ex.Message;
+                        failedCount++;
                     }
                     catch (Exception ex)
                     {
@@ -158,7 +159,8 @@ namespace JoesScanner.Services
 
                 if (downloadedCount == 0)
                 {
-                    await ShowErrorAsync("Download failed", "Could not download any of the selected calls. Check your connection and server settings.");
+                    await ShowErrorAsync("Download failed", firewallError ??
+                        "Could not download any of the selected calls. Check your connection and server settings.");
                     return;
                 }
             }
@@ -212,47 +214,6 @@ namespace JoesScanner.Services
 
             var combined = baseUrl.TrimEnd('/') + "/" + raw.TrimStart('/');
             return Uri.TryCreate(combined, UriKind.Absolute, out var result) ? result : null;
-        }
-
-        /// <summary>
-        /// Apply Basic Auth per-request based on the actual audio URI host,
-        /// matching the same logic used by audio playback.
-        /// </summary>
-        private void ApplyAuthorizationHeader(HttpRequestMessage request, Uri audioUri)
-        {
-            try
-            {
-                var serverKey = audioUri.GetLeftPart(UriPartial.Authority);
-                var firewallToken = HostedServerRules.GetApiFirewallBasicAuthParameterEnsuredAsync(_settingsService, serverKey).GetAwaiter().GetResult();
-                if (!string.IsNullOrWhiteSpace(firewallToken))
-                {
-                    AppLog.Add(() => "Download: auth applied (API firewall creds).");
-                    request.Headers.Authorization = new AuthenticationHeaderValue("Basic", firewallToken);
-                    return;
-                }
-
-                if (HostedServerRules.RequiresApiFirewallCredentials(_settingsService, serverKey))
-                {
-                    AppLog.Add(() => "Download: auth not applied. reason=api_firewall_credentials_unavailable");
-                    return;
-                }
-
-                // Custom/manual servers: use configured Basic Auth credentials if available.
-                var username = (_settingsService.BasicAuthUsername ?? string.Empty).Trim();
-                if (string.IsNullOrWhiteSpace(username))
-                    return;
-
-                var password = _settingsService.BasicAuthPassword ?? string.Empty;
-
-                var rawAuth = $"{username}:{password}";
-                var authBytes = Encoding.UTF8.GetBytes(rawAuth);
-                AppLog.Add(() => "Download: auth applied (custom creds).");
-                request.Headers.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(authBytes));
-            }
-            catch
-            {
-                // Auth failure should not prevent the request from being attempted.
-            }
         }
 
         private static Task ShowErrorAsync(string title, string message)

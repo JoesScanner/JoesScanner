@@ -42,17 +42,16 @@ public CallHistoryService(
             // We explicitly keep this to gzip/deflate to avoid hangs on certain Android builds.
             var handler = new HttpClientHandler
             {
+                AllowAutoRedirect = false,
                 AutomaticDecompression =
                     DecompressionMethods.GZip |
                     DecompressionMethods.Deflate
             };
 
-            _httpClient = new HttpClient(handler)
-            {
-                Timeout = TimeSpan.FromSeconds(12),
-                DefaultRequestVersion = HttpVersion.Version11,
-                DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower
-            };
+            _httpClient = ServerAuthenticationHandler.CreateClient(_settingsService, handler);
+            _httpClient.Timeout = TimeSpan.FromSeconds(12);
+            _httpClient.DefaultRequestVersion = HttpVersion.Version11;
+            _httpClient.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
 
             _httpClient.DefaultRequestHeaders.Accept.ParseAdd("application/json, text/javascript, */*; q=0.01");
             _httpClient.DefaultRequestHeaders.Add("X-Requested-With", "XMLHttpRequest");
@@ -85,8 +84,6 @@ public CallHistoryService(
                     TalkgroupGroups = new Dictionary<string, IReadOnlyList<HistoryLookupItem>>(StringComparer.OrdinalIgnoreCase)
                 };
             }
-
-            UpdateAuthorizationHeader();
 
             var receiversEndpoint = new Uri(baseUrl + "/receiversjson");
             var sitesEndpoint = new Uri(baseUrl + "/sitesjson");
@@ -303,8 +300,6 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
             if (string.IsNullOrWhiteSpace(baseUrl))
                 return new CallsPage();
 
-            UpdateAuthorizationHeader();
-
             var callsUrl = baseUrl + "/calljson";
             var payload = BuildDataTablesPayload(_draw, start, length, filters, dateFromLocal, dateToLocal);
             _draw++;
@@ -487,45 +482,7 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
             return baseUrl.TrimEnd('/');
         }
 
-        private void UpdateAuthorizationHeader()
-        {
-            _httpClient.DefaultRequestHeaders.Authorization = null;
-
-            var serverUrlRaw = _settingsService.ServerUrl ?? string.Empty;
-            if (string.IsNullOrWhiteSpace(serverUrlRaw))
-                return;
-
-            var serverKey = NormalizeBaseUrl(serverUrlRaw);
-            if (string.IsNullOrWhiteSpace(serverKey))
-                return;
-
-            var firewallToken = HostedServerRules.GetApiFirewallBasicAuthParameterEnsuredAsync(_settingsService, serverKey).GetAwaiter().GetResult();
-            if (!string.IsNullOrWhiteSpace(firewallToken))
-            {
-                AppLog.Add(() => "History: auth applied (API firewall creds).");
-                _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", firewallToken);
-                return;
-            }
-
-            if (HostedServerRules.RequiresApiFirewallCredentials(_settingsService, serverKey))
-            {
-                AppLog.Add(() => "History: auth not applied. reason=api_firewall_credentials_unavailable");
-                return;
-            }
-
-            var username = (_settingsService.BasicAuthUsername ?? string.Empty).Trim();
-            var password = _settingsService.BasicAuthPassword ?? string.Empty;
-
-            if (string.IsNullOrWhiteSpace(username))
-                return;
-
-            var raw = $"{username}:{password}";
-            var bytes = Encoding.ASCII.GetBytes(raw);
-            var base64 = Convert.ToBase64String(bytes);
-
-            AppLog.Add(() => "History: auth applied (custom creds).");
-            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", base64);
-        }private static string Truncate(string? value, int maxChars)
+        private static string Truncate(string? value, int maxChars)
         {
             if (string.IsNullOrEmpty(value))
                 return string.Empty;

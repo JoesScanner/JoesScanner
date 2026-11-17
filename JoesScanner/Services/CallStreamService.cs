@@ -2,7 +2,6 @@ using JoesScanner.Models;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
-using System.Net.Http.Headers;
 using System.Net.WebSockets;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -26,6 +25,7 @@ namespace JoesScanner.Services
         private readonly ILocalCallsRepository _localCallsRepository;
         private readonly IAddressDetectionService _addressDetectionService;
         private readonly HttpClient _httpClient;
+        private readonly HttpMessageInvoker _webSocketInvoker;
         private readonly JsonSerializerOptions _jsonOptions;
 
         // Mirrors DEFAULT_CONFIG["poll_batch"] from the server.
@@ -45,16 +45,15 @@ namespace JoesScanner.Services
         // DataTables draw counter used by the calljson endpoint.
         private int _draw = 1;
 
-        // Tracks the actual auth mode and username most recently applied to outbound call-server requests.
-        private volatile string _lastAuthModeForLog = "none";
-        private volatile string _lastAppliedAuthUsernameForLog = "(none)";
-
         // Creates a new call stream service with an HttpClient configured for the calljson endpoint.
         public CallStreamService(ISettingsService settingsService, ILocalCallsRepository localCallsRepository, IAddressDetectionService addressDetectionService)
         {
             _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
             _localCallsRepository = localCallsRepository ?? throw new ArgumentNullException(nameof(localCallsRepository));
             _addressDetectionService = addressDetectionService ?? throw new ArgumentNullException(nameof(addressDetectionService));
+            _webSocketInvoker = new HttpMessageInvoker(new ServerAuthenticationHandler(
+                ServerAuthentication.For(_settingsService),
+                new SocketsHttpHandler { AllowAutoRedirect = false }));
 
             // IMPORTANT (Apple platforms + HTTP custom servers)
             // iOS and MacCatalyst can still surface NSURLErrorDomain -1022 (ATS) for cleartext HTTP
@@ -64,22 +63,16 @@ namespace JoesScanner.Services
 #if IOS || MACCATALYST
             var socketsHandler = new SocketsHttpHandler
             {
+                AllowAutoRedirect = false,
                 ConnectTimeout = TimeSpan.FromSeconds(5),
                 AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
             };
 
-            _httpClient = new HttpClient(socketsHandler)
-            {
-                // Fail fast on non-responsive servers so the UI shows an error row.
-                Timeout = TimeSpan.FromSeconds(5)
-            };
+            _httpClient = ServerAuthenticationHandler.CreateClient(_settingsService, socketsHandler);
 #else
-            _httpClient = new HttpClient
-            {
-                // Fail fast on non-responsive servers so the UI shows an error row.
-                Timeout = TimeSpan.FromSeconds(5)
-            };
+            _httpClient = ServerAuthenticationHandler.CreateClient(_settingsService);
 #endif
+            _httpClient.Timeout = TimeSpan.FromSeconds(15);
             _httpClient.DefaultRequestHeaders.Accept.ParseAdd("application/json, text/javascript, */*; q=0.01");
             _httpClient.DefaultRequestHeaders.Add("X-Requested-With", "XMLHttpRequest");
             _httpClient.DefaultRequestHeaders.Add("DNT", "1");
@@ -125,9 +118,6 @@ namespace JoesScanner.Services
                 pairs.Add(new($"columns[{i}][search][value]", c.Search?.Value ?? string.Empty));
                 pairs.Add(new($"columns[{i}][search][regex]", c.Search?.Regex == true ? "true" : "false"));
             }
-
-            // Ensure auth header matches current settings for this request.
-            UpdateAuthorizationHeader();
 
             using var content = new FormUrlEncodedContent(pairs);
             using var response = await _httpClient.PostAsync(callsUrl, content, cancellationToken);
@@ -218,7 +208,6 @@ namespace JoesScanner.Services
             while (!cancellationToken.IsCancellationRequested)
             {
                 var baseUrl = (_settingsService.ServerUrl ?? string.Empty).TrimEnd('/');
-                var usernameForLog = GetLastAppliedAuthUsernameForLog();
 
                 if (string.IsNullOrWhiteSpace(baseUrl))
                 {
@@ -286,8 +275,7 @@ namespace JoesScanner.Services
                         {
                             hasReportedIdleConnection = true;
 
-                            var authModeForLog = GetLastAppliedAuthModeForLog();
-                            AppLog.Add(() => $"CallStream: WEBSOCKET CONNECTED. [ServerUrl={baseUrl}, Path=/Calls, AuthMode={authModeForLog}]");
+                            AppLog.Add(() => $"CallStream: WEBSOCKET CONNECTED. [ServerUrl={baseUrl}, Path=/Calls]");
 
                             yield return new CallItem
                             {
@@ -302,7 +290,6 @@ namespace JoesScanner.Services
                             ws,
                             baseUrl,
                             callsUrl,
-                            usernameForLog,
                             isAppleTestAccount,
                             cancellationToken))
                         {
@@ -340,6 +327,11 @@ namespace JoesScanner.Services
                     AppLog.DebugWriteLine(() => $"[CallStreamService] [Timeout] {ex}");
                     AppLog.Add(() => $"CallStream: poll timed out. ex={ex.GetType().Name}: {ex.Message}");
                 }
+                catch (FirewallAuthenticationException ex)
+                {
+                    isAuthError = true;
+                    errorMessage = ex.Message;
+                }
                 catch (CallStreamAuthException ex)
                 {
                     isAuthError = true;
@@ -362,6 +354,11 @@ namespace JoesScanner.Services
                     {
                         // Caller requested cancellation (disconnect, shutdown, etc.).
                         yield break;
+                    }
+                    catch (FirewallAuthenticationException retryAuth)
+                    {
+                        isAuthError = true;
+                        errorMessage = retryAuth.Message;
                     }
                     catch (CallStreamAuthException retryAuth)
                     {
@@ -390,12 +387,10 @@ namespace JoesScanner.Services
                     var talkgroup = isAuthError ? "AUTH" : "ERROR";
 
                     var transcription = isAuthError
-                        ? "Authentication to the audio server failed. " +
-                          "Verify the basic auth username/password and any firewall authentication."
+                        ? errorMessage
                         : $"Error talking to {callsUrl}: {errorMessage}";
 
-                    var authModeForLog = GetLastAppliedAuthModeForLog();
-                    AppLog.Add(() => $"CallStream: {talkgroup} - {transcription} [ServerUrl={callsUrl}, AuthMode={authModeForLog}]");
+                    AppLog.Add(() => $"CallStream: {talkgroup} - {transcription} [ServerUrl={callsUrl}]");
 
                     // Clear error row for the UI.
                     yield return new CallItem
@@ -421,7 +416,7 @@ namespace JoesScanner.Services
                         hasReportedIdleConnection = true;
 
                         AppLog.Add(() => $"CallStream: HEARTBEAT - connected to server, waiting for calls. " +
-                            $"[ServerUrl={baseUrl}/calljson, Username={usernameForLog}, AuthMode={GetLastAppliedAuthModeForLog()}]");
+                            $"[ServerUrl={baseUrl}/calljson]");
 
                         yield return new CallItem
                         {
@@ -449,7 +444,7 @@ namespace JoesScanner.Services
                         hasReportedIdleConnection = true;
 
                         AppLog.Add(() => $"CallStream: HEARTBEAT - connected to server, waiting for calls. " +
-                            $"[ServerUrl={baseUrl}/calljson, Username={usernameForLog}, AuthMode={GetLastAppliedAuthModeForLog()}]");
+                            $"[ServerUrl={baseUrl}/calljson]");
 
                         yield return new CallItem
                         {
@@ -988,19 +983,12 @@ namespace JoesScanner.Services
             // Keepalive helps prevent intermediate proxies from timing out idle connections.
             ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
 
-            // Apply the same basic auth policy used by calljson.
-            var authHeader = BuildBasicAuthHeaderValue(baseUri);
-            if (!string.IsNullOrWhiteSpace(authHeader))
-            {
-                ws.Options.SetRequestHeader("Authorization", authHeader);
-            }
-
             try
             {
                 using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 connectCts.CancelAfter(TimeSpan.FromSeconds(10));
 
-                await ws.ConnectAsync(wsUri, connectCts.Token);
+                await ws.ConnectAsync(wsUri, _webSocketInvoker, connectCts.Token);
 
                 if (ws.State == WebSocketState.Open)
                 {
@@ -1022,99 +1010,6 @@ namespace JoesScanner.Services
         }
 
 
-private void SetLastAppliedAuthForLog(string mode, string? username)
-{
-    _lastAuthModeForLog = string.IsNullOrWhiteSpace(mode) ? "none" : mode.Trim();
-    _lastAppliedAuthUsernameForLog = string.IsNullOrWhiteSpace(username) ? "(none)" : username.Trim();
-}
-
-private string GetLastAppliedAuthUsernameForLog()
-{
-    return string.IsNullOrWhiteSpace(_lastAppliedAuthUsernameForLog) ? "(none)" : _lastAppliedAuthUsernameForLog;
-}
-
-private string GetLastAppliedAuthModeForLog()
-{
-    return string.IsNullOrWhiteSpace(_lastAuthModeForLog) ? "none" : _lastAuthModeForLog;
-}
-
-        private string? BuildBasicAuthHeaderValue(Uri serverUri)
-        {
-            try
-            {
-                var serverKey = serverUri.GetLeftPart(UriPartial.Authority);
-                var firewallToken = HostedServerRules.GetApiFirewallBasicAuthParameterEnsuredAsync(_settingsService, serverKey).GetAwaiter().GetResult();
-                if (!string.IsNullOrWhiteSpace(firewallToken))
-                {
-                    SetLastAppliedAuthForLog("api_firewall", null);
-                    AppLog.Add(() => "CallStream: WS auth applied (API firewall creds).");
-                    return $"Basic {firewallToken}";
-                }
-
-                if (HostedServerRules.RequiresApiFirewallCredentials(_settingsService, serverKey))
-                {
-                    SetLastAppliedAuthForLog("api_firewall_unavailable", null);
-                    AppLog.Add(() => "CallStream: WS auth not applied. reason=api_firewall_credentials_unavailable");
-                    return null;
-                }
-
-                // Custom/manual servers: only apply Basic Auth if user provided a username.
-                var user = (_settingsService.BasicAuthUsername ?? string.Empty).Trim();
-                var pass = TextNormalizationHelper.NormalizeSmartQuotes((_settingsService.BasicAuthPassword ?? string.Empty).Trim());
-                if (string.IsNullOrWhiteSpace(user))
-                {
-                    SetLastAppliedAuthForLog("custom_blank", null);
-                    AppLog.Add(() => "CallStream: WS auth not applied (custom). reason=username_blank");
-                    return null;
-                }
-
-                var token = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{user}:{pass}"));
-                SetLastAppliedAuthForLog("custom", null);
-                AppLog.Add(() => "CallStream: WS auth applied (custom creds).");
-                return $"Basic {token}";
-            }
-            catch (Exception ex)
-            {
-                SetLastAppliedAuthForLog("error", null);
-                AppLog.Add(() => $"CallStream: BuildBasicAuthHeaderValue failed. ex={ex.GetType().Name}: {ex.Message}");
-                return null;
-            }
-        }
-
-
-        private void UpdateAuthorizationHeader()
-        {
-            // This header is for Trunking Recorder endpoints (calljson, audio download, WS).
-            // Hosted default server uses the service account. Custom server uses user-provided Basic Auth if set.
-            try
-            {
-                var baseUrl = (_settingsService.ServerUrl ?? string.Empty).Trim();
-                if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri))
-                {
-                    _httpClient.DefaultRequestHeaders.Authorization = null;
-                    return;
-                }
-
-                var header = BuildBasicAuthHeaderValue(uri);
-                if (string.IsNullOrWhiteSpace(header))
-                {
-                    _httpClient.DefaultRequestHeaders.Authorization = null;
-                    return;
-                }
-
-                // header format: "Basic <token>"
-                var token = header.StartsWith("Basic ", StringComparison.OrdinalIgnoreCase)
-                    ? header.Substring("Basic ".Length).Trim()
-                    : header.Trim();
-
-                _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", token);
-            }
-            catch
-            {
-                _httpClient.DefaultRequestHeaders.Authorization = null;
-            }
-        }
-
         private async Task<List<CallRow>> FetchLatestAsync(
             string callsUrl,
             CancellationToken cancellationToken)
@@ -1133,8 +1028,6 @@ private string GetLastAppliedAuthModeForLog()
             {
                 var payload = BuildDataTablesPayload(_draw, start, length);
                 _draw++;
-
-                UpdateAuthorizationHeader();
 
                 var jsonBody = JsonSerializer.Serialize(payload, _jsonOptions);
                 using var content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
@@ -1175,7 +1068,7 @@ private string GetLastAppliedAuthModeForLog()
 
                 return rows;
             }
-            catch (CallStreamAuthException)
+            catch (Exception ex) when (ex is CallStreamAuthException or FirewallAuthenticationException or OperationCanceledException)
             {
                 throw;
             }
@@ -1190,7 +1083,6 @@ private string GetLastAppliedAuthModeForLog()
             ClientWebSocket ws,
             string baseUrl,
             string callsUrl,
-            string usernameForLog,
             bool isAppleTestAccount,
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
