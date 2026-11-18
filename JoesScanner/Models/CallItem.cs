@@ -345,9 +345,7 @@ public string What3WordsCoordinatesText
             }
         }
 
-        // Transcription text as produced by the server for this call.
-        // Note: extremely large transcriptions can stall UI layout on some platforms.
-        // We normalize whitespace and cap the stored text to keep the queue responsive.
+        // Transcription text for this call, with normalized whitespace.
         public string Transcription
         {
             get => _transcription;
@@ -562,51 +560,46 @@ public string What3WordsCoordinatesText
             }
         }
 
-        // Hard caps for UI safety. The Label is already limited by MaxLines, but very large strings
-        // can still cause expensive layout and text shaping work.
+        // Match the live transcription sanitizer's incoming limit for callers that bypass it.
         private const int MaxIncomingTranscriptionChars = 20000;
-        private const int MaxUiTranscriptionChars = 2000;
 
         private static string NormalizeTranscriptionForUi(string? text)
         {
-            if (string.IsNullOrWhiteSpace(text))
+            if (string.IsNullOrEmpty(text))
                 return string.Empty;
 
-            var s = text;
+            var input = text.AsSpan(0, Math.Min(text.Length, MaxIncomingTranscriptionChars)).Trim();
+            if (input.IsEmpty)
+                return string.Empty;
 
-            // Avoid pathological allocations from extremely large server payloads.
-            if (s.Length > MaxIncomingTranscriptionChars)
-                s = s.Substring(0, MaxIncomingTranscriptionChars);
-
-            // Normalize whitespace: convert newlines/tabs to spaces and collapse runs of whitespace.
-            var sb = new System.Text.StringBuilder(s.Length);
-            var lastWasSpace = true; // trim leading whitespace
-            foreach (var ch in s)
+            // The live stream already normalizes whitespace. Reuse its string when possible.
+            for (var i = 1; i < input.Length; i++)
             {
-                var c = ch;
-                if (c == '\n' || c == '\n' || c == '\t')
-                    c = ' ';
-
-                if (char.IsWhiteSpace(c))
-                {
-                    if (lastWasSpace)
-                        continue;
-
-                    sb.Append(' ');
-                    lastWasSpace = true;
+                var ch = input[i];
+                if (!char.IsWhiteSpace(ch) || (ch == ' ' && input[i - 1] != ' '))
                     continue;
+
+                var normalized = new System.Text.StringBuilder(input.Length).Append(input[..i]);
+                var lastWasSpace = input[i - 1] == ' ';
+                foreach (var c in input[i..])
+                {
+                    if (char.IsWhiteSpace(c))
+                    {
+                        if (!lastWasSpace)
+                            normalized.Append(' ');
+                        lastWasSpace = true;
+                    }
+                    else
+                    {
+                        normalized.Append(c);
+                        lastWasSpace = false;
+                    }
                 }
 
-                sb.Append(c);
-                lastWasSpace = false;
+                return normalized.ToString();
             }
 
-            var normalized = sb.ToString().Trim();
-
-            if (normalized.Length > MaxUiTranscriptionChars)
-                normalized = normalized.Substring(0, MaxUiTranscriptionChars).TrimEnd() + "...";
-
-            return normalized;
+            return input.Length == text.Length ? text : input.ToString();
         }
 
         private static string TruncateForAccessibility(string text, int maxLen)
