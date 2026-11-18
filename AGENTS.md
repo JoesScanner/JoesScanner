@@ -1,7 +1,7 @@
 ﻿# JoesScanner Development Instructions
 
 ## Project
-- JoesScanner is a .NET 10 MAUI application targeting Windows, Android, iOS, and Mac Catalyst.
+- JoesScanner is a .NET 11 MAUI application targeting Windows, Android, iOS, and Mac Catalyst.
 - Use the SDK specified in global.json.
 - Main project: JoesScanner/JoesScanner.csproj.
 
@@ -28,7 +28,7 @@
 
 ## Testing
 - Windows Debug build:
-  dotnet build JoesScanner/JoesScanner.csproj -f net10.0-windows10.0.19041.0 -c Debug
+  dotnet build JoesScanner/JoesScanner.csproj -f net11.0-windows10.0.19041.0 -c Debug
 - Run relevant available tests after code changes.
 - Investigate build errors introduced by changes.
 - Report outstanding warnings and testing limitations.

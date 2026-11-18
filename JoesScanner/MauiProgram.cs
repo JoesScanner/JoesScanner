@@ -13,7 +13,7 @@ public static class MauiProgram
         var builder = MauiApp.CreateBuilder();
 
         // SQLitePCL must be initialized once before any Microsoft.Data.Sqlite usage.
-        // bundle_green provides cross-platform native SQLite in MAUI.
+        // Use the SQLitePCLRaw bundle supplied by Microsoft.Data.Sqlite.
         Batteries_V2.Init();
 
         builder
