@@ -6,6 +6,7 @@
     xmlns:vm="clr-namespace:JoesScanner.ViewModels"
     xmlns:controls="clr-namespace:JoesScanner.Views.Controls"
     xmlns:models="clr-namespace:JoesScanner.Models"
+    xmlns:views="clr-namespace:JoesScanner.Views"
     x:Name="Page"
     x:DataType="vm:HistoryViewModel"
     Title="History"
@@ -439,36 +440,37 @@
 
                                     <VerticalStackLayout Grid.Column="0" Spacing="2">
 
-                                        <Label FontSize="14">
-                                            <Label.GestureRecognizers>
+                                        <controls:CallCardMetadataLabel
+                                            Metadata="{Binding CardMetadata}"
+                                            CardLayout="{Binding CallCardOptions.Layout, Source={x:Reference Page}, x:DataType=views:HistoryPage}"
+                                            FontSize="14"
+                                            LineBreakMode="WordWrap"
+                                            TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}">
+                                            <controls:CallCardMetadataLabel.GestureRecognizers>
                                                 <TapGestureRecognizer Tapped="OnCallPrimaryTapped" CommandParameter="{Binding .}" />
-                                            </Label.GestureRecognizers>
-                                            <Label.FormattedText>
-                                                <FormattedString>
-                                                    <Span Text="{Binding TimeOnlyDisplay}" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
-                                                    <Span Text=" > " TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
-                                                    <Span Text="{Binding ReceiverName}" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
-                                                    <Span Text=" > " TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
-                                                    <Span Text="{Binding Site}" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
-                                                    <Span Text=" > " TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
-                                                    <Span Text="{Binding Talkgroup}" FontAttributes="Bold" TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
-                                                </FormattedString>
-                                            </Label.FormattedText>
-                                        </Label>
+                                            </controls:CallCardMetadataLabel.GestureRecognizers>
+                                        </controls:CallCardMetadataLabel>
+
+                                        <controls:CallCardMetadataLabel
+                                            Metadata="{Binding CardMetadata}"
+                                            CardLayout="{Binding CallCardOptions.Layout, Source={x:Reference Page}, x:DataType=views:HistoryPage}"
+                                            Section="Secondary"
+                                            FontSize="12"
+                                            LineBreakMode="WordWrap"
+                                            TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}">
+                                            <controls:CallCardMetadataLabel.GestureRecognizers>
+                                                <TapGestureRecognizer Tapped="OnCallPrimaryTapped" CommandParameter="{Binding .}" />
+                                            </controls:CallCardMetadataLabel.GestureRecognizers>
+                                        </controls:CallCardMetadataLabel>
 
                                         <Label
                                             FontSize="12"
                                             TextColor="{AppThemeBinding Light=#374151, Dark=#cbd5e1}"
                                             LineBreakMode="WordWrap"
-                                            Text="{Binding Transcription}">
+                                            Text="{Binding TranscriptionDisplay}">
                                             <Label.GestureRecognizers>
                                                 <TapGestureRecognizer Tapped="OnCallPrimaryTapped" CommandParameter="{Binding .}" />
                                             </Label.GestureRecognizers>
-                                            <Label.Triggers>
-                                                <DataTrigger TargetType="Label" Binding="{Binding Transcription}" Value="">
-                                                    <Setter Property="IsVisible" Value="False" />
-                                                </DataTrigger>
-                                            </Label.Triggers>
                                         </Label>
 
                                         <Grid
@@ -589,17 +591,22 @@
 
                                     <VerticalStackLayout Grid.Column="1" Spacing="2" HorizontalOptions="End" VerticalOptions="Start">
 
-                                        <Label
+                                        <controls:CallCardDurationLabel
+                                            Metadata="{Binding CardMetadata}"
+                                            CardLayout="{Binding CallCardOptions.Layout, Source={x:Reference Page}, x:DataType=views:HistoryPage}"
+                                            CompactFormat="True"
                                             FontSize="12"
-                                            TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
-                                            Text="{Binding DateDisplay}"
-                                            HorizontalTextAlignment="End" />
+                                            TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" />
 
                                         <Label
                                             FontSize="12"
                                             TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
-                                            Text="{Binding DurationMmSsDisplay}"
-                                            HorizontalTextAlignment="End" />
+                                            Text="{Binding CardMetadata.HistoryDate, FallbackValue='Play call', TargetNullValue='Play call'}"
+                                            HorizontalTextAlignment="End">
+                                            <Label.GestureRecognizers>
+                                                <TapGestureRecognizer Tapped="OnCallPrimaryTapped" CommandParameter="{Binding .}" />
+                                            </Label.GestureRecognizers>
+                                        </Label>
 
                                         <Button
                                             Text="Grab"

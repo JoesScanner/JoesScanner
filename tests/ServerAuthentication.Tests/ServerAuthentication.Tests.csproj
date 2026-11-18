@@ -12,5 +12,6 @@
     <Compile Include="../../JoesScanner/Services/ISettingsService.cs" Link="ISettingsService.cs" />
     <Compile Include="../../JoesScanner/Services/ServerAuthentication.cs" Link="ServerAuthentication.cs" />
     <Compile Include="../../JoesScanner/Services/ServerAuthenticationHandler.cs" Link="ServerAuthenticationHandler.cs" />
+    <Compile Include="../../JoesScanner/Services/LivePlaybackRequests.cs" Link="LivePlaybackRequests.cs" />
   </ItemGroup>
 </Project>

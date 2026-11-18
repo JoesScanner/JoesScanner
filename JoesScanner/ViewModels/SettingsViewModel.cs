@@ -31,6 +31,9 @@ namespace JoesScanner.ViewModels
         private readonly IHistoryLookupsCacheService _historyLookupsCacheService;
         private readonly IAuthObservedTriplesSyncService _authObservedTriplesSyncService;
         private readonly ISubscriptionService _subscriptionService;
+        private readonly CallCardOptionsService _callCardOptionsService;
+        private CallCardOptionsViewModel? _callCardOptions;
+        public CallCardOptionsViewModel CallCardOptions => _callCardOptions ??= new(_callCardOptionsService);
         private readonly HttpClient _httpClient;
         private readonly HttpClient _scannerValidationClient;
         private readonly FilterService _filterService = FilterService.Instance;
@@ -602,7 +605,8 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
             IFilterProfileStore filterProfileStore,
             IHistoryLookupsCacheService historyLookupsCacheService,
             IAuthObservedTriplesSyncService authObservedTriplesSyncService,
-            ISubscriptionService subscriptionService)
+            ISubscriptionService subscriptionService,
+            CallCardOptionsService callCardOptionsService)
         {
             _settings = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
             _mainViewModel = mainViewModel ?? throw new ArgumentNullException(nameof(mainViewModel));
@@ -615,6 +619,7 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
             _historyLookupsCacheService = historyLookupsCacheService ?? throw new ArgumentNullException(nameof(historyLookupsCacheService));
             _authObservedTriplesSyncService = authObservedTriplesSyncService ?? throw new ArgumentNullException(nameof(authObservedTriplesSyncService));
             _subscriptionService = subscriptionService;
+            _callCardOptionsService = callCardOptionsService;
             _filterService.CatalogChanged += (_, _) => QueueFilterCatalogRefresh();
 
             _httpClient = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })

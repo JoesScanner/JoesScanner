@@ -175,6 +175,9 @@ namespace JoesScanner.Services
             {
             }
 
+            if (linkedToken.IsCancellationRequested)
+                return;
+
             var preparedUrl = prepared.Url;
 
             if (prepared.ToneDetected)
@@ -461,6 +464,9 @@ namespace JoesScanner.Services
 
                 p0.Prepared += (_, __) =>
                 {
+                    if (cancellationToken.IsCancellationRequested)
+                        return;
+
                     try
                     {
                         try
@@ -1111,6 +1117,9 @@ namespace JoesScanner.Services
 
                 await _systemMediaService.SetClipPlaybackStateAsync(true, true, "ClipPlaybackStart");
                 clipPlaybackStateNotified = true;
+
+                if (cancellationToken.IsCancellationRequested)
+                    return;
 
                 player.Play();
                 try { AppLog.Add(() => $"Audio(iOS): player.Play invoked. mixEnabled={mixEnabled} rate={playbackRate}"); } catch { }

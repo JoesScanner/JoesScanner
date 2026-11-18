@@ -834,6 +834,7 @@ private void CollapseAllCards()
     CollapseSection(ThemeBodyLayout, ThemeChevronLabel);
     CollapseSection(TelemetryBodyLayout, TelemetryChevronLabel);
     CollapseSection(LogBodyLayout, LogChevronLabel);
+    CollapseSection(CallCardOptionsBody, CallCardOptionsChevron);
 
     if (BindingContext is SettingsViewModel vm)
     {
@@ -847,6 +848,13 @@ private void CollapseAllCards()
         vm.SetSettingsCardOpenState("Telemetry", false);
         vm.SetSettingsCardOpenState("Log", false);
     }
+}
+
+private async void OnCallCardOptionsHeaderTapped(object? sender, TappedEventArgs e)
+{
+    ToggleSection(CallCardOptionsBody, CallCardOptionsChevron);
+    if (CallCardOptionsBody.IsVisible && BindingContext is SettingsViewModel settings)
+        await settings.CallCardOptions.LoadAsync();
 }
 
 private void OnConnectionHeaderTapped(object sender, EventArgs e)

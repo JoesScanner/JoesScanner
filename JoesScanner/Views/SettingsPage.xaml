@@ -21,8 +21,31 @@
             <Setter Property="OnColor" Value="{StaticResource Primary}" />
             <Setter Property="ThumbColor" Value="White" />
         </Style>
+        <Style x:Key="SettingsCardStyle" TargetType="Border">
+            <Setter Property="Stroke" Value="{AppThemeBinding Light=#e5e7eb, Dark=#374151}" />
+            <Setter Property="StrokeThickness" Value="1" />
+            <Setter Property="StrokeShape" Value="RoundRectangle 8" />
+            <Setter Property="BackgroundColor" Value="{AppThemeBinding Light=#ffffff, Dark=#111827}" />
+            <Setter Property="Padding" Value="12,8" />
+        </Style>
+        <Style x:Key="SettingsCardContentStyle" TargetType="VerticalStackLayout">
+            <Setter Property="Spacing" Value="8" />
+        </Style>
+        <Style x:Key="SettingsCardHeaderStyle" TargetType="Grid">
+            <Setter Property="MinimumHeightRequest" Value="40" />
+            <Setter Property="ColumnSpacing" Value="12" />
+        </Style>
+        <Style x:Key="SettingsCardTitleStyle" TargetType="Label">
+            <Setter Property="FontSize" Value="16" />
+            <Setter Property="FontAttributes" Value="Bold" />
+            <Setter Property="VerticalOptions" Value="Center" />
+            <Setter Property="VerticalTextAlignment" Value="Center" />
+            <Setter Property="LineBreakMode" Value="WordWrap" />
+            <Setter Property="TextColor" Value="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+        </Style>
         <Style x:Key="SettingsCardChevronStyle" TargetType="Label">
             <Setter Property="FontSize" Value="14" />
+            <Setter Property="TextColor" Value="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
             <Setter Property="WidthRequest" Value="20" />
             <Setter Property="HorizontalOptions" Value="End" />
             <Setter Property="HorizontalTextAlignment" Value="Center" />
@@ -49,30 +72,13 @@
                     <RoundRectangle CornerRadius="10" />
                 </Border.StrokeShape>
 
-                <!-- Rows:
-                             0 = header
-                             1 = connection
-                             2 = auto connect (Windows)
-                             3 = filters
-                             4 = audio filters
-                             5 = audio options
-                             6 = address detection
-                             7 = bluetooth labels
-                             8 = theme
-                             9 = telemetry
-                             10 = log
-                             11 = about -->
-                <Grid
-                            RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto"
-                            ColumnDefinitions="*">
+                <VerticalStackLayout Style="{StaticResource SettingsCardContentStyle}">
 
                     <!-- HEADER PANEL -->
                     <Border
-                                Grid.Row="0"
                                 BackgroundColor="#0D0D28"
                                 Padding="2,0"
                                 StrokeThickness="0"
-                                Margin="0,0,0,10"
                                 HorizontalOptions="Fill">
 
                         <Border.StrokeShape>
@@ -157,35 +163,21 @@
                     </Border>
 
                     <!-- CONNECTION CARD -->
-                    <Border
-    Grid.Row="1"
-    Padding="12"
-    BackgroundColor="{AppThemeBinding Light=#f9fafb, Dark=#020617}"
-    StrokeThickness="1"
-    StrokeShape="RoundRectangle 16"
-    Margin="0,0,0,12">
+                    <Border Style="{StaticResource SettingsCardStyle}">
 
-    <Grid RowDefinitions="Auto,Auto,Auto,Auto" ColumnDefinitions="*" RowSpacing="0">
+    <VerticalStackLayout Style="{StaticResource SettingsCardContentStyle}">
 
         <!-- Header -->
-        <Grid
+        <Grid Style="{StaticResource SettingsCardHeaderStyle}"
             x:Name="ConnectionHeaderGrid"
-            Grid.Row="0"
-            ColumnDefinitions="*,Auto,Auto"
-            ColumnSpacing="12"
-            RowDefinitions="Auto">
+            ColumnDefinitions="Auto,*,Auto">
             <Grid.GestureRecognizers>
                 <TapGestureRecognizer Tapped="OnConnectionHeaderTapped" />
             </Grid.GestureRecognizers>
 
-            <Label
+            <Label Style="{StaticResource SettingsCardTitleStyle}"
                 Grid.Column="0"
-                Text="Connection"
-                FontAttributes="Bold"
-                FontSize="16"
-                HorizontalOptions="Start"
-                LineBreakMode="NoWrap"
-                TextColor="{AppThemeBinding Light=#111827, Dark=White}" />
+                Text="Connection" />
 
             <Label
                 Grid.Column="1"
@@ -195,25 +187,18 @@
                 TextColor="{AppThemeBinding Light=#16a34a, Dark=#22c55e}"
                 HorizontalTextAlignment="End"
                 VerticalOptions="Center"
-                LineBreakMode="WordWrap"
-                MaxLines="
-                2" />
+                LineBreakMode="WordWrap" />
 
             <Label
                 x:Name="ConnectionChevronLabel"
                 Style="{StaticResource SettingsCardChevronStyle}"
                 Grid.Column="2"
-                Text="▶"
-                FontSize="14"
-                VerticalOptions="Center"
-                TextColor="{AppThemeBinding Light=#111827, Dark=White}" />
+                Text="▶" />
         </Grid>
 
         <Label
             x:Name="ConnectionDescriptionLabel"
-            Grid.Row="1"
             IsVisible="False"
-            Margin="0,0,0,4"
             Text="Choose which server the app connects to. Not all servers require user/pass."
             FontSize="12"
             TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
@@ -227,7 +212,6 @@
         <!-- Fields -->
         <controls:DeferredContentView
             x:Name="ConnectionFieldsGrid"
-            Grid.Row="2"
             IsVisible="False">
             <controls:DeferredContentView.ContentTemplate>
                 <DataTemplate x:DataType="vm:SettingsViewModel">
@@ -361,56 +345,38 @@
             </controls:DeferredContentView.ContentTemplate>
         </controls:DeferredContentView>
 
-    </Grid>
+    </VerticalStackLayout>
 </Border>
 
 
                     <!-- AUTO CONNECT OPTIONS (WINDOWS ONLY) -->
-                    <Border
-                                    Grid.Row="2"
-                                    Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
-                                    StrokeThickness="1"
-                                    Padding="12"
-                                    Margin="0,0,0,12"
-                                    BackgroundColor="{AppThemeBinding Light=#ffffff, Dark=#111827}"
-                                    StrokeShape="RoundRectangle 8">
+                    <Border Style="{StaticResource SettingsCardStyle}">
 
-                <Grid RowDefinitions="Auto,Auto,Auto,Auto" ColumnDefinitions="*" RowSpacing="0" ColumnSpacing="12" HorizontalOptions="FillAndExpand">
+                <VerticalStackLayout Style="{StaticResource SettingsCardContentStyle}">
 
                     <!-- Header -->
-                    <Grid
+                    <Grid Style="{StaticResource SettingsCardHeaderStyle}"
                         x:Name="AutoplayHeaderGrid"
-                        Grid.Row="0"
-                        ColumnDefinitions="*,Auto"
-                        ColumnSpacing="12">
+                        ColumnDefinitions="*,Auto">
                         <Grid.GestureRecognizers>
                             <TapGestureRecognizer Tapped="OnAutoplayHeaderTapped" />
                         </Grid.GestureRecognizers>
 
-                        <Label
+                        <Label Style="{StaticResource SettingsCardTitleStyle}"
                             Grid.Column="0"
                             Text="Autoplay options"
-                            FontSize="16"
-                            FontAttributes="Bold"
-                            TextColor="{AppThemeBinding Light=#111827, Dark=#f9fafb}"
                              />
 
                         <Label
                             x:Name="AutoplayChevronLabel"
                             Style="{StaticResource SettingsCardChevronStyle}"
                             Grid.Column="1"
-                            Text="▶"
-                            FontSize="14"
-                            VerticalOptions="Center"
-                            TextColor="{AppThemeBinding Light=#111827, Dark=#f9fafb}"
-                            Margin="0" />
+                            Text="▶" />
                     </Grid>
 
                     <!-- Body -->
                     <controls:DeferredContentView
                         x:Name="AutoplayFieldsGrid"
-                        Grid.Row="1"
-                        Margin="0,10,0,0"
                         IsVisible="False">
                         <controls:DeferredContentView.ContentTemplate>
                             <DataTemplate x:DataType="vm:SettingsViewModel">
@@ -458,43 +424,30 @@
                             </DataTemplate>
                         </controls:DeferredContentView.ContentTemplate>
                     </controls:DeferredContentView>
-                </Grid>
+                </VerticalStackLayout>
 
 </Border>
 
                     <!-- FILTERS CARD -->
-                    <Border
-                                    Grid.Row="3"
-                                    Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
-                                    StrokeThickness="1"
-                                    Padding="12"
-                                    Margin="0,0,0,12"
-                                    BackgroundColor="{AppThemeBinding Light=#ffffff, Dark=#111827}"
-                                    StrokeShape="RoundRectangle 8">
+                    <Border Style="{StaticResource SettingsCardStyle}">
 
-    <VerticalStackLayout Spacing="8">
+    <VerticalStackLayout Style="{StaticResource SettingsCardContentStyle}">
 
         <!-- Header -->
-        <Grid x:Name="FiltersHeaderGrid" ColumnDefinitions="*,Auto" ColumnSpacing="12">
+        <Grid Style="{StaticResource SettingsCardHeaderStyle}" x:Name="FiltersHeaderGrid" ColumnDefinitions="*,Auto">
             <Grid.GestureRecognizers>
                 <TapGestureRecognizer Tapped="OnFiltersHeaderTapped" />
             </Grid.GestureRecognizers>
 
-            <Label
+            <Label Style="{StaticResource SettingsCardTitleStyle}"
                 Grid.Column="0"
-                Text="Talkgroup Filters"
-                FontSize="16"
-                FontAttributes="Bold"
-                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                Text="Talkgroup Filters" />
 
             <Label
                 x:Name="FiltersChevronLabel"
                 Style="{StaticResource SettingsCardChevronStyle}"
                 Grid.Column="1"
-                Text="▶"
-                FontSize="14"
-                VerticalOptions="Center"
-                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                Text="▶" />
         </Grid>
 
         <!-- Body -->
@@ -654,39 +607,109 @@
     </VerticalStackLayout>
 </Border>
 
-                    <!-- AUDIO FILTERS CARD -->
-                    <Border
-                                    Grid.Row="4"
-                                    Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
-                                    StrokeThickness="1"
-                                    Padding="12"
-                                    Margin="0,0,0,12"
-                                    BackgroundColor="{AppThemeBinding Light=#ffffff, Dark=#111827}"
-                                    StrokeShape="RoundRectangle 8">
+                    <!-- CALL CARD OPTIONS CARD -->
+                    <Border Style="{StaticResource SettingsCardStyle}">
+                        <VerticalStackLayout Style="{StaticResource SettingsCardContentStyle}">
+                            <Grid Style="{StaticResource SettingsCardHeaderStyle}" ColumnDefinitions="*,Auto">
+                                <Grid.GestureRecognizers>
+                                    <TapGestureRecognizer Tapped="OnCallCardOptionsHeaderTapped" />
+                                </Grid.GestureRecognizers>
+                                <Label Style="{StaticResource SettingsCardTitleStyle}" Text="Call Card Options" />
+                                <Label Grid.Column="1" x:Name="CallCardOptionsChevron"
+                                       Style="{StaticResource SettingsCardChevronStyle}" Text="▶" />
+                            </Grid>
+                            <controls:DeferredContentView x:Name="CallCardOptionsBody" IsVisible="False">
+                                <controls:DeferredContentView.ContentTemplate>
+                                    <DataTemplate x:DataType="vm:SettingsViewModel">
+                                        <VerticalStackLayout
+                                            BindingContext="{Binding CallCardOptions, x:DataType=vm:SettingsViewModel}"
+                                            x:DataType="vm:CallCardOptionsViewModel"
+                                            Spacing="8">
+                                            <Label Text="Preview" FontSize="12" FontAttributes="Bold" />
+                                            <Border Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}" Padding="8"
+                                                    StrokeShape="RoundRectangle 8">
+                                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                    <VerticalStackLayout Grid.Column="0" Spacing="2">
+                                                        <controls:CallCardMetadataLabel Metadata="{Binding Preview}" CardLayout="{Binding Draft}"
+                                                            FontSize="14" LineBreakMode="WordWrap" />
+                                                        <controls:CallCardMetadataLabel Metadata="{Binding Preview}" CardLayout="{Binding Draft}"
+                                                            Section="Secondary" FontSize="12" LineBreakMode="WordWrap" />
+                                                    </VerticalStackLayout>
+                                                    <controls:CallCardDurationLabel Grid.Column="1"
+                                                        Metadata="{Binding Preview}" CardLayout="{Binding Draft}"
+                                                        FontSize="12" VerticalOptions="Start" />
+                                                </Grid>
+                                            </Border>
+                                            <VerticalStackLayout Spacing="8" IsEnabled="{Binding CanEdit}">
+                                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                    <Label Text="Show call duration" FontSize="12" VerticalOptions="Center" />
+                                                    <controls:CompactToggleSwitch Grid.Column="1"
+                                                        Style="{StaticResource CompactToggleStyle}"
+                                                        IsToggled="{Binding ShowDuration, Mode=TwoWay}"
+                                                        SemanticProperties.Description="Show call duration in the top-right corner" />
+                                                </Grid>
+                                                <Picker Title="Field" ItemsSource="{Binding Fields}" SelectedItem="{Binding SelectedField}"
+                                                    ItemDisplayBinding="{Binding Name, x:DataType=models:CallCardFieldOption}"
+                                                    SemanticProperties.Description="Call card field" />
+                                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                                    <Label Text="{Binding PositionText}" FontSize="12" VerticalOptions="Center" />
+                                                    <HorizontalStackLayout Grid.Column="1" Spacing="8" VerticalOptions="Center">
+                                                        <Label Text="Show field" FontSize="12" VerticalOptions="Center" />
+                                                        <controls:CompactToggleSwitch
+                                                            Style="{StaticResource CompactToggleStyle}"
+                                                            IsToggled="{Binding ShowSelectedField, Mode=TwoWay}"
+                                                            SemanticProperties.Description="Show selected field" />
+                                                    </HorizontalStackLayout>
+                                                </Grid>
+                                                <Label Text="Turn off Show call duration to display Duration in a metadata section."
+                                                        IsVisible="{Binding ShowDurationPlacementHint}" FontSize="12" LineBreakMode="WordWrap" />
+                                                <Button Text="{Binding MoveSectionText}" Command="{Binding MoveSectionCommand}"
+                                                        Style="{StaticResource SecondaryPillButtonStyle}" HorizontalOptions="Start" />
+                                                <Grid RowDefinitions="Auto,Auto,Auto" ColumnDefinitions="Auto,*"
+                                                      RowSpacing="6" ColumnSpacing="6">
+                                                    <Button Text="Left" Command="{Binding MoveUpCommand}"
+                                                            SemanticProperties.Description="Move selected field left"
+                                                            Style="{StaticResource SecondaryPillButtonStyle}" />
+                                                    <Button Grid.Column="1" Text="Right" Command="{Binding MoveDownCommand}"
+                                                            SemanticProperties.Description="Move selected field right"
+                                                            HorizontalOptions="Start"
+                                                            Style="{StaticResource SecondaryPillButtonStyle}" />
+                                                    <Button Grid.Row="1" Grid.ColumnSpan="2" Text="Reset to Defaults"
+                                                            Command="{Binding ResetCommand}" HorizontalOptions="Start"
+                                                            Style="{StaticResource SecondaryPillButtonStyle}" />
+                                                    <Button Grid.Row="2" Grid.ColumnSpan="2" Text="Apply"
+                                                            Command="{Binding ApplyCommand}" HorizontalOptions="Start"
+                                                            Style="{StaticResource PillButtonStyle}" />
+                                                </Grid>
+                                            </VerticalStackLayout>
+                                            <Label Text="{Binding Status}" FontSize="12" LineBreakMode="WordWrap" />
+                                        </VerticalStackLayout>
+                                    </DataTemplate>
+                                </controls:DeferredContentView.ContentTemplate>
+                            </controls:DeferredContentView>
+                        </VerticalStackLayout>
+                    </Border>
 
-    <VerticalStackLayout Spacing="8">
+                    <!-- AUDIO FILTERS CARD -->
+                    <Border Style="{StaticResource SettingsCardStyle}">
+
+    <VerticalStackLayout Style="{StaticResource SettingsCardContentStyle}">
 
         <!-- Header -->
-        <Grid x:Name="AudioFiltersHeaderGrid" ColumnDefinitions="*,Auto" ColumnSpacing="12">
+        <Grid Style="{StaticResource SettingsCardHeaderStyle}" x:Name="AudioFiltersHeaderGrid" ColumnDefinitions="*,Auto">
             <Grid.GestureRecognizers>
                 <TapGestureRecognizer Tapped="OnAudioFiltersHeaderTapped" />
             </Grid.GestureRecognizers>
 
-            <Label
+            <Label Style="{StaticResource SettingsCardTitleStyle}"
                 Grid.Column="0"
-                Text="Audio filters"
-                FontSize="16"
-                FontAttributes="Bold"
-                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                Text="Audio filters" />
 
             <Label
                 x:Name="AudioFiltersChevronLabel"
                 Style="{StaticResource SettingsCardChevronStyle}"
                 Grid.Column="1"
-                Text="▶"
-                FontSize="14"
-                VerticalOptions="Center"
-                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                Text="▶" />
         </Grid>
 
         <!-- Body -->
@@ -903,38 +926,25 @@
 
 
                     <!-- AUDIO OPTIONS CARD -->
-                    <Border
-                                    Grid.Row="5"
-                                    IsVisible="{OnPlatform WinUI=false, Default=true}"
-                                    Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
-                                    StrokeThickness="1"
-                                    Padding="12"
-                                    BackgroundColor="{AppThemeBinding Light=#ffffff, Dark=#111827}"
-                                    StrokeShape="RoundRectangle 8"
-                                    Margin="0,0,0,10">
+                    <Border Style="{StaticResource SettingsCardStyle}"
+                            IsVisible="{OnPlatform WinUI=false, Default=true}">
 
-    <VerticalStackLayout Spacing="8">
+    <VerticalStackLayout Style="{StaticResource SettingsCardContentStyle}">
 
-        <Grid x:Name="AudioHeaderGrid" ColumnDefinitions="*,Auto" ColumnSpacing="12">
+        <Grid Style="{StaticResource SettingsCardHeaderStyle}" x:Name="AudioHeaderGrid" ColumnDefinitions="*,Auto">
             <Grid.GestureRecognizers>
                 <TapGestureRecognizer Tapped="OnAudioHeaderTapped" />
             </Grid.GestureRecognizers>
 
-            <Label
+            <Label Style="{StaticResource SettingsCardTitleStyle}"
                 Grid.Column="0"
-                Text="Audio options"
-                FontSize="16"
-                FontAttributes="Bold"
-                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                Text="Audio options" />
 
             <Label
                 x:Name="AudioChevronLabel"
                 Style="{StaticResource SettingsCardChevronStyle}"
                 Grid.Column="1"
-                Text="▶"
-                FontSize="14"
-                VerticalOptions="Center"
-                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                Text="▶" />
         </Grid>
 
         <controls:DeferredContentView x:Name="AudioBodyLayout" IsVisible="False">
@@ -983,38 +993,25 @@
 </Border>
 
                     <!-- ADDRESS DETECTION CARD -->
-                    <Border
-                                    Grid.Row="6"
-                                    Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
-                                    StrokeThickness="1"
-                                    Padding="12"
-                                    Margin="0,0,0,12"
-                                    BackgroundColor="{AppThemeBinding Light=#ffffff, Dark=#111827}"
-                                    StrokeShape="RoundRectangle 8">
+                    <Border Style="{StaticResource SettingsCardStyle}">
 
-    <VerticalStackLayout Spacing="8">
+    <VerticalStackLayout Style="{StaticResource SettingsCardContentStyle}">
 
         <!-- Header -->
-        <Grid x:Name="AddressDetectionHeaderGrid" ColumnDefinitions="*,Auto" ColumnSpacing="12">
+        <Grid Style="{StaticResource SettingsCardHeaderStyle}" x:Name="AddressDetectionHeaderGrid" ColumnDefinitions="*,Auto">
             <Grid.GestureRecognizers>
                 <TapGestureRecognizer Tapped="OnAddressDetectionHeaderTapped" />
             </Grid.GestureRecognizers>
 
-            <Label
+            <Label Style="{StaticResource SettingsCardTitleStyle}"
                 Grid.Column="0"
-                Text="Address detection"
-                FontSize="16"
-                FontAttributes="Bold"
-                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                Text="Address detection" />
 
             <Label
                 x:Name="AddressDetectionChevronLabel"
                 Style="{StaticResource SettingsCardChevronStyle}"
                 Grid.Column="1"
-                Text="▶"
-                FontSize="14"
-                VerticalOptions="Center"
-                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                Text="▶" />
         </Grid>
 
         <!-- Body -->
@@ -1232,38 +1229,25 @@
 </Border>
 
 <!-- BLUETOOTH LABELS CARD -->
-                    <Border
-                                    Grid.Row="7"
-                                    Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
-                                    StrokeThickness="1"
-                                    Padding="12"
-                                    BackgroundColor="{AppThemeBinding Light=#ffffff, Dark=#111827}"
-                                    StrokeShape="RoundRectangle 8"
-                                    Margin="0,0,0,10">
+                    <Border Style="{StaticResource SettingsCardStyle}">
 
-    <VerticalStackLayout Spacing="8">
+    <VerticalStackLayout Style="{StaticResource SettingsCardContentStyle}">
 
         <!-- Header -->
-        <Grid x:Name="BluetoothHeaderGrid" ColumnDefinitions="*,Auto" ColumnSpacing="12">
+        <Grid Style="{StaticResource SettingsCardHeaderStyle}" x:Name="BluetoothHeaderGrid" ColumnDefinitions="*,Auto">
             <Grid.GestureRecognizers>
                 <TapGestureRecognizer Tapped="OnBluetoothHeaderTapped" />
             </Grid.GestureRecognizers>
 
-            <Label
+            <Label Style="{StaticResource SettingsCardTitleStyle}"
                 Grid.Column="0"
-                Text="Bluetooth options"
-                FontSize="16"
-                FontAttributes="Bold"
-                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                Text="Bluetooth options" />
 
             <Label
                 x:Name="BluetoothChevronLabel"
                 Style="{StaticResource SettingsCardChevronStyle}"
                 Grid.Column="1"
-                Text="▶"
-                FontSize="14"
-                VerticalOptions="Center"
-                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                Text="▶" />
         </Grid>
 
         <!-- Body -->
@@ -1337,37 +1321,25 @@
 </Border>
 
                     <!-- THEME CARD -->
-                    <Border
-                                    Grid.Row="8"
-                                    Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
-                                    StrokeThickness="1"
-                                    Padding="12"
-                                    BackgroundColor="{AppThemeBinding Light=#ffffff, Dark=#111827}"
-                                    StrokeShape="RoundRectangle 8">
+                    <Border Style="{StaticResource SettingsCardStyle}">
 
-    <VerticalStackLayout Spacing="10">
+    <VerticalStackLayout Style="{StaticResource SettingsCardContentStyle}">
 
         <!-- Header -->
-        <Grid x:Name="ThemeHeaderGrid" ColumnDefinitions="*,Auto" ColumnSpacing="12">
+        <Grid Style="{StaticResource SettingsCardHeaderStyle}" x:Name="ThemeHeaderGrid" ColumnDefinitions="*,Auto">
             <Grid.GestureRecognizers>
                 <TapGestureRecognizer Tapped="OnThemeHeaderTapped" />
             </Grid.GestureRecognizers>
 
-            <Label
+            <Label Style="{StaticResource SettingsCardTitleStyle}"
                 Grid.Column="0"
-                Text="Theme"
-                FontSize="16"
-                FontAttributes="Bold"
-                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                Text="Theme" />
 
             <Label
                 x:Name="ThemeChevronLabel"
                 Style="{StaticResource SettingsCardChevronStyle}"
                 Grid.Column="1"
-                Text="▶"
-                FontSize="14"
-                VerticalOptions="Center"
-                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                Text="▶" />
         </Grid>
 
         <!-- Body -->
@@ -1405,39 +1377,26 @@
 
 
                     <!-- TELEMETRY CARD (CUSTOM SERVERS ONLY) -->
-                    <Border
-                                    Grid.Row="9"
-                                    IsVisible="{Binding ShowTelemetryCard}"
-                                    Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
-                                    StrokeThickness="1"
-                                    Padding="12"
-                                    Margin="0,0,0,0"
-                                    BackgroundColor="{AppThemeBinding Light=#ffffff, Dark=#111827}"
-                                    StrokeShape="RoundRectangle 8">
+                    <Border Style="{StaticResource SettingsCardStyle}"
+                            IsVisible="{Binding ShowTelemetryCard}">
 
-    <VerticalStackLayout Spacing="10">
+    <VerticalStackLayout Style="{StaticResource SettingsCardContentStyle}">
 
         <!-- Header -->
-        <Grid x:Name="TelemetryHeaderGrid" ColumnDefinitions="*,Auto" ColumnSpacing="12">
+        <Grid Style="{StaticResource SettingsCardHeaderStyle}" x:Name="TelemetryHeaderGrid" ColumnDefinitions="*,Auto">
             <Grid.GestureRecognizers>
                 <TapGestureRecognizer Tapped="OnTelemetryHeaderTapped" />
             </Grid.GestureRecognizers>
 
-            <Label
+            <Label Style="{StaticResource SettingsCardTitleStyle}"
                 Grid.Column="0"
-                Text="Telemetry"
-                FontSize="16"
-                FontAttributes="Bold"
-                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                Text="Telemetry" />
 
             <Label
                 x:Name="TelemetryChevronLabel"
                 Style="{StaticResource SettingsCardChevronStyle}"
                 Grid.Column="1"
-                Text="▶"
-                FontSize="14"
-                VerticalOptions="Center"
-                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                Text="▶" />
         </Grid>
 
         <!-- Body -->
@@ -1475,38 +1434,25 @@
 </Border>
 
                     <!-- LOG CARD -->
-                    <Border
-                                    Grid.Row="10"
-                                    Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
-                                    StrokeThickness="1"
-                                    Padding="12"
-                                    Margin="0,12,0,0"
-                                    BackgroundColor="{AppThemeBinding Light=#ffffff, Dark=#111827}"
-                                    StrokeShape="RoundRectangle 8">
+                    <Border Style="{StaticResource SettingsCardStyle}">
 
-    <VerticalStackLayout Spacing="10">
+    <VerticalStackLayout Style="{StaticResource SettingsCardContentStyle}">
 
         <!-- Header -->
-        <Grid x:Name="LogHeaderGrid" ColumnDefinitions="*,Auto" ColumnSpacing="12">
+        <Grid Style="{StaticResource SettingsCardHeaderStyle}" x:Name="LogHeaderGrid" ColumnDefinitions="*,Auto">
             <Grid.GestureRecognizers>
                 <TapGestureRecognizer Tapped="OnLogHeaderTapped" />
             </Grid.GestureRecognizers>
 
-            <Label
+            <Label Style="{StaticResource SettingsCardTitleStyle}"
                 Grid.Column="0"
-                Text="Log"
-                FontSize="16"
-                FontAttributes="Bold"
-                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                Text="Log" />
 
             <Label
                 x:Name="LogChevronLabel"
                 Style="{StaticResource SettingsCardChevronStyle}"
                 Grid.Column="1"
-                Text="▶"
-                FontSize="14"
-                VerticalOptions="Center"
-                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                Text="▶" />
         </Grid>
 
         <!-- Body -->
@@ -1578,22 +1524,13 @@
 </Border>
 
                     <!-- ABOUT CARD -->
-                    <Border
-                                    Grid.Row="11"
-                                    Stroke="{AppThemeBinding Light=#e5e7eb, Dark=#374151}"
-                                    StrokeThickness="1"
-                                    Padding="12"
-                                    Margin="0,12,0,0"
-                                    BackgroundColor="{AppThemeBinding Light=#ffffff, Dark=#111827}"
-                                    StrokeShape="RoundRectangle 8">
+                    <Border Style="{StaticResource SettingsCardStyle}">
 
-    <VerticalStackLayout Spacing="10">
+    <VerticalStackLayout Style="{StaticResource SettingsCardContentStyle}">
 
-        <Label
-            Text="About"
-            FontSize="16"
-            FontAttributes="Bold"
-            TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+        <Grid Style="{StaticResource SettingsCardHeaderStyle}">
+            <Label Text="About" Style="{StaticResource SettingsCardTitleStyle}" />
+        </Grid>
 
         <Label
             Text="App info, support, and update actions for this device."
@@ -1615,43 +1552,32 @@
             <Label x:Name="AboutStoreLabel" Grid.Row="3" Grid.Column="1" Text="" FontSize="12" VerticalOptions="Center" />
         </Grid>
 
-        <FlexLayout
-            Wrap="Wrap"
-            Direction="Row"
-            JustifyContent="Start"
-            AlignItems="Start"
-            BindableLayout.ItemsSource="{x:Null}">
-            <FlexLayout.Resources>
-                <Style TargetType="Button" BasedOn="{StaticResource PillButtonStyle}">
-                    <Setter Property="HorizontalOptions" Value="Start" />
-                    <Setter Property="Margin" Value="0,0,3,0" />
-                </Style>
-            </FlexLayout.Resources>
-
-            <Button
+        <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto" ColumnSpacing="6" RowSpacing="6">
+            <Button Grid.Row="0" Grid.Column="0" HorizontalOptions="Start"
                 Text="Check for updates"
-                Clicked="OnCheckForUpdatesClicked" />
+                Clicked="OnCheckForUpdatesClicked"
+                Style="{StaticResource PillButtonStyle}" />
 
-            <Button
+            <Button Grid.Row="0" Grid.Column="1" HorizontalOptions="Start"
                 Text="Store page"
                 Clicked="OnOpenStorePageClicked"
                 Style="{StaticResource SecondaryPillButtonStyle}" />
 
-            <Button
+            <Button Grid.Row="1" Grid.Column="0" HorizontalOptions="Start"
                 Text="Support"
                 Clicked="OnOpenSupportSiteClicked"
                 Style="{StaticResource SecondaryPillButtonStyle}" />
 
-            <Button
+            <Button Grid.Row="1" Grid.Column="1" HorizontalOptions="Start"
                 Text="Privacy Policy"
                 Clicked="OnOpenPrivacyPolicyClicked"
                 Style="{StaticResource SecondaryPillButtonStyle}" />
-        </FlexLayout>
+        </Grid>
 
     </VerticalStackLayout>
 </Border>
 
-                </Grid>
+                </VerticalStackLayout>
             </Border>
         </ScrollView>
 

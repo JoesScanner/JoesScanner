@@ -7,9 +7,7 @@ public interface ICallStreamService
 {
     // Starts streaming calls from the server until the cancellation token is triggered.
     // The caller consumes the IAsyncEnumerable to receive new CallItem instances as they arrive.
-    IAsyncEnumerable<CallItem> GetCallStreamAsync(CancellationToken cancellationToken);
-    // Best-effort helper used to catch up on transcription updates that may have been missed
-    // while the app was backgrounded or the main UI was not visible.
-    // Returns null when the call cannot be found or the server has no transcription yet.
-    Task<string?> TryFetchTranscriptionByIdAsync(string backendId, CancellationToken cancellationToken);
+    IAsyncEnumerable<CallItem> GetCallStreamAsync(IReadOnlyList<CallItem> existingCalls, CancellationToken cancellationToken);
+    // Populate the shared update state for existing cards that may have missed notifications.
+    Task RefreshCallMetadataAsync(IReadOnlyList<CallItem> calls, CancellationToken cancellationToken);
 }

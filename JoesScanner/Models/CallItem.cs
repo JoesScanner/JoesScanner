@@ -18,7 +18,41 @@ namespace JoesScanner.Models
         private bool _isMutedByFilter;
         private bool _isToneHot;
         private string _backendId = string.Empty;
-        private bool _isTranscriptionUpdate;
+        internal LiveCallState? LiveState { get; init; }
+        internal bool IsLiveUpdate { get; init; }
+        private CallCardMetadata? _cardMetadata;
+
+        public CallCardMetadata? CardMetadata
+        {
+            get => _cardMetadata;
+            set
+            {
+                if (_cardMetadata == value)
+                    return;
+
+                _cardMetadata = value;
+                OnPropertyChanged();
+            }
+        }
+
+        // Called on the UI thread for existing cards, including cards held in the pending queue.
+        internal bool ApplyLiveUpdate()
+        {
+            if (LiveState is not { } state)
+                return false;
+
+            var snapshot = state.Read();
+            CardMetadata = snapshot.Metadata;
+            if (snapshot.Metadata.DurationSeconds is { } seconds)
+                CallDurationSeconds = seconds;
+
+            if (snapshot.Transcription is not { } transcript || Transcription == transcript)
+                return false;
+
+            var previous = Transcription;
+            Transcription = transcript;
+            return Transcription != previous;
+        }
 
         private string _detectedAddress = string.Empty;
                 private int _addressDetectionAppliedHash;
@@ -204,19 +238,6 @@ public string What3WordsCoordinatesText
     }
 
 
-        public bool IsTranscriptionUpdate
-        {
-            get => _isTranscriptionUpdate;
-            set
-            {
-                if (_isTranscriptionUpdate == value)
-                    return;
-
-                _isTranscriptionUpdate = value;
-                OnPropertyChanged();
-            }
-        }
-
         // Timestamp of the call (local time). Comes from the server StartTime / StartTimeUTC.
         public DateTime Timestamp
         {
@@ -358,10 +379,20 @@ public string What3WordsCoordinatesText
 
                 _transcription = normalized;
                 OnPropertyChanged();
+                OnPropertyChanged(nameof(TranscriptionDisplay));
                 OnPropertyChanged(nameof(AccessibilitySummary));
                 OnPropertyChanged(nameof(AccessibilityAnnouncement));
             }
         }
+
+        internal const string MissingTranscriptionMessage = "No transcription from server";
+
+        internal static bool IsMissingTranscription(string? text) =>
+            string.IsNullOrWhiteSpace(text) ||
+            string.Equals(text, MissingTranscriptionMessage, StringComparison.OrdinalIgnoreCase);
+
+        public string TranscriptionDisplay =>
+            IsMissingTranscription(Transcription) ? MissingTranscriptionMessage : Transcription;
 
         // Absolute or relative audio URL for this call.
         public string AudioUrl
@@ -378,7 +409,7 @@ public string What3WordsCoordinatesText
         }
 
         // Debug or diagnostic information for this call, shown on a separate line.
-        // Used for things like "No transcription from server", "No audio URL", etc.
+        // Used for diagnostics such as a missing audio URL.
         public string DebugInfo
         {
             get => _debugInfo;
@@ -478,27 +509,12 @@ public string What3WordsCoordinatesText
 
         // Duration label used in the UI, derived from CallDurationSeconds.
         public string DurationDisplay =>
-            CallDurationSeconds <= 0
-                ? string.Empty
-                : $"{CallDurationSeconds:F1}s";
+            CallCardMetadata.FormatDuration(CallDurationSeconds, compact: false) ?? string.Empty;
 
         // Compact duration for UI where we want the call length in minutes.
         // Examples: 0:12, 1:05, 12:34, 1:02:03
-        public string DurationMmSsDisplay
-        {
-            get
-            {
-                if (CallDurationSeconds <= 0)
-                    return string.Empty;
-
-                var ts = TimeSpan.FromSeconds(CallDurationSeconds);
-
-                if (ts.TotalHours >= 1)
-                    return $"{(int)ts.TotalHours}:{ts.Minutes:00}:{ts.Seconds:00}";
-
-                return $"{(int)ts.TotalMinutes}:{ts.Seconds:00}";
-            }
-        }
+        public string DurationMmSsDisplay =>
+            CallCardMetadata.FormatDuration(CallDurationSeconds, compact: true) ?? string.Empty;
 
         // Receiver name shown in the UI.
         // Prefers VoiceReceiver, falls back to Source if receiver is not set.

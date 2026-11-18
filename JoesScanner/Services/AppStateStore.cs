@@ -2,7 +2,6 @@ using System;
 using System.Globalization;
 using System.IO;
 using Microsoft.Data.Sqlite;
-using Microsoft.Maui.Storage;
 
 namespace JoesScanner.Services;
 

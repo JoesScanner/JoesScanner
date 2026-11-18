@@ -6,6 +6,7 @@
     xmlns:vm="clr-namespace:JoesScanner.ViewModels"
     xmlns:controls="clr-namespace:JoesScanner.Views.Controls"
     xmlns:models="clr-namespace:JoesScanner.Models"
+    xmlns:views="clr-namespace:JoesScanner.Views"
     x:Name="Page"
     x:DataType="vm:MainViewModel"
     Title="Joes Scanner"
@@ -236,107 +237,53 @@
                                     </DataTrigger>
                                 </Border.Triggers>
 
-                                <!-- Header, transcription, detected address, what3words, and debug -->
-                                <Grid
-                                    ColumnDefinitions="*,Auto"
-                                    RowDefinitions="Auto,Auto,Auto,Auto,Auto"
-                                    RowSpacing="{OnPlatform WinUI=4, MacCatalyst=4, Android=2, iOS=2}"
-                                    ColumnSpacing="6">
+                                <VerticalStackLayout Spacing="0">
+                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6">
+                                        <VerticalStackLayout Grid.Column="0" Spacing="2">
+                                            <controls:CallCardMetadataLabel
+                                                Metadata="{Binding CardMetadata}"
+                                                CardLayout="{Binding CallCardOptions.Layout, Source={x:Reference Page}, x:DataType=views:MainPage}"
+                                                FontSize="{OnPlatform WinUI=12, MacCatalyst=12, Android=11, iOS=11}"
+                                                FontAutoScalingEnabled="False"
+                                                LineBreakMode="WordWrap"
+                                                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                                            <controls:CallCardMetadataLabel
+                                                Metadata="{Binding CardMetadata}"
+                                                CardLayout="{Binding CallCardOptions.Layout, Source={x:Reference Page}, x:DataType=views:MainPage}"
+                                                Section="Secondary"
+                                                FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
+                                                FontAutoScalingEnabled="False"
+                                                LineBreakMode="WordWrap"
+                                                TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
+                                        </VerticalStackLayout>
 
-                                    <!-- Header row: time > receiver > site > talkgroup -->
+                                        <HorizontalStackLayout Grid.Column="1" Spacing="4" VerticalOptions="Start">
+                                            <Label
+                                                Text="M"
+                                                FontSize="{OnPlatform WinUI=9, MacCatalyst=9, Android=8, iOS=8}"
+                                                FontAutoScalingEnabled="False"
+                                                TextColor="#dc2626"
+                                                IsVisible="{Binding IsMutedByFilter}" />
+                                            <controls:CallCardDurationLabel
+                                                Metadata="{Binding CardMetadata}"
+                                                CardLayout="{Binding CallCardOptions.Layout, Source={x:Reference Page}, x:DataType=views:MainPage}"
+                                                FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
+                                                FontAutoScalingEnabled="False"
+                                                TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
+                                        </HorizontalStackLayout>
+                                    </Grid>
+
                                     <Label
-                                        Grid.Row="0"
-                                        Grid.Column="0"
-                                        FontSize="{OnPlatform WinUI=12, MacCatalyst=12, Android=11, iOS=11}"
-                                        FontAutoScalingEnabled="False"
-                                        MaxLines="1"
-                                        LineBreakMode="TailTruncation">
-                                        <Label.FormattedText>
-                                            <FormattedString>
-                                                <Span
-                                                    Text="{Binding TimeOnlyDisplay}"
-                                                    FontAttributes="Bold"
-                                                    TextColor="{AppThemeBinding Light=#111827, Dark=White}" />
-                                                <Span Text=" > " />
-                                                <Span
-                                                    Text="{Binding ReceiverName}"
-                                                    TextColor="{AppThemeBinding Light=#374151, Dark=#9ca3af}" />
-                                                <Span Text=" > " />
-                                                <Span
-                                                    Text="{Binding SystemName}"
-                                                    TextColor="{AppThemeBinding Light=#374151, Dark=#9ca3af}" />
-                                                <Span Text=" > " />
-                                                <Span
-                                                    Text="{Binding Talkgroup}"
-                                                    FontAttributes="Bold"
-                                                    TextColor="{AppThemeBinding Light=#111827, Dark=#bfdbfe}" />
-                                            </FormattedString>
-                                        </Label.FormattedText>
-                                    </Label>
-
-                                    <!-- Duration on the right (show muted marker when applicable) -->
-                                    <HorizontalStackLayout
-                                        Grid.Row="0"
-                                        Grid.Column="1"
-                                        Spacing="4"
-                                        HorizontalOptions="End"
-                                        VerticalOptions="Center">
-
-                                        <Label
-                                            Text="M"
-                                            FontSize="{OnPlatform WinUI=9, MacCatalyst=9, Android=8, iOS=8}"
-                                            FontAutoScalingEnabled="False"
-                                            TextColor="#dc2626"
-                                            IsVisible="{Binding IsMutedByFilter}" />
-
-                                        <Label
-                                            HorizontalTextAlignment="End"
-                                            VerticalTextAlignment="Center"
-                                            FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
-                                            FontAutoScalingEnabled="False"
-                                            Text="{Binding DurationDisplay}"
-                                            TextColor="{AppThemeBinding Light=#4b5563, Dark=#9ca3af}" />
-                                    </HorizontalStackLayout>
-
-                                    <!-- Transcription (only show when there is real text) -->
-                                    <Label
-                                        Grid.Row="1"
-                                        Grid.Column="0"
-                                        Grid.ColumnSpan="2"
                                         Margin="0,2,0,0"
                                         FontSize="{OnPlatform WinUI=12, MacCatalyst=12, Android=11, iOS=11}"
                                         FontAutoScalingEnabled="False"
                                         LineBreakMode="WordWrap"
                                         TextColor="{AppThemeBinding Light=#374151, Dark=#e5e7eb}"
-                                        Text="{Binding Transcription, TargetNullValue=''}">
-
-                                        <Label.Triggers>
-                                            <!-- Hide when empty -->
-                                            <DataTrigger
-                                                TargetType="Label"
-                                                Binding="{Binding Transcription, TargetNullValue=''}"
-                                                Value="">
-                                                <Setter Property="IsVisible" Value="False" />
-                                                <Setter Property="Margin" Value="0" />
-                                            </DataTrigger>
-
-                                            <!-- Hide when server sends the placeholder string -->
-                                            <DataTrigger
-                                                TargetType="Label"
-                                                Binding="{Binding Transcription, TargetNullValue=''}"
-                                                Value="No transcription from server">
-                                                <Setter Property="IsVisible" Value="False" />
-                                                <Setter Property="Margin" Value="0" />
-                                            </DataTrigger>
-                                        </Label.Triggers>
-                                    </Label>
+                                        Text="{Binding TranscriptionDisplay}" />
 
                                     
                                     <!-- Address detection -->
                                     <Grid
-                                        Grid.Row="2"
-                                        Grid.Column="0"
-                                        Grid.ColumnSpan="2"
                                         Margin="0,2,0,0"
                                         ColumnDefinitions="Auto,Auto"
                                         RowDefinitions="Auto"
@@ -372,9 +319,6 @@
 
 <!-- what3words -->
                                     <VerticalStackLayout
-                                        Grid.Row="3"
-                                        Grid.Column="0"
-                                        Grid.ColumnSpan="2"
                                         Margin="0,2,0,0"
                                         Spacing="1"
                                         IsVisible="{Binding HasWhat3WordsAddress}">
@@ -462,9 +406,6 @@
                                     </VerticalStackLayout>
 <!-- Debug or error info -->
                                     <Label
-                                        Grid.Row="4"
-                                        Grid.Column="0"
-                                        Grid.ColumnSpan="2"
                                         Margin="0,2,0,0"
                                         FontSize="{OnPlatform WinUI=10, MacCatalyst=10, Android=9, iOS=9}"
                                         FontAutoScalingEnabled="False"
@@ -473,7 +414,7 @@
                                         TextColor="{AppThemeBinding Light=#b91c1c, Dark=#fecaca}"
                                         IsVisible="{Binding HasDebugInfo}"
                                         Text="{Binding DebugInfo}" />
-                                </Grid>
+                                </VerticalStackLayout>
                             </Border>
                         </DataTemplate>
                     </CollectionView.ItemTemplate>

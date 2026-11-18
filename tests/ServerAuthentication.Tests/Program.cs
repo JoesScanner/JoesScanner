@@ -21,7 +21,11 @@ var cases = new (string Name, Func<Task> Run)[]
     ("Redirects never carry scanner credentials", RedirectIsolation),
     ("Port changes, downgrades, and embedded credentials are blocked", OriginIsolation),
     ("A changed WordPress session does not use credentials from the old session", SessionIsolation),
-    ("The WebSocket handshake refreshes firewall credentials", WebSocketRotation)
+    ("The WebSocket handshake refreshes firewall credentials", WebSocketRotation),
+    ("Rapid selections cancel obsolete playback and late completion cannot replace the latest selection", RapidPlaybackSelections),
+    ("A canceled firewall waiter sends no audio request and does not poison the next selection", CanceledFirewallWait),
+    ("Canceled credential issuance releases the firewall gate for the next selection", CanceledFirewallIssuance),
+    ("HTTP timeouts and unexpected cancellation remain playback failures", UnexpectedPlaybackTimeout)
 };
 
 foreach (var (name, run) in cases)
@@ -230,6 +234,140 @@ static async Task WebSocketRotation()
     Check(socket.State == WebSocketState.Open && sends == 2 && fixture.IssuanceCount == 2, "Upgrade retry failed.");
 }
 
+static async Task RapidPlaybackSelections()
+{
+    var requests = new LivePlaybackRequests();
+    using var queue = requests.Begin(manual: false);
+    var earlyDownload = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var nextDownload = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+    using var first = requests.Begin(manual: true);
+    var firstToken = first.Token;
+    var firstWork = FinishSelectionAsync(first, earlyDownload.Task);
+    using var second = requests.Begin(manual: true);
+    var secondToken = second.Token;
+    var secondWork = FinishSelectionAsync(second, nextDownload.Task);
+    using var last = requests.Begin(manual: true);
+    Check(queue.Token.IsCancellationRequested && firstToken.IsCancellationRequested && secondToken.IsCancellationRequested,
+        "A tap must cancel the queue and previous selections immediately.");
+
+    Check(await FinishSelectionAsync(last, Task.FromResult("latest")) == "latest",
+        "The latest selection should be the only request eligible to start playback.");
+    nextDownload.SetResult("obsolete");
+    earlyDownload.SetResult("even older");
+    Check(await firstWork == null && await secondWork == null, "Late downloads must not start audio.");
+    second.Dispose();
+    first.Dispose();
+    Check(last.CanContinue && requests.HasManualSelection, "Cleanup for an old request must leave the new request active.");
+    last.Dispose();
+    Check(!requests.HasManualSelection, "Queue playback can resume after the current selection finishes.");
+
+    static async Task<string?> FinishSelectionAsync(LivePlaybackRequests.Request request, Task<string> download)
+    {
+        var path = await download;
+        return request.CanContinue ? path : null;
+    }
+}
+
+static async Task CanceledFirewallWait()
+{
+    using var fixture = new Fixture();
+    var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    using var issuer = new HttpClient(new AsyncStubHandler(async (_, token) =>
+    {
+        started.SetResult();
+        await release.Task.WaitAsync(token);
+        return fixture.IssuedReply(fixture.Issued);
+    }));
+    var auth = new ServerAuthentication((ISettingsService)(object)fixture.Settings, issuer);
+    var sent = new List<string>();
+    using var audioClient = new HttpClient(new ServerAuthenticationHandler(auth, new StubHandler(request =>
+    {
+        lock (sent) sent.Add(request.RequestUri!.AbsolutePath);
+        return Reply(HttpStatusCode.OK);
+    })));
+    var holdingCall = audioClient.GetAsync(HostedServerRules.DefaultServerUrl + "/holding.wav");
+    await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+    var requests = new LivePlaybackRequests();
+    using var earlier = requests.Begin(manual: true);
+    var obsoleteAudio = audioClient.GetAsync(HostedServerRules.DefaultServerUrl + "/obsolete.wav", earlier.Token);
+    using var latest = requests.Begin(manual: true);
+    await ExpectPlaybackCancellationAsync(obsoleteAudio, earlier.Token);
+    var latestAudio = audioClient.GetAsync(HostedServerRules.DefaultServerUrl + "/latest.wav", latest.Token);
+    release.SetResult();
+    using var firstResponse = await holdingCall.WaitAsync(TimeSpan.FromSeconds(5));
+    using var latestResponse = await latestAudio.WaitAsync(TimeSpan.FromSeconds(5));
+    Check(sent.Count == 2 && sent.Contains("/holding.wav") && sent.Contains("/latest.wav"),
+        "The canceled auth waiter must never reach the audio transport.");
+}
+
+static async Task CanceledFirewallIssuance()
+{
+    using var fixture = new Fixture();
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var issued = 0;
+    using var issuer = new HttpClient(new AsyncStubHandler(async (_, token) =>
+    {
+        if (Interlocked.Increment(ref issued) == 1)
+        {
+            entered.SetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, token);
+        }
+        return fixture.IssuedReply(fixture.Issued);
+    }));
+    var auth = new ServerAuthentication((ISettingsService)(object)fixture.Settings, issuer);
+    using var client = new HttpClient(new ServerAuthenticationHandler(auth, new StubHandler(_ => Reply(HttpStatusCode.OK))));
+    using var obsolete = new CancellationTokenSource();
+    var earlier = client.GetAsync(HostedServerRules.DefaultServerUrl + "/early.wav", obsolete.Token);
+    await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    obsolete.Cancel();
+    await ExpectPlaybackCancellationAsync(earlier, obsolete.Token);
+    using var result = await client.GetAsync(HostedServerRules.DefaultServerUrl + "/next.wav").WaitAsync(TimeSpan.FromSeconds(5));
+    Check(result.IsSuccessStatusCode && issued == 2, "Canceled issuance must release the gate without applying an auth failure cooldown.");
+}
+
+static async Task UnexpectedPlaybackTimeout()
+{
+    using var client = new HttpClient(new AsyncStubHandler(async (_, token) =>
+    {
+        await Task.Delay(Timeout.InfiniteTimeSpan, token);
+        return Reply(HttpStatusCode.OK);
+    })) { Timeout = TimeSpan.FromMilliseconds(30) };
+    using var selection = new CancellationTokenSource();
+    try
+    {
+        using var response = await client.GetAsync("https://audio.test/call.wav", selection.Token);
+        throw new Exception("A request timeout was expected.");
+    }
+    catch (TaskCanceledException ex)
+    {
+        Check(LivePlaybackRequests.IsTimeout(ex) && !LivePlaybackRequests.IsExpectedCancellation(ex, selection.Token),
+            "An actual HttpClient timeout must remain a failure when the selection is active.");
+        selection.Cancel();
+        Check(!LivePlaybackRequests.IsExpectedCancellation(ex, selection.Token),
+            "A subsequent selection cancellation must not mask an HTTP timeout.");
+        using var unrelated = new CancellationTokenSource();
+        Check(!LivePlaybackRequests.IsExpectedCancellation(new OperationCanceledException(unrelated.Token), selection.Token),
+            "An exception tied to an uncanceled token must remain a failure.");
+    }
+    Check(!LivePlaybackRequests.IsExpectedCancellation(new OperationCanceledException(), CancellationToken.None),
+        "An unexpected cancellation without a caller cancellation must remain a failure.");
+}
+
+static async Task ExpectPlaybackCancellationAsync(Task<HttpResponseMessage> work, CancellationToken token)
+{
+    try
+    {
+        using var response = await work.WaitAsync(TimeSpan.FromSeconds(5));
+        throw new Exception("Obsolete playback should have canceled.");
+    }
+    catch (OperationCanceledException ex) when (LivePlaybackRequests.IsExpectedCancellation(ex, token))
+    {
+        // Both OperationCanceledException and TaskCanceledException are expected here.
+    }
+}
+
 static async Task FailsAsync(Func<Task<HttpResponseMessage>> send, string expectedMessage)
 {
     try
@@ -355,6 +493,12 @@ sealed class StubHandler(Func<HttpRequestMessage, HttpResponseMessage> send) : H
 {
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
         Task.FromResult(send(request));
+}
+
+sealed class AsyncStubHandler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send) : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+        send(request, cancellationToken);
 }
 
 sealed class UpgradeContent : HttpContent

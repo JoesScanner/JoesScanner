@@ -34,7 +34,8 @@ namespace JoesScanner.ViewModels
 private readonly IPlaybackCoordinator _playbackCoordinator;
 
         private CancellationTokenSource? _cts;
-        private CancellationTokenSource? _audioCts;
+        private readonly LivePlaybackRequests _playbackRequests = new();
+        private readonly SemaphoreSlim _nativePlaybackGate = new(1);
 
         // Set true only when the user explicitly disconnects.
         // Used to decide whether we should clear the "last connected" intent across restarts.
@@ -42,6 +43,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 
         // Prevent overlapping start/stop transitions when the user taps play or stop repeatedly during startup/shutdown.
         private int _monitoringTransitionState;
+        private int _refreshingCallMetadata;
 
         private int _audioToggleSerial;
         // When true, the live queue continues to run but audio output is suppressed.
@@ -69,6 +71,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 
         // True while we are playing through the backlog.
         private bool _isQueuePlaybackRunning;
+        private int _queuePlaybackVersion;
 
         // True when we should resume playback after a temporary soft mute (History tab, etc.).
         // This prevents the UI from starting playback when AutoPlay is off and nothing was playing.
@@ -360,10 +363,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                     (_isQueuePlaybackRunning || _currentPlayingCall != null);
 
                 // Cancel any in-flight playback immediately, but do not reset queue state.
-                if (_audioCts != null)
-                {
-                    try { _audioCts.Cancel(); } catch { }
-                }
+                _playbackRequests.CancelCurrent();
 
                 try { await _audioPlaybackService.StopAsync(); } catch { }
                 return;
@@ -549,7 +549,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 						isQueuePlaybackRunning: _isQueuePlaybackRunning,
 						visibleQueueCount: GetQueuedPlayableCandidateCount());
 
-					if (!canStart)
+					if (!canStart || _playbackRequests.HasManualSelection)
 						return;
 
 					await EnsureQueuePlaybackAsync();
@@ -1173,20 +1173,28 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                 _prefetchCts = null;
             }
 
-            try { priorCts?.Cancel(); } catch { }
-            try { priorCts?.Dispose(); } catch { }
+            if (priorTask != null && priorCts != null)
+                _ = CancelPrefetchAsync(priorTask, priorCts, deleteCompletedTempFile);
+        }
 
-            if (!deleteCompletedTempFile || priorTask == null || !priorTask.IsCompletedSuccessfully)
-                return;
-
-            try
+        private static async Task CancelPrefetchAsync(Task<string?> prefetch, CancellationTokenSource source, bool deleteTempFile)
+        {
+            using (source)
             {
-                var cachedPath = priorTask.Result;
-                if (IsDownloadedAudioTempFile(cachedPath))
-                    TryDeleteFile(cachedPath);
-            }
-            catch
-            {
+                try
+                {
+                    source.Cancel();
+                    var path = await prefetch.ConfigureAwait(false);
+                    if (deleteTempFile && IsDownloadedAudioTempFile(path))
+                        TryDeleteFile(path!);
+                }
+                catch (OperationCanceledException ex) when (LivePlaybackRequests.IsExpectedCancellation(ex, source.Token))
+                {
+                }
+                catch (Exception ex)
+                {
+                    AppLog.DebugWriteLine(() => $"Live audio prefetch failed: {ex.GetType().Name}");
+                }
             }
         }
 
@@ -1211,8 +1219,18 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             {
                 return await prefetchedTask.WaitAsync(cancellationToken);
             }
-            catch
+            catch (OperationCanceledException ex) when (LivePlaybackRequests.IsExpectedCancellation(ex, cancellationToken))
             {
+                if (prefetchedCts != null)
+                {
+                    _ = CancelPrefetchAsync(prefetchedTask, prefetchedCts, deleteTempFile: true);
+                    prefetchedCts = null;
+                }
+                return null;
+            }
+            catch (Exception ex)
+            {
+                AppLog.DebugWriteLine(() => $"Live audio prefetch failed; trying a foreground request: {ex.GetType().Name}");
                 return null;
             }
             finally
@@ -1713,7 +1731,8 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                 {
                     try
                     {
-                        await foreach (var call in _callStreamService.GetCallStreamAsync(token))
+                        await foreach (var call in _callStreamService.GetCallStreamAsync(
+                            await MainThread.InvokeOnMainThreadAsync(SnapshotLiveCalls), token))
                         {
                             if (token.IsCancellationRequested)
                                 break;
@@ -1721,14 +1740,21 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                             if (call == null)
                                 continue;
 
-                            TotalCallsReceived++;
-
                             try
                             {
                                 await MainThread.InvokeOnMainThreadAsync(() =>
                                 {
                                     if (token.IsCancellationRequested)
                                         return;
+
+                                    if (!call.IsLiveUpdate || !string.IsNullOrEmpty(call.Transcription))
+                                        TotalCallsReceived++;
+
+                                    if (call.IsLiveUpdate && call.LiveState is { } state)
+                                    {
+                                        ApplyLiveUpdate(state, call);
+                                        return;
+                                    }
 
                                     // Status sentinel messages
                                     if (string.Equals(call.Talkgroup, "AUTH", StringComparison.OrdinalIgnoreCase))
@@ -1764,59 +1790,6 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                                         SetConnectionStatus(ConnectionStatus.Connected);
                                     }
 
-                                    // Transcription update for an existing call
-                                    if (call.IsTranscriptionUpdate && !string.IsNullOrWhiteSpace(call.BackendId))
-                                    {
-                                        var existing = Calls.FirstOrDefault(c => c.BackendId == call.BackendId);
-                                        if (existing != null)
-                                        {
-                                            if (!string.IsNullOrWhiteSpace(call.Transcription))
-                                            {
-                                                existing.Transcription = call.Transcription;
-
-                                                
-                                                // Carry address detection results over when we receive the transcription update payload.
-                                                // The stream produces update items separately, so we must copy these fields onto the existing UI item.
-                                                if (call.HasDetectedAddress)
-                                                {
-                                                    var hadAddress = existing.HasDetectedAddress;
-
-                                                    existing.DetectedAddress = call.DetectedAddress;
-                                                    existing.DetectedAddressConfidencePercent = call.DetectedAddressConfidencePercent;
-                                                    existing.DetectedAddressCandidates = call.DetectedAddressCandidates;
-
-                                                    if (!hadAddress && existing.HasDetectedAddress)
-                                                        AddAddressAlertIfNew(existing);
-                                                }
-if (call.HasWhat3WordsAddress)
-{
-    existing.What3WordsAddress = call.What3WordsAddress;
-}
-
-if (!string.IsNullOrWhiteSpace(existing.DebugInfo))
-                                                {
-                                                    var cleaned = existing.DebugInfo
-                                                        .Replace("No transcription from server", string.Empty, StringComparison.OrdinalIgnoreCase)
-                                                        .Trim();
-
-                                                    cleaned = cleaned.Trim(' ', '|', ';');
-
-                                                    existing.DebugInfo = cleaned;
-                                                }
-                                            }
-
-                                            if (!string.IsNullOrWhiteSpace(call.DebugInfo))
-                                            {
-                                                existing.DebugInfo = string.IsNullOrWhiteSpace(existing.DebugInfo)
-                                                    ? call.DebugInfo
-                                                    : $"{existing.DebugInfo}; {call.DebugInfo}";
-                                            }
-
-                                            LastQueueEvent = $"Transcription updated at {DateTime.Now:T}";
-                                        }
-
-                                        return;
-                                    }
 
                                     var isAppleTestAccount = IsAppleIosTestAccount();
 
@@ -2057,13 +2030,7 @@ if (!string.IsNullOrWhiteSpace(existing.DebugInfo))
                 _cts = null;
             }
 
-            if (_audioCts != null)
-            {
-                try { _audioCts.Cancel(); } catch { }
-
-                _audioCts.Dispose();
-                _audioCts = null;
-            }
+            _playbackRequests.CancelCurrent();
 
             IsRunning = false;
 
@@ -2160,13 +2127,7 @@ if (!string.IsNullOrWhiteSpace(existing.DebugInfo))
 
         public async Task StopAudioFromToggleAsync()
         {
-            if (_audioCts != null)
-            {
-                try { _audioCts.Cancel(); } catch { }
-
-                _audioCts.Dispose();
-                _audioCts = null;
-            }
+            _playbackRequests.CancelCurrent();
 
             try
             {
@@ -2240,91 +2201,73 @@ if (!string.IsNullOrWhiteSpace(existing.DebugInfo))
 			return null;
 		}
 
-		private async Task OnCallTappedAsync(CallItem? item, bool preserveQueueAnchor, bool continueQueueFromPlayedCall = false)
-		{
-			if (item == null)
-				return;
-
-			// If requested, remember where the queue was so a "peek" play doesn't move the anchor.
-			var priorLastPlayed = preserveQueueAnchor ? _lastPlayedCall : null;
-			var wasQueuePlaybackRunning = preserveQueueAnchor && _isQueuePlaybackRunning;
-
-			try
-			{
-				await InterruptAudioForUserActionAsync("User selected call");
-
-				LastQueueEvent = $"Call tapped at {DateTime.Now:T}";
-
-				if (!AudioEnabled)
-				{
-					await PlaySingleCallWithoutQueueAsync(item);
-					return;
-				}
-
-				foreach (var call in Calls)
-				{
-					if (call.IsPlaying)
-						call.IsPlaying = false;
-				}
-
-				var shouldResumeQueueAfterManualPlayback =
-					AudioEnabled &&
-					IsRunning &&
-					(
-						_settingsService.AutoPlay ||
-						_userRunShouldDriveQueue ||
-						wasQueuePlaybackRunning ||
-						continueQueueFromPlayedCall
-					);
-
-				// Mark it as the current selection while it plays.
-				_currentPlayingCall = item;
-				UpdateQueueDerivedState();
-
-				await PlayAudioAsync(item, allowMutedPlayback: true, preserveAndroidAudioFocusForImmediateQueueResume: shouldResumeQueueAfterManualPlayback);
-
-				// After a user-initiated play, do not leave the VM thinking something is still playing.
-				// Otherwise the queue restart gate can refuse to start.
-				_currentPlayingCall = null;
-				foreach (var call in Calls)
-				{
-					if (call.IsPlaying)
-						call.IsPlaying = false;
-				}
-
-				// If requested, continue the queue starting from the call that was just played.
-				if (continueQueueFromPlayedCall)
-				{
-					_lastPlayedCall = item;
-					UpdateQueueDerivedState();
-				}
-				// Otherwise, restore the prior anchor so the live queue continues from where it was.
-				else if (preserveQueueAnchor)
-				{
-					_lastPlayedCall = priorLastPlayed;
-					UpdateQueueDerivedState();
-				}
-
-				if (shouldResumeQueueAfterManualPlayback)
-				{
-					LastQueueEvent = "Tapped call finished; restarting queue";
-					_ = RequestQueuePlaybackAsync("TappedCallFinished", true);
-				}
-				else
-				{
-					LastQueueEvent = "Tapped call finished";
-				}
-			}
-			catch (Exception ex)
-			{
-				AppLog.DebugWriteLine(() => $"Error in OnCallTappedAsync: {ex}");
-				LastQueueEvent = "Error while playing tapped call (see debug output)";
-			}
-		}
-private async Task JumpToLiveAsync()
+        private async Task OnCallTappedAsync(CallItem? item, bool preserveQueueAnchor, bool continueQueueFromPlayedCall = false)
         {
+            if (item == null)
+                return;
+
+            var priorLastPlayed = preserveQueueAnchor ? _lastPlayedCall : null;
+            var wasQueuePlaybackRunning = preserveQueueAnchor && _isQueuePlaybackRunning;
+            using var request = BeginManualPlayback();
+            var token = request.Token;
+
             try
             {
+                await _audioPlaybackService.StopAsync();
+                if (!request.CanContinue)
+                    return;
+
+                LastQueueEvent = $"Call tapped at {DateTime.Now:T}";
+                ClearPlayingSelection();
+                if (!AudioEnabled)
+                {
+                    await PlaySingleCallWithoutQueueAsync(item, request);
+                    return;
+                }
+
+                var shouldResumeQueueAfterManualPlayback =
+                    IsRunning && (_settingsService.AutoPlay || _userRunShouldDriveQueue ||
+                        wasQueuePlaybackRunning || continueQueueFromPlayedCall);
+
+                await PlayAudioAsync(item, request, allowMutedPlayback: true,
+                    preserveAndroidAudioFocusForImmediateQueueResume: shouldResumeQueueAfterManualPlayback);
+                if (!request.CanContinue)
+                    return;
+
+                if (continueQueueFromPlayedCall)
+                    _lastPlayedCall = item;
+                else if (preserveQueueAnchor)
+                    _lastPlayedCall = priorLastPlayed;
+                UpdateQueueDerivedState();
+
+                if (shouldResumeQueueAfterManualPlayback)
+                {
+                    LastQueueEvent = "Tapped call finished; restarting queue";
+                    request.Dispose();
+                    _ = RequestQueuePlaybackAsync("TappedCallFinished", true);
+                }
+            }
+            catch (OperationCanceledException ex) when (LivePlaybackRequests.IsExpectedCancellation(ex, token))
+            {
+                // A newer selection or explicit stop owns the playback state now.
+            }
+            catch (Exception ex)
+            {
+                ReportPlaybackFailure(ex, request);
+            }
+        }
+
+        private async Task JumpToLiveAsync()
+        {
+            using var request = BeginManualPlayback();
+            var token = request.Token;
+            try
+            {
+                await _audioPlaybackService.StopAsync();
+                if (!request.CanContinue)
+                    return;
+
+                ClearPlayingSelection();
                 CallItem? newest = null;
 
                 lock (_pendingCallsLock)
@@ -2365,12 +2308,6 @@ private async Task JumpToLiveAsync()
                     }
                 }
 
-                foreach (var call in Calls)
-                {
-                    if (call.IsPlaying)
-                        call.IsPlaying = false;
-                }
-
                 // Force the UI list to snap back to the newest call even if the user was
                 // scrolled into history (which intentionally disables auto-follow).
                 try
@@ -2396,11 +2333,14 @@ private async Task JumpToLiveAsync()
                 _currentPlayingCall = newest;
                 UpdateQueueDerivedState();
 
-                await PlayAudioAsync(newest);
+                await PlayAudioAsync(newest, request);
+                if (!request.CanContinue)
+                    return;
 
 				if (AudioEnabled && IsRunning && _settingsService.AutoPlay && CallsWaiting > 0)
                 {
                     LastQueueEvent = "Jump to live finished; restarting queue";
+                    request.Dispose();
 					_ = RequestQueuePlaybackAsync("JumpToLiveFinished", true);
                 }
                 else
@@ -2408,10 +2348,12 @@ private async Task JumpToLiveAsync()
                     LastQueueEvent = "Jump to live finished";
                 }
             }
+            catch (OperationCanceledException ex) when (LivePlaybackRequests.IsExpectedCancellation(ex, token))
+            {
+            }
             catch (Exception ex)
             {
-                AppLog.DebugWriteLine(() => $"Error in JumpToLiveAsync: {ex}");
-                LastQueueEvent = "Error jumping to live (see debug output)";
+                ReportPlaybackFailure(ex, request);
             }
         }
 
@@ -2512,20 +2454,22 @@ private static string SpeedStepToLabel(double step)
 }
         private async Task EnsureQueuePlaybackAsync()
         {
-            if (_isQueuePlaybackRunning)
+            if (_isQueuePlaybackRunning || _playbackRequests.HasManualSelection)
                 return;
 
             if (!AudioEnabled || !IsRunning)
                 return;
 
             _isQueuePlaybackRunning = true;
+            var version = ++_queuePlaybackVersion;
             var aborted = false;
+            var hadFailure = false;
 
             LastQueueEvent = "Queue playback started";
 
             try
             {
-                while (AudioEnabled && IsRunning)
+                while (version == _queuePlaybackVersion && AudioEnabled && IsRunning)
                 {
                     var next = GetNextQueuedCall();
                     if (next == null)
@@ -2533,9 +2477,18 @@ private static string SpeedStepToLabel(double step)
 
                     UpdateQueueDerivedState();
 
-                    await PlayAudioAsync(next);
+                    using var request = _playbackRequests.Begin(manual: false);
+                    try
+                    {
+                        await PlayAudioAsync(next, request);
+                    }
+                    catch (Exception ex)
+                    {
+                        hadFailure = true;
+                        ReportPlaybackFailure(ex, request);
+                    }
 
-                    if (!AudioEnabled || !IsRunning)
+                    if (!AudioEnabled || !IsRunning || (!request.CanContinue && !_isMainAudioSoftMuted))
                     {
                         aborted = true;
                         break;
@@ -2549,11 +2502,13 @@ private static string SpeedStepToLabel(double step)
             }
             finally
             {
-                _isQueuePlaybackRunning = false;
-
-                UpdateQueueDerivedState();
-
-                LastQueueEvent = aborted ? "Queue playback aborted" : "Queue playback finished";
+                if (version == _queuePlaybackVersion)
+                {
+                    _isQueuePlaybackRunning = false;
+                    UpdateQueueDerivedState();
+                    if (!hadFailure)
+                        LastQueueEvent = aborted ? "Queue playback aborted" : "Queue playback finished";
+                }
             }
         }
 
@@ -2762,58 +2717,39 @@ private static string SpeedStepToLabel(double step)
             };
         }
 
-        private async Task PlaySingleCallWithoutQueueAsync(CallItem item)
+        private async Task PlaySingleCallWithoutQueueAsync(CallItem item, LivePlaybackRequests.Request request)
         {
-            if (item == null || string.IsNullOrWhiteSpace(item.AudioUrl))
+            if (string.IsNullOrWhiteSpace(item.AudioUrl) || _filterService.ShouldHide(item))
                 return;
 
-            if (_filterService.ShouldHide(item))
-                return;
-
+            string? playbackUrl = null;
+            item.IsPlaying = true;
+            _currentPlayingCall = item;
             try
             {
-                foreach (var call in Calls)
-                {
-                    if (call.IsPlaying)
-                        call.IsPlaying = false;
-                }
-
-                item.IsPlaying = true;
-
-                var playbackUrl = await GetPlayableAudioUrlAsync(item.AudioUrl, CancellationToken.None);
-                if (string.IsNullOrWhiteSpace(playbackUrl))
+                playbackUrl = await GetPlayableAudioUrlAsync(item.AudioUrl, request.Token);
+                if (!request.CanContinue || string.IsNullOrWhiteSpace(playbackUrl))
                     return;
 
-                try
-                {
-                    _systemMediaService.UpdateNowPlaying(BuildNowPlayingMetadataSnapshot(item), AudioEnabled);
-                }
-                catch
-                {
-                }
-
-                await _audioPlaybackService.PlayAsync(playbackUrl, 1.0);
-            }
-            catch (FirewallAuthenticationException ex)
-            {
-                LastQueueEvent = ex.Message;
-            }
-            catch (Exception ex)
-            {
-                AppLog.DebugWriteLine(() => $"Error in PlaySingleCallWithoutQueueAsync: {ex}");
+                try { _systemMediaService.UpdateNowPlaying(BuildNowPlayingMetadataSnapshot(item), AudioEnabled); } catch { }
+                await PlayOnDeviceAsync(playbackUrl, 1.0, false, request, request.Token);
             }
             finally
             {
-                item.IsPlaying = false;
+                if (IsDownloadedAudioTempFile(playbackUrl))
+                    TryDeleteFile(playbackUrl!);
+                if (request.IsCurrent)
+                    ClearPlayingSelection();
             }
         }
 
-        private async Task PlayAudioAsync(CallItem? item, bool allowMutedPlayback = false, bool preserveAndroidAudioFocusForImmediateQueueResume = false)
+        private async Task PlayAudioAsync(CallItem? item, LivePlaybackRequests.Request request,
+            bool allowMutedPlayback = false, bool preserveAndroidAudioFocusForImmediateQueueResume = false)
         {
             if (item == null || string.IsNullOrWhiteSpace(item.AudioUrl))
                 return;
 
-            if (!AudioEnabled)
+            if (!AudioEnabled || !request.CanContinue)
                 return;
 
             if (_filterService.ShouldHide(item))
@@ -2844,16 +2780,7 @@ private static string SpeedStepToLabel(double step)
                 return;
             }
 
-            if (_audioCts != null)
-            {
-                try { _audioCts.Cancel(); } catch { }
-
-                _audioCts.Dispose();
-                _audioCts = null;
-            }
-
-            _audioCts = new CancellationTokenSource();
-            var userCts = _audioCts;
+            var userToken = request.Token;
 
             // Playback watchdog (prevents the queue from hanging forever on truly stuck playback).
             var rateForTimeout = GetEffectivePlaybackRate(item);
@@ -2874,8 +2801,8 @@ private static string SpeedStepToLabel(double step)
             using var playbackWatchdogCts = new CancellationTokenSource(TimeSpan.FromSeconds(playbackLimitSeconds));
             using var downloadWatchdogCts = new CancellationTokenSource(TimeSpan.FromSeconds(downloadLimitSeconds));
 
-            using var playbackLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(userCts.Token, playbackWatchdogCts.Token);
-            using var downloadLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(userCts.Token, downloadWatchdogCts.Token);
+            using var playbackLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(userToken, playbackWatchdogCts.Token);
+            using var downloadLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(userToken, downloadWatchdogCts.Token);
 
             var playbackToken = playbackLinkedCts.Token;
             var downloadToken = downloadLinkedCts.Token;
@@ -2892,6 +2819,8 @@ private static string SpeedStepToLabel(double step)
             OnPropertyChanged(nameof(CallsWaiting));
             OnPropertyChanged(nameof(IsCallsWaitingVisible));
 
+            string? downloadedTempPath = null;
+            var acquiringAudio = false;
             try
             {
                 var rate = rateForTimeout;
@@ -2914,39 +2843,38 @@ private static string SpeedStepToLabel(double step)
 
                     seconds = Math.Clamp(seconds, 0.15, 10800);
                     await Task.Delay(TimeSpan.FromSeconds(seconds), playbackToken);
-                    _lastQueuePlaybackFinishedAtUtc = DateTimeOffset.UtcNow;
+                    if (request.CanContinue)
+                        _lastQueuePlaybackFinishedAtUtc = DateTimeOffset.UtcNow;
                     return;
                 }
 
-                string? downloadedTempPath = null;
-                var shouldDeleteTempFile = false;
                 var acquisitionStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
                 // IMPORTANT: Do not use the playback watchdog here.
                 // Backgrounded Android downloads can be slower and would trip the playback watchdog incorrectly.
+                acquiringAudio = true;
                 var playbackUrl = await TryTakePrefetchedPlayableUrlAsync(item, downloadToken);
                 var usedPrefetchedPlayableUrl = !string.IsNullOrWhiteSpace(playbackUrl);
-                if (string.IsNullOrWhiteSpace(playbackUrl))
+                if (request.CanContinue && !downloadToken.IsCancellationRequested && string.IsNullOrWhiteSpace(playbackUrl))
                 {
                     playbackUrl = await GetPlayableAudioUrlAsync(item.AudioUrl, downloadToken);
                 }
 
                 acquisitionStopwatch.Stop();
+                acquiringAudio = false;
+                if (IsDownloadedAudioTempFile(playbackUrl))
+                    downloadedTempPath = playbackUrl;
+                if (!request.CanContinue)
+                    return;
+
+                if (downloadWatchdogCts.IsCancellationRequested)
+                    throw new TimeoutException("Audio download timeout");
 
                 if (string.IsNullOrWhiteSpace(playbackUrl))
                 {
-                    if (downloadWatchdogCts.IsCancellationRequested && !userCts.IsCancellationRequested)
-                        LastQueueEvent = "Audio download timeout, skipping to next call";
-
                     AppLog.Add(() => $"QueueTiming: backendId={item.BackendId ?? "(none)"} acquisitionFailed acquisitionMs={acquisitionStopwatch.Elapsed.TotalMilliseconds:0} prefetched={usedPrefetchedPlayableUrl}");
                     _lastQueuePlaybackFinishedAtUtc = DateTimeOffset.UtcNow;
                     return;
-                }
-
-                if (IsDownloadedAudioTempFile(playbackUrl))
-                {
-                    downloadedTempPath = playbackUrl;
-                    shouldDeleteTempFile = true;
                 }
 
                 StartPlayableUrlPrefetchForUpcomingCall(item);
@@ -2968,61 +2896,77 @@ private static string SpeedStepToLabel(double step)
                 }
 
                 var playbackStopwatch = System.Diagnostics.Stopwatch.StartNew();
-                await _audioPlaybackService.PlayAsync(playbackUrl, rate, preserveAndroidAudioFocusForImmediateQueueResume, playbackToken);
+                await PlayOnDeviceAsync(playbackUrl, rate, preserveAndroidAudioFocusForImmediateQueueResume, request, playbackToken);
+                if (!request.CanContinue)
+                    return;
+
+                if (playbackWatchdogCts.IsCancellationRequested)
+                {
+                    await _audioPlaybackService.StopAsync();
+                    throw new TimeoutException("Call playback watchdog timeout");
+                }
                 playbackStopwatch.Stop();
                 _lastQueuePlaybackFinishedAtUtc = DateTimeOffset.UtcNow;
 
                 AppLog.Add(() => $"QueueTiming: backendId={item.BackendId ?? "(none)"} playbackMs={playbackStopwatch.Elapsed.TotalMilliseconds:0} totalCallSeconds={item.CallDurationSeconds:0.###}");
 
-                if (shouldDeleteTempFile && !string.IsNullOrWhiteSpace(downloadedTempPath))
-                {
-                    TryDeleteFile(downloadedTempPath);
-                }
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException ex) when (LivePlaybackRequests.IsExpectedCancellation(ex, userToken))
             {
-                if (downloadWatchdogCts.IsCancellationRequested && !userCts.IsCancellationRequested)
-                {
-                    LastQueueEvent = "Audio download timeout, skipping to next call";
-                }
-                else if (playbackWatchdogCts.IsCancellationRequested && !userCts.IsCancellationRequested)
-                {
-                    LastQueueEvent = "Call playback watchdog timeout, skipping to next call";
-
-                    try
-                    {
-                        await _audioPlaybackService.StopAsync();
-                    }
-                    catch
-                    {
-                    }
-                }
             }
-            catch (FirewallAuthenticationException ex)
+            catch (OperationCanceledException ex) when (acquiringAudio &&
+                LivePlaybackRequests.IsExpectedCancellation(ex, downloadWatchdogCts.Token))
             {
-                LastQueueEvent = ex.Message;
+                throw new TimeoutException("Audio download timeout", ex);
             }
-            catch (Exception ex)
+            catch (OperationCanceledException ex) when (!acquiringAudio &&
+                LivePlaybackRequests.IsExpectedCancellation(ex, playbackWatchdogCts.Token))
             {
-                AppLog.DebugWriteLine(() => $"Error in PlayAudioAsync: {ex}");
+                if (request.CanContinue)
+                    await _audioPlaybackService.StopAsync();
+                throw new TimeoutException("Call playback watchdog timeout", ex);
             }
             finally
             {
-                item.IsPlaying = false;
+                if (downloadedTempPath != null)
+                    TryDeleteFile(downloadedTempPath);
+                if (request.IsCurrent)
+                {
+                    item.IsPlaying = false;
+                    if (request.CanContinue || (_isMainAudioSoftMuted && !request.IsManual))
+                    {
+                        _lastPlayedCall = item;
+                        _lastQueuePlaybackFinishedAtUtc ??= DateTimeOffset.UtcNow;
+                    }
+                    if (_currentPlayingCall == item)
+                        _currentPlayingCall = null;
 
-                _lastPlayedCall = item;
-                _lastQueuePlaybackFinishedAtUtc ??= DateTimeOffset.UtcNow;
-
-                if (_currentPlayingCall == item)
-                    _currentPlayingCall = null;
-
-                OnPropertyChanged(nameof(CallsWaiting));
-                OnPropertyChanged(nameof(IsCallsWaitingVisible));
+                    OnPropertyChanged(nameof(CallsWaiting));
+                    OnPropertyChanged(nameof(IsCallsWaitingVisible));
+                }
             }
         }
 
 
-        private static bool IsDownloadedAudioTempFile(string path)
+        private async Task PlayOnDeviceAsync(string url, double rate, bool preserveAudioFocus,
+            LivePlaybackRequests.Request request, CancellationToken cancellationToken)
+        {
+            if (!request.CanContinue || cancellationToken.IsCancellationRequested)
+                return;
+
+            await _nativePlaybackGate.WaitAsync(cancellationToken);
+            try
+            {
+                if (request.CanContinue && !cancellationToken.IsCancellationRequested)
+                    await _audioPlaybackService.PlayAsync(url, rate, preserveAudioFocus, cancellationToken);
+            }
+            finally
+            {
+                _nativePlaybackGate.Release();
+            }
+        }
+
+        private static bool IsDownloadedAudioTempFile(string? path)
         {
             if (string.IsNullOrWhiteSpace(path))
                 return false;
@@ -3065,10 +3009,7 @@ private static string SpeedStepToLabel(double step)
             if (string.IsNullOrWhiteSpace(audioUrl))
                 return null;
 
-            if (!Uri.TryCreate(audioUrl, UriKind.Absolute, out var audioUri))
-                return audioUrl;
-
-            if (audioUri.Scheme is not ("http" or "https"))
+            if (!Uri.TryCreate(audioUrl, UriKind.Absolute, out var audioUri) || audioUri.Scheme is not ("http" or "https"))
                 return audioUrl;
 
             if (!string.IsNullOrEmpty(audioUri.UserInfo))
@@ -3078,55 +3019,31 @@ private static string SpeedStepToLabel(double step)
             if (!authentication.RequiresFirewall(audioUri) && authentication.GetCustomAuthorization(audioUri) == null)
                 return audioUri.AbsoluteUri;
 
+            using var request = new HttpRequestMessage(HttpMethod.Get, audioUri);
+            using var response = await _audioHttpClient.SendAsync(
+                request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            response.EnsureSuccessStatusCode();
+
+            var extension = Path.GetExtension(audioUri.AbsolutePath);
+            if (string.IsNullOrEmpty(extension))
+                extension = ".wav";
+
+            var localPath = Path.Combine(FileSystem.CacheDirectory, $"jaas_{Guid.NewGuid():N}{extension}");
+            var tempPath = localPath + ".tmp";
             try
             {
-                using var request = new HttpRequestMessage(HttpMethod.Get, audioUri);
-
-                using var response = await _audioHttpClient.SendAsync(
-                    request,
-                    HttpCompletionOption.ResponseHeadersRead,
-                    cancellationToken);
-
-                response.EnsureSuccessStatusCode();
-
-                var ext = Path.GetExtension(audioUri.AbsolutePath);
-                if (string.IsNullOrEmpty(ext))
-                    ext = ".wav";
-
-                var cacheDir = FileSystem.CacheDirectory;
-                var fileName = $"jaas_{Guid.NewGuid():N}{ext}";
-                var localPath = Path.Combine(cacheDir, fileName);
-                var tempPath = localPath + ".tmp";
-
-                try
+                await using (var target = File.Create(tempPath))
+                await using (var stream = await response.Content.ReadAsStreamAsync(cancellationToken))
                 {
-                    await using (var target = File.Create(tempPath))
-                    await using (var stream = await response.Content.ReadAsStreamAsync(cancellationToken))
-                    {
-                        await stream.CopyToAsync(target, cancellationToken);
-                    }
-
-                    if (File.Exists(localPath))
-                        File.Delete(localPath);
-
-                    File.Move(tempPath, localPath);
-                    return localPath;
+                    await stream.CopyToAsync(target, cancellationToken);
                 }
-                catch
-                {
-                    TryDeleteFile(tempPath);
-                    TryDeleteFile(localPath);
-                    throw;
-                }
+
+                File.Move(tempPath, localPath);
+                return localPath;
             }
-            catch (Exception ex) when (ex is OperationCanceledException or FirewallAuthenticationException)
+            finally
             {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                AppLog.DebugWriteLine(() => $"[MainViewModel] Error downloading audio with auth: {ex}");
-                return null;
+                TryDeleteFile(tempPath);
             }
         }
 
@@ -3153,97 +3070,77 @@ private static string SpeedStepToLabel(double step)
             await StartMonitoringAsync();
         }
 
-        public async Task RefreshStaleTranscriptionsAsync(int maxToRefresh = 20)
+        private List<CallItem> SnapshotLiveCalls()
         {
+            var calls = Calls.ToList();
+            lock (_pendingCallsLock)
+                calls.AddRange(_pendingCalls);
+            return calls;
+        }
+
+        private void ApplyLiveUpdate(LiveCallState state, CallItem? update = null)
+        {
+            var existing = state.FindCard(Calls, _pendingCalls, _pendingCallsLock);
+            if (existing == null || !existing.ApplyLiveUpdate())
+                return;
+
+            var hadAddress = existing.HasDetectedAddress;
+            if (update != null && update.Transcription == existing.Transcription)
+            {
+                // Reuse detection performed by the stream. A newer observation may have
+                // already changed the transcript, in which case these results are stale.
+                existing.DetectedAddress = update.DetectedAddress;
+                existing.DetectedAddressConfidencePercent = update.DetectedAddressConfidencePercent;
+                existing.DetectedAddressCandidates = update.DetectedAddressCandidates;
+                existing.AddressDetectionAppliedHash = update.AddressDetectionAppliedHash;
+                existing.What3WordsAddress = update.What3WordsAddress;
+                existing.What3WordsAppliedHash = update.What3WordsAppliedHash;
+            }
+            else
+            {
+                try { _addressDetectionService.Apply(existing); } catch { }
+            }
+            if (!hadAddress && existing.HasDetectedAddress)
+                AddAddressAlertIfNew(existing);
+            try { _ = _what3WordsService.ResolveCoordinatesIfNeededAsync(existing, CancellationToken.None); } catch { }
+
+            LastQueueEvent = $"Transcription updated at {DateTime.Now:T}";
+        }
+
+        public async Task RefreshStaleCallMetadataAsync(int maxToRefresh = 20)
+        {
+            if (Interlocked.Exchange(ref _refreshingCallMetadata, 1) != 0)
+                return;
+
             try
             {
-                // Snapshot candidates on the UI thread so we do not enumerate the bound collection off-thread.
-                var candidates = await MainThread.InvokeOnMainThreadAsync(() =>
-                {
-                    if (Calls == null || Calls.Count == 0)
-                        return new List<CallItem>();
-
-                    bool NeedsRefresh(CallItem c)
-                    {
-                        if (c == null)
-                            return false;
-
-                        if (string.IsNullOrWhiteSpace(c.BackendId))
-                            return false;
-
-                        if (string.IsNullOrWhiteSpace(c.Transcription))
-                            return true;
-
-                        var t = c.Transcription.Trim();
-                        return t.Contains("No transcription", StringComparison.OrdinalIgnoreCase);
-                    }
-
-                    return Calls.Where(NeedsRefresh).Take(maxToRefresh).ToList();
-                });
-
-                if (candidates.Count == 0)
+                var candidates = await MainThread.InvokeOnMainThreadAsync(() => SnapshotLiveCalls()
+                    .Where(call => call.LiveState?.NeedsNotificationLookup() == true)
+                    .Take(maxToRefresh).ToArray());
+                if (candidates.Length == 0)
                     return;
 
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
-
-                foreach (var item in candidates)
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+                await _callStreamService.RefreshCallMetadataAsync(candidates, timeout.Token).ConfigureAwait(false);
+                await MainThread.InvokeOnMainThreadAsync(() =>
                 {
-                    if (string.IsNullOrWhiteSpace(item.BackendId))
-                        continue;
-
-                    string? refreshed;
-                    try
+                    foreach (var candidate in candidates)
                     {
-                        refreshed = await _callStreamService.TryFetchTranscriptionByIdAsync(item.BackendId, cts.Token);
+                        if (candidate.LiveState is { } state)
+                            ApplyLiveUpdate(state);
                     }
-                    catch (OperationCanceledException)
-                    {
-                        break;
-                    }
-                    catch
-                    {
-                        continue;
-                    }
-
-                    if (string.IsNullOrWhiteSpace(refreshed))
-                        continue;
-
-                    await MainThread.InvokeOnMainThreadAsync(() =>
-                    {
-                        try
-                        {
-                            if (!string.Equals(item.Transcription, refreshed, StringComparison.Ordinal))
-                            {
-                                item.Transcription = refreshed;
-
-                                
-                                var hadAddress = item.HasDetectedAddress;
-                                try { _addressDetectionService.Apply(item); } catch { }
-                                if (!hadAddress && item.HasDetectedAddress)
-                                    AddAddressAlertIfNew(item);
-							try { _ = _what3WordsService.ResolveCoordinatesIfNeededAsync(item, CancellationToken.None); } catch { }
-
-							if (!string.IsNullOrWhiteSpace(item.DebugInfo))
-                                {
-                                    var cleaned = item.DebugInfo
-                                        .Replace("No transcription from server", string.Empty, StringComparison.OrdinalIgnoreCase)
-                                        .Trim();
-
-                                    cleaned = cleaned.Trim(' ', '|', ';');
-                                    item.DebugInfo = cleaned;
-                                }
-
-                                LastQueueEvent = $"Transcription catch-up at {DateTime.Now:T}";
-                            }
-                        }
-                        catch
-                        {
-                        }
-                    });
-                }
+                });
             }
-            catch
+            catch (OperationCanceledException)
             {
+            }
+            catch (Exception ex)
+            {
+                AppLog.Add(() => $"Call metadata catch-up failed ({ex.GetType().Name}).");
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _refreshingCallMetadata, 0);
             }
         }
 
@@ -3459,26 +3356,46 @@ public void DismissAddressAlert(CallItem call)
             }
         }
 
-        private async Task InterruptAudioForUserActionAsync(string reason)
+        private LivePlaybackRequests.Request BeginManualPlayback()
         {
-            try
-            {
-                if (_audioCts != null)
-                {
-                    try { _audioCts.Cancel(); } catch { }
-                }
+            // Retire an automatic loop immediately. Its canceled I/O may still be unwinding
+            // when the newer manual selection finishes and requests queue playback again.
+            ++_queuePlaybackVersion;
+            _isQueuePlaybackRunning = false;
+            var request = _playbackRequests.Begin(manual: true);
+            ClearPrefetchedPlayableUrl(deleteCompletedTempFile: true);
+            return request;
+        }
 
-                // Cancellation alone does not always stop platform players immediately.
-                // Stop the player so user actions (next, previous, speed) take effect right away.
-                try { await _audioPlaybackService.StopAsync(); } catch { }
-            }
-            catch
+        private void ClearPlayingSelection()
+        {
+            foreach (var call in Calls)
             {
+                if (call.IsPlaying)
+                    call.IsPlaying = false;
             }
-            finally
+            _currentPlayingCall = null;
+        }
+
+        private void ReportPlaybackFailure(Exception ex, LivePlaybackRequests.Request request)
+        {
+            // Log failure types without recording URLs or request details.
+            AppLog.DebugWriteLine(() => ex is HttpRequestException { StatusCode: { } status }
+                ? $"Live playback failed: {ex.GetType().Name}, HTTP {(int)status}"
+                : $"Live playback failed: {ex.GetType().Name}");
+            if (!request.CanContinue)
+                return;
+
+            UpdateQueueDerivedState();
+            LastQueueEvent = ex switch
             {
-                LastQueueEvent = reason;
-            }
+                FirewallAuthenticationException firewall => firewall.Message,
+                TimeoutException watchdog => watchdog.Message,
+                OperationCanceledException canceled when LivePlaybackRequests.IsTimeout(canceled) => "Audio request timed out",
+                OperationCanceledException => "Audio request was unexpectedly canceled",
+                HttpRequestException => "Audio request failed (see debug output)",
+                _ => "Error while playing call (see debug output)"
+            };
         }
 
         private Task DecreasePlaybackSpeedStepAsync()
@@ -3539,7 +3456,6 @@ public void DismissAddressAlert(CallItem call)
                 if (!IsPlayable(candidate))
                     continue;
 
-                await InterruptAudioForUserActionAsync(direction == 1 ? "Previous call requested" : "Next call requested");
                 await OnCallTappedAsync(candidate);
                 return;
             }

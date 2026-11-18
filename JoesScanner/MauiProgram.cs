@@ -34,6 +34,7 @@ public static class MauiProgram
 
         // Services
         builder.Services.AddSingleton<ISettingsService, SettingsService>();
+        builder.Services.AddSingleton<CallCardOptionsService>();
         builder.Services.AddSingleton<IDatabasePathProvider, DatabasePathProvider>();
         builder.Services.AddSingleton<ILocalCallsRepository, LocalCallsRepository>();
         builder.Services.AddSingleton<IHistoryLookupsRepository, HistoryLookupsRepository>();

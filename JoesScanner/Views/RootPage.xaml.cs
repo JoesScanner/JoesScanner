@@ -4,7 +4,7 @@ using JoesScanner.Services;
 using JoesScanner.ViewModels;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Maui.Devices;
-using Microsoft.Maui.ApplicationModel;
+using Microsoft.Maui.Dispatching;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -14,6 +14,7 @@ namespace JoesScanner.Views;
 public partial class RootPage : ContentPage
 {
     private readonly IServiceProvider _services;
+    private readonly IDispatcher _viewDispatcher;
 
     private readonly Dictionary<AppTab, ContentPage> _pages = new();
     private readonly Dictionary<AppTab, View> _views = new();
@@ -45,6 +46,7 @@ public partial class RootPage : ContentPage
     {
         _services = services ?? throw new ArgumentNullException(nameof(services));
         InitializeComponent();
+        _viewDispatcher = ContentHost.Dispatcher;
     }
 
     protected override void OnAppearing()
@@ -82,34 +84,7 @@ public partial class RootPage : ContentPage
         {
             if (DeviceInfo.Platform == DevicePlatform.iOS)
             {
-                _ = MainThread.InvokeOnMainThreadAsync(async () =>
-                {
-                    try
-                    {
-                        await Task.Yield();
-                        await Task.Delay(1);
-
-                        // First appearance: perform the normal initial attach once.
-                        if (Interlocked.Exchange(ref _initialNavigationStarted, 1) == 0)
-                        {
-                            SwitchTo(tab: _current);
-                            return;
-                        }
-
-                        // Later iOS appearances, including returning from modal pickers:
-                        // if the hosted content was cleared, reattach the current tab.
-                        if (!HasActiveHostedContent())
-                        {
-                            LogNavError($"RootPage.OnAppearing detected empty host on iOS. Reattaching {_current}.");
-                            SwitchTo(tab: _current);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        LogNavError($"RootPage.OnAppearing deferred SwitchTo({_current}) failed: {ex}");
-                        _ = SafeAlertAsync("Navigation error", $"Settings navigation failed:\n{FormatNavException(ex)}");
-                    }
-                });
+                _ = RestoreIosHostedTabAsync();
             }
             else
             {
@@ -125,9 +100,39 @@ public partial class RootPage : ContentPage
             QueueSettingsWarmupAfterLayout(mainView);
     }
 
+    private async Task RestoreIosHostedTabAsync()
+    {
+        try
+        {
+            // Defer until the native page handler is ready.
+            await Task.Delay(1).ConfigureAwait(false);
+            await _viewDispatcher.DispatchAsync(() =>
+            {
+                if (!_rootVisible)
+                    return;
+
+                if (Interlocked.Exchange(ref _initialNavigationStarted, 1) == 0)
+                {
+                    SwitchTo(_current);
+                }
+                else if (!HasActiveHostedContent())
+                {
+                    LogNavError($"RootPage.OnAppearing detected empty host on iOS. Reattaching {_current}.");
+                    SwitchTo(_current);
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            LogNavError($"RootPage.OnAppearing deferred navigation failed: {ex}");
+            _ = SafeAlertAsync("Navigation error", $"Settings navigation failed:\n{FormatNavException(ex)}");
+        }
+    }
+
     protected override void OnDisappearing()
     {
         _rootVisible = false;
+        ++_navigationRequestVersion;
         StopWaitingForMainLayout();
         TabNavigationService.Instance.TabRequested -= OnTabRequested;
         base.OnDisappearing();
@@ -152,7 +157,7 @@ public partial class RootPage : ContentPage
 
         StopWaitingForMainLayout();
         _settingsWarmupQueued = true;
-        if (!Dispatcher.Dispatch(StartSettingsWarmup))
+        if (!_viewDispatcher.Dispatch(StartSettingsWarmup))
             _settingsWarmupQueued = false;
     }
 
@@ -282,7 +287,10 @@ public partial class RootPage : ContentPage
     {
         try
         {
-            await MainThread.InvokeOnMainThreadAsync(() => SwitchToWithFeedbackAsync(tab));
+            if (_viewDispatcher.IsDispatchRequired)
+                await _viewDispatcher.DispatchAsync(() => SwitchToWithFeedbackAsync(tab));
+            else
+                await SwitchToWithFeedbackAsync(tab);
         }
         catch (Exception ex)
         {
@@ -293,110 +301,87 @@ public partial class RootPage : ContentPage
 
     private async Task SwitchToWithFeedbackAsync(AppTab tab)
     {
+        if (!_rootVisible)
+            return;
+
         var version = ++_navigationRequestVersion;
-        // Settings no longer depends on overlay animation to finish loading its data.
-        if (_current == AppTab.Settings || tab == AppTab.Settings)
+        // Settings and repeated selections do not wait for the overlay animation.
+        if (_current == tab || _current == AppTab.Settings || tab == AppTab.Settings)
         {
             SwitchTo(tab);
             return;
         }
 
-        var shouldShowOverlay = _current != tab;
-
-        if (!shouldShowOverlay)
-        {
-            await MainThread.InvokeOnMainThreadAsync(() => SwitchTo(tab));
-            return;
-        }
-
-        await MainThread.InvokeOnMainThreadAsync(ShowNavigationFeedbackAsync);
-
         try
         {
-            if (version == _navigationRequestVersion)
-                SwitchTo(tab);
+            await ShowNavigationFeedbackAsync().ConfigureAwait(false);
+            await _viewDispatcher.DispatchAsync(() =>
+            {
+                if (_rootVisible && version == _navigationRequestVersion)
+                    SwitchTo(tab);
+            });
         }
         finally
         {
-            await MainThread.InvokeOnMainThreadAsync(HideNavigationFeedbackAsync);
+            await HideNavigationFeedbackAsync();
         }
     }
 
     private async Task ShowNavigationFeedbackAsync()
     {
+        ++_navigationOverlayDepth;
         try
         {
-            Interlocked.Increment(ref _navigationOverlayDepth);
-
-            if (NavigationFeedbackOverlay == null)
-                return;
-
             NavigationFeedbackOverlay.IsVisible = true;
             NavigationFeedbackOverlay.InputTransparent = false;
+            NavigationFeedbackSpinner.IsVisible = false;
+            NavigationFeedbackSpinner.IsRunning = false;
 
-            if (NavigationFeedbackSpinner != null)
+            await NavigationFeedbackOverlay.FadeTo(0.14, 70, Easing.CubicOut).ConfigureAwait(false);
+            await _viewDispatcher.DispatchAsync(() =>
             {
-                NavigationFeedbackSpinner.IsVisible = false;
-                NavigationFeedbackSpinner.IsRunning = false;
-            }
+                if (!_rootVisible)
+                    return;
 
-            await NavigationFeedbackOverlay.FadeTo(0.14, 70, Easing.CubicOut);
-
-            await Task.Yield();
-
-            if (NavigationFeedbackSpinner != null)
-            {
                 NavigationFeedbackSpinner.IsVisible = true;
                 NavigationFeedbackSpinner.IsRunning = true;
-            }
+            });
         }
-        catch
+        catch (Exception ex)
         {
+            LogNavError($"Showing navigation feedback failed: {ex.GetType().Name}");
         }
     }
 
-    private async Task HideNavigationFeedbackAsync()
+    private Task HideNavigationFeedbackAsync() => _viewDispatcher.DispatchAsync(async () =>
     {
+        if (--_navigationOverlayDepth > 0)
+            return;
+
+        NavigationFeedbackSpinner.IsRunning = false;
+        NavigationFeedbackSpinner.IsVisible = false;
+
         try
         {
-            if (Interlocked.Decrement(ref _navigationOverlayDepth) > 0)
-                return;
-
-            if (NavigationFeedbackOverlay == null)
-                return;
-
-            if (NavigationFeedbackSpinner != null)
-            {
-                NavigationFeedbackSpinner.IsRunning = false;
-                NavigationFeedbackSpinner.IsVisible = false;
-            }
-
-            await NavigationFeedbackOverlay.FadeTo(0, 90, Easing.CubicIn);
-            NavigationFeedbackOverlay.InputTransparent = true;
-            NavigationFeedbackOverlay.IsVisible = false;
+            await NavigationFeedbackOverlay.FadeTo(0, 90, Easing.CubicIn).ConfigureAwait(false);
         }
-        catch
+        catch (Exception ex)
         {
-            try
-            {
-                if (NavigationFeedbackSpinner != null)
-                {
-                    NavigationFeedbackSpinner.IsRunning = false;
-                    NavigationFeedbackSpinner.IsVisible = false;
-                }
-
-                if (NavigationFeedbackOverlay != null)
-                {
-                    NavigationFeedbackOverlay.Opacity = 0;
-                    NavigationFeedbackOverlay.InputTransparent = true;
-                    NavigationFeedbackOverlay.IsVisible = false;
-                }
-            }
-            catch
-            {
-            }
+            LogNavError($"Hiding navigation feedback failed: {ex.GetType().Name}");
         }
-    }
+        finally
+        {
+            await _viewDispatcher.DispatchAsync(() =>
+            {
+                if (_navigationOverlayDepth != 0)
+                    return;
+
+                NavigationFeedbackOverlay.Opacity = 0;
+                NavigationFeedbackOverlay.InputTransparent = true;
+                NavigationFeedbackOverlay.IsVisible = false;
+            });
+        }
+    });
 
     private ContentPage CreatePage(AppTab tab)
     {
@@ -587,7 +572,7 @@ public partial class RootPage : ContentPage
         if (trace)
         {
             LogSettingsStage($"{previousTab} to {tab} synchronous total", started);
-            Dispatcher.Dispatch(() => AppLog.Add(() => $"Settings navigation: dispatcher resumed after {Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} ms."));
+            _viewDispatcher.Dispatch(() => AppLog.Add(() => $"Settings navigation: dispatcher resumed after {Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} ms."));
         }
     }
 
@@ -783,24 +768,16 @@ public partial class RootPage : ContentPage
         }
     }
 
-    private static Task SafeAlertAsync(string title, string message)
+    private Task SafeAlertAsync(string title, string message) => _viewDispatcher.DispatchAsync(async () =>
     {
         try
         {
-            return MainThread.InvokeOnMainThreadAsync(async () =>
-            {
-                try
-                {
-                    await UiDialogs.AlertAsync(title, message, "OK");
-                }
-                catch
-                {
-                }
-            });
+            if (_rootVisible)
+                await DisplayAlertAsync(title, message, "OK");
         }
-        catch
+        catch (Exception ex)
         {
-            return Task.CompletedTask;
+            LogNavError($"Showing the navigation error failed: {ex.GetType().Name}");
         }
-    }
+    });
 }

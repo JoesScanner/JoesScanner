@@ -1209,69 +1209,37 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
             public DataTablesSearch Search { get; set; } = new();
         }
 
-        private sealed class CallRow
+        private sealed class CallRow : TrunkingRecorderCallFields
         {
             public string? DT_RowId { get; set; }
             public string? StartTime { get; set; }
             public string? StartTimeUTC { get; set; }
             public string? Time { get; set; }
             public string? Date { get; set; }
-            public string? TargetID { get; set; }
-            public string? TargetLabel { get; set; }
-            public string? TargetTag { get; set; }
-            public string? SourceID { get; set; }
-            public string? SourceLabel { get; set; }
-            public string? SourceTag { get; set; }
-            public string? LCN { get; set; }
-            public string? Frequency { get; set; }
-            public string? CallAudioType { get; set; }
-            public string? SystemID { get; set; }
-            public string? SystemLabel { get; set; }
-            public string? SystemType { get; set; }
             public string? AudioStartPos { get; set; }
-            public string? SiteID { get; set; }
-            public string? SiteLabel { get; set; }
-            public string? VoiceReceiver { get; set; }
-            public string? CallType { get; set; }
             public string? CallText { get; set; }
             public string? Transcript { get; set; }
             public string? Transcription { get; set; }
             public string? AudioFilename { get; set; }
-            public string? CallDuration { get; set; }
         }
 
         private static CallRow ParseRow(JsonElement e)
         {
-            return new CallRow
+            var row = new CallRow
             {
                 DT_RowId = GetString(e, "DT_RowId"),
                 StartTime = GetString(e, "StartTime"),
                 StartTimeUTC = GetString(e, "StartTimeUTC"),
                 Time = GetString(e, "Time"),
                 Date = GetString(e, "Date"),
-                TargetID = GetString(e, "TargetID"),
-                TargetLabel = GetString(e, "TargetLabel"),
-                TargetTag = GetString(e, "TargetTag"),
-                SourceID = GetString(e, "SourceID"),
-                SourceLabel = GetString(e, "SourceLabel"),
-                SourceTag = GetString(e, "SourceTag"),
-                LCN = GetString(e, "LCN"),
-                Frequency = GetString(e, "Frequency"),
-                CallAudioType = GetString(e, "CallAudioType"),
-                SystemID = GetString(e, "SystemID"),
-                SystemLabel = GetString(e, "SystemLabel"),
-                SystemType = GetString(e, "SystemType"),
                 AudioStartPos = GetString(e, "AudioStartPos"),
-                SiteID = GetString(e, "SiteID"),
-                SiteLabel = GetString(e, "SiteLabel"),
-                VoiceReceiver = GetString(e, "VoiceReceiver"),
-                CallType = GetString(e, "CallType"),
                 CallText = GetString(e, "CallText"),
                 Transcript = GetString(e, "Transcript"),
                 Transcription = GetString(e, "Transcription"),
-                AudioFilename = GetStringAny(e, "AudioFilename", "AudioFileName", "AudioFile", "Filename", "FileName", "CallAudioFilename", "CallAudioFile"),
-                CallDuration = GetString(e, "CallDuration")
+                AudioFilename = GetStringAny(e, "AudioFilename", "AudioFileName", "AudioFile", "Filename", "FileName", "CallAudioFilename", "CallAudioFile")
             };
+            row.ReadCardFields(e, GetString);
+            return row;
         }
 
 
@@ -1342,11 +1310,11 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
             return WebUtility.HtmlDecode(s).Trim();
         }
 
-        private static DateTime ParseTimestamp(string? startTime, string? startTimeUtc)
+        private static DateTime? ParseTimestamp(string? startTime, string? startTimeUtc)
         {
             var value = !string.IsNullOrWhiteSpace(startTimeUtc) ? startTimeUtc : startTime;
             if (string.IsNullOrWhiteSpace(value))
-                return DateTime.Now;
+                return null;
 
             try
             {
@@ -1366,7 +1334,7 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
             {
             }
 
-            return DateTime.Now;
+            return null;
         }
 
         private static string? CapTextRaw(string? text)
@@ -1455,32 +1423,7 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
                 if (string.IsNullOrWhiteSpace(rawId))
                     rawId = Guid.NewGuid().ToString("N");
 
-                var timestamp = ParseTimestamp(r.StartTime, r.StartTimeUTC);
-
-                var talkgroup = !string.IsNullOrWhiteSpace(r.TargetLabel)
-                    ? r.TargetLabel
-                    : r.TargetID ?? string.Empty;
-
-                var source = !string.IsNullOrWhiteSpace(r.SourceLabel)
-                    ? r.SourceLabel
-                    : r.SourceID ?? string.Empty;
-
-                var site = !string.IsNullOrWhiteSpace(r.SiteLabel)
-                    ? r.SiteLabel
-                    : r.SiteID ?? string.Empty;
-
-                // User preference: do not show the word "Unknown" in the Site column.
-                if (!string.IsNullOrWhiteSpace(site) && site.StartsWith("Unknown", StringComparison.OrdinalIgnoreCase))
-                    site = string.Empty;
-
-                var voiceReceiver = r.VoiceReceiver?.Trim() ?? string.Empty;
-
-                double durationSeconds = 0;
-                if (!string.IsNullOrWhiteSpace(r.CallDuration) &&
-                    double.TryParse(r.CallDuration, NumberStyles.Float, CultureInfo.InvariantCulture, out var dur))
-                {
-                    durationSeconds = dur;
-                }
+                var metadata = r.ToCardMetadata(ParseTimestamp(r.StartTime, r.StartTimeUTC), omitUnknownSite: true);
 
                 var transcript = (r.CallText ?? r.Transcription ?? r.Transcript ?? string.Empty).Trim();
 
@@ -1516,12 +1459,13 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
                 return new CallItem
                 {
                     BackendId = rawId,
-                    Timestamp = timestamp,
-                    CallDurationSeconds = durationSeconds,
-                    Talkgroup = talkgroup,
-                    Source = source,
-                    Site = site,
-                    VoiceReceiver = voiceReceiver,
+                    Timestamp = metadata.Timestamp ?? DateTime.Now,
+                    CallDurationSeconds = metadata.DurationSeconds ?? 0,
+                    Talkgroup = metadata.Talkgroup ?? string.Empty,
+                    Source = metadata.Radio ?? string.Empty,
+                    Site = metadata.Site ?? string.Empty,
+                    VoiceReceiver = metadata.Receiver ?? string.Empty,
+                    CardMetadata = metadata,
                     Transcription = transcript,
                     AudioUrl = audioUrl,
                     DebugInfo = string.Empty,

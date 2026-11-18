@@ -21,8 +21,12 @@ namespace JoesScanner.Views
         private bool _isDropdownOpen;
 
         private bool _addressAlertHandlersAttached;
-public HistoryPage(HistoryViewModel viewModel, ICallDownloadService downloadService, ISettingsService settingsService)
+        public CallCardOptionsService CallCardOptions { get; }
+
+        public HistoryPage(HistoryViewModel viewModel, ICallDownloadService downloadService, ISettingsService settingsService,
+            CallCardOptionsService callCardOptions)
         {
+            CallCardOptions = callCardOptions;
             InitializeComponent();
             _viewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
             _downloadService = downloadService ?? throw new ArgumentNullException(nameof(downloadService));
@@ -181,7 +185,7 @@ private async void OnCallDownloadClicked(object sender, EventArgs e)
 
 
 
-private void OnCallPrimaryTapped(object sender, TappedEventArgs e)
+private void OnCallPrimaryTapped(object? sender, TappedEventArgs e)
         {
             try
             {

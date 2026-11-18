@@ -1,6 +1,6 @@
 using JoesScanner.Models;
 using JoesScanner.Services;
-using Microsoft.Maui.ApplicationModel;
+using Microsoft.Maui.Dispatching;
 
 namespace JoesScanner.Views.Controls;
 
@@ -9,6 +9,7 @@ public partial class AppTabStrip : ContentView
     // Static sizing. Adjust these two numbers to taste.
     private const double StaticTabIconSize = 70d;
     private const double StaticStripHeight = 70d;
+    private readonly IDispatcher _viewDispatcher;
 
     public static readonly BindableProperty SelectedTabProperty = BindableProperty.Create(
         nameof(SelectedTab),
@@ -97,6 +98,7 @@ public partial class AppTabStrip : ContentView
 
     public AppTabStrip()
     {
+        _viewDispatcher = Dispatcher;
         InitializeComponent();
 
         // The control can be created before a Handler (and therefore MauiContext.Services) exists.
@@ -111,8 +113,19 @@ public partial class AppTabStrip : ContentView
             DetachCommsBadge();
         };
 
-        HandlerChanged += (_, _) => BeginAttachCommsBadge();
-        HandlerChanged += (_, _) => StartHistoryIconWatcher();
+        HandlerChanged += (_, _) =>
+        {
+            if (Handler == null)
+            {
+                StopAttachCommsBadge();
+                StopHistoryIconWatcher();
+                DetachCommsBadge();
+                return;
+            }
+
+            BeginAttachCommsBadge();
+            StartHistoryIconWatcher();
+        };
 
         // Keep the hooks in place in case you ever re-enable AutoSizeEnabled,
         // but UpdateSizing will apply static sizing when AutoSizeEnabled is false.
@@ -122,103 +135,93 @@ public partial class AppTabStrip : ContentView
         UpdateSizing();
     }
 
-    private CancellationTokenSource? _attachCts;
+    private IDispatcherTimer? _attachTimer;
+    private int _attachAttempts;
 
     private ICommsBadgeService? _commsBadge;
 
-    private ISettingsService? _settingsService;
-
     private CancellationTokenSource? _historyIconCts;
-    private string _lastHistoryIcon = string.Empty;
 
     private void BeginAttachCommsBadge()
     {
-        if (_commsBadge != null)
+        if (TryAttachCommsBadge())
         {
-            UpdateCommsButtonBadge();
+            StopAttachCommsBadge();
             return;
         }
+        if (_attachTimer != null)
+            return;
 
-        StopAttachCommsBadge();
-        _attachCts = new CancellationTokenSource();
+        // Services can still be unavailable before the handler finishes attaching.
+        _attachAttempts = 0;
+        _attachTimer = _viewDispatcher.CreateTimer();
+        _attachTimer.Interval = TimeSpan.FromMilliseconds(250);
+        _attachTimer.IsRepeating = true;
+        _attachTimer.Tick += OnAttachTimerTick;
+        _attachTimer.Start();
+    }
 
-        // Retry for a short period until the MauiContext services become available.
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                for (var i = 0; i < 20 && !_attachCts.IsCancellationRequested; i++)
-                {
-                    MainThread.BeginInvokeOnMainThread(() =>
-                    {
-                        try { TryAttachCommsBadge(); } catch { }
-                    });
-
-                    if (_commsBadge != null)
-                        break;
-
-                    await Task.Delay(250, _attachCts.Token).ConfigureAwait(false);
-                }
-            }
-            catch
-            {
-            }
-        });
+    private void OnAttachTimerTick(object? sender, EventArgs e)
+    {
+        if (TryAttachCommsBadge() || ++_attachAttempts == 20)
+            StopAttachCommsBadge();
     }
 
     private void StopAttachCommsBadge()
     {
-        try { _attachCts?.Cancel(); } catch { }
-        try { _attachCts?.Dispose(); } catch { }
-        _attachCts = null;
+        if (_attachTimer is not { } timer)
+            return;
+
+        _attachTimer = null;
+        timer.Stop();
+        timer.Tick -= OnAttachTimerTick;
     }
 
-    private void TryAttachCommsBadge()
+    private bool TryAttachCommsBadge()
     {
-        if (_commsBadge != null)
-        {
-            UpdateCommsButtonBadge();
-            return;
-        }
-
         try
         {
-            // Prefer this control's Handler, fall back to Application handler.
-            var services = Handler?.MauiContext?.Services ?? Application.Current?.Handler?.MauiContext?.Services;
-            _commsBadge = services?.GetService(typeof(ICommsBadgeService)) as ICommsBadgeService;
-
             if (_commsBadge == null)
-                return;
+            {
+                var services = Handler?.MauiContext?.Services ?? Application.Current?.Handler?.MauiContext?.Services;
+                _commsBadge = services?.GetService(typeof(ICommsBadgeService)) as ICommsBadgeService;
+                if (_commsBadge == null)
+                    return false;
 
-            _commsBadge.Changed += OnCommsBadgeChanged;
+                _commsBadge.Changed += OnCommsBadgeChanged;
+            }
+
             UpdateCommsButtonBadge();
+            return true;
         }
-        catch
+        catch (Exception ex)
         {
+            AppLog.DebugWriteLine(() => $"Comms badge attachment failed: {ex.GetType().Name}");
+            return false;
         }
     }
 
     private void DetachCommsBadge()
     {
-        try
-        {
-            if (_commsBadge != null)
-                _commsBadge.Changed -= OnCommsBadgeChanged;
-        }
-        catch
-        {
-        }
+        if (_commsBadge is not { } badge)
+            return;
+
+        _commsBadge = null;
+        badge.Changed -= OnCommsBadgeChanged;
     }
 
     private void OnCommsBadgeChanged()
     {
-        try
-        {
-            MainThread.BeginInvokeOnMainThread(UpdateCommsButtonBadge);
-        }
-        catch
-        {
-        }
+        if (_viewDispatcher.IsDispatchRequired)
+            _viewDispatcher.Dispatch(UpdateAttachedCommsBadge);
+        else
+            UpdateAttachedCommsBadge();
+    }
+
+    private void UpdateAttachedCommsBadge()
+    {
+        if (_commsBadge != null)
+            UpdateCommsButtonBadge();
     }
 
     private void UpdateCommsButtonBadge()
@@ -243,6 +246,12 @@ public partial class AppTabStrip : ContentView
 
     private void UpdateSizing()
     {
+        if (_viewDispatcher.IsDispatchRequired)
+        {
+            _viewDispatcher.Dispatch(UpdateSizing);
+            return;
+        }
+
         // Static sizing mode (default).
         if (!AutoSizeEnabled)
         {
@@ -349,7 +358,7 @@ public partial class AppTabStrip : ContentView
 
             try
             {
-                _ = MainThread.InvokeOnMainThreadAsync(async () =>
+                _ = _viewDispatcher.DispatchAsync(async () =>
                 {
                     try
                     {
@@ -390,15 +399,11 @@ public partial class AppTabStrip : ContentView
             if (_historyIconCts != null)
                 return;
 
-            if (Handler?.MauiContext?.Services == null)
-                return;
-
-            _settingsService ??= Handler.MauiContext.Services.GetService<ISettingsService>();
-            if (_settingsService == null)
+            if (Handler?.MauiContext?.Services.GetService<ISettingsService>() is not { } settings)
                 return;
 
             _historyIconCts = new CancellationTokenSource();
-            _ = RunHistoryIconLoopAsync(_historyIconCts.Token);
+            _ = RunHistoryIconLoopAsync(settings, _historyIconCts.Token);
         }
         catch
         {
@@ -421,56 +426,40 @@ public partial class AppTabStrip : ContentView
         }
     }
 
-    private async Task RunHistoryIconLoopAsync(CancellationToken ct)
+    private async Task RunHistoryIconLoopAsync(ISettingsService settings, CancellationToken ct)
     {
+        string? previous = null;
         while (!ct.IsCancellationRequested)
         {
             try
             {
-                UpdateHistoryIcon();
+                var isHosted = IsHostedJoeServerSelected(settings.ServerUrl);
+                var isFullAccess = !isHosted || settings.SubscriptionTierLevel >= 2;
+                var desired = isFullAccess ? "mc_history_full.png" : "mc_history.png";
+
+                if (desired != previous && _viewDispatcher.Dispatch(() =>
+                    {
+                        if (!ct.IsCancellationRequested)
+                            HistoryButton.Source = desired;
+                    }))
+                {
+                    previous = desired;
+                }
             }
-            catch
+            catch (Exception ex)
             {
+                AppLog.DebugWriteLine(() => $"History tab icon refresh failed: {ex.GetType().Name}");
             }
 
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(1), ct);
+                await Task.Delay(TimeSpan.FromSeconds(1), ct).ConfigureAwait(false);
             }
-            catch
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 break;
             }
         }
-    }
-
-    private void UpdateHistoryIcon()
-    {
-        if (HistoryButton == null || _settingsService == null)
-            return;
-
-        var isHosted = IsHostedJoeServerSelected(_settingsService.ServerUrl);
-
-        // Custom servers are always treated as full access.
-        var isFullAccess = !isHosted || _settingsService.SubscriptionTierLevel >= 2;
-
-        var desired = isFullAccess ? "mc_history_full.png" : "mc_history.png";
-        if (string.Equals(desired, _lastHistoryIcon, StringComparison.OrdinalIgnoreCase))
-            return;
-
-        _lastHistoryIcon = desired;
-
-        MainThread.BeginInvokeOnMainThread(() =>
-        {
-            try
-            {
-                if (HistoryButton != null)
-                    HistoryButton.Source = desired;
-            }
-            catch
-            {
-            }
-        });
     }
 
     private static bool IsHostedJoeServerSelected(string? serverUrl)

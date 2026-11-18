@@ -7,7 +7,6 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Threading.Channels;
 using JoesScanner.Data;
 using JoesScanner.Services;
 using JoesScanner.Helpers;
@@ -30,17 +29,6 @@ namespace JoesScanner.Services
 
         // Mirrors DEFAULT_CONFIG["poll_batch"] from the server.
         private const int PollBatchSize = 25;
-
-        // When true, the next GetCallStreamAsync run should preserve the IDs learned
-        // during a warm start so we do not re-emit the same recent calls.
-        private volatile bool _preserveSeenIdsForNextConnect;
-
-        // Tracks which call IDs have already been surfaced to the UI.
-        private readonly HashSet<string> _seenIds = new();
-
-        // Tracks call IDs that were initially missing transcription so we can
-        // detect when the server later sends an updated row with text.
-        private readonly HashSet<string> _idsMissingTranscription = new();
 
         // DataTables draw counter used by the calljson endpoint.
         private int _draw = 1;
@@ -94,8 +82,7 @@ namespace JoesScanner.Services
             int start,
             int length)
         {
-            var payload = BuildDataTablesPayload(_draw, start, length);
-            _draw++;
+            var payload = BuildDataTablesPayload(Interlocked.Increment(ref _draw), start, length);
 
             var pairs = new List<KeyValuePair<string, string>>
             {
@@ -163,28 +150,23 @@ namespace JoesScanner.Services
 
         // Continuously polls the server and yields new calls as CallItem objects.
         // Skips initial backlog so only new calls after connection are surfaced.
-        public async IAsyncEnumerable<CallItem> GetCallStreamAsync(
+        public IAsyncEnumerable<CallItem> GetCallStreamAsync(
+            IReadOnlyList<CallItem> existingCalls, CancellationToken cancellationToken)
+        {
+            var serverUrl = (_settingsService.ServerUrl ?? string.Empty).TrimEnd('/');
+            var liveCalls = new LiveCallIndex();
+            liveCalls.Seed(existingCalls, serverUrl);
+            return StreamCallsAsync(serverUrl, liveCalls, cancellationToken);
+        }
+
+        private async IAsyncEnumerable<CallItem> StreamCallsAsync(string currentServerUrl, LiveCallIndex liveCalls,
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
             var isAppleTestAccount = IsAppleIosTestAccount();
             AppLog.Add(() => $"AppleTest: enabled={isAppleTestAccount}");
 
-            // New connection: by default clear any previously seen IDs and suppress the first batch
-            // so we only show calls that arrive after the user connects.
-            // If a warm start was performed immediately before this stream begins, preserve the
-            // warm-start IDs so we do not duplicate the initial backfilled calls.
+            // Only existing cards can receive updates from the first polling batch.
             var skipInitialBatch = true;
-
-            if (_preserveSeenIdsForNextConnect)
-            {
-                _preserveSeenIdsForNextConnect = false;
-                skipInitialBatch = false;
-            }
-            else
-            {
-                _seenIds.Clear();
-                _idsMissingTranscription.Clear();
-            }
 
             // Apple review test account behavior.
             // For this one account only, backfill several hours of calls so playback can
@@ -192,7 +174,7 @@ namespace JoesScanner.Services
             if (isAppleTestAccount)
             {
                 skipInitialBatch = false;
-                await foreach (var backfilled in BackfillRecentHoursAsync(cancellationToken))
+                await foreach (var backfilled in BackfillRecentHoursAsync(currentServerUrl, liveCalls, cancellationToken))
                 {
                     yield return backfilled;
                 }
@@ -208,6 +190,13 @@ namespace JoesScanner.Services
             while (!cancellationToken.IsCancellationRequested)
             {
                 var baseUrl = (_settingsService.ServerUrl ?? string.Empty).TrimEnd('/');
+                if (!string.Equals(currentServerUrl, baseUrl, StringComparison.Ordinal))
+                {
+                    liveCalls = new LiveCallIndex();
+                    skipInitialBatch = true;
+                    wsDisableUntilUtc = DateTime.MinValue;
+                }
+                currentServerUrl = baseUrl;
 
                 if (string.IsNullOrWhiteSpace(baseUrl))
                 {
@@ -268,6 +257,7 @@ namespace JoesScanner.Services
 
                     if (ws != null)
                     {
+                    using var socket = ws;
                         // We are live; do not skip later polling batches as "initial backlog."
                         skipInitialBatch = false;
 
@@ -287,10 +277,10 @@ namespace JoesScanner.Services
                         }
 
                         await foreach (var item in StreamFromWebSocketWithRecoveryAsync(
-                            ws,
+                            socket,
                             baseUrl,
                             callsUrl,
-                            isAppleTestAccount,
+                            liveCalls,
                             cancellationToken))
                         {
                             yield return item;
@@ -309,6 +299,7 @@ namespace JoesScanner.Services
                 List<CallRow>? rows = null;
                 string? errorMessage = null;
                 var isAuthError = false;
+                var pollVersion = LiveCallState.NextVersion();
 
                 try
                 {
@@ -348,6 +339,7 @@ namespace JoesScanner.Services
                     try
                     {
                         await Task.Delay(TimeSpan.FromMilliseconds(500), cancellationToken);
+                        pollVersion = LiveCallState.NextVersion();
                         rows = await FetchLatestAsync(callsUrl, cancellationToken);
                     }
                     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -482,7 +474,7 @@ namespace JoesScanner.Services
                 {
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    var item = BuildCallItemFromRow(r, baseUrl, skipYieldForThisBatch);
+                    var item = BuildCallItemFromRow(r, baseUrl, liveCalls, pollVersion, skipYieldForThisBatch);
 
                     if (item != null)
                     {
@@ -502,10 +494,9 @@ namespace JoesScanner.Services
                 || string.Equals(username, AppleIosTestAccountEmailLegacy, StringComparison.OrdinalIgnoreCase);
         }
 
-        private async IAsyncEnumerable<CallItem> BackfillRecentHoursAsync(
+        private async IAsyncEnumerable<CallItem> BackfillRecentHoursAsync(string baseUrl, LiveCallIndex liveCalls,
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
-            var baseUrl = (_settingsService.ServerUrl ?? string.Empty).TrimEnd('/');
             if (string.IsNullOrWhiteSpace(baseUrl))
                 yield break;
 
@@ -583,7 +574,7 @@ namespace JoesScanner.Services
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                var item = BuildCallItemFromRow(r, baseUrl, skipYieldForThisBatch: false);
+                var item = BuildCallItemFromRow(r, baseUrl, liveCalls, LiveCallState.NextVersion());
                 if (item != null)
                     yield return item;
             }
@@ -631,112 +622,47 @@ namespace JoesScanner.Services
             return DateTimeOffset.UtcNow;
         }
 
-        public async Task<string?> TryFetchTranscriptionByIdAsync(string backendId, CancellationToken cancellationToken)
+        public async Task RefreshCallMetadataAsync(IReadOnlyList<CallItem> calls, CancellationToken cancellationToken)
         {
-            try
+            var baseUrl = (_settingsService.ServerUrl ?? string.Empty).TrimEnd('/');
+            var targets = new Dictionary<string, LiveCallState>(StringComparer.OrdinalIgnoreCase);
+            foreach (var call in calls)
             {
-                if (string.IsNullOrWhiteSpace(backendId))
-                    return null;
-
-                var baseUrl = (_settingsService.ServerUrl ?? string.Empty).TrimEnd('/');
-                if (string.IsNullOrWhiteSpace(baseUrl))
-                    return null;
-
-                var callsUrl = baseUrl + "/calljson";
-
-                var row = await FetchCallByIdAsync(callsUrl, backendId.Trim(), cancellationToken);
-                if (row == null)
-                    return null;
-
-                var normalized = NormalizeCallText(row.CallText);
-                return string.IsNullOrWhiteSpace(normalized) ? null : normalized;
+                if (call.LiveState is { } state && state.ServerUrl == baseUrl)
+                    targets.TryAdd(state.Id, state);
             }
-            catch (OperationCanceledException)
+            if (targets.Count == 0)
+                return;
+
+            var version = LiveCallState.NextVersion();
+            var rows = await FetchCatchupRowsAsync(baseUrl + "/calljson", targets.Keys, false, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (baseUrl != (_settingsService.ServerUrl ?? string.Empty).TrimEnd('/'))
+                return;
+            foreach (var row in rows)
             {
-                throw;
-            }
-            catch
-            {
-                return null;
+                if (row.DT_RowId?.Trim() is { } id && targets.TryGetValue(id, out var state))
+                    state.Observe(ToLiveSnapshot(row), version);
             }
         }
 
-
-        // Builds a CallItem from a calljson row (or a WebSocket "full row" message).
-        // Returns null when the row is neither new nor a transcription update from the client's perspective.
-        private CallItem? BuildCallItemFromRow(CallRow r, string baseUrl, bool skipYieldForThisBatch)
+        private CallItem? BuildCallItemFromRow(CallRow r, string baseUrl, LiveCallIndex liveCalls, long version,
+            bool skipYieldForThisBatch = false)
         {
             var rawId = r.DT_RowId?.Trim();
             if (string.IsNullOrEmpty(rawId))
                 return null;
 
-            // Determine whether this row is new or an update for an existing call.
-            var isNew = !_seenIds.Contains(rawId);
-            var wasMissingTranscription = _idsMissingTranscription.Contains(rawId);
+            if (!liveCalls.MarkSeen(rawId))
+                return ObserveExistingCall(r, liveCalls.Find(rawId), version);
+            if (skipYieldForThisBatch)
+                return null;
 
-            if (isNew)
-            {
-                _seenIds.Add(rawId);
-            }
-
-            // Start with no debug message for this call.
-            var debugInfo = string.Empty;
-
-            // Transcription text from the server, may be empty if there is no transcription.
-            var text = NormalizeCallText(r.CallText);
-
-            if (string.IsNullOrWhiteSpace(text))
-            {
-                // Server did not send any transcription text for this call.
-                debugInfo = AppendDebug(debugInfo, "No transcription from server");
-
-                // For brand new calls with no text, remember that we are waiting
-                // for a transcription update on this ID.
-                if (isNew)
-                {
-                    _idsMissingTranscription.Add(rawId);
-                }
-            }
-            else
-            {
-                // We now have transcription text; if we were previously waiting,
-                // stop tracking this ID as missing transcription.
-                if (wasMissingTranscription)
-                {
-                    _idsMissingTranscription.Remove(rawId);
-                }
-            }
-
-            // Timestamp from StartTime / StartTimeUTC.
-            var timestamp = ParseTimestamp(r.StartTime, r.StartTimeUTC);
-
-            // Talkgroup from label or ID.
-            var talkgroup = !string.IsNullOrWhiteSpace(r.TargetLabel)
-                ? r.TargetLabel
-                : r.TargetID ?? string.Empty;
-
-            // Source radio ID / label.
-            var source = !string.IsNullOrWhiteSpace(r.SourceLabel)
-                ? r.SourceLabel
-                : r.SourceID ?? string.Empty;
-
-            // Site name from SiteLabel / SiteID.
-            var site = !string.IsNullOrWhiteSpace(r.SiteLabel)
-                ? r.SiteLabel
-                : r.SiteID ?? string.Empty;
-
-            // Voice receiver name.
-            var voiceReceiver = r.VoiceReceiver?.Trim() ?? string.Empty;
-
-            // Call duration in seconds, if the server provides CallDuration.
-            double durationSeconds = 0;
-            if (!string.IsNullOrWhiteSpace(r.CallDuration))
-            {
-                if (double.TryParse(r.CallDuration, NumberStyles.Float, CultureInfo.InvariantCulture, out var dur))
-                {
-                    durationSeconds = dur;
-                }
-            }
+            var state = new LiveCallState(baseUrl, rawId);
+            state.Observe(ToLiveSnapshot(r), version);
+            liveCalls.Track(state);
+            var snapshot = state.Read();
+            var metadata = snapshot.Metadata;
 
             // Build audio URL from AudioFilename.
             string audioUrl = string.Empty;
@@ -761,50 +687,35 @@ namespace JoesScanner.Services
             // Playback downloads audio with an Authorization header when needed.
             audioUrl = SanitizeAudioUrl(audioUrl);
 
-            if (isNew && string.IsNullOrWhiteSpace(audioUrl))
+            var debugInfo = string.Empty;
+            if (string.IsNullOrWhiteSpace(audioUrl))
             {
                 debugInfo = AppendDebug(debugInfo, "No audio URL from server");
                 debugInfo = AppendDebug(debugInfo, "No audio URL built from server data");
             }
 
-            // Decide whether this row should be yielded:
-            // - Brand new call: always yield (subject to initial backlog skip)
-            // - Existing ID that just transitioned from "no text" to "has text":
-            //   yield as a transcription update
-            // - Existing ID with no text or no change: skip
-            var isTranscriptionUpdate =
-                !isNew &&
-                wasMissingTranscription &&
-                !string.IsNullOrWhiteSpace(text);
-
-            if (!isNew && !isTranscriptionUpdate)
-            {
-                return null;
-            }
-
-            // Do not surface prior calls in the UI on the initial batch.
-            if (skipYieldForThisBatch && isNew)
-            {
-                return null;
-            }
-
             var item = new CallItem
             {
                 BackendId = rawId,
-                IsTranscriptionUpdate = isTranscriptionUpdate,
-                Timestamp = timestamp,
-                CallDurationSeconds = durationSeconds,
-                Talkgroup = talkgroup,
-                Source = source,
-                Site = site,
-                VoiceReceiver = voiceReceiver,
-                Transcription = text,
+                LiveState = state,
+                Timestamp = metadata.Timestamp ?? DateTime.Now,
+                CallDurationSeconds = metadata.DurationSeconds ?? 0,
+                Talkgroup = metadata.Talkgroup ?? string.Empty,
+                Source = metadata.Radio ?? string.Empty,
+                Site = metadata.Site ?? string.Empty,
+                VoiceReceiver = metadata.Receiver ?? string.Empty,
+                CardMetadata = metadata,
+                Transcription = snapshot.Transcription ?? string.Empty,
                 AudioUrl = audioUrl,
                 DebugInfo = debugInfo
             };
 
-            // Address detection must never impact queue connectivity.
-            // If disabled (default), skip the work entirely. If enabled, run best-effort.
+            ApplyAddressDetection(item);
+            return item;
+        }
+
+        private void ApplyAddressDetection(CallItem item)
+        {
             try
             {
                 _addressDetectionService.Apply(item);
@@ -813,6 +724,25 @@ namespace JoesScanner.Services
             {
                 try { AppLog.Add(() => $"AddressDetection: Apply failed. {ex.Message}"); } catch { }
             }
+        }
+
+        private static LiveCallSnapshot ToLiveSnapshot(CallRow row) =>
+            row.ToLiveSnapshot(ParseTimestamp(row.StartTime, row.StartTimeUTC), NormalizeCallText(row.CallText));
+
+        private CallItem? ObserveExistingCall(CallRow row, LiveCallState? state, long version)
+        {
+            if (state == null || !state.Observe(ToLiveSnapshot(row), version, out var transcript))
+                return null;
+
+            var item = new CallItem
+            {
+                BackendId = state.Id,
+                LiveState = state,
+                IsLiveUpdate = true,
+                Transcription = transcript ?? string.Empty
+            };
+            if (transcript != null)
+                ApplyAddressDetection(item);
             return item;
         }
 
@@ -923,34 +853,29 @@ namespace JoesScanner.Services
             }
         }
 
-        private async Task<CallRow?> FetchCallByIdAsync(string callsUrl, string callId, CancellationToken cancellationToken)
+        private async Task<List<CallRow>> FetchCatchupRowsAsync(string callsUrl, IEnumerable<string> ids,
+            bool includeLatestPage, CancellationToken cancellationToken)
         {
             const int pageSize = 200;
-            const int maxPages = 5; // up to 1000 rows
+            const int maxPages = 5;
+            var remaining = new HashSet<string>(ids, StringComparer.OrdinalIgnoreCase);
+            var result = new List<CallRow>();
 
             for (var page = 0; page < maxPages; page++)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                var start = page * pageSize;
-                var rows = await FetchLatestAsync(callsUrl, cancellationToken, start, pageSize);
-
-                if (rows.Count == 0)
-                    return null;
-
-                foreach (var r in rows)
+                var rows = await FetchLatestAsync(callsUrl, cancellationToken, page * pageSize, pageSize).ConfigureAwait(false);
+                foreach (var row in rows)
                 {
-                    if (string.Equals(r.DT_RowId?.Trim(), callId, StringComparison.OrdinalIgnoreCase))
-                    {
-                        return r;
-                    }
+                    var matched = row.DT_RowId?.Trim() is { } id && remaining.Remove(id);
+                    if (matched || (includeLatestPage && page == 0))
+                        result.Add(row);
                 }
 
-                if (rows.Count < pageSize)
-                    return null;
+                if (remaining.Count == 0 || rows.Count < pageSize)
+                    break;
             }
 
-            return null;
+            return result;
         }
 
         private async Task<ClientWebSocket?> TryOpenWebSocketAsync(string baseUrl, CancellationToken cancellationToken)
@@ -1026,8 +951,7 @@ namespace JoesScanner.Services
             // Attempt JSON body first (works reliably on the hosted gateway in our environment).
             try
             {
-                var payload = BuildDataTablesPayload(_draw, start, length);
-                _draw++;
+                var payload = BuildDataTablesPayload(Interlocked.Increment(ref _draw), start, length);
 
                 var jsonBody = JsonSerializer.Serialize(payload, _jsonOptions);
                 using var content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
@@ -1079,166 +1003,163 @@ namespace JoesScanner.Services
             }
         }
 
-                private async IAsyncEnumerable<CallItem> StreamFromWebSocketWithRecoveryAsync(
-            ClientWebSocket ws,
-            string baseUrl,
-            string callsUrl,
-            bool isAppleTestAccount,
+        private async IAsyncEnumerable<CallItem> StreamFromWebSocketWithRecoveryAsync(
+            ClientWebSocket ws, string baseUrl, string callsUrl, LiveCallIndex liveCalls,
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
-            // Minimal WS loop: parse message payloads into CallRow and reuse BuildCallItemFromRow.
-            // On some servers, the WS feed may not include transcription updates, so we periodically
-            // poll calljson for any IDs we are still tracking as missing transcription.
+            using var session = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var token = session.Token;
             var buffer = new byte[64 * 1024];
+            var receive = ReadWebSocketRowsAsync(ws, buffer, token);
+            Task<List<CallRow>>? catchup = null;
+            LiveCallState[] targets = [];
+            long catchupVersion = 0;
 
-            var nextTranscriptionCatchupUtc = DateTime.UtcNow.AddSeconds(2);
-
-            while (!cancellationToken.IsCancellationRequested && ws.State == WebSocketState.Open)
+            try
             {
-                WebSocketReceiveResult result;
-                using var ms = new MemoryStream();
-
-                do
+                while (!token.IsCancellationRequested)
                 {
-                    result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
-
-                    if (result.MessageType == WebSocketMessageType.Close)
+                    // Keep one receive and at most one catch-up request in flight. Prefer live rows
+                    // if both are ready, so the older HTTP snapshot can only fill untouched fields.
+                    if (catchup == null || receive.IsCompleted || await Task.WhenAny(receive, catchup) == receive)
                     {
-                        try
+                        var (rows, version) = await receive;
+                        if (rows == null)
+                            yield break;
+
+                        foreach (var row in rows)
                         {
-                            await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "closing", CancellationToken.None);
-                        }
-                        catch
-                        {
-                        }
+                            token.ThrowIfCancellationRequested();
+                            await PersistWebSocketRowAsync(row, baseUrl, token);
 
-                        yield break;
-                    }
-
-                    ms.Write(buffer, 0, result.Count);
-                }
-                while (!result.EndOfMessage);
-
-                var text = Encoding.UTF8.GetString(ms.ToArray());
-                if (!string.IsNullOrWhiteSpace(text))
-                {
-                    List<CallItem> toYield;
-
-                    try
-                    {
-                        toYield = new List<CallItem>();
-
-                        using var doc = JsonDocument.Parse(text);
-                        var root = doc.RootElement;
-
-                        if (root.ValueKind == JsonValueKind.Array)
-                        {
-                            foreach (var item in root.EnumerateArray())
+                            CallItem? call;
+                            if (row.IsUpdateNotification)
                             {
-                                if (item.ValueKind != JsonValueKind.Object)
-                                    continue;
-
-                                var row = ParseRow(item);
-
-                                await PersistWebSocketRowAsync(row, baseUrl, cancellationToken);
-
-                                if (!row.IsUpdateNotification)
-                                {
-                                    var call = BuildCallItemFromRow(row, baseUrl, skipYieldForThisBatch: false);
-                                    if (call != null)
-                                        toYield.Add(call);
-                                }
-                            }
-                        }
-                        else if (root.ValueKind == JsonValueKind.Object)
-                        {
-                            // Some feeds wrap rows under a property (for example: "data").
-                            if (root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array)
-                            {
-                                foreach (var item in data.EnumerateArray())
-                                {
-                                    if (item.ValueKind != JsonValueKind.Object)
-                                        continue;
-
-                                    var row = ParseRow(item);
-
-                                    await PersistWebSocketRowAsync(row, baseUrl, cancellationToken);
-
-                                    if (!row.IsUpdateNotification)
-                                    {
-                                        var call = BuildCallItemFromRow(row, baseUrl, skipYieldForThisBatch: false);
-                                        if (call != null)
-                                            toYield.Add(call);
-                                    }
-                                }
+                                var state = row.DT_RowId?.Trim() is { } id ? liveCalls.Find(id) : null;
+                                call = ObserveExistingCall(row, state, version);
+                                if (state != null)
+                                    liveCalls.QueueNotification(state, DateTimeOffset.UtcNow);
                             }
                             else
                             {
-                                var row = ParseRow(root);
-
-                                await PersistWebSocketRowAsync(row, baseUrl, cancellationToken);
-
-                                if (!row.IsUpdateNotification)
-                                {
-                                    var call = BuildCallItemFromRow(row, baseUrl, skipYieldForThisBatch: false);
-                                    if (call != null)
-                                        toYield.Add(call);
-                                }
+                                call = BuildCallItemFromRow(row, baseUrl, liveCalls, version);
                             }
+
+                            if (call != null)
+                                yield return call;
                         }
-                    }
-                    catch (Exception ex)
-                    {
-                        AppLog.DebugWriteLine(() => $"[CallStreamService] [WebSocket] Parse error: {ex}");
 
-                        AppLog.Add(() => $"CallStream: WebSocket parse error. ex={ex.GetType().Name}: {ex.Message}");
-                        // Break out so outer loop can fall back/reconnect.
-                        yield break;
+                        receive = ReadWebSocketRowsAsync(ws, buffer, token);
                     }
 
-                    foreach (var call in toYield)
-                        yield return call;
-                }
-
-                // Transcription catch-up: if WS doesn't deliver the calltext update, polling calljson will.
-                // Keep this lightweight: only do work when we still have IDs in the missing set.
-                if (_idsMissingTranscription.Count > 0 && DateTime.UtcNow >= nextTranscriptionCatchupUtc)
-                {
-                    nextTranscriptionCatchupUtc = DateTime.UtcNow.AddSeconds(2);
-
-                    List<CallItem>? catchupYield = null;
-
-                    try
+                    if (catchup is { IsCompleted: true })
                     {
-                        // Grab the newest page and let BuildCallItemFromRow decide if any rows now qualify
-                        // as transcription updates for IDs we were waiting on.
-                        var rows = await FetchLatestAsync(callsUrl, cancellationToken, start: 0, length: 200);
-                        catchupYield = new List<CallItem>();
-
-                        foreach (var r in rows)
+                        foreach (var row in await catchup)
                         {
-                            var call = BuildCallItemFromRow(r, baseUrl, skipYieldForThisBatch: false);
-                            if (call != null && call.IsTranscriptionUpdate)
-                                catchupYield.Add(call);
+                            token.ThrowIfCancellationRequested();
+                            // Catch-up pages can include historical rows that were never Live cards.
+                            // Leave them untracked so a subsequent full WebSocket row can insert a new call.
+                            var state = row.DT_RowId?.Trim() is { } id ? liveCalls.Find(id) : null;
+                            if (targets.Length == 0 && state?.Read().Transcription != null)
+                                continue;
+                            if (ObserveExistingCall(row, state, catchupVersion) is { } call)
+                                yield return call;
                         }
-                    }
-                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                    {
-                        yield break;
-                    }
-                    catch (Exception ex)
-                    {
-                        AppLog.DebugWriteLine(() => $"[CallStreamService] [WebSocket] Transcription catch-up failed: {ex.Message}");
 
-                        AppLog.Add(() => $"CallStream: transcription catch-up failed. ex={ex.GetType().Name}: {ex.Message}");
+                        foreach (var target in targets)
+                            target.CompleteNotification();
+                        catchup = null;
                     }
 
-                    if (catchupYield != null)
+                    if (catchup == null && liveCalls.BeginCatchup(DateTimeOffset.UtcNow) is { } scheduled)
                     {
-                        foreach (var call in catchupYield)
-                            yield return call;
+                        targets = scheduled;
+                        catchupVersion = LiveCallState.NextVersion();
+                        catchup = FetchWebSocketCatchupAsync(callsUrl, targets, token);
                     }
                 }
+            }
+            finally
+            {
+                session.Cancel();
+                await ((Task)receive).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+                if (catchup != null)
+                    await ((Task)catchup).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+                foreach (var target in targets)
+                    target.CompleteNotification();
+                liveCalls.ClearNotifications();
+            }
+        }
+
+        private async Task<List<CallRow>> FetchWebSocketCatchupAsync(
+            string callsUrl, LiveCallState[] targets, CancellationToken cancellationToken)
+        {
+            try
+            {
+                return await FetchCatchupRowsAsync(callsUrl, targets.Select(state => state.Id),
+                    targets.Length == 0, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return [];
+            }
+            catch (Exception ex)
+            {
+                AppLog.Add(() => $"CallStream: WebSocket metadata catch-up failed ({ex.GetType().Name}).");
+                return [];
+            }
+        }
+
+        private static async Task<(List<CallRow>? Rows, long Version)> ReadWebSocketRowsAsync(
+            ClientWebSocket ws, byte[] buffer, CancellationToken cancellationToken)
+        {
+            using var message = new MemoryStream();
+            WebSocketReceiveResult result;
+            do
+            {
+                result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken).ConfigureAwait(false);
+                if (result.MessageType == WebSocketMessageType.Close)
+                {
+                    await ws.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "closing", cancellationToken).ConfigureAwait(false);
+                    return (null, 0);
+                }
+
+                message.Write(buffer, 0, result.Count);
+            }
+            while (!result.EndOfMessage);
+
+            var version = LiveCallState.NextVersion();
+            var rows = new List<CallRow>();
+            var text = Encoding.UTF8.GetString(message.GetBuffer(), 0, (int)message.Length);
+            if (string.IsNullOrWhiteSpace(text))
+                return (rows, version);
+
+            try
+            {
+                using var doc = JsonDocument.Parse(text);
+                var root = doc.RootElement;
+                if (root.ValueKind == JsonValueKind.Object)
+                {
+                    if (root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array)
+                        root = data;
+                    else
+                        rows.Add(ParseRow(root));
+                }
+                if (root.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var row in root.EnumerateArray())
+                    {
+                        if (row.ValueKind == JsonValueKind.Object)
+                            rows.Add(ParseRow(row));
+                    }
+                }
+
+                return (rows, version);
+            }
+            catch (JsonException ex)
+            {
+                AppLog.Add(() => $"CallStream: WebSocket parse error ({ex.GetType().Name}).");
+                return (null, 0);
             }
         }
 
@@ -1273,7 +1194,7 @@ private static string SanitizeAudioUrl(string audioUrl)
         // Maps a JSON row from the DataTables response into a CallRow object. from the DataTables response into a CallRow object.
         private static CallRow ParseRow(JsonElement e)
         {
-            return new CallRow
+            var row = new CallRow
             {
                 DT_RowId = GetString(e, "DT_RowId"),
                 IsUpdateNotification = IsTruthy(GetString(e, "Update")),
@@ -1281,27 +1202,12 @@ private static string SanitizeAudioUrl(string audioUrl)
                 StartTimeUTC = GetString(e, "StartTimeUTC"),
                 Time = GetString(e, "Time"),
                 Date = GetString(e, "Date"),
-                TargetID = GetString(e, "TargetID"),
-                TargetLabel = GetString(e, "TargetLabel"),
-                TargetTag = GetString(e, "TargetTag"),
-                SourceID = GetString(e, "SourceID"),
-                SourceLabel = GetString(e, "SourceLabel"),
-                SourceTag = GetString(e, "SourceTag"),
-                LCN = GetString(e, "LCN"),
-                Frequency = GetString(e, "Frequency"),
-                CallAudioType = GetString(e, "CallAudioType"),
-                SystemID = GetString(e, "SystemID"),
-                SystemLabel = GetString(e, "SystemLabel"),
-                SystemType = GetString(e, "SystemType"),
                 AudioStartPos = GetString(e, "AudioStartPos"),
-                SiteID = GetString(e, "SiteID"),
-                SiteLabel = GetString(e, "SiteLabel"),
-                VoiceReceiver = GetString(e, "VoiceReceiver"),
-                CallType = GetString(e, "CallType"),
                 CallText = GetString(e, "CallText"),
-                AudioFilename = GetString(e, "AudioFilename"),
-                CallDuration = GetString(e, "CallDuration")
+                AudioFilename = GetString(e, "AudioFilename")
             };
+            row.ReadCardFields(e, GetString);
+            return row;
         }
 
         private static bool IsTruthy(string? value)
@@ -1315,12 +1221,12 @@ private static string SanitizeAudioUrl(string audioUrl)
         }
 
         // Parses timestamps from either ISO 8601 or Unix seconds and converts them to local time.
-        private static DateTime ParseTimestamp(string? startTime, string? startTimeUtc)
+        private static DateTime? ParseTimestamp(string? startTime, string? startTimeUtc)
         {
             var value = !string.IsNullOrWhiteSpace(startTimeUtc) ? startTimeUtc : startTime;
 
             if (string.IsNullOrWhiteSpace(value))
-                return DateTime.Now;
+                return null;
 
             try
             {
@@ -1342,7 +1248,7 @@ private static string SanitizeAudioUrl(string audioUrl)
             {
             }
 
-            return DateTime.Now;
+            return null;
         }
 
         // Safely gets a string representation of a JSON property, handling various value kinds.
@@ -1600,7 +1506,7 @@ private static string SanitizeAudioUrl(string audioUrl)
         }
 
 // Internal representation of a single call row from the calljson endpoint.
-        private sealed class CallRow
+        private sealed class CallRow : TrunkingRecorderCallFields
         {
             public string? DT_RowId { get; set; }
             public bool IsUpdateNotification { get; set; }
@@ -1608,26 +1514,9 @@ private static string SanitizeAudioUrl(string audioUrl)
             public string? StartTimeUTC { get; set; }
             public string? Time { get; set; }
             public string? Date { get; set; }
-            public string? TargetID { get; set; }
-            public string? TargetLabel { get; set; }
-            public string? TargetTag { get; set; }
-            public string? SourceID { get; set; }
-            public string? SourceLabel { get; set; }
-            public string? SourceTag { get; set; }
-            public string? LCN { get; set; }
-            public string? Frequency { get; set; }
-            public string? CallAudioType { get; set; }
-            public string? SystemID { get; set; }
-            public string? SystemLabel { get; set; }
-            public string? SystemType { get; set; }
             public string? AudioStartPos { get; set; }
-            public string? SiteID { get; set; }
-            public string? SiteLabel { get; set; }
-            public string? VoiceReceiver { get; set; }
-            public string? CallType { get; set; }
             public string? CallText { get; set; }
             public string? AudioFilename { get; set; }
-            public string? CallDuration { get; set; }
         }
     }
 }

@@ -33,8 +33,11 @@ namespace JoesScanner.Views
 
         private bool _addressAlertHandlersAttached;
 
-        public MainPage(MainViewModel viewModel)
+        public CallCardOptionsService CallCardOptions { get; }
+
+        public MainPage(MainViewModel viewModel, CallCardOptionsService callCardOptions)
         {
+            CallCardOptions = callCardOptions;
             InitializeComponent();
 
             _viewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
@@ -978,8 +981,8 @@ private static async Task OpenWhat3WordsForCallAsync(JoesScanner.Models.CallItem
                 await vm.TryAutoReconnectAsync();
 
                 // iOS can miss WebSocket update notifications while the app is backgrounded.
-                // When the user returns to the main page, refresh any calls still missing transcription.
-                await vm.RefreshStaleTranscriptionsAsync();
+                // When the user returns to the main page, refresh calls with missing transcription or duration.
+                await vm.RefreshStaleCallMetadataAsync();
             }
         }
 
