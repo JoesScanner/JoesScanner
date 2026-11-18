@@ -3143,12 +3143,11 @@ private static string SpeedStepToLabel(double step)
 
         public async Task TryAutoReconnectAsync()
         {
-            var shouldReconnect = AppStateStore.GetBool("last_connected_on_exit", false);
-
-            if (!shouldReconnect)
+            if (IsRunning)
                 return;
 
-            if (IsRunning)
+            var shouldReconnect = await Task.Run(() => AppStateStore.GetBool("last_connected_on_exit", false));
+            if (!shouldReconnect || IsRunning)
                 return;
 
             await StartMonitoringAsync();

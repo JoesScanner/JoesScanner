@@ -243,9 +243,12 @@ CREATE TABLE IF NOT EXISTS history_lookups (
 CREATE TABLE IF NOT EXISTS filter_profiles (
   profile_id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
+  server_key TEXT NOT NULL DEFAULT '',
   created_utc TEXT NOT NULL,
   updated_utc TEXT NOT NULL,
-  json_payload TEXT NOT NULL
+  filters_json TEXT NOT NULL DEFAULT '{}',
+  rules_json TEXT NOT NULL DEFAULT '[]',
+  json_payload TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS telemetry_queue (
@@ -286,6 +289,7 @@ CREATE INDEX IF NOT EXISTS idx_unregistered_queue_created ON unregistered_sessio
         await EnsureColumnExistsAsync(connection, "server_auth_state", "tier_level", "INTEGER NULL", cancellationToken).ConfigureAwait(false);
 
         await EnsureColumnExistsAsync(connection, "calls", "transcript_available", "INTEGER NOT NULL DEFAULT 0", cancellationToken).ConfigureAwait(false);
+        await EnsureFilterProfileSchemaAsync(connection, cancellationToken).ConfigureAwait(false);
     
         // Meta table to make schema state explicit and queryable (in addition to PRAGMA user_version).
         await using (var meta = connection.CreateCommand())
@@ -350,21 +354,66 @@ ON CONFLICT(id) DO UPDATE SET schema_version = excluded.schema_version, updated_
         await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private static async Task EnsureColumnExistsAsync(SqliteConnection connection, string tableName, string columnName, string columnDefinition, CancellationToken cancellationToken)
+    private static async Task EnsureFilterProfileSchemaAsync(SqliteConnection connection, CancellationToken cancellationToken)
     {
-        await using var pragma = connection.CreateCommand();
-        pragma.CommandText = $"PRAGMA table_info({tableName});";
+        // Older databases can have either the split JSON columns or only the bootstrap payload.
+        // Keep the payload column so inserts also satisfy the older NOT NULL constraint.
+        await using var transaction = connection.BeginTransaction();
+        await EnsureColumnExistsAsync(connection, "filter_profiles", "json_payload", "TEXT NOT NULL DEFAULT '{}'", cancellationToken, transaction).ConfigureAwait(false);
+        var addedServerKey = await EnsureColumnExistsAsync(connection, "filter_profiles", "server_key", "TEXT NOT NULL DEFAULT ''", cancellationToken, transaction).ConfigureAwait(false);
+        var addedFilters = await EnsureColumnExistsAsync(connection, "filter_profiles", "filters_json", "TEXT NOT NULL DEFAULT '{}'", cancellationToken, transaction).ConfigureAwait(false);
+        var addedRules = await EnsureColumnExistsAsync(connection, "filter_profiles", "rules_json", "TEXT NOT NULL DEFAULT '[]'", cancellationToken, transaction).ConfigureAwait(false);
 
-        await using var reader = await pragma.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
-        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        await using var cmd = connection.CreateCommand();
+        cmd.Transaction = transaction;
+        cmd.CommandText = """
+            WITH payloads AS MATERIALIZED (
+                SELECT profile_id, json_payload AS payload
+                FROM filter_profiles
+                WHERE json_valid(json_payload) AND json_payload <> '{}'
+            )
+            UPDATE filter_profiles AS profile
+            SET server_key = CASE WHEN $server AND typeof(legacy_server) = 'text' THEN legacy_server ELSE server_key END,
+                filters_json = CASE WHEN $filters AND json_valid(legacy_filters) AND substr(legacy_filters, 1, 1) = '{'
+                    THEN legacy_filters ELSE filters_json END,
+                rules_json = CASE WHEN $rules AND json_valid(legacy_rules) AND substr(legacy_rules, 1, 1) = '['
+                    THEN legacy_rules ELSE rules_json END
+            FROM (
+                SELECT profile_id,
+                    coalesce(json_extract(payload, '$.serverKey'), json_extract(payload, '$.ServerKey')) AS legacy_server,
+                    coalesce(json_extract(payload, '$.filters'), json_extract(payload, '$.Filters')) AS legacy_filters,
+                    coalesce(json_extract(payload, '$.rules'), json_extract(payload, '$.Rules')) AS legacy_rules
+                FROM payloads
+            ) AS legacy
+            WHERE profile.profile_id = legacy.profile_id AND ($server OR $filters OR $rules);
+            CREATE INDEX IF NOT EXISTS idx_filter_profiles_server_key ON filter_profiles(server_key);
+            """;
+        cmd.Parameters.AddWithValue("$server", addedServerKey);
+        cmd.Parameters.AddWithValue("$filters", addedFilters);
+        cmd.Parameters.AddWithValue("$rules", addedRules);
+        await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<bool> EnsureColumnExistsAsync(SqliteConnection connection, string tableName, string columnName,
+        string columnDefinition, CancellationToken cancellationToken, SqliteTransaction? transaction = null)
+    {
+        await using (var pragma = connection.CreateCommand())
         {
-            var name = reader.GetString(1);
-            if (string.Equals(name, columnName, StringComparison.OrdinalIgnoreCase))
-                return;
+            pragma.Transaction = transaction;
+            pragma.CommandText = $"PRAGMA table_info({tableName});";
+            await using var reader = await pragma.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (string.Equals(reader.GetString(1), columnName, StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
         }
 
         await using var alter = connection.CreateCommand();
+        alter.Transaction = transaction;
         alter.CommandText = $"ALTER TABLE {tableName} ADD COLUMN {columnName} {columnDefinition};";
         await alter.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        return true;
     }
 }

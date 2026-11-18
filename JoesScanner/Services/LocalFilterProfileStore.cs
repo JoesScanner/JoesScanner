@@ -3,7 +3,6 @@ using System.Collections.Concurrent;
 using System.Text.Json;
 using JoesScanner.Models;
 using Microsoft.Data.Sqlite;
-using Microsoft.Maui.Storage;
 
 namespace JoesScanner.Services
 {
@@ -65,68 +64,16 @@ namespace JoesScanner.Services
         private static SqliteConnection OpenConnection()
         {
             var conn = new SqliteConnection($"Data Source={DbPath};Cache=Shared");
-            conn.Open();
-            DbBootstrapper.EnsureInitialized(conn);
-            EnsureTable(conn);
-            return conn;
-        }
-
-        private static void EnsureTable(SqliteConnection conn)
-        {
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = $@"
-CREATE TABLE IF NOT EXISTS {TableName} (
-  profile_id   TEXT PRIMARY KEY,
-  name         TEXT NOT NULL,
-  server_key   TEXT NOT NULL DEFAULT '',
-  created_utc  TEXT NOT NULL,
-  updated_utc  TEXT NOT NULL,
-  filters_json TEXT NOT NULL,
-  rules_json   TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_filter_profiles_name ON {TableName}(name);
-CREATE INDEX IF NOT EXISTS idx_filter_profiles_server_key ON {TableName}(server_key);
-";
-            cmd.ExecuteNonQuery();
-
-            // Back-compat migration: older installs may not have the server_key column.
-            EnsureServerKeyColumn(conn);
-        }
-
-        private static void EnsureServerKeyColumn(SqliteConnection conn)
-        {
             try
             {
-                using var check = conn.CreateCommand();
-                check.CommandText = $"PRAGMA table_info({TableName});";
-
-                var has = false;
-                using (var reader = check.ExecuteReader())
-                {
-                    while (reader.Read())
-                    {
-                        var col = reader.GetString(1);
-                        if (string.Equals(col, "server_key", StringComparison.OrdinalIgnoreCase))
-                        {
-                            has = true;
-                            break;
-                        }
-                    }
-                }
-
-                if (has)
-                    return;
-
-                using var alter = conn.CreateCommand();
-                alter.CommandText = $"ALTER TABLE {TableName} ADD COLUMN server_key TEXT NOT NULL DEFAULT '';";
-                alter.ExecuteNonQuery();
-
-                using var idx = conn.CreateCommand();
-                idx.CommandText = $"CREATE INDEX IF NOT EXISTS idx_filter_profiles_server_key ON {TableName}(server_key);";
-                idx.ExecuteNonQuery();
+                conn.Open();
+                DbBootstrapper.EnsureInitialized(conn);
+                return conn;
             }
             catch
             {
+                conn.Dispose();
+                throw;
             }
         }
 
@@ -299,8 +246,8 @@ LIMIT 1;";
 
                 await using var cmd = conn.CreateCommand();
                 cmd.CommandText = $@"
-INSERT INTO {TableName} (profile_id, name, server_key, created_utc, updated_utc, filters_json, rules_json)
-VALUES ($id, $name, $sk, $c, $u, $fj, $rj)
+INSERT INTO {TableName} (profile_id, name, server_key, created_utc, updated_utc, filters_json, rules_json, json_payload)
+VALUES ($id, $name, $sk, $c, $u, $fj, $rj, '{{}}')
 ON CONFLICT(profile_id) DO UPDATE SET
   name = excluded.name,
   server_key = excluded.server_key,
@@ -444,8 +391,8 @@ WHERE profile_id = $id;";
 
                     await using var cmd = conn.CreateCommand();
                     cmd.CommandText = $@"
-INSERT INTO {TableName} (profile_id, name, server_key, created_utc, updated_utc, filters_json, rules_json)
-VALUES ($id, $name, $sk, $c, $u, $fj, $rj)
+INSERT INTO {TableName} (profile_id, name, server_key, created_utc, updated_utc, filters_json, rules_json, json_payload)
+VALUES ($id, $name, $sk, $c, $u, $fj, $rj, '{{}}')
 ON CONFLICT(profile_id) DO UPDATE SET
   name = excluded.name,
   server_key = excluded.server_key,

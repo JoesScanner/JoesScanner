@@ -22,20 +22,6 @@
             <Grid
                 x:Name="ContentHost" />
 
-            <!--
-                WarmupHost is an invisible, tiny host used to force MAUI to create native handlers and
-                run the first layout pass for heavy pages (notably Settings) before the user taps them.
-                This removes the "first open" hitch without changing the visible UI.
-            -->
-            <ContentView
-                x:Name="WarmupHost"
-                Opacity="0.01"
-                InputTransparent="True"
-                HeightRequest="1"
-                WidthRequest="1"
-                HorizontalOptions="Start"
-                VerticalOptions="Start" />
-
             <Grid
                 x:Name="NavigationFeedbackOverlay"
                 IsVisible="False"

@@ -37,7 +37,7 @@
     </ContentPage.Resources>
 
 <!-- Scroll so content works on phone and desktop -->
-    <Grid Padding="5,0,5,5" RowDefinitions="0,*" RowSpacing="0">
+    <controls:SettingsLayoutGrid Padding="5,0,5,5" RowDefinitions="0,*" RowSpacing="0">
 
         <ScrollView Grid.Row="1">
             <Border
@@ -225,13 +225,16 @@
         </Label>
 
         <!-- Fields -->
-        <Grid
+        <controls:DeferredContentView
             x:Name="ConnectionFieldsGrid"
             Grid.Row="2"
-            IsVisible="False"
-            RowDefinitions="Auto,Auto,Auto,Auto"
-            ColumnDefinitions="*"
-            RowSpacing="8">
+            IsVisible="False">
+            <controls:DeferredContentView.ContentTemplate>
+                <DataTemplate x:DataType="vm:SettingsViewModel">
+                    <Grid
+                RowDefinitions="Auto,Auto,Auto,Auto"
+                ColumnDefinitions="*"
+                RowSpacing="8">
 
             <!-- Server selection row -->
 <Grid
@@ -353,8 +356,10 @@
                     Style="{StaticResource SecondaryPillButtonStyle}"
                     VerticalOptions="Center" />
             </Grid>
-
-        </Grid>
+                    </Grid>
+                </DataTemplate>
+            </controls:DeferredContentView.ContentTemplate>
+        </controls:DeferredContentView>
 
     </Grid>
 </Border>
@@ -402,11 +407,14 @@
                     </Grid>
 
                     <!-- Body -->
-                    <Grid
+                    <controls:DeferredContentView
                         x:Name="AutoplayFieldsGrid"
                         Grid.Row="1"
                         Margin="0,10,0,0"
-                        IsVisible="False"
+                        IsVisible="False">
+                        <controls:DeferredContentView.ContentTemplate>
+                            <DataTemplate x:DataType="vm:SettingsViewModel">
+                                <Grid
                         RowDefinitions="Auto,Auto,Auto,Auto"
                         ColumnDefinitions="*,Auto"
                         RowSpacing="10"
@@ -446,7 +454,10 @@
                             IsToggled="{Binding WindowsStartWithWindows}"
                             IsVisible="{StaticResource IsWinUIOnly}"
                             Style="{StaticResource CompactToggleStyle}" />
-                    </Grid>
+                                </Grid>
+                            </DataTemplate>
+                        </controls:DeferredContentView.ContentTemplate>
+                    </controls:DeferredContentView>
                 </Grid>
 
 </Border>
@@ -487,8 +498,10 @@
         </Grid>
 
         <!-- Body -->
-        <VerticalStackLayout x:Name="FiltersBodyLayout" Spacing="8" IsVisible="False">
-            <VerticalStackLayout Spacing="8">
+        <controls:DeferredContentView x:Name="FiltersBodyLayout" IsVisible="False">
+            <controls:DeferredContentView.ContentTemplate>
+                <DataTemplate x:DataType="vm:SettingsViewModel">
+                    <VerticalStackLayout Spacing="8">
             <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
                 <Label
                     Grid.Column="0"
@@ -625,9 +638,18 @@
                         </BindableLayout.ItemTemplate>
                     </VerticalStackLayout>
                 </Grid>
+                <Label Text="{Binding FilterPageSummary}" FontSize="12" />
+                <HorizontalStackLayout IsVisible="{Binding HasFilterPages}" Spacing="8">
+                    <Button Text="Previous" Clicked="OnPreviousFilterPageClicked"
+                            IsEnabled="{Binding CanShowPreviousFilterPage}" />
+                    <Button Text="Next" Clicked="OnNextFilterPageClicked"
+                            IsEnabled="{Binding CanShowNextFilterPage}" />
+                </HorizontalStackLayout>
             </VerticalStackLayout>
-            </VerticalStackLayout>
-        </VerticalStackLayout>
+                    </VerticalStackLayout>
+                </DataTemplate>
+            </controls:DeferredContentView.ContentTemplate>
+        </controls:DeferredContentView>
 
     </VerticalStackLayout>
 </Border>
@@ -668,8 +690,10 @@
         </Grid>
 
         <!-- Body -->
-        <VerticalStackLayout x:Name="AudioFiltersBodyLayout" Spacing="10" IsVisible="False">
-            <VerticalStackLayout Spacing="10" x:Load="{Binding AudioFiltersBodyLoaded}">
+        <controls:DeferredContentView x:Name="AudioFiltersBodyLayout" IsVisible="False">
+            <controls:DeferredContentView.ContentTemplate>
+                <DataTemplate x:DataType="vm:SettingsViewModel">
+                    <VerticalStackLayout Spacing="10">
             <Label
                 Text="Reduce static and quiet emergency tones during playback."
                 FontSize="12"
@@ -868,8 +892,10 @@
                 FontSize="11"
                 Opacity="0.75"
                 TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
-            </VerticalStackLayout>
-        </VerticalStackLayout>
+                    </VerticalStackLayout>
+                </DataTemplate>
+            </controls:DeferredContentView.ContentTemplate>
+        </controls:DeferredContentView>
 
     </VerticalStackLayout>
 
@@ -911,8 +937,10 @@
                 TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
         </Grid>
 
-        <VerticalStackLayout x:Name="AudioBodyLayout" Spacing="6" IsVisible="False">
-            <Grid
+        <controls:DeferredContentView x:Name="AudioBodyLayout" IsVisible="False">
+            <controls:DeferredContentView.ContentTemplate>
+                <DataTemplate x:DataType="vm:SettingsViewModel">
+                    <Grid
                 RowDefinitions="Auto,Auto"
                 ColumnDefinitions="*,Auto"
                 RowSpacing="8"
@@ -945,8 +973,10 @@
                     Opacity="0.8"
                     LineBreakMode="WordWrap"
                     TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
-            </Grid>
-        </VerticalStackLayout>
+                    </Grid>
+                </DataTemplate>
+            </controls:DeferredContentView.ContentTemplate>
+        </controls:DeferredContentView>
 
     </VerticalStackLayout>
 
@@ -988,8 +1018,10 @@
         </Grid>
 
         <!-- Body -->
-        <VerticalStackLayout x:Name="AddressDetectionBodyLayout" Spacing="10" IsVisible="False">
-            <VerticalStackLayout Spacing="10" x:Load="{Binding AddressDetectionBodyLoaded}">
+        <controls:DeferredContentView x:Name="AddressDetectionBodyLayout" IsVisible="False">
+            <controls:DeferredContentView.ContentTemplate>
+                <DataTemplate x:DataType="vm:SettingsViewModel">
+                    <VerticalStackLayout Spacing="10">
             <Label
                 Text="Detects addresses in transcriptions and can open them in maps."
                 FontSize="12"
@@ -1190,8 +1222,10 @@
                 FontSize="11"
                 Opacity="0.75"
                 TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
-            </VerticalStackLayout>
-        </VerticalStackLayout>
+                    </VerticalStackLayout>
+                </DataTemplate>
+            </controls:DeferredContentView.ContentTemplate>
+        </controls:DeferredContentView>
 
     </VerticalStackLayout>
 
@@ -1233,8 +1267,10 @@
         </Grid>
 
         <!-- Body -->
-        <VerticalStackLayout x:Name="BluetoothBodyLayout" Spacing="6" IsVisible="False">
-            <VerticalStackLayout Spacing="6" x:Load="{Binding BluetoothBodyLoaded}">
+        <controls:DeferredContentView x:Name="BluetoothBodyLayout" IsVisible="False">
+            <controls:DeferredContentView.ContentTemplate>
+                <DataTemplate x:DataType="vm:SettingsViewModel">
+                    <VerticalStackLayout Spacing="6">
             <Label
                 Text="Choose which call fields show up on your Bluetooth device. Not all devices display all fields."
                 FontSize="12"
@@ -1292,9 +1328,10 @@
                                                     HorizontalOptions="FillAndExpand"
                                                     VerticalOptions="Center" />
                                         </Grid>
-
-            </VerticalStackLayout>
-        </VerticalStackLayout>
+                    </VerticalStackLayout>
+                </DataTemplate>
+            </controls:DeferredContentView.ContentTemplate>
+        </controls:DeferredContentView>
 
     </VerticalStackLayout>
 </Border>
@@ -1334,8 +1371,10 @@
         </Grid>
 
         <!-- Body -->
-        <VerticalStackLayout x:Name="ThemeBodyLayout" Spacing="10" IsVisible="False">
-            <VerticalStackLayout Spacing="10" x:Load="{Binding ThemeBodyLoaded}">
+        <controls:DeferredContentView x:Name="ThemeBodyLayout" IsVisible="False">
+            <controls:DeferredContentView.ContentTemplate>
+                <DataTemplate x:DataType="vm:SettingsViewModel">
+                    <VerticalStackLayout Spacing="10">
 
             <Label
                                                         Text="Choose System, Light, or Dark."
@@ -1357,9 +1396,10 @@
                                             </HorizontalStackLayout>
 
             </VerticalStackLayout>
-        </VerticalStackLayout>
-
-    </VerticalStackLayout>
+                    </VerticalStackLayout>
+                </DataTemplate>
+            </controls:DeferredContentView.ContentTemplate>
+        </controls:DeferredContentView>
     </VerticalStackLayout>
 </Border>
 
@@ -1401,8 +1441,10 @@
         </Grid>
 
         <!-- Body -->
-        <VerticalStackLayout x:Name="TelemetryBodyLayout" Spacing="10" IsVisible="False">
-            <VerticalStackLayout Spacing="10" x:Load="{Binding TelemetryBodyLoaded}">
+        <controls:DeferredContentView x:Name="TelemetryBodyLayout" IsVisible="False">
+            <controls:DeferredContentView.ContentTemplate>
+                <DataTemplate x:DataType="vm:SettingsViewModel">
+                    <VerticalStackLayout Spacing="10">
 
             <Label
                 Text="Disable phone home telemetry for custom servers. Default servers always send telemetry."
@@ -1424,9 +1466,10 @@
                     IsToggled="{Binding TelemetryEnabled}"
                     Style="{StaticResource CompactToggleStyle}" />
             </Grid>
-
-            </VerticalStackLayout>
-        </VerticalStackLayout>
+                    </VerticalStackLayout>
+                </DataTemplate>
+            </controls:DeferredContentView.ContentTemplate>
+        </controls:DeferredContentView>
 
     </VerticalStackLayout>
 </Border>
@@ -1467,8 +1510,10 @@
         </Grid>
 
         <!-- Body -->
-        <VerticalStackLayout x:Name="LogBodyLayout" Spacing="10" IsVisible="False">
-            <VerticalStackLayout Spacing="10" x:Load="{Binding LogBodyLoaded}">
+        <controls:DeferredContentView x:Name="LogBodyLayout" IsVisible="False">
+            <controls:DeferredContentView.ContentTemplate>
+                <DataTemplate x:DataType="vm:SettingsViewModel">
+                    <VerticalStackLayout Spacing="10">
 
             <Label
                 Text="Recent log entries. Use Refresh, Copy, or Download to export."
@@ -1524,9 +1569,10 @@
                     Clicked="OnDownloadLogClicked"
                     Style="{StaticResource PillButtonStyle}" />
             </Grid>
-
-            </VerticalStackLayout>
-        </VerticalStackLayout>
+                    </VerticalStackLayout>
+                </DataTemplate>
+            </controls:DeferredContentView.ContentTemplate>
+        </controls:DeferredContentView>
 
     </VerticalStackLayout>
 </Border>
@@ -1609,5 +1655,5 @@
             </Border>
         </ScrollView>
 
-    </Grid>
+    </controls:SettingsLayoutGrid>
 </ContentPage>

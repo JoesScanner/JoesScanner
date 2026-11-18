@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="11.0.0" />
+    <PackageReference Include="SQLite" Version="3.54.1" />
+    <Compile Include="../../JoesScanner/Helpers/ServerKeyHelper.cs" Link="ServerKeyHelper.cs" />
+    <Compile Include="../../JoesScanner/Helpers/SettingsStartupPreparation.cs" Link="SettingsStartupPreparation.cs" />
+    <Compile Include="../../JoesScanner/Models/FilterRule.cs" Link="FilterRule.cs" />
+    <Compile Include="../../JoesScanner/Models/FilterRuleStateRecord.cs" Link="FilterRuleStateRecord.cs" />
+    <Compile Include="../../JoesScanner/Models/FilterProfile.cs" Link="FilterProfile.cs" />
+    <Compile Include="../../JoesScanner/Services/DbBootstrapper.cs" Link="DbBootstrapper.cs" />
+    <Compile Include="../../JoesScanner/Services/IFilterProfileStore.cs" Link="IFilterProfileStore.cs" />
+    <Compile Include="../../JoesScanner/Services/LocalFilterProfileStore.cs" Link="LocalFilterProfileStore.cs" />
+    <Compile Include="../../JoesScanner/Services/FilterService.cs" Link="FilterService.cs" />
+    <Compile Include="../../JoesScanner/Services/ObservedTriple.cs" Link="ObservedTriple.cs" />
+  </ItemGroup>
+</Project>

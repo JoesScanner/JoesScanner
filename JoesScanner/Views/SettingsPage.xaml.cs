@@ -5,12 +5,14 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 using System.Linq;
 using Microsoft.Maui.ApplicationModel;
 using Microsoft.Extensions.DependencyInjection;
+using JoesScanner.Views.Controls;
 
 namespace JoesScanner.Views
 {
@@ -22,7 +24,12 @@ namespace JoesScanner.Views
     {
         private readonly IAppUpdateService? _appUpdateService;
         private SettingsViewModel? _observedSettingsViewModel;
-        private bool _isPreparingFiltersSection;
+        private bool _isTabVisible;
+        private View? _tracedHost;
+        private long _hostAttachStarted;
+        private long _navigationStarted;
+        private bool _firstLayoutTraced;
+        private Editor? LogEditor => LogBodyLayout?.Content?.FindByName<Editor>(nameof(LogEditor));
 
         public static readonly BindableProperty FiltersTextTranslationXProperty = BindableProperty.Create(
             nameof(FiltersTextTranslationX),
@@ -46,25 +53,29 @@ namespace JoesScanner.Views
             _appUpdateService = ResolveAppUpdateService();
             SetAppVersionTextSafe();
             SetAboutInfoTextSafe();
-            HookBindingContext();
-            // No per page edit mode state.
+
         }
 
         // Optional constructor if you ever want to inject the view model.
         public SettingsPage(SettingsViewModel viewModel, IAppUpdateService appUpdateService)
         {
             SafeInitializeComponent();
+            var bindingStarted = Stopwatch.GetTimestamp();
             BindingContext = viewModel;
+            // The tab host takes this content out of its page. Keep its bindings through that move.
+            if (Content is { } content)
+                content.BindingContext = viewModel;
+            AppLog.Add(() => $"Settings timing: root binding setup={Stopwatch.GetElapsedTime(bindingStarted).TotalMilliseconds:F1} ms.");
             _appUpdateService = appUpdateService;
             SetAppVersionTextSafe();
             SetAboutInfoTextSafe();
-            HookBindingContext();
-            // No per page edit mode state.
+
         }
 
 
         private void SafeInitializeComponent()
         {
+            var started = Stopwatch.GetTimestamp();
             try
             {
                 InitializeComponent();
@@ -90,8 +101,57 @@ namespace JoesScanner.Views
                     }
                 };
             }
+            finally
+            {
+                AppLog.Add(() => $"Settings timing: managed XAML initialization={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F1} ms.");
+            }
         }
 
+        internal void TraceFirstHostAttachment(View view, long navigationStarted)
+        {
+            if (!AppLog.IsEnabled || _firstLayoutTraced)
+                return;
+
+            StopTracingHost();
+            _tracedHost = view;
+            _navigationStarted = navigationStarted;
+            _hostAttachStarted = Stopwatch.GetTimestamp();
+            if (view is SettingsLayoutGrid grid)
+                grid.BeginLayoutTrace();
+            view.Loaded += OnTracedHostLayout;
+            view.SizeChanged += OnTracedHostLayout;
+        }
+
+        internal void CheckFirstVisibleLayout()
+        {
+            if (_tracedHost is { IsVisible: true, IsLoaded: true, Width: > 0, Height: > 0 })
+                AppLog.Add("Settings timing: visible host already has loaded, nonzero bounds after activation.");
+        }
+
+        private void OnTracedHostLayout(object? sender, EventArgs e)
+        {
+            if (_tracedHost is not { IsVisible: true, IsLoaded: true, Width: > 0, Height: > 0 } view)
+                return;
+
+            _firstLayoutTraced = true;
+            var sinceAttach = Stopwatch.GetElapsedTime(_hostAttachStarted);
+            var sinceNavigation = Stopwatch.GetElapsedTime(_navigationStarted);
+            AppLog.Add(() => $"Settings timing: first visible loaded nonzero layout={sinceAttach.TotalMilliseconds:F1} ms from activation sequence start, {sinceNavigation.TotalMilliseconds:F1} ms from navigation start.");
+            view.Loaded -= OnTracedHostLayout;
+            view.SizeChanged -= OnTracedHostLayout;
+        }
+
+        private void StopTracingHost()
+        {
+            if (_tracedHost is not { } view)
+                return;
+
+            if (view is SettingsLayoutGrid grid)
+                grid.EndLayoutTrace();
+            view.Loaded -= OnTracedHostLayout;
+            view.SizeChanged -= OnTracedHostLayout;
+            _tracedHost = null;
+        }
 
 
         protected override void OnBindingContextChanged()
@@ -108,7 +168,7 @@ namespace JoesScanner.Views
                 _observedSettingsViewModel = null;
             }
 
-            if (BindingContext is SettingsViewModel vm)
+            if (_isTabVisible && BindingContext is SettingsViewModel vm)
             {
                 _observedSettingsViewModel = vm;
                 vm.PropertyChanged += OnSettingsViewModelPropertyChanged;
@@ -125,7 +185,8 @@ namespace JoesScanner.Views
             {
                 try
                 {
-                    RefreshLogText();
+                    if (_isTabVisible && LogBodyLayout?.IsVisible == true)
+                        RefreshLogText();
                 }
                 catch
                 {
@@ -244,8 +305,8 @@ namespace JoesScanner.Views
             {
                 FiltersTextTranslationX = -e.NewValue;
 
-                if (FiltersTextScrollView != null)
-                    await FiltersTextScrollView.ScrollToAsync(e.NewValue, 0, false);
+                if (FiltersBodyLayout.Content?.FindByName<ScrollView>("FiltersTextScrollView") is { } scroll)
+                    await scroll.ScrollToAsync(e.NewValue, 0, false);
             }
             catch
             {
@@ -255,36 +316,37 @@ namespace JoesScanner.Views
 
         protected override void OnAppearing()
         {
+            var started = Stopwatch.GetTimestamp();
             base.OnAppearing();
+            var baseElapsed = Stopwatch.GetElapsedTime(started);
+            if (_isTabVisible)
+                return;
 
-            if (BindingContext is SettingsViewModel preVm)
-            {
-                preVm.RefreshLogEnabledFromRuntime();
-            }
-
+            _isTabVisible = true;
+            var bindingStarted = Stopwatch.GetTimestamp();
+            HookBindingContext();
+            var bindingElapsed = Stopwatch.GetElapsedTime(bindingStarted);
             if (BindingContext is SettingsViewModel vm)
             {
-                // Schedule the load so navigation and layout can complete first.
-                // Always observe exceptions to avoid iOS killing the process.
-                MainThread.BeginInvokeOnMainThread(async () =>
+                var queued = Stopwatch.GetTimestamp();
+                Dispatcher.Dispatch(async () =>
                 {
-                    try
+                    if (_isTabVisible)
                     {
-                        await vm.OnPageOpenedAsync();
-                    }
-                    catch (Exception ex)
-                    {
-                        try
-                        {
-                            AppLog.DebugWriteLine(() => $"SettingsPage.OnAppearing load failed: {ex}");
-                        }
-                        catch
-                        {
-                        }
+                        var callback = Stopwatch.GetTimestamp();
+                        var pending = vm.OnPageOpenedAsync();
+                        var wait = Stopwatch.GetElapsedTime(queued, callback);
+                        var synchronous = Stopwatch.GetElapsedTime(callback);
+                        AppLog.Add(() => $"Settings timing: Settings data callback dispatcher wait={wait.TotalMilliseconds:F1} ms, synchronous work before returning Task={synchronous.TotalMilliseconds:F1} ms.");
+                        await pending;
                     }
                 });
             }
+
+            var elapsed = Stopwatch.GetElapsedTime(started);
+            AppLog.Add(() => $"Settings timing: SettingsPage.OnAppearing base={baseElapsed.TotalMilliseconds:F1} ms, binding subscription={bindingElapsed.TotalMilliseconds:F1} ms, total={elapsed.TotalMilliseconds:F1} ms.");
         }
+
         private void OnFilterTextSliderValueChanged(object sender, ValueChangedEventArgs e)
         {
             // The filter rows bind directly to FilterTextHorizontalTranslation on the page view model.
@@ -619,47 +681,25 @@ namespace JoesScanner.Views
 
         public void OnTabHiding()
         {
-            try
-            {
-                CollapseAllCards();
-            }
-            catch
-            {
-            }
+            StopTracingHost();
+            if (!_isTabVisible)
+                return;
 
-            if (BindingContext is SettingsViewModel vm)
-            {
-                try
-                {
-                    if (vm.HasChanges)
-                        vm.DiscardConnectionChanges();
-                }
-                catch
-                {
-                }
-            }
+            _isTabVisible = false;
+            HookBindingContext();
+            CollapseAllCards();
+            if (BindingContext is SettingsViewModel vm && vm.HasChanges)
+                vm.DiscardConnectionChanges();
         }
 
         protected override void OnDisappearing()
         {
-            try
-            {
-                CollapseAllCards();
-            }
-            catch
-            {
-                // Never block navigation.
-            }
-
-            if (BindingContext is SettingsViewModel vm)
-            {
-                if (vm.HasChanges)
-                {
-                    vm.DiscardConnectionChanges();
-                }
-            }
-
+            var started = Stopwatch.GetTimestamp();
+            OnTabHiding();
+            var hidingElapsed = Stopwatch.GetElapsedTime(started);
             base.OnDisappearing();
+            var elapsed = Stopwatch.GetElapsedTime(started);
+            AppLog.Add(() => $"Settings timing: SettingsPage.OnDisappearing hide callback={hidingElapsed.TotalMilliseconds:F1} ms, total={elapsed.TotalMilliseconds:F1} ms.");
         }
         
 
@@ -723,10 +763,10 @@ namespace JoesScanner.Views
                 // Force bindings to commit their Text values.
                 // Only unfocus the custom URL entry when Custom server is actually selected.
                 if (BindingContext is SettingsViewModel urlVm && urlVm.IsCustomServerSelected)
-                    ServerUrlEntry?.Unfocus();
+                    ConnectionFieldsGrid.Content?.FindByName<Entry>("ServerUrlEntry")?.Unfocus();
 
-                BasicAuthUsernameEntry?.Unfocus();
-                BasicAuthPasswordEntry?.Unfocus();
+                ConnectionFieldsGrid.Content?.FindByName<Entry>("BasicAuthUsernameEntry")?.Unfocus();
+                ConnectionFieldsGrid.Content?.FindByName<Entry>("BasicAuthPasswordEntry")?.Unfocus();
 
                 // Give the UI thread a moment to propagate binding updates.
                 await Task.Delay(50);
@@ -757,6 +797,8 @@ private void ToggleSection(VisualElement body, Label chevron, VisualElement? des
         return;
 
     var isExpanded = body.IsVisible;
+    if (!isExpanded && body is DeferredContentView deferred && !deferred.TryLoadContent())
+        return;
 
     body.IsVisible = !isExpanded;
     chevron.Text = body.IsVisible ? "▼" : "▶";
@@ -809,13 +851,10 @@ private void CollapseAllCards()
 
 private void OnConnectionHeaderTapped(object sender, EventArgs e)
 {
+    var vm = BindingContext as SettingsViewModel;
     ToggleSection(ConnectionFieldsGrid, ConnectionChevronLabel, ConnectionDescriptionLabel);
 
-    if (!ConnectionFieldsGrid.IsVisible)
-        return;
-
-    var vm = BindingContext as SettingsViewModel;
-    if (vm == null)
+    if (!ConnectionFieldsGrid.IsVisible || vm == null)
         return;
 
     MainThread.BeginInvokeOnMainThread(async () =>
@@ -859,55 +898,28 @@ private void OnAutoplayHeaderTapped(object sender, EventArgs e)
     }
 }
 
-private async void OnFiltersHeaderTapped(object sender, EventArgs e)
+private void OnFiltersHeaderTapped(object sender, EventArgs e)
 {
-    if (FiltersBodyLayout == null || FiltersChevronLabel == null)
-        return;
+    ToggleSection(FiltersBodyLayout, FiltersChevronLabel);
+    if (BindingContext is SettingsViewModel vm)
+        vm.SetSettingsCardOpenState("Filters", FiltersBodyLayout.IsVisible);
+}
 
-    if (FiltersBodyLayout.IsVisible)
-    {
-        ToggleSection(FiltersBodyLayout, FiltersChevronLabel);
-        if (BindingContext is SettingsViewModel closeVm)
-            closeVm.SetSettingsCardOpenState("Filters", false);
-        return;
-    }
+private void OnPreviousFilterPageClicked(object? sender, EventArgs e)
+{
+    if (BindingContext is SettingsViewModel vm)
+        vm.MoveFilterPage(-1);
+}
 
-    if (_isPreparingFiltersSection)
-        return;
-
-    _isPreparingFiltersSection = true;
-
-    try
-    {
-        if (BindingContext is SettingsViewModel loadVm)
-        {
-            loadVm.SetSettingsCardOpenState("Filters", false);
-            await loadVm.EnsureFiltersReadyAsync();
-        }
-
-        ToggleSection(FiltersBodyLayout, FiltersChevronLabel);
-
-        if (BindingContext is SettingsViewModel openVm)
-            openVm.SetSettingsCardOpenState("Filters", true);
-    }
-    catch (Exception ex)
-    {
-        try { AppLog.DebugWriteLine(() => $"SettingsPage: filters load failed: {ex}"); } catch { }
-    }
-    finally
-    {
-        _isPreparingFiltersSection = false;
-    }
+private void OnNextFilterPageClicked(object? sender, EventArgs e)
+{
+    if (BindingContext is SettingsViewModel vm)
+        vm.MoveFilterPage(1);
 }
 
 
 private void OnAudioFiltersHeaderTapped(object sender, EventArgs e)
 {
-    var willOpen = !AudioFiltersBodyLayout.IsVisible;
-    var pre = BindingContext as SettingsViewModel;
-    if (willOpen && pre != null)
-        pre.EnsureSectionLoaded("AudioFilters");
-
     ToggleSection(AudioFiltersBodyLayout, AudioFiltersChevronLabel);
     if (BindingContext is SettingsViewModel vm)
     {
@@ -926,11 +938,6 @@ private void OnAudioHeaderTapped(object sender, EventArgs e)
 
 private void OnAddressDetectionHeaderTapped(object sender, EventArgs e)
 {
-    var willOpen = !AddressDetectionBodyLayout.IsVisible;
-    var pre = BindingContext as SettingsViewModel;
-    if (willOpen && pre != null)
-        pre.EnsureSectionLoaded("AddressDetection");
-
     ToggleSection(AddressDetectionBodyLayout, AddressDetectionChevronLabel);
     if (BindingContext is SettingsViewModel vm)
     {
@@ -940,11 +947,6 @@ private void OnAddressDetectionHeaderTapped(object sender, EventArgs e)
 
 private void OnBluetoothHeaderTapped(object sender, EventArgs e)
 {
-    var willOpen = !BluetoothBodyLayout.IsVisible;
-    var pre = BindingContext as SettingsViewModel;
-    if (willOpen && pre != null)
-        pre.EnsureSectionLoaded("Bluetooth");
-
     ToggleSection(BluetoothBodyLayout, BluetoothChevronLabel);
     if (BindingContext is SettingsViewModel vm)
     {
@@ -954,11 +956,6 @@ private void OnBluetoothHeaderTapped(object sender, EventArgs e)
 
 private void OnThemeHeaderTapped(object sender, EventArgs e)
 {
-    var willOpen = !ThemeBodyLayout.IsVisible;
-    var pre = BindingContext as SettingsViewModel;
-    if (willOpen && pre != null)
-        pre.EnsureSectionLoaded("Theme");
-
     ToggleSection(ThemeBodyLayout, ThemeChevronLabel);
     if (BindingContext is SettingsViewModel vm)
     {
@@ -968,11 +965,6 @@ private void OnThemeHeaderTapped(object sender, EventArgs e)
 
 private void OnTelemetryHeaderTapped(object sender, EventArgs e)
 {
-    var willOpen = !TelemetryBodyLayout.IsVisible;
-    var pre = BindingContext as SettingsViewModel;
-    if (willOpen && pre != null)
-        pre.EnsureSectionLoaded("Telemetry");
-
     ToggleSection(TelemetryBodyLayout, TelemetryChevronLabel);
     if (BindingContext is SettingsViewModel vm)
     {
@@ -982,11 +974,6 @@ private void OnTelemetryHeaderTapped(object sender, EventArgs e)
 
 private void OnLogHeaderTapped(object sender, EventArgs e)
 {
-    var willOpen = !LogBodyLayout.IsVisible;
-    var pre = BindingContext as SettingsViewModel;
-    if (willOpen && pre != null)
-        pre.EnsureSectionLoaded("Log");
-
     ToggleSection(LogBodyLayout, LogChevronLabel);
 
     if (BindingContext is SettingsViewModel vm)
@@ -1147,16 +1134,19 @@ private async void OnOpenPrivacyPolicyClicked(object sender, EventArgs e)
 
 private void RefreshLogText()
 {
+    if (LogEditor is not { } editor)
+        return;
+
     try
     {
         if (!AppLog.IsEnabled)
         {
-            LogEditor.Text = "Logging is disabled. Turn on Enable logging to capture entries."; 
+            editor.Text = "Logging is disabled. Turn on Enable logging to capture entries.";
             return;
         }
 
         var lines = AppLog.GetSnapshot(500);
-        LogEditor.Text = lines.Length == 0
+        editor.Text = lines.Length == 0
             ? "No log entries yet."
             : string.Join(Environment.NewLine, lines);
     }
@@ -1164,7 +1154,7 @@ private void RefreshLogText()
     {
         try
         {
-            LogEditor.Text = $"Could not load log:\\n{ex.Message}";
+            editor.Text = $"Could not load log:\\n{ex.Message}";
         }
         catch
         {

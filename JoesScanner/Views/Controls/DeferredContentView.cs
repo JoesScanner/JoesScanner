@@ -1,64 +1,35 @@
 using Microsoft.Maui.Controls;
+using JoesScanner.Services;
+using System.Diagnostics;
 
 namespace JoesScanner.Views.Controls;
 
-// Hosts a DataTemplate and delays creating the actual visual tree until IsLoaded becomes true.
-// This is used to keep large pages responsive by allowing the first render to complete before
-// constructing expensive sections.
+// Creates the section in its final host when the user first expands it.
 public sealed class DeferredContentView : ContentView
 {
-    public static readonly BindableProperty ContentTemplateProperty = BindableProperty.Create(
-        nameof(ContentTemplate),
-        typeof(DataTemplate),
-        typeof(DeferredContentView),
-        default(DataTemplate),
-        propertyChanged: (b, o, n) => ((DeferredContentView)b).TryInflate());
+    public DataTemplate? ContentTemplate { get; set; }
 
-    public static readonly BindableProperty IsLoadedProperty = BindableProperty.Create(
-        nameof(IsLoaded),
-        typeof(bool),
-        typeof(DeferredContentView),
-        false,
-        propertyChanged: (b, o, n) => ((DeferredContentView)b).TryInflate());
-
-    private bool _inflated;
-
-    public DataTemplate? ContentTemplate
+    internal bool TryLoadContent()
     {
-        get => (DataTemplate?)GetValue(ContentTemplateProperty);
-        set => SetValue(ContentTemplateProperty, value);
-    }
+        if (Content != null)
+            return true;
 
-    public bool IsLoaded
-    {
-        get => (bool)GetValue(IsLoadedProperty);
-        set => SetValue(IsLoadedProperty, value);
-    }
-
-    private void TryInflate()
-    {
-        if (_inflated)
-            return;
-
-        if (!IsLoaded)
-            return;
-
-        var template = ContentTemplate;
-        if (template is null)
-            return;
-
+        var started = Stopwatch.GetTimestamp();
         try
         {
-            var content = template.CreateContent();
-            if (content is View v)
-            {
-                Content = v;
-                _inflated = true;
-            }
+            if (ContentTemplate?.CreateContent() is not View view)
+                throw new InvalidOperationException("A deferred section requires a view template.");
+
+            var created = Stopwatch.GetTimestamp();
+            Content = view;
+            var attached = Stopwatch.GetTimestamp();
+            AppLog.Add(() => $"Settings timing: card body created={Stopwatch.GetElapsedTime(started, created).TotalMilliseconds:F1} ms, attached={Stopwatch.GetElapsedTime(created, attached).TotalMilliseconds:F1} ms.");
+            return true;
         }
-        catch
+        catch (Exception ex)
         {
-            // Best effort. If a template fails to inflate, do not crash the app.
+            AppLog.Add(() => $"Settings timing: deferred card creation failed ({ex.GetType().Name}).");
+            return false;
         }
     }
 }

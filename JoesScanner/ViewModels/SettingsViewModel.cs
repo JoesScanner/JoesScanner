@@ -1,4 +1,5 @@
-﻿using JoesScanner.Models;
+using System.Diagnostics;
+using JoesScanner.Models;
 using JoesScanner.Services;
 using Microsoft.Maui.ApplicationModel;
 using System.Collections.ObjectModel;
@@ -14,6 +15,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using JoesScanner.Helpers;
+using Microsoft.Data.Sqlite;
 
 namespace JoesScanner.ViewModels
 {
@@ -40,18 +42,26 @@ namespace JoesScanner.ViewModels
         // One-time guard to avoid redoing expensive initialization work each time the user
         // visits Settings. (Profiles can still be refreshed via explicit actions.)
         private int _pageOpenStarted;
+        private readonly SettingsStartupPreparation<StartupData> _startupData = new();
 
-        private int _filterUiRefreshQueued;
+        private sealed record StartupData(
+            IReadOnlyList<ServerDirectoryEntry> Directory,
+            IReadOnlyList<FilterProfile> Profiles,
+            string SelectedProfileId);
+
+        private const int FilterPageSize = 64;
+        private IReadOnlyList<FilterCatalogRow> _filterCatalog = [];
+        private FilterCatalogRow[] _visibleFilterRows = [];
+        private string _filterCatalogServerUrl = string.Empty;
+        private int _filterPageIndex;
+        private int _filterCardVersion;
+        private int _filterRefreshPending;
+        private bool _filterRefreshRunning;
+        private bool _tryFilterSeed;
+        private Task? _filterSeedTask;
 
 
         private bool _deferredUiLoaded;
-        private bool _filtersBodyLoaded;
-        private bool _audioFiltersBodyLoaded;
-        private bool _addressDetectionBodyLoaded;
-        private bool _bluetoothBodyLoaded;
-        private bool _themeBodyLoaded;
-        private bool _telemetryBodyLoaded;
-        private bool _logBodyLoaded;
 
         private string _selectedSettingsFilterProfileNameOption = NoneSettingsProfileNameOption;
         private bool _isCustomSettingsFilterProfileName;
@@ -180,10 +190,12 @@ SyncSettingsProfileNameDropdownFromDraft();
                 _ = SelectSettingsFilterProfileAsync(profile, apply: true);
         }
 
-        public ObservableCollection<FilterRule> FilterRules => _filterService.Rules;
-
-
-public ObservableCollection<FilterRule> FilterRulesUi => _filterService.Rules;
+        public IReadOnlyList<FilterRule> FilterRules { get; private set; } = [];
+        public bool HasFilterPages => _filterCatalog.Count > FilterPageSize;
+        public bool CanShowPreviousFilterPage => _filterPageIndex > 0;
+        public bool CanShowNextFilterPage => (_filterPageIndex + 1) * FilterPageSize < _filterCatalog.Count;
+        public string FilterPageSummary => _filterCatalog.Count == 0 ? "No filters discovered yet."
+            : $"{_filterPageIndex * FilterPageSize + 1}?{_filterPageIndex * FilterPageSize + FilterRules.Count} of {_filterCatalog.Count}";
 
 private double _filterTextHorizontalOffset;
 public double FilterTextHorizontalOffset
@@ -435,8 +447,9 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
         private volatile bool _telemetryCardOpen;
         private volatile bool _logCardOpen;
 
-        private int _autoSaveInProgress = 0;
-        private int _autoSaveQueued = 0;
+        private readonly SemaphoreSlim _settingsSaveGate = new(1);
+        private bool _autoSaveInProgress;
+        private bool _autoSaveQueued;
 
         private bool _hasUnsavedConnectionChanges;
         private bool _hasUnsavedNonConnectionChanges;
@@ -448,7 +461,7 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
             if (string.Equals(key, "Autoplay", StringComparison.OrdinalIgnoreCase))
                 _autoplayCardOpen = isOpen;
             else if (string.Equals(key, "Filters", StringComparison.OrdinalIgnoreCase))
-                _filtersCardOpen = isOpen;
+                SetFiltersCardOpen(isOpen);
             else if (string.Equals(key, "AudioFilters", StringComparison.OrdinalIgnoreCase))
                 _audioFiltersCardOpen = isOpen;
             else if (string.Equals(key, "Audio", StringComparison.OrdinalIgnoreCase))
@@ -501,40 +514,38 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
 
         private void QueueAutosaveNonConnection(string cardKey)
         {
-            // Only autosave when the relevant card is open.
             if (!IsCardOpenForAutosave(cardKey))
                 return;
 
-            // Debounce/serialize autosaves to avoid overlapping saves and excessive IO.
-            if (Interlocked.Exchange(ref _autoSaveQueued, 1) == 1)
-                return;
+            _autoSaveQueued = true;
+            if (!_autoSaveInProgress)
+                _ = ProcessAutosavesAsync();
+        }
 
-            _ = Task.Run(async () =>
+        private async Task ProcessAutosavesAsync()
+        {
+            _autoSaveInProgress = true;
+            try
             {
-                try
+                while (_autoSaveQueued)
                 {
-                    // Small debounce window to coalesce rapid toggles/picker changes.
+                    // Coalesce edits within the existing autosave debounce window.
                     await Task.Delay(150);
-
-                    Interlocked.Exchange(ref _autoSaveQueued, 0);
-
-                    if (Interlocked.CompareExchange(ref _autoSaveInProgress, 1, 0) != 0)
-                        return;
-
+                    _autoSaveQueued = false;
                     try
                     {
                         await SaveNonConnectionSettingsAsync();
                     }
-                    finally
+                    catch (Exception ex)
                     {
-                        Interlocked.Exchange(ref _autoSaveInProgress, 0);
+                        AppLog.Add(() => $"Settings: autosave failed ({ex.GetType().Name}).");
                     }
                 }
-                catch
-                {
-                    // Autosave is best-effort; don't surface UI errors for it.
-                }
-            });
+            }
+            finally
+            {
+                _autoSaveInProgress = false;
+            }
         }
 
         private static int ClampInt(int value, int min, int max)
@@ -601,17 +612,10 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
             _filterProfileStore = filterProfileStore ?? throw new ArgumentNullException(nameof(filterProfileStore));
 
 
-try
-{
-    _filterService.RulesChanged += (_, __) => QueueFilterUiRefresh();
-}
-catch
-{
-}
-
             _historyLookupsCacheService = historyLookupsCacheService ?? throw new ArgumentNullException(nameof(historyLookupsCacheService));
             _authObservedTriplesSyncService = authObservedTriplesSyncService ?? throw new ArgumentNullException(nameof(authObservedTriplesSyncService));
             _subscriptionService = subscriptionService;
+            _filterService.CatalogChanged += (_, _) => QueueFilterCatalogRefresh();
 
             _httpClient = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
             {
@@ -639,7 +643,9 @@ catch
             ToggleBasicAuthPasswordVisibilityCommand =
                 new Command(() => IsBasicAuthPasswordVisible = !IsBasicAuthPasswordVisible);
 
+            var initializationStarted = Stopwatch.GetTimestamp();
             InitializeFromSettings();
+            AppLog.Add(() => $"Settings timing: view model initialization={Stopwatch.GetElapsedTime(initializationStarted).TotalMilliseconds:F1} ms.");
 
             SaveCommand = new Command(async () => await SaveNonConnectionSettingsAsync());
             ResetServerCommand = new Command(ResetServerUrl);
@@ -664,27 +670,19 @@ catch
             try
             {
                 IsSyncingTalkgroupFilters = true;
-                AppLog.Add(() => $"Settings: manual lookup sync requested. server='{_settings.ServerUrl}'");
-
-                // Ensure the filter engine is in the correct per-server context before we mutate rules.
-                try
-                {
-                    _filterService.SetServerUrl(_settings.ServerUrl);
-                }
-                catch
-                {
-                }
+                var serverUrl = _settings.ServerUrl;
+                AppLog.Add("Settings: manual lookup sync requested.");
 
                 // First seed from the local calls database so the filter tree can immediately reflect
                 // anything the user has already observed on this device, even before the server responds.
                 var localSeeded = 0;
                 try
                 {
-                    var localObserved = await _authObservedTriplesSyncService.GetLocalObservedAsync(_settings.ServerUrl, DateTime.MinValue, CancellationToken.None);
+                    var localObserved = await Task.Run(() => _authObservedTriplesSyncService.GetLocalObservedAsync(serverUrl, DateTime.MinValue, CancellationToken.None));
                     localSeeded = localObserved?.Count ?? 0;
                     if (localObserved != null && localObserved.Count > 0)
                     {
-                        _filterService.SeedFromObservedTriples(localObserved);
+                        _filterService.SeedFromObservedTriples(localObserved, serverUrl);
                     }
                     else
                     {
@@ -692,8 +690,7 @@ catch
                         localSeeded = localDiscovery?.Count ?? 0;
                         if (localDiscovery != null && localDiscovery.Count > 0)
                         {
-                            _filterService.SeedFromObservedTriples(localDiscovery);
-                            AppLog.Add(() => $"Settings: manual lookup sync using locally persisted discovery fallback. server='{_settings.ServerUrl}' count={localSeeded}");
+                            AppLog.Add(() => $"Settings: manual lookup sync using local discovery, count={localSeeded}.");
                         }
                     }
                 }
@@ -716,21 +713,21 @@ catch
                 var received = 0;
                 try
                 {
-                    var triples = await _authObservedTriplesSyncService.TrySyncExchangeAsync(_settings.ServerUrl, force: true, CancellationToken.None);
+                    var triples = await _authObservedTriplesSyncService.TrySyncExchangeAsync(serverUrl, force: true, CancellationToken.None);
                     received = triples?.Count ?? 0;
                     if (triples != null)
-                        replaced = _filterService.ReplaceFromObservedTriples(triples);
+                        replaced = await Task.Run(() => _filterService.ReplaceFromObservedTriples(triples, serverUrl));
                 }
                 catch
                 {
                 }
 
                 // Manual sync should be silent. Log the results for diagnostics, but do not show UI dialogs.
-                AppLog.Add(() => $"Settings: manual lookup sync complete. server='{_settings.ServerUrl}' receivers={r} sites={s} talkgroups={t} localObservedSeeded={localSeeded} observedReceived={received} rulesReplaced={replaced}");
+                AppLog.Add(() => $"Settings: manual lookup sync complete. receivers={r} sites={s} talkgroups={t} localObservedSeeded={localSeeded} observedReceived={received} rulesReplaced={replaced}");
             }
             catch (Exception ex)
             {
-                AppLog.Add(() => $"Settings: manual lookup sync failed. ex={ex.GetType().Name}: {ex.Message}");
+                AppLog.Add(() => $"Settings: manual lookup sync failed ({ex.GetType().Name}).");
             }
             finally
             {
@@ -739,225 +736,204 @@ catch
         }
 
 
-        public Task OnPageOpenedAsync()
+        public async Task PrepareLocalDataAsync()
         {
-            if (Interlocked.Exchange(ref _pageOpenStarted, 1) == 1)
-                return Task.CompletedTask;
-
-
-            try
-            {
-                _filterService.SetServerUrl(_settings.ServerUrl);
-            }
-            catch
-            {
-            }
+            if (_pageOpenStarted != 0)
+                return;
 
             try
             {
-                // IMPORTANT:
-                // The Settings page must feel instant. Do not block the UI thread waiting for
-                // SQLite reads or any other IO during page open.
-                //
-                // Kick off the expensive work and let the UI render immediately.
-                _ = Task.Run(async () =>
-                {
-                    try
-                    {
-                        await LoadSettingsFilterProfilesAsync(applySelectedProfile: true);
-                    }
-                    catch
-                    {
-                    }
-                });
-
-                // Refresh server directory list (best effort) without blocking page open.
-                // Use the cached list immediately, then refresh only if stale.
-                _ = Task.Run(async () =>
-                {
-                    try
-                    {
-                        await Task.Delay(450);
-                        await MainThread.InvokeOnMainThreadAsync(async () =>
-                        {
-                            try
-                            {
-                                await EnsureDirectoryServersFreshAsync(force: false);
-                            }
-                            catch
-                            {
-                            }
-                        });
-                    }
-                    catch
-                    {
-                    }
-                });
-
-                // Let the page render first, then build the heavier UI sections.
-                _ = MainThread.InvokeOnMainThreadAsync(async () =>
-                {
-                    try
-                    {
-                        await Task.Delay(50);
-                        // Do not build or populate heavy card bodies here.
-                        // Cards are lazy loaded on demand when expanded.
-                    }
-                    catch
-                    {
-                    }
-                });
+                var serverKey = ServerKeyHelper.Normalize(_settings.ServerUrl);
+                await _startupData.GetOrStart(serverKey, ReadStartupDataAsync);
             }
             catch (Exception ex)
             {
+                AppLog.Add(() => $"Settings timing: local preload failed ({ex.GetType().Name}).");
+            }
+        }
+
+        private Task<StartupData> ReadStartupDataAsync(string serverKey) =>
+            Task.Run(async () =>
+            {
+                var started = Stopwatch.GetTimestamp();
+                var stage = "directory cache";
                 try
                 {
-                    AppLog.DebugWriteLine(() => $"SettingsViewModel.OnPageOpenedAsync failed: {ex}");
+                    var directory = _settings.GetCachedDirectoryServers();
+                    var directoryTime = Stopwatch.GetElapsedTime(started);
+                    stage = "filter profiles";
+                    var (profiles, selectedId) = await ReadFilterProfilesAsync(serverKey).ConfigureAwait(false);
+                    var elapsed = Stopwatch.GetElapsedTime(started);
+                    AppLog.Add(() => $"Settings timing: local reads directory={directoryTime.TotalMilliseconds:F1} ms, profiles={elapsed.TotalMilliseconds - directoryTime.TotalMilliseconds:F1} ms.");
+                    return new StartupData(directory, profiles, selectedId);
                 }
-                catch
+                catch (SqliteException ex)
                 {
+                    // SQLite messages can include filesystem paths or data. Log only known error categories.
+                    var detail = ex.SqliteErrorCode switch
+                    {
+                        1 when stage == "filter profiles" && ex.Message.Contains("no such column: server_key", StringComparison.OrdinalIgnoreCase) => "missing filter profile server_key column",
+                        1 => "SQL or schema error",
+                        5 => "database busy",
+                        6 => "database locked",
+                        8 => "database read-only",
+                        10 => "database I/O error",
+                        11 => "database corrupt",
+                        14 => "cannot open database",
+                        19 => "constraint violation",
+                        26 => "invalid database format",
+                        _ => "SQLite operation failed"
+                    };
+                    var elapsed = Stopwatch.GetElapsedTime(started);
+                    AppLog.Add(() => $"Settings timing: local read failed, stage={stage}, elapsed={elapsed.TotalMilliseconds:F1} ms, sqlite={ex.SqliteErrorCode}, extended={ex.SqliteExtendedErrorCode}, detail={detail}.");
+                    throw;
                 }
+            });
+
+        public async Task OnPageOpenedAsync()
+        {
+            if (Interlocked.Exchange(ref _pageOpenStarted, 1) == 1)
+                return;
+
+            var started = Stopwatch.GetTimestamp();
+            try
+            {
+                var serverKey = ServerKeyHelper.Normalize(_settings.ServerUrl);
+                var localData = _startupData.GetOrStart(serverKey, ReadStartupDataAsync);
+                var wasReady = localData.IsCompletedSuccessfully;
+                var data = await localData;
+                _startupData.Release(localData);
+                var waited = Stopwatch.GetElapsedTime(started);
+
+                if (!string.Equals(serverKey, ServerKeyHelper.Normalize(_settings.ServerUrl), StringComparison.OrdinalIgnoreCase))
+                    await LoadSettingsFilterProfilesAsync(applySelectedProfile: true);
+                else
+                    PublishFilterProfiles(data.Profiles, data.SelectedProfileId, applySelectedProfile: true);
+
+                if (_lastDirectoryRefreshUtc == DateTime.MinValue && !IsDirectoryLoading)
+                    PublishDirectoryServers(data.Directory);
+
+                AppLog.Add(() => $"Settings timing: local data ready before open={wasReady}, wait={waited.TotalMilliseconds:F1} ms, publish={Stopwatch.GetElapsedTime(started).TotalMilliseconds - waited.TotalMilliseconds:F1} ms.");
+                var refreshStarted = Stopwatch.GetTimestamp();
+                await EnsureDirectoryServersFreshAsync(force: false);
+                AppLog.Add(() => $"Settings timing: directory refresh check={Stopwatch.GetElapsedTime(refreshStarted).TotalMilliseconds:F1} ms.");
+            }
+            catch (Exception ex)
+            {
+                Interlocked.Exchange(ref _pageOpenStarted, 0);
+                AppLog.Add(() => $"Settings: initial data load failed ({ex.GetType().Name}).");
+            }
+        }
+
+        private void SetFiltersCardOpen(bool isOpen)
+        {
+            if (_filtersCardOpen == isOpen)
+                return;
+
+            _filtersCardOpen = isOpen;
+            _filterCardVersion++;
+            if (isOpen)
+            {
+                _tryFilterSeed = true;
+                QueueFilterCatalogRefresh();
+            }
+            else
+            {
+                _filterCatalog = [];
+                _filterCatalogServerUrl = string.Empty;
+                _filterPageIndex = 0;
+                PublishFilterPage();
+            }
+        }
+
+        private void QueueFilterCatalogRefresh()
+        {
+            if (!_filtersCardOpen || Interlocked.Exchange(ref _filterRefreshPending, 1) != 0)
+                return;
+
+            MainThread.BeginInvokeOnMainThread(() => _ = RefreshFilterCatalogAsync());
+        }
+
+        private async Task RefreshFilterCatalogAsync()
+        {
+            if (_filterRefreshRunning)
+                return;
+
+            _filterRefreshRunning = true;
+            try
+            {
+                while (Interlocked.Exchange(ref _filterRefreshPending, 0) != 0 && _filtersCardOpen)
+                {
+                    var start = Stopwatch.GetTimestamp();
+                    var version = _filterCardVersion;
+                    var serverUrl = _settings.ServerUrl;
+                    var catalog = await Task.Run(_filterService.GetCatalogSnapshot);
+                    var buildTime = Stopwatch.GetElapsedTime(start);
+                    if (!_filtersCardOpen || _filterCardVersion != version ||
+                        !string.Equals(serverUrl, _settings.ServerUrl, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    var publishStart = Stopwatch.GetTimestamp();
+                    _filterCatalog = catalog;
+                    _filterCatalogServerUrl = serverUrl;
+                    PublishFilterPage();
+                    AppLog.Add(() => $"Settings: filter catalog rows={catalog.Count}, visible={FilterRules.Count}, build={buildTime.TotalMilliseconds:F0} ms, publish={Stopwatch.GetElapsedTime(publishStart).TotalMilliseconds:F0} ms.");
+
+                    if (_tryFilterSeed)
+                    {
+                        _tryFilterSeed = false;
+                        if (catalog.Count == 0 && _filterSeedTask?.IsCompleted != false)
+                            _filterSeedTask = Task.Run(() => SeedFiltersFromObservedAsync(serverUrl));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                AppLog.Add(() => $"Settings: filter catalog refresh failed ({ex.GetType().Name}).");
             }
             finally
             {
-                // Intentionally do not reset _pageOpenStarted.
-                // This work is designed to be one-time per process so Settings stays snappy.
+                _filterRefreshRunning = false;
             }
-
-            return Task.CompletedTask;
         }
 
-        public bool FiltersBodyLoaded
+        public void MoveFilterPage(int offset)
         {
-            get => _filtersBodyLoaded;
-            set
-            {
-                if (_filtersBodyLoaded == value)
-                    return;
-                _filtersBodyLoaded = value;
-                OnPropertyChanged();
-            }
+            _filterPageIndex += offset;
+            PublishFilterPage();
         }
 
-        public bool AudioFiltersBodyLoaded
+        private void PublishFilterPage()
         {
-            get => _audioFiltersBodyLoaded;
-            set
+            _filterPageIndex = Math.Clamp(_filterPageIndex, 0, Math.Max(0, (_filterCatalog.Count - 1) / FilterPageSize));
+            var rows = _filterCatalog.Skip(_filterPageIndex * FilterPageSize).Take(FilterPageSize).ToArray();
+            if (!rows.SequenceEqual(_visibleFilterRows))
             {
-                if (_audioFiltersBodyLoaded == value)
-                    return;
-                _audioFiltersBodyLoaded = value;
-                OnPropertyChanged();
+                _visibleFilterRows = rows;
+                FilterRules = rows.Select(row => new FilterRule
+                {
+                    Level = row.Level,
+                    Receiver = row.Receiver,
+                    Site = row.Site,
+                    Talkgroup = row.Talkgroup,
+                    IsMuted = row.IsMuted,
+                    IsDisabled = row.IsDisabled,
+                    LastSeenUtc = row.LastSeenUtc
+                }).ToArray();
+                OnPropertyChanged(nameof(FilterRules));
             }
+            OnPropertyChanged(nameof(HasFilterPages));
+            OnPropertyChanged(nameof(CanShowPreviousFilterPage));
+            OnPropertyChanged(nameof(CanShowNextFilterPage));
+            OnPropertyChanged(nameof(FilterPageSummary));
         }
 
-        public bool AddressDetectionBodyLoaded
-        {
-            get => _addressDetectionBodyLoaded;
-            set
-            {
-                if (_addressDetectionBodyLoaded == value)
-                    return;
-                _addressDetectionBodyLoaded = value;
-                OnPropertyChanged();
-            }
-        }
-
-        public bool BluetoothBodyLoaded
-        {
-            get => _bluetoothBodyLoaded;
-            set
-            {
-                if (_bluetoothBodyLoaded == value)
-                    return;
-                _bluetoothBodyLoaded = value;
-                OnPropertyChanged();
-            }
-        }
-
-        public bool ThemeBodyLoaded
-        {
-            get => _themeBodyLoaded;
-            set
-            {
-                if (_themeBodyLoaded == value)
-                    return;
-                _themeBodyLoaded = value;
-                OnPropertyChanged();
-            }
-        }
-
-        public bool TelemetryBodyLoaded
-        {
-            get => _telemetryBodyLoaded;
-            set
-            {
-                if (_telemetryBodyLoaded == value)
-                    return;
-                _telemetryBodyLoaded = value;
-                OnPropertyChanged();
-            }
-        }
-
-        public bool LogBodyLoaded
-        {
-            get => _logBodyLoaded;
-            set
-            {
-                if (_logBodyLoaded == value)
-                    return;
-                _logBodyLoaded = value;
-                OnPropertyChanged();
-            }
-        }
-
-        public async Task EnsureFiltersReadyAsync()
-        {
-            FiltersBodyLoaded = true;
-
-            // Always switch the filter engine to the currently selected server in the UI,
-            // not only the last saved settings value. This avoids stale or empty-state
-            // mismatches right after the user changes servers and immediately opens Filters.
-            try
-            {
-                _filterService.SetServerUrl(ServerUrl);
-            }
-            catch
-            {
-            }
-
-            // First rebuild from the current live queue snapshot. This is immediate, local,
-            // and avoids the first-open empty state when the user already has calls loaded.
-            RebuildFilterRulesFromCurrentCalls_NoThrow();
-
-            // If we already have rules after switching context/rebuilding locally, stop here.
-            if (_filterService.Rules.Count > 0)
-            {
-                RefreshFilterRulesUi();
-                return;
-            }
-
-            await SeedFiltersFromObservedAsync(ServerUrl, forceNetwork: false);
-            RefreshFilterRulesUi();
-        }
-
-        public void EnsureSectionLoaded(string sectionKey)
-        {
-            if (string.Equals(sectionKey, "Filters", StringComparison.OrdinalIgnoreCase)) FiltersBodyLoaded = true;
-            if (string.Equals(sectionKey, "AudioFilters", StringComparison.OrdinalIgnoreCase)) AudioFiltersBodyLoaded = true;
-            if (string.Equals(sectionKey, "AddressDetection", StringComparison.OrdinalIgnoreCase)) AddressDetectionBodyLoaded = true;
-            if (string.Equals(sectionKey, "Bluetooth", StringComparison.OrdinalIgnoreCase)) BluetoothBodyLoaded = true;
-            if (string.Equals(sectionKey, "Theme", StringComparison.OrdinalIgnoreCase)) ThemeBodyLoaded = true;
-            if (string.Equals(sectionKey, "Telemetry", StringComparison.OrdinalIgnoreCase)) TelemetryBodyLoaded = true;
-            if (string.Equals(sectionKey, "Log", StringComparison.OrdinalIgnoreCase)) LogBodyLoaded = true;
-        }
-
-        private async Task SeedFiltersFromObservedAsync(string? serverUrl, bool forceNetwork)
+        private async Task SeedFiltersFromObservedAsync(string? serverUrl)
         {
             try
             {
-                _ = forceNetwork;
-
                 var serverKey = ServerKeyHelper.Normalize(serverUrl);
                 if (string.IsNullOrWhiteSpace(serverKey))
                     return;
@@ -969,17 +945,9 @@ catch
                     var localObserved = await _authObservedTriplesSyncService.GetLocalObservedAsync(serverKey, DateTime.MinValue, CancellationToken.None);
                     if (localObserved != null && localObserved.Count > 0)
                     {
-                        _filterService.SeedFromObservedTriples(localObserved);
+                        _filterService.SeedFromObservedTriples(localObserved, serverKey);
                     }
-                    else
-                    {
-                        var localDiscovery = _filterService.GetDiscoveredTriplesSnapshot();
-                        if (localDiscovery != null && localDiscovery.Count > 0)
-                        {
-                            _filterService.SeedFromObservedTriples(localDiscovery);
-                            AppLog.Add(() => $"Settings: seeded filters from locally persisted discovery fallback. server='{serverKey}' count={localDiscovery.Count}");
-                        }
-                    }
+
                 }
                 catch
                 {
@@ -991,10 +959,11 @@ catch
                 if (triples == null || triples.Count == 0)
                     return;
 
-                _filterService.SeedFromObservedTriples(triples);
+                _filterService.SeedFromObservedTriples(triples, serverKey);
             }
-            catch
+            catch (Exception ex)
             {
+                AppLog.Add(() => $"Settings: filter seed failed ({ex.GetType().Name}).");
             }
         }
 
@@ -1013,36 +982,36 @@ catch
 
         public async Task LoadSettingsFilterProfilesAsync(bool applySelectedProfile)
         {
-            // NOTE:
-            // On iOS (especially when autoplay/monitoring is active), doing synchronous file IO and JSON parsing
-            // on the UI thread during navigation can cause hangs or watchdog kills. The underlying store is sync,
-            // even though it exposes an async signature (Task.FromResult).
-            //
-            // Run the store call on a background thread, then marshal collection updates back to the UI thread.
-	            var serverKey = ServerKeyHelper.Normalize(_settings.ServerUrl);
-            var profiles = await Task.Run(async () => await _filterProfileStore.GetProfilesForServerAsync(serverKey, CancellationToken.None));
+            var serverKey = ServerKeyHelper.Normalize(_settings.ServerUrl);
+            // The SQLite store does synchronous work even though its API returns a Task.
+            var (profiles, selectedId) = await Task.Run(() => ReadFilterProfilesAsync(serverKey));
 
             await MainThread.InvokeOnMainThreadAsync(() =>
             {
-                _settingsFilterProfiles.Clear();
-                foreach (var p in profiles)
-                    _settingsFilterProfiles.Add(p);
-
-                RefreshSettingsProfileNameOptions();
-
-                var selectedId = AppStateStore.GetString("settings_selected_filter_profile_id", string.Empty);
-                if (string.IsNullOrWhiteSpace(selectedId))
-                {
-                    SelectedSettingsFilterProfile = null;
-                    return;
-                }
-
-                var selected = _settingsFilterProfiles.FirstOrDefault(p => string.Equals(p.Id, selectedId, StringComparison.OrdinalIgnoreCase));
-                SelectedSettingsFilterProfile = selected;
-
-                if (applySelectedProfile && selected != null)
-                    ApplySettingsProfile(selected);
+                if (string.Equals(serverKey, ServerKeyHelper.Normalize(_settings.ServerUrl), StringComparison.OrdinalIgnoreCase))
+                    PublishFilterProfiles(profiles, selectedId, applySelectedProfile);
             });
+        }
+
+        private async Task<(IReadOnlyList<FilterProfile> Profiles, string SelectedId)> ReadFilterProfilesAsync(string serverKey)
+        {
+            var profiles = await _filterProfileStore.GetProfilesForServerAsync(serverKey, CancellationToken.None)
+                .ConfigureAwait(false);
+            return (profiles, AppStateStore.GetString("settings_selected_filter_profile_id", string.Empty));
+        }
+
+        private void PublishFilterProfiles(IReadOnlyList<FilterProfile> profiles, string selectedId, bool applySelectedProfile)
+        {
+            _settingsFilterProfiles.Clear();
+            foreach (var profile in profiles)
+                _settingsFilterProfiles.Add(profile);
+
+            RefreshSettingsProfileNameOptions();
+            var selected = string.IsNullOrWhiteSpace(selectedId) ? null :
+                _settingsFilterProfiles.FirstOrDefault(p => string.Equals(p.Id, selectedId, StringComparison.OrdinalIgnoreCase));
+            SelectedSettingsFilterProfile = selected;
+            if (applySelectedProfile && selected != null)
+                ApplySettingsProfile(selected);
         }
 
         public async Task SelectSettingsFilterProfileAsync(FilterProfile? profile, bool apply)
@@ -1964,7 +1933,7 @@ public bool WindowsStartWithWindows
 
         private void OnToggleMuteFilter(FilterRule? rule)
         {
-            if (rule == null)
+            if (rule == null || !IsCurrentFilterCatalog())
                 return;
 
             _filterService.ToggleMute(rule);
@@ -1972,7 +1941,7 @@ public bool WindowsStartWithWindows
 
         private void OnToggleDisableFilter(FilterRule? rule)
         {
-            if (rule == null)
+            if (rule == null || !IsCurrentFilterCatalog())
                 return;
 
             _filterService.ToggleDisable(rule);
@@ -1980,11 +1949,14 @@ public bool WindowsStartWithWindows
 
         private void OnClearFilter(FilterRule? rule)
         {
-            if (rule == null)
+            if (rule == null || !IsCurrentFilterCatalog())
                 return;
 
             _filterService.ClearRule(rule);
         }
+
+        private bool IsCurrentFilterCatalog() =>
+            _filtersCardOpen && string.Equals(_filterCatalogServerUrl, _settings.ServerUrl, StringComparison.OrdinalIgnoreCase);
 
         private void InitializeFromSettings()
         {
@@ -2018,7 +1990,6 @@ public bool WindowsStartWithWindows
 
             _themeMode = string.IsNullOrWhiteSpace(_settings.ThemeMode) ? "System" : _settings.ThemeMode;
             _savedThemeMode = _themeMode;
-            ApplyTheme(_themeMode);
 
             _bluetoothLabelArtistToken = BluetoothLabelMapping.NormalizeToken(_settings.BluetoothLabelArtist, BluetoothLabelMapping.TokenAppName);
             _savedBluetoothLabelArtistToken = _bluetoothLabelArtistToken;
@@ -2089,7 +2060,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             _addressDetectionOpenMapsOnTap = _settings.AddressDetectionOpenMapsOnTap;
             _savedAddressDetectionOpenMapsOnTap = _addressDetectionOpenMapsOnTap;
 
-            LoadDirectoryServersFromCache();
+            PublishDirectoryServers([]);
 
             _addressDetectionMinConfidencePercent = _settings.AddressDetectionMinConfidencePercent;
             _savedAddressDetectionMinConfidencePercent = _addressDetectionMinConfidencePercent;
@@ -2152,8 +2123,13 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             OnPropertyChanged(nameof(ValidationSuccessHeaderText));
         }
 
-        private void UpdateSubscriptionSummaryFromSettings()
+        private int _subscriptionSummaryRevision;
+
+        private void UpdateSubscriptionSummaryFromSettings() => _ = RefreshSubscriptionSummaryAsync();
+
+        private async Task RefreshSubscriptionSummaryAsync()
         {
+            var revision = ++_subscriptionSummaryRevision;
             if (HasChanges)
             {
                 ShowSubscriptionSummary = false;
@@ -2174,19 +2150,30 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                 return;
             }
 
-            if (!_settings.SubscriptionLastStatusOk)
+            (bool IsActive, string Message, DateTime? RenewalUtc, string PriceId) summary;
+            try
+            {
+                summary = await Task.Run(() => (_settings.SubscriptionLastStatusOk, _settings.SubscriptionLastMessage,
+                    _settings.SubscriptionRenewalUtc, _settings.SubscriptionPriceId));
+            }
+            catch (Exception ex)
+            {
+                AppLog.Add(() => $"Settings: subscription summary read failed ({ex.GetType().Name}).");
+                return;
+            }
+
+            if (revision != _subscriptionSummaryRevision)
+                return;
+
+            if (!summary.IsActive)
             {
                 ShowSubscriptionSummary = false;
                 SubscriptionSummary = string.Empty;
                 return;
             }
 
-            var planSummary = _settings.SubscriptionLastMessage ?? string.Empty;
-            planSummary = planSummary.Trim();
-
-            // Restore renewal info in the header summary when the last message is plan-only.
-            // The auth check caches the renewal timestamp separately; include it here so users can see the next renewal at a glance.
-            var renewalUtc = _settings.SubscriptionRenewalUtc;
+            var planSummary = (summary.Message ?? string.Empty).Trim();
+            var renewalUtc = summary.RenewalUtc;
             if (renewalUtc.HasValue &&
                 planSummary.IndexOf("renewal", StringComparison.OrdinalIgnoreCase) < 0)
             {
@@ -2206,7 +2193,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                 return;
             }
 
-            var priceText = _settings.SubscriptionPriceId ?? string.Empty;
+            var priceText = summary.PriceId ?? string.Empty;
             priceText = priceText.Trim();
 
             if (!string.IsNullOrEmpty(priceText))
@@ -2292,112 +2279,164 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             app.UserAppTheme = theme;
         }
 
+        private sealed record NonConnectionSettings(
+            bool AutoPlay,
+            bool WindowsAutoConnectOnStart,
+            bool WindowsStartWithWindows,
+            bool MobileAutoConnectOnStart,
+            string ThemeMode,
+            string BluetoothLabelArtist,
+            string BluetoothLabelTitle,
+            string BluetoothLabelAlbum,
+            string BluetoothLabelComposer,
+            string BluetoothLabelGenre,
+            bool MobileMixAudioWithOtherApps,
+            bool What3WordsLinksEnabled,
+            string What3WordsApiKey,
+            bool AudioStaticFilterEnabled,
+            int AudioStaticAttenuatorVolume,
+            bool AudioToneFilterEnabled,
+            int AudioToneStrength,
+            int AudioToneSensitivity,
+            int AudioToneHighlightMinutes,
+            bool TelemetryEnabled,
+            bool AddressDetectionEnabled,
+            bool AddressDetectionOpenMapsOnTap,
+            int AddressDetectionMinConfidencePercent,
+            int AddressDetectionMinAddressChars,
+            int AddressDetectionMaxCandidatesPerCall);
+
         private async Task SaveNonConnectionSettingsAsync()
         {
-            // Autosave target: non-connection settings only.
-            // Connection credentials and active server selection are persisted only by Verify/Validate.
-
-            _settings.AutoPlay = AutoPlay;
-
-            _settings.WindowsAutoConnectOnStart = WindowsAutoConnectOnStart;
-            _settings.WindowsStartWithWindows = WindowsStartWithWindows;
-            _settings.MobileAutoConnectOnStart = MobileAutoConnectOnStart;
+            await _settingsSaveGate.WaitAsync();
+            try
+            {
+                // Capture UI values together so a change during persistence stays dirty for the next save.
+                var snapshot = new NonConnectionSettings(
+                    _autoPlay,
+                    _windowsAutoConnectOnStart,
+                    _windowsStartWithWindows,
+                    _mobileAutoConnectOnStart,
+                    _themeMode,
+                    _bluetoothLabelArtistToken,
+                    _bluetoothLabelTitleToken,
+                    _bluetoothLabelAlbumToken,
+                    _bluetoothLabelComposerToken,
+                    _bluetoothLabelGenreToken,
+                    _mobileMixAudioWithOtherApps,
+                    _what3WordsLinksEnabled,
+                    _what3WordsApiKey,
+                    _audioStaticFilterEnabled,
+                    _audioStaticAttenuatorVolume,
+                    _audioToneFilterEnabled,
+                    _audioToneStrength,
+                    _audioToneSensitivity,
+                    _audioToneHighlightMinutes,
+                    _telemetryEnabled,
+                    _addressDetectionEnabled,
+                    _addressDetectionOpenMapsOnTap,
+                    _addressDetectionMinConfidencePercent,
+                    _addressDetectionMinAddressChars,
+                    _addressDetectionMaxCandidatesPerCall);
+#if WINDOWS
+                var updateStartup = snapshot.WindowsStartWithWindows != _savedWindowsStartWithWindows;
+#endif
+                var updateAudioSession = snapshot.MobileMixAudioWithOtherApps != _savedMobileMixAudioWithOtherApps;
+                var started = Stopwatch.GetTimestamp();
+                await Task.Run(() => PersistNonConnectionSettings(snapshot));
 
 #if WINDOWS
-            try
-            {
-                // Best effort. If this fails (policy restrictions, permissions, etc.),
-                // the setting remains saved and the user can toggle again.
-                var ok = await WindowsStartupManager.TrySetRunOnLoginAsync(_settings.WindowsStartWithWindows);
-                if (!ok)
+                if (updateStartup)
                 {
-                    AppLog.Add(() => $"Startup: Settings save attempted to set StartWithWindows={_settings.WindowsStartWithWindows} but it reported failure.");
+                    try
+                    {
+                        if (!await WindowsStartupManager.TrySetRunOnLoginAsync(snapshot.WindowsStartWithWindows))
+                            AppLog.Add("Settings: applying the Windows startup setting failed.");
+                    }
+                    catch (Exception ex)
+                    {
+                        AppLog.Add(() => $"Settings: applying the Windows startup setting failed ({ex.GetType().Name}).");
+                    }
                 }
-            }
-            catch (Exception ex)
-            {
-                AppLog.Add(() => $"Startup: Settings save threw while applying StartWithWindows={_settings.WindowsStartWithWindows}. {ex.GetType().Name}: {ex.Message}");
-            }
 #endif
+                if (updateAudioSession)
+                {
+                    try
+                    {
+                        await _systemMediaService.RefreshAudioSessionAsync(_mainViewModel.AudioEnabled, "SettingsSave:MobileMixAudioWithOtherApps");
+                    }
+                    catch (Exception ex)
+                    {
+                        AppLog.Add(() => $"Settings: audio session refresh failed ({ex.GetType().Name}).");
+                    }
+                }
 
-            _settings.ThemeMode = ThemeMode;
-
-            _settings.BluetoothLabelArtist = _bluetoothLabelArtistToken;
-            _settings.BluetoothLabelTitle = _bluetoothLabelTitleToken;
-            _settings.BluetoothLabelAlbum = _bluetoothLabelAlbumToken;
-            _settings.BluetoothLabelComposer = _bluetoothLabelComposerToken;
-            _settings.BluetoothLabelGenre = _bluetoothLabelGenreToken;
-            _settings.MobileMixAudioWithOtherApps = _mobileMixAudioWithOtherApps;
-            AppLog.Add(() => $"Settings: MobileMixAudioWithOtherApps saved as {_settings.MobileMixAudioWithOtherApps}.");
-            try
-            {
-                await _systemMediaService.RefreshAudioSessionAsync(_mainViewModel.AudioEnabled, "SettingsSave:MobileMixAudioWithOtherApps");
-                AppLog.Add("Settings: requested live iOS audio-session refresh after MobileMixAudioWithOtherApps save.");
+                _savedAutoPlay = snapshot.AutoPlay;
+                _savedWindowsAutoConnectOnStart = snapshot.WindowsAutoConnectOnStart;
+                _savedWindowsStartWithWindows = snapshot.WindowsStartWithWindows;
+                _savedMobileAutoConnectOnStart = snapshot.MobileAutoConnectOnStart;
+                _savedThemeMode = snapshot.ThemeMode;
+                _savedBluetoothLabelArtistToken = snapshot.BluetoothLabelArtist;
+                _savedBluetoothLabelTitleToken = snapshot.BluetoothLabelTitle;
+                _savedBluetoothLabelAlbumToken = snapshot.BluetoothLabelAlbum;
+                _savedBluetoothLabelComposerToken = snapshot.BluetoothLabelComposer;
+                _savedBluetoothLabelGenreToken = snapshot.BluetoothLabelGenre;
+                _savedMobileMixAudioWithOtherApps = snapshot.MobileMixAudioWithOtherApps;
+                _savedWhat3WordsLinksEnabled = snapshot.What3WordsLinksEnabled;
+                _savedWhat3WordsApiKey = snapshot.What3WordsApiKey;
+                _savedAudioStaticFilterEnabled = snapshot.AudioStaticFilterEnabled;
+                _savedAudioStaticAttenuatorVolume = snapshot.AudioStaticAttenuatorVolume;
+                _savedAudioToneFilterEnabled = snapshot.AudioToneFilterEnabled;
+                _savedAudioToneStrength = snapshot.AudioToneStrength;
+                _savedAudioToneSensitivity = snapshot.AudioToneSensitivity;
+                _savedAudioToneHighlightMinutes = snapshot.AudioToneHighlightMinutes;
+                _savedTelemetryEnabled = snapshot.TelemetryEnabled;
+                _savedAddressDetectionEnabled = snapshot.AddressDetectionEnabled;
+                _savedAddressDetectionOpenMapsOnTap = snapshot.AddressDetectionOpenMapsOnTap;
+                _savedAddressDetectionMinConfidencePercent = snapshot.AddressDetectionMinConfidencePercent;
+                _savedAddressDetectionMinAddressChars = snapshot.AddressDetectionMinAddressChars;
+                _savedAddressDetectionMaxCandidatesPerCall = snapshot.AddressDetectionMaxCandidatesPerCall;
+                UpdateHasChanges();
+                OnPropertyChanged(nameof(HasUnsavedSettings));
+                OnPropertyChanged(nameof(ConnectionNeedsValidation));
+                UpdateSubscriptionSummaryFromSettings();
+                var elapsed = Stopwatch.GetElapsedTime(started);
+                if (elapsed.TotalMilliseconds >= 100)
+                    AppLog.Add(() => $"Settings: save completed in {elapsed.TotalMilliseconds:F0} ms.");
             }
-            catch (Exception ex)
+            finally
             {
-                AppLog.Add(() => $"Settings: live audio-session refresh failed after MobileMixAudioWithOtherApps save. {ex.GetType().Name}: {ex.Message}");
+                _settingsSaveGate.Release();
             }
+        }
 
-            _settings.What3WordsLinksEnabled = _what3WordsLinksEnabled;
-            _settings.What3WordsApiKey = _what3WordsApiKey;
-
-            
-            _settings.AudioStaticFilterEnabled = _audioStaticFilterEnabled;
-            _settings.AudioStaticAttenuatorVolume = _audioStaticAttenuatorVolume;
-            _settings.AudioToneFilterEnabled = _audioToneFilterEnabled;
-            _settings.AudioToneStrength = _audioToneStrength;
-            _settings.AudioToneSensitivity = _audioToneSensitivity;
-            _settings.AudioToneHighlightMinutes = _audioToneHighlightMinutes;
-
-            _settings.TelemetryEnabled = _telemetryEnabled;
-
-_settings.AddressDetectionEnabled = _addressDetectionEnabled;
-            _settings.AddressDetectionOpenMapsOnTap = _addressDetectionOpenMapsOnTap;
-
-            _settings.AddressDetectionMinConfidencePercent = _addressDetectionMinConfidencePercent;
-            _settings.AddressDetectionMinAddressChars = _addressDetectionMinAddressChars;
-            _settings.AddressDetectionMaxCandidatesPerCall = _addressDetectionMaxCandidatesPerCall;
-            // Update non-connection saved snapshots so only connection changes drive the Verify indicator.
-            _savedAutoPlay = _autoPlay;
-            _savedWindowsAutoConnectOnStart = _windowsAutoConnectOnStart;
-            _savedWindowsStartWithWindows = _windowsStartWithWindows;
-            _savedMobileAutoConnectOnStart = _mobileAutoConnectOnStart;
-
-            _savedThemeMode = _themeMode;
-
-            _savedBluetoothLabelArtistToken = _bluetoothLabelArtistToken;
-            _savedBluetoothLabelTitleToken = _bluetoothLabelTitleToken;
-            _savedBluetoothLabelAlbumToken = _bluetoothLabelAlbumToken;
-            _savedBluetoothLabelComposerToken = _bluetoothLabelComposerToken;
-            _savedBluetoothLabelGenreToken = _bluetoothLabelGenreToken;
-            _savedMobileMixAudioWithOtherApps = _mobileMixAudioWithOtherApps;
-
-            _savedWhat3WordsLinksEnabled = _what3WordsLinksEnabled;
-            _savedWhat3WordsApiKey = _what3WordsApiKey;
-            _savedAudioStaticFilterEnabled = _audioStaticFilterEnabled;
-            _savedAudioStaticAttenuatorVolume = _audioStaticAttenuatorVolume;
-            _savedAudioToneFilterEnabled = _audioToneFilterEnabled;
-            _savedAudioToneStrength = _audioToneStrength;
-            _savedAudioToneSensitivity = _audioToneSensitivity;
-            _savedAudioToneHighlightMinutes = _audioToneHighlightMinutes;
-
-            _savedTelemetryEnabled = _telemetryEnabled;
-
-
-
-            _savedAddressDetectionEnabled = _addressDetectionEnabled;
-            _savedAddressDetectionOpenMapsOnTap = _addressDetectionOpenMapsOnTap;
-
-            _savedAddressDetectionMinConfidencePercent = _addressDetectionMinConfidencePercent;
-            _savedAddressDetectionMinAddressChars = _addressDetectionMinAddressChars;
-            _savedAddressDetectionMaxCandidatesPerCall = _addressDetectionMaxCandidatesPerCall;
-            UpdateHasChanges();
-
-            OnPropertyChanged(nameof(HasUnsavedSettings));
-            OnPropertyChanged(nameof(ConnectionNeedsValidation));
-
-            UpdateSubscriptionSummaryFromSettings();
+        private void PersistNonConnectionSettings(NonConnectionSettings snapshot)
+        {
+            _settings.AutoPlay = snapshot.AutoPlay;
+            _settings.WindowsAutoConnectOnStart = snapshot.WindowsAutoConnectOnStart;
+            _settings.WindowsStartWithWindows = snapshot.WindowsStartWithWindows;
+            _settings.MobileAutoConnectOnStart = snapshot.MobileAutoConnectOnStart;
+            _settings.ThemeMode = snapshot.ThemeMode;
+            _settings.BluetoothLabelArtist = snapshot.BluetoothLabelArtist;
+            _settings.BluetoothLabelTitle = snapshot.BluetoothLabelTitle;
+            _settings.BluetoothLabelAlbum = snapshot.BluetoothLabelAlbum;
+            _settings.BluetoothLabelComposer = snapshot.BluetoothLabelComposer;
+            _settings.BluetoothLabelGenre = snapshot.BluetoothLabelGenre;
+            _settings.MobileMixAudioWithOtherApps = snapshot.MobileMixAudioWithOtherApps;
+            _settings.What3WordsLinksEnabled = snapshot.What3WordsLinksEnabled;
+            _settings.What3WordsApiKey = snapshot.What3WordsApiKey;
+            _settings.AudioStaticFilterEnabled = snapshot.AudioStaticFilterEnabled;
+            _settings.AudioStaticAttenuatorVolume = snapshot.AudioStaticAttenuatorVolume;
+            _settings.AudioToneFilterEnabled = snapshot.AudioToneFilterEnabled;
+            _settings.AudioToneStrength = snapshot.AudioToneStrength;
+            _settings.AudioToneSensitivity = snapshot.AudioToneSensitivity;
+            _settings.AudioToneHighlightMinutes = snapshot.AudioToneHighlightMinutes;
+            _settings.TelemetryEnabled = snapshot.TelemetryEnabled;
+            _settings.AddressDetectionEnabled = snapshot.AddressDetectionEnabled;
+            _settings.AddressDetectionOpenMapsOnTap = snapshot.AddressDetectionOpenMapsOnTap;
+            _settings.AddressDetectionMinConfidencePercent = snapshot.AddressDetectionMinConfidencePercent;
+            _settings.AddressDetectionMinAddressChars = snapshot.AddressDetectionMinAddressChars;
+            _settings.AddressDetectionMaxCandidatesPerCall = snapshot.AddressDetectionMaxCandidatesPerCall;
         }
 
         private void ResetServerUrl()
@@ -3165,77 +3204,27 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
 
 
 
-        private ServerDirectoryEntry ReuseOrUpdateDirectoryEntry(ServerDirectoryEntry source)
+        private void PublishDirectoryServers(IReadOnlyList<ServerDirectoryEntry> entries)
         {
-            if (source == null)
-                return new ServerDirectoryEntry();
-
-            if (source.IsCustom)
-                return CustomServerDirectoryEntry;
-
-            var normalizedUrl = (source.Url ?? string.Empty).Trim().TrimEnd('/');
-            var builtinJoeUrl = DefaultServerUrl.Trim().TrimEnd('/');
-
-            if (string.Equals(normalizedUrl, builtinJoeUrl, StringComparison.OrdinalIgnoreCase))
-                return BuiltinJoeDirectoryEntry;
-
-            var existing = _directoryServers.FirstOrDefault(s =>
-                s != null &&
-                !s.IsCustom &&
-                string.Equals((s.Url ?? string.Empty).Trim().TrimEnd('/'), normalizedUrl, StringComparison.OrdinalIgnoreCase));
-
-            var target = existing ?? new ServerDirectoryEntry();
-            target.DirectoryId = source.DirectoryId;
-            target.Name = source.Name ?? string.Empty;
-            target.Url = source.Url ?? string.Empty;
-            target.InfoUrl = source.InfoUrl ?? string.Empty;
-            target.AreaLabel = source.AreaLabel ?? string.Empty;
-            target.MapAnchor = source.MapAnchor ?? string.Empty;
-            target.IsOfficial = source.IsOfficial;
-            target.IsCustom = false;
-            target.Badge = source.Badge ?? string.Empty;
-            target.BadgeLabel = source.BadgeLabel ?? string.Empty;
-            return target;
-        }
-
-        private void LoadDirectoryServersFromCache()
-        {
+            _suppressDirectorySelection = true;
             try
             {
-                var existingEntries = _directoryServers.ToList();
                 _directoryServers.Clear();
                 _directoryServers.Add(BuiltinJoeDirectoryEntry);
-                var cached = _settings.GetCachedDirectoryServers();
-                foreach (var s in cached)
+                foreach (var entry in entries)
                 {
-                    if (s == null)
-                        continue;
-
-                    var cachedUrl = (s.Url ?? string.Empty).Trim().TrimEnd('/');
-                    var builtinJoeUrl = DefaultServerUrl.Trim().TrimEnd('/');
-                    if (string.Equals(cachedUrl, builtinJoeUrl, StringComparison.OrdinalIgnoreCase))
-                        continue;
-
-                    var existing = existingEntries.FirstOrDefault(entry =>
-                        entry != null &&
-                        !entry.IsCustom &&
-                        string.Equals((entry.Url ?? string.Empty).Trim().TrimEnd('/'), cachedUrl, StringComparison.OrdinalIgnoreCase));
-
-                    _directoryServers.Add(ReuseOrUpdateDirectoryEntry(existing ?? s));
+                    if (!HostedServerRules.IsProvidedDefaultServerUrl(entry.Url))
+                        _directoryServers.Add(entry);
                 }
-
                 _directoryServers.Add(CustomServerDirectoryEntry);
-
-                // Sync picker selection to current ServerUrl.
                 SyncSelectedDirectoryServerFromCurrentUrl();
-
                 DirectoryStatusText = _directoryServers.Count <= 2
                     ? "No servers loaded yet."
                     : $"Loaded {_directoryServers.Count - 2} server(s).";
             }
-            catch
+            finally
             {
-                // Ignore cache load errors.
+                _suppressDirectorySelection = false;
             }
         }
 
@@ -3346,32 +3335,9 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
                 }
 
                 // Persist cache first.
-                try { _settings.UpsertCachedDirectoryServers(list); } catch { }
+                await Task.Run(() => _settings.UpsertCachedDirectoryServers(list));
 
-                await MainThread.InvokeOnMainThreadAsync(() =>
-                {
-                    _directoryServers.Clear();
-                    _directoryServers.Add(BuiltinJoeDirectoryEntry);
-                    foreach (var s in list)
-                    {
-                        if (s == null)
-                            continue;
-
-                        var listUrl = (s.Url ?? string.Empty).Trim().TrimEnd('/');
-                        var builtinJoeUrl = DefaultServerUrl.Trim().TrimEnd('/');
-                        if (string.Equals(listUrl, builtinJoeUrl, StringComparison.OrdinalIgnoreCase))
-                            continue;
-
-                        _directoryServers.Add(ReuseOrUpdateDirectoryEntry(s));
-                    }
-
-                    _directoryServers.Add(CustomServerDirectoryEntry);
-                    SyncSelectedDirectoryServerFromCurrentUrl();
-                });
-
-                DirectoryStatusText = list.Count == 0
-                    ? "No servers are currently listed."
-                    : $"Loaded {list.Count} server(s).";
+                PublishDirectoryServers(list);
 
                 try
                 {
@@ -3386,7 +3352,7 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
             catch (Exception ex)
             {
                 DirectoryStatusText = "Directory load failed.";
-                try { AppLog.Add(() => $"Directory: load failed. {ex.Message}"); } catch { }
+                AppLog.Add(() => $"Settings: directory refresh failed ({ex.GetType().Name}).");
             }
             finally
             {
@@ -3404,7 +3370,7 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
 
             try
             {
-                await ServerAuthentication.For(_settings).GetFirewallAuthorizationAsync(uri, CancellationToken.None);
+                await Task.Run(() => ServerAuthentication.For(_settings).GetFirewallAuthorizationAsync(uri, CancellationToken.None));
             }
             catch (Exception ex)
             {
@@ -3518,71 +3484,6 @@ _settings.AddressDetectionEnabled = _addressDetectionEnabled;
             [JsonPropertyName("trial_ends_at")]
             public string? TrialEndsAt { get; set; }
         }
-
-
-private void RebuildFilterRulesFromCurrentCalls_NoThrow()
-{
-    try
-    {
-        // Settings expects the filter list to be populated even if the user opens Settings
-        // before the next live call arrives. Rebuild from the current queue snapshot.
-        var snapshot = _mainViewModel?.Calls?.ToList();
-        if (snapshot == null || snapshot.Count == 0)
-            return;
-
-        // Keep it bounded to avoid doing too much work on page open.
-        const int MaxCalls = 250;
-        if (snapshot.Count > MaxCalls)
-            snapshot = snapshot.Skip(snapshot.Count - MaxCalls).ToList();
-
-        foreach (var call in snapshot)
-        {
-            try
-            {
-                _filterService.EnsureRulesForCall(call);
-            }
-            catch
-            {
-            }
-        }
-    }
-    catch
-    {
-    }
-}
-
-private void QueueFilterUiRefresh()
-{
-    if (Interlocked.Exchange(ref _filterUiRefreshQueued, 1) == 1)
-        return;
-
-    _ = MainThread.InvokeOnMainThreadAsync(async () =>
-    {
-        try
-        {
-            await Task.Delay(75);
-        }
-        catch
-        {
-        }
-
-        try
-        {
-            RefreshFilterRulesUi();
-        }
-        catch
-        {
-        }
-        finally
-        {
-            Interlocked.Exchange(ref _filterUiRefreshQueued, 0);
-        }
-    });
-}
-
-private void RefreshFilterRulesUi()
-{
-}
 
 
     }

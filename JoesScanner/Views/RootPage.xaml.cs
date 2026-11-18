@@ -1,12 +1,13 @@
+using System.Diagnostics;
 using JoesScanner.Models;
 using JoesScanner.Services;
+using JoesScanner.ViewModels;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Maui.Devices;
 using Microsoft.Maui.ApplicationModel;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
-using JoesScanner.Helpers;
 
 namespace JoesScanner.Views;
 
@@ -18,18 +19,25 @@ public partial class RootPage : ContentPage
     private readonly Dictionary<AppTab, View> _views = new();
 
     private static bool UseHostedViewCaching =>
-        DeviceInfo.Platform != DevicePlatform.iOS && DeviceInfo.Platform != DevicePlatform.WinUI;
+        DeviceInfo.Platform != DevicePlatform.iOS;
 
     private static bool UsePersistentTabHosts =>
         DeviceInfo.Platform == DevicePlatform.WinUI;
 
     private AppTab _current = AppTab.Main;
 
+    private ContentPage? _activePage;
+    private View? _activeView;
     private bool _hasAppearedOnce;
-
-    private int _warmupStarted;
+    private bool _rootVisible;
+    private bool _settingsWarmupQueued;
+    private bool _settingsWarmupStarted;
+    private View? _mainLayoutView;
+    private SettingsPage? _preparedSettingsPage;
+    private IElementHandler? _settingsHandlerOnHide;
 
     private int _navigationOverlayDepth;
+    private int _navigationRequestVersion;
 
     private int _initialNavigationStarted;
 
@@ -42,6 +50,7 @@ public partial class RootPage : ContentPage
     protected override void OnAppearing()
     {
         base.OnAppearing();
+        _rootVisible = true;
 
         TabNavigationService.Instance.TabRequested -= OnTabRequested;
         TabNavigationService.Instance.TabRequested += OnTabRequested;
@@ -112,98 +121,162 @@ public partial class RootPage : ContentPage
             LogNavError($"RootPage.OnAppearing initial SwitchTo({_current}) failed: {ex}");
             _ = SafeAlertAsync("Navigation error", $"Settings navigation failed:\n{FormatNavException(ex)}");
         }
-
-        // Warm up local storage and settings caches.
-        //
-        // Goals:
-        // - Remove the one-time first-open hitch when the user taps Settings.
-        // - Do not block initial navigation or audio playback.
-        //
-        // Strategy:
-        // - Pre-create the Settings tab UI (XAML tree) on the UI thread after first render.
-        // - Prime SQLite and filter profile reads on a background thread.
-        // - Resolve and cache app data paths once to avoid repeated WinRT exceptions on Windows.
-        if (Interlocked.Exchange(ref _warmupStarted, 1) == 0)
-        {
-            // Pre-create Settings tab UI as soon as the UI is ready so the first tap is instant.
-            //
-            // IMPORTANT:
-            // iOS App Store / TestFlight builds are much less tolerant of reparenting a native-backed
-            // MAUI visual tree between hidden and visible hosts. Keep the warmup path off on iOS and
-            // let iOS create views only when they are actually shown.
-            if (DeviceInfo.Platform != DevicePlatform.iOS && DeviceInfo.Platform != DevicePlatform.WinUI)
-            {
-                _ = MainThread.InvokeOnMainThreadAsync(async () =>
-                {
-                    try
-                    {
-                        // Keep this delay very small. In production, users can often tap Settings
-                        // quickly after launch, so we want the heavy XAML tree built early.
-                        await Task.Yield();
-                        await Task.Delay(50);
-                        // Always use a throwaway Settings instance for warmup.
-                        // Reusing the cached hosted Settings view here can leave that same native-backed
-                        // view attached to WarmupHost, then Android throws "The specified child already has
-                        // a parent" when the user later opens Settings and ContentHost tries to attach it.
-                        // Warmup must never touch the real cached tab view.
-                        var tmpPage = _services.GetRequiredService<SettingsPage>();
-                        var settingsView = tmpPage.Content ?? new ContentView();
-                        tmpPage.Content = null;
-                        try { settingsView.BindingContext = tmpPage.BindingContext; } catch { }
-
-                        // Creating the Settings page is not enough to eliminate the first-open hitch.
-                        // The hitch often comes from the first time MAUI creates native handlers and
-                        // runs the initial layout pass for the Settings visual tree.
-                        //
-                        // WarmupHost is an invisible, tiny host that forces handler creation and a
-                        // first layout pass without changing the visible UI.
-                        if (WarmupHost != null)
-                        {
-                            try
-                            {
-                                WarmupHost.Content = settingsView;
-
-                                // Give MAUI a moment to attach handlers and measure/arrange.
-                                await Task.Delay(20);
-                            }
-                            finally
-                            {
-                                // Detach so the real tab switch can host the view later.
-                                WarmupHost.Content = null;
-                            }
-                        }
-                    }
-                    catch
-                    {
-                    }
-                });
-            }
-
-            // Prime DB and profile reads off the UI thread.
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    _ = AppPaths.GetAppDataDirectorySafe();
-
-                    var settings = _services.GetRequiredService<ISettingsService>();
-                    var serverKey = ServerKeyHelper.Normalize(settings.ServerUrl);
-
-                    var store = _services.GetRequiredService<IFilterProfileStore>();
-                    _ = await store.GetProfilesForServerAsync(serverKey, CancellationToken.None);
-                }
-                catch
-                {
-                }
-            });
-        }
+        if (_current == AppTab.Main && _activeView is { } mainView)
+            QueueSettingsWarmupAfterLayout(mainView);
     }
 
     protected override void OnDisappearing()
     {
+        _rootVisible = false;
+        StopWaitingForMainLayout();
         TabNavigationService.Instance.TabRequested -= OnTabRequested;
         base.OnDisappearing();
     }
+
+    private void QueueSettingsWarmupAfterLayout(View view)
+    {
+        if (!_rootVisible || _settingsWarmupStarted || _settingsWarmupQueued)
+            return;
+
+        if (view.Handler == null || !view.IsLoaded || view.Width <= 0 || view.Height <= 0)
+        {
+            if (_mainLayoutView == view)
+                return;
+
+            StopWaitingForMainLayout();
+            _mainLayoutView = view;
+            view.SizeChanged += OnMainLayoutChanged;
+            view.Loaded += OnMainLayoutChanged;
+            return;
+        }
+
+        StopWaitingForMainLayout();
+        _settingsWarmupQueued = true;
+        if (!Dispatcher.Dispatch(StartSettingsWarmup))
+            _settingsWarmupQueued = false;
+    }
+
+    private void OnMainLayoutChanged(object? sender, EventArgs e)
+    {
+        if (_current == AppTab.Main && sender is View view && view == _activeView)
+            QueueSettingsWarmupAfterLayout(view);
+    }
+
+    private void StopWaitingForMainLayout()
+    {
+        if (_mainLayoutView is not { } view)
+            return;
+
+        view.SizeChanged -= OnMainLayoutChanged;
+        view.Loaded -= OnMainLayoutChanged;
+        _mainLayoutView = null;
+    }
+
+    private void StartSettingsWarmup()
+    {
+        _settingsWarmupQueued = false;
+        if (!_rootVisible || _current != AppTab.Main || _settingsWarmupStarted)
+            return;
+
+        _settingsWarmupStarted = true;
+        try
+        {
+            _ = _services.GetRequiredService<SettingsViewModel>().PrepareLocalDataAsync();
+
+            // Managed XAML needs the dispatcher. Give queued input and playback callbacks priority.
+#if WINDOWS
+            Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread()?.TryEnqueue(
+                Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, PrepareSettingsPage);
+#elif ANDROID
+            Android.OS.Looper.MyQueue()?.AddIdleHandler(new SettingsIdleHandler(this));
+#endif
+        }
+        catch (Exception ex)
+        {
+            AppLog.Add(() => $"Settings timing: startup preparation failed ({ex.GetType().Name}).");
+        }
+    }
+
+    private void PrepareSettingsPage()
+    {
+        if (!_rootVisible || _current != AppTab.Main || _pages.ContainsKey(AppTab.Settings))
+            return;
+
+        try
+        {
+            var start = Stopwatch.GetTimestamp();
+            var page = _services.GetRequiredService<SettingsPage>();
+            if (page.Handler == null && page.Content is { Handler: null })
+                _preparedSettingsPage = page;
+
+            var elapsed = Stopwatch.GetElapsedTime(start);
+            AppLog.Add(() => $"Settings timing: idle managed preparation={elapsed.TotalMilliseconds:F1} ms, reusable={_preparedSettingsPage != null}.");
+#if WINDOWS
+            if (_preparedSettingsPage != null)
+            {
+                Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread()?.TryEnqueue(
+                    Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, HostPreparedWindowsSettings);
+            }
+#endif
+        }
+        catch (Exception ex)
+        {
+            AppLog.Add(() => $"Settings timing: managed preparation failed ({ex.GetType().Name}).");
+        }
+    }
+
+#if WINDOWS
+    private void HostPreparedWindowsSettings()
+    {
+        if (!_rootVisible || _current != AppTab.Main || _preparedSettingsPage == null ||
+            _pages.ContainsKey(AppTab.Settings) || ContentHost.Handler == null)
+            return;
+
+        // The collapsed page goes directly into its permanent host. Keep it hidden and leave
+        // the Settings lifecycle dormant until selection. Other platforms use their existing path.
+        View? candidate = null;
+        try
+        {
+            var started = Stopwatch.GetTimestamp();
+            var (_, view, origin) = GetOrCreate(AppTab.Settings);
+            candidate = view;
+            if (AppLog.IsEnabled)
+                LogSettingsStage($"idle obtain page ({origin})", started);
+            AddPersistentHostedView(view, isSettings: true, operation: "idle");
+            var elapsed = Stopwatch.GetElapsedTime(started);
+            AppLog.Add(() => $"Settings timing: idle permanent host preparation={elapsed.TotalMilliseconds:F1} ms, handler ready={view.Handler != null}.");
+        }
+        catch (Exception ex)
+        {
+            _pages.Remove(AppTab.Settings);
+            _views.Remove(AppTab.Settings);
+            if (candidate != null && ContentHost.Children.Contains(candidate))
+            {
+                try { ContentHost.Children.Remove(candidate); }
+                catch (Exception cleanupError)
+                {
+                    AppLog.Add(() => $"Settings timing: rollback of failed idle host add failed ({cleanupError.GetType().Name}).");
+                }
+            }
+            AppLog.Add(() => $"Settings timing: idle permanent host preparation failed ({ex.GetType().Name}).");
+        }
+    }
+#endif
+
+#if ANDROID
+    private sealed class SettingsIdleHandler(RootPage root) : Java.Lang.Object, Android.OS.MessageQueue.IIdleHandler
+    {
+        private readonly WeakReference<RootPage> _root = new(root);
+
+        public bool QueueIdle()
+        {
+            if (_root.TryGetTarget(out var page))
+                page.PrepareSettingsPage();
+
+            return false;
+        }
+    }
+#endif
 
     private async void OnTabRequested(object? sender, AppTab tab)
     {
@@ -220,6 +293,14 @@ public partial class RootPage : ContentPage
 
     private async Task SwitchToWithFeedbackAsync(AppTab tab)
     {
+        var version = ++_navigationRequestVersion;
+        // Settings no longer depends on overlay animation to finish loading its data.
+        if (_current == AppTab.Settings || tab == AppTab.Settings)
+        {
+            SwitchTo(tab);
+            return;
+        }
+
         var shouldShowOverlay = _current != tab;
 
         if (!shouldShowOverlay)
@@ -232,7 +313,8 @@ public partial class RootPage : ContentPage
 
         try
         {
-            await MainThread.InvokeOnMainThreadAsync(() => SwitchTo(tab));
+            if (version == _navigationRequestVersion)
+                SwitchTo(tab);
         }
         finally
         {
@@ -333,12 +415,16 @@ public partial class RootPage : ContentPage
         };
     }
 
-    private (ContentPage page, View view) GetOrCreate(AppTab tab)
+    private (ContentPage page, View view, string origin) GetOrCreate(AppTab tab)
     {
         if (UseHostedViewCaching && _pages.TryGetValue(tab, out var existingPage) && _views.TryGetValue(tab, out var existingView))
-            return (existingPage, existingView);
+            return (existingPage, existingView, "host cache");
 
-        var page = CreatePage(tab);
+        var prepared = tab == AppTab.Settings ? _preparedSettingsPage : null;
+        if (tab == AppTab.Settings)
+            _preparedSettingsPage = null;
+        var reusePrepared = prepared is { Handler: null, Content: { Handler: null } };
+        var page = reusePrepared ? prepared! : CreatePage(tab);
         var view = page.Content ?? new ContentView();
 
         // Detach so we can host it inside RootPage.
@@ -347,7 +433,8 @@ public partial class RootPage : ContentPage
         // Preserve BindingContext inheritance that the view would normally get from the page.
         try
         {
-            view.BindingContext = page.BindingContext;
+            if (!ReferenceEquals(view.BindingContext, page.BindingContext))
+                view.BindingContext = page.BindingContext;
         }
         catch
         {
@@ -359,7 +446,7 @@ public partial class RootPage : ContentPage
             _views[tab] = view;
         }
 
-        return (page, view);
+        return (page, view, reusePrepared ? "idle-managed page" : "new page");
     }
 
     private void SwitchTo(AppTab tab)
@@ -383,7 +470,7 @@ public partial class RootPage : ContentPage
         if (_current == tab && HasActiveHostedContent())
         {
             // Even if the user is already on this tab, treat it as a show event.
-            if (_pages.TryGetValue(_current, out var currentPage))
+            if (_activePage is { } currentPage)
             {
                 try
                 {
@@ -401,58 +488,75 @@ public partial class RootPage : ContentPage
         }
 
         var previousTab = _current;
+        var trace = AppLog.IsEnabled && (previousTab == AppTab.Settings || tab == AppTab.Settings);
+        var started = Stopwatch.GetTimestamp();
+        var (page, view, origin) = GetOrCreate(tab);
+        if (trace)
+            LogSettingsStage($"{previousTab} to {tab} obtain page and view ({origin})", started);
+        var stageStarted = Stopwatch.GetTimestamp();
+        StopWaitingForMainLayout();
 
-        // Tell the previous page it is going away so it can detach handlers.
-        if (_pages.TryGetValue(previousTab, out var oldPage))
+        var leavingSettings = previousTab == AppTab.Settings ? _activeView : null;
+        if (leavingSettings != null && UsePersistentTabHosts)
+            _settingsHandlerOnHide = leavingSettings.Handler;
+
+        if (_activePage is { } oldPage)
         {
-            try
-            {
-                if (oldPage is ITabHidingAware hidingAware)
-                    hidingAware.OnTabHiding();
-            }
-            catch
-            {
-            }
+            if (oldPage is ITabHidingAware hidingAware)
+                hidingAware.OnTabHiding();
 
-            try { oldPage.SendDisappearing(); } catch { }
+            if (trace)
+                LogSettingsStage($"{previousTab} OnTabHiding", stageStarted);
+            stageStarted = Stopwatch.GetTimestamp();
+            oldPage.SendDisappearing();
+            if (trace)
+                LogSettingsStage($"{previousTab} SendDisappearing", stageStarted);
         }
 
+        stageStarted = Stopwatch.GetTimestamp();
+        _activePage = page;
+        _activeView = view;
         _current = tab;
+        TabStrip.SelectedTab = tab;
 
-        try
+        var settingsPage = page as SettingsPage;
+        var isSettings = settingsPage != null;
+        var handlerBefore = view.Handler;
+        var alreadyHosted = ReferenceEquals(view.Parent, ContentHost);
+        if (trace)
         {
-            TabStrip.SelectedTab = tab;
-        }
-        catch
-        {
-        }
-
-        // iOS release builds are particularly sensitive to reusing a detached native-backed view.
-        // Recreate the outgoing and incoming hosted views each time instead of caching them.
-        if (!UseHostedViewCaching)
-        {
-            try
+            LogSettingsStage("tab selection and state", stageStarted);
+            if (isSettings)
             {
-                _pages.Remove(previousTab);
-                _views.Remove(previousTab);
-                _pages.Remove(tab);
-                _views.Remove(tab);
-            }
-            catch
-            {
+                var retained = handlerBefore != null && ReferenceEquals(handlerBefore, _settingsHandlerOnHide);
+                AppLog.Add(() => $"Settings navigation: view already hosted={alreadyHosted}, handler before activation={handlerBefore != null}, same handler as previous visit={retained}.");
             }
         }
-
-        var (page, view) = GetOrCreate(tab);
+        settingsPage?.TraceFirstHostAttachment(view, started);
 
         if (UsePersistentTabHosts)
         {
-            ShowPersistentHostedView(view);
+            AddPersistentHostedView(view, isSettings, operation: "navigation");
+            stageStarted = Stopwatch.GetTimestamp();
+            ActivatePersistentHostedView(view);
+            if (trace)
+                LogSettingsStage("persistent host visibility and activation", stageStarted);
         }
         else
         {
+            stageStarted = Stopwatch.GetTimestamp();
             ContentHost.Children.Clear();
-            ContentHost.Children.Add(view);
+            if (trace)
+                LogSettingsStage("remove outgoing hosted view", stageStarted);
+            AddHostedView(view, isSettings, operation: "navigation");
+        }
+
+        if (trace)
+        {
+            if (isSettings)
+                AppLog.Add(() => $"Settings navigation: handler after activation={view.Handler != null}, same as before activation={handlerBefore != null && ReferenceEquals(handlerBefore, view.Handler)}.");
+            if (leavingSettings != null)
+                AppLog.Add(() => $"Settings navigation: after hiding, still hosted={ReferenceEquals(leavingSettings.Parent, ContentHost)}, same handler={_settingsHandlerOnHide != null && ReferenceEquals(_settingsHandlerOnHide, leavingSettings.Handler)}.");
         }
 
         // In this app, many tabs are hosted by detaching a page's Content and reparenting the
@@ -461,6 +565,7 @@ public partial class RootPage : ContentPage
         //
         // Give pages an explicit tab-shown callback first, then still send the normal appearing
         // event as a best-effort fallback for handlers that rely on it.
+        stageStarted = Stopwatch.GetTimestamp();
         try
         {
             if (page is ITabShowingAware showingAware)
@@ -470,9 +575,27 @@ public partial class RootPage : ContentPage
         {
         }
 
-        try { page.SendAppearing(); } catch { }
+        if (trace)
+            LogSettingsStage($"{tab} OnTabShowing", stageStarted);
+        stageStarted = Stopwatch.GetTimestamp();
+        page.SendAppearing();
+        if (trace)
+            LogSettingsStage($"{tab} SendAppearing", stageStarted);
+        settingsPage?.CheckFirstVisibleLayout();
+        if (tab == AppTab.Main)
+            QueueSettingsWarmupAfterLayout(view);
+        if (trace)
+        {
+            LogSettingsStage($"{previousTab} to {tab} synchronous total", started);
+            Dispatcher.Dispatch(() => AppLog.Add(() => $"Settings navigation: dispatcher resumed after {Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} ms."));
+        }
     }
 
+    private static void LogSettingsStage(string stage, long started)
+    {
+        var elapsed = Stopwatch.GetElapsedTime(started);
+        AppLog.Add(() => $"Settings navigation: {stage}={elapsed.TotalMilliseconds:F1} ms.");
+    }
     
     private bool HasActiveHostedContent()
     {
@@ -500,10 +623,13 @@ public partial class RootPage : ContentPage
         }
     }
 
-    private void ShowPersistentHostedView(View targetView)
+    private void AddPersistentHostedView(View targetView, bool isSettings, string operation)
     {
-        if (ContentHost == null || targetView == null)
+        if (ReferenceEquals(targetView.Parent, ContentHost))
             return;
+
+        if (isSettings && targetView.Parent != null)
+            throw new InvalidOperationException("Settings content already belongs to another host.");
 
         try
         {
@@ -518,10 +644,38 @@ public partial class RootPage : ContentPage
 
         if (!ContentHost.Children.Contains(targetView))
         {
+            var started = Stopwatch.GetTimestamp();
             targetView.IsVisible = false;
-            ContentHost.Children.Add(targetView);
+            if (isSettings)
+            {
+                targetView.InputTransparent = true;
+                if (AppLog.IsEnabled)
+                    LogSettingsStage($"{operation} set Settings hidden before host add", started);
+            }
+            AddHostedView(targetView, isSettings, operation);
+        }
+    }
+
+    private void AddHostedView(View view, bool isSettings, string operation)
+    {
+        if (!isSettings || !AppLog.IsEnabled)
+        {
+            ContentHost.Children.Add(view);
+            return;
         }
 
+        var instrumented = Stopwatch.GetTimestamp();
+        using var handlers = view.Handler == null ? new SettingsHandlerTrace(view, operation) : null;
+        LogSettingsStage($"{operation} set up Settings handler tracing", instrumented);
+        var started = Stopwatch.GetTimestamp();
+        if (handlers != null)
+            handlers.AttachStarted = started;
+        ContentHost.Children.Add(view);
+        LogSettingsStage($"{operation} ContentHost.Children.Add(Settings)", started);
+    }
+
+    private void ActivatePersistentHostedView(View targetView)
+    {
         foreach (var child in ContentHost.Children)
         {
             if (child is not View childView)
@@ -553,13 +707,16 @@ public partial class RootPage : ContentPage
         {
         }
 
-        foreach (var kvp in _pages)
-        {
-            try { kvp.Value.SendDisappearing(); } catch { }
-        }
+        if (_activePage is ITabHidingAware hidingAware)
+            hidingAware.OnTabHiding();
+        _activePage?.SendDisappearing();
+        _activePage = null;
+        _activeView = null;
+        StopWaitingForMainLayout();
 
         _pages.Clear();
         _views.Clear();
+        _settingsHandlerOnHide = null;
     }
 
     private static string FormatNavException(Exception ex)
