@@ -24,7 +24,7 @@ namespace JoesScanner;
         | ConfigChanges.Density)]
 public class MainActivity : MauiAppCompatActivity
 {
-    private const string AndroidAppInForegroundKey = "android_app_in_foreground";
+    internal static bool IsAudioActivityVisible { get; private set; }
     // Handles the Android back button without using the deprecated OnBackPressed override.
     // If audio is enabled, the task is moved to the background so audio can continue.
     // If audio is disabled, normal back behavior runs (closes the activity and app).
@@ -59,8 +59,6 @@ public class MainActivity : MauiAppCompatActivity
     {
         base.OnCreate(savedInstanceState);
 
-        try { AppStateStore.SetBool(AndroidAppInForegroundKey, true); } catch { }
-
         // Enable Android edge-to-edge drawing so the app behaves correctly on Android 15+
         // while still working on earlier Android versions.
         WindowCompat.SetDecorFitsSystemWindows(Window, false);
@@ -73,25 +71,13 @@ public class MainActivity : MauiAppCompatActivity
 
     protected override void OnStart()
     {
+        IsAudioActivityVisible = true;
         base.OnStart();
-        try { AppStateStore.SetBool(AndroidAppInForegroundKey, true); } catch { }
-    }
-
-    protected override void OnResume()
-    {
-        base.OnResume();
-        try { AppStateStore.SetBool(AndroidAppInForegroundKey, true); } catch { }
-    }
-
-    protected override void OnPause()
-    {
-        try { AppStateStore.SetBool(AndroidAppInForegroundKey, false); } catch { }
-        base.OnPause();
     }
 
     protected override void OnStop()
     {
-        try { AppStateStore.SetBool(AndroidAppInForegroundKey, false); } catch { }
+        IsAudioActivityVisible = false;
         base.OnStop();
     }
 

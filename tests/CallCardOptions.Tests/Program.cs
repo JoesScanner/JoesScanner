@@ -3,6 +3,9 @@ using JoesScanner.Models;
 using JoesScanner.Services;
 using Microsoft.Data.Sqlite;
 
+AndroidAudioTests.Run();
+IosAudioTests.Run();
+
 var defaults = CallCardLayout.Default;
 var complete = new CallCardMetadata
 {
@@ -193,7 +196,7 @@ Console.WriteLine("PASS Combined updates reach pending cards and follow their pr
 
 var index = new LiveCallIndex();
 var completeTranscript = new LiveCallState("https://local.example", "notice");
-completeTranscript.Observe(new(new(), "Existing transcript", CallCardIdFallback.None), LiveCallState.NextVersion());
+completeTranscript.Observe(new(new(), "Existing transcript", CallCardIdFallback.None, "https://local.example/call.mp3"), LiveCallState.NextVersion());
 Check(index.MarkSeen(completeTranscript.Id), "The first full row should be new.");
 index.Track(completeTranscript);
 var now = DateTimeOffset.UtcNow.AddSeconds(3);
@@ -213,7 +216,7 @@ Check(index.BeginCatchup(now.AddSeconds(4)) == null && completeTranscript.Read()
 Console.WriteLine("PASS ID-only WebSocket notices coalesce and resolve missing duration with an existing transcript");
 
 var queued = new LiveCallState("https://local.example", "retry");
-queued.Observe(new(new(), "Existing transcript", CallCardIdFallback.None), LiveCallState.NextVersion());
+queued.Observe(new(new(), "Existing transcript", CallCardIdFallback.None, "https://local.example/call.mp3"), LiveCallState.NextVersion());
 index.Track(queued);
 index.QueueNotification(queued, now);
 Check(index.BeginCatchup(now)?.Single() == queued, "A missing duration should trigger a lookup for this notice.");
@@ -323,6 +326,54 @@ finally
         File.Delete(Path.Combine(database.FullName, name));
     database.Delete();
 }
+
+foreach (var (ios, legacy, expected) in new (bool, string?, MobileAudioMode)[]
+{
+    (false, null, MobileAudioMode.MixAndDuck),
+    (true, null, MobileAudioMode.MixAndDuck),
+    (false, "true", MobileAudioMode.MixAndDuck),
+    (true, "true", MobileAudioMode.MixNormally),
+    (false, "false", MobileAudioMode.Exclusive),
+    (true, "false", MobileAudioMode.Exclusive),
+    (true, "invalid", MobileAudioMode.MixAndDuck)
+})
+{
+    var mobileDb = Directory.CreateTempSubdirectory("JoesScanner.MobileAudioTests-");
+    AppPaths.DatabaseDirectory = mobileDb.FullName;
+    try
+    {
+        if (legacy != null)
+            AppStateStore.SetString(MobileAudioPreferencesStore.LegacyMixKey, legacy);
+        var initial = MobileAudioPreferencesStore.Read(ios);
+        Check(initial == new MobileAudioPreferences(expected, AudioDisconnectionBehavior.PausePlayback),
+            $"Wrong mobile audio defaults or migration for iOS={ios}, legacy={legacy}.");
+        Check(AppStateStore.GetString(MobileAudioPreferencesStore.LegacyMixKey) == (legacy ?? string.Empty),
+            "Migration must preserve the legacy value used by current playback.");
+        var oppositeLegacy = expected == MobileAudioMode.Exclusive ? "true" : "false";
+        AppStateStore.SetString(MobileAudioPreferencesStore.LegacyMixKey, oppositeLegacy);
+        Check(MobileAudioPreferencesStore.Read(ios) == initial, "Migration must run only once.");
+
+        var routeChange = initial with { OnDisconnect = AudioDisconnectionBehavior.ContinueThroughPhoneSpeaker };
+        MobileAudioPreferencesStore.Write(routeChange);
+        Check(MobileAudioPreferencesStore.Read(ios) == routeChange, "Changing route behavior must preserve the mode.");
+        foreach (var mode in Enum.GetValues<MobileAudioMode>())
+        {
+            var changedMode = routeChange with { Mode = mode };
+            MobileAudioPreferencesStore.Write(changedMode);
+            Check(MobileAudioPreferencesStore.Read(ios) == changedMode, "Every mode must persist independently of the route choice.");
+        }
+        Check(AppStateStore.GetString(MobileAudioPreferencesStore.LegacyMixKey) == oppositeLegacy,
+            "Saving the new preferences must preserve the legacy playback setting.");
+    }
+    finally
+    {
+        SqliteConnection.ClearAllPools();
+        foreach (var name in new[] { "joesscanner.db", "joesscanner.db-wal", "joesscanner.db-shm" })
+            File.Delete(Path.Combine(mobileDb.FullName, name));
+        mobileDb.Delete();
+    }
+}
+Console.WriteLine("PASS Mobile audio defaults, one-time platform migration, and independent SQLite setting changes");
 
 static TrunkingRecorderCallFields ReadRow(string json)
 {

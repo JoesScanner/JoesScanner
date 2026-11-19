@@ -19,6 +19,14 @@ namespace JoesScanner.Models
         private bool _isToneHot;
         private string _backendId = string.Empty;
         internal LiveCallState? LiveState { get; init; }
+        internal bool HasUnplayedLateAudio { get; private set; }
+
+        internal bool ConsumeLateAudio()
+        {
+            var pending = HasUnplayedLateAudio;
+            HasUnplayedLateAudio = false;
+            return pending;
+        }
         internal bool IsLiveUpdate { get; init; }
         private CallCardMetadata? _cardMetadata;
 
@@ -45,6 +53,11 @@ namespace JoesScanner.Models
             CardMetadata = snapshot.Metadata;
             if (snapshot.Metadata.DurationSeconds is { } seconds)
                 CallDurationSeconds = seconds;
+            if (snapshot.AudioUrl is { } audioUrl && AudioUrl != audioUrl)
+            {
+                HasUnplayedLateAudio |= string.IsNullOrWhiteSpace(AudioUrl);
+                AudioUrl = audioUrl;
+            }
 
             if (snapshot.Transcription is not { } transcript || Transcription == transcript)
                 return false;

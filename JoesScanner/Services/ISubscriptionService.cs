@@ -5,6 +5,7 @@ namespace JoesScanner.Services
         public bool IsAllowed { get; }
         public string? ErrorCode { get; }
         public string? Message { get; }
+        public int? VerifiedOnlineTier { get; init; }
 
         public SubscriptionCheckResult(bool isAllowed, string? errorCode = null, string? message = null)
         {

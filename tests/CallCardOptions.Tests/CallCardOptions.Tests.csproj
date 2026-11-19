@@ -9,14 +9,21 @@
     <PackageReference Include="Microsoft.Data.Sqlite" Version="11.0.0" />
     <PackageReference Include="SQLite" Version="3.54.1" />
     <Compile Include="../../JoesScanner/Models/CallCardLayout.cs" Link="CallCardLayout.cs" />
+    <Compile Include="../../JoesScanner/Models/MobileAudioPreferences.cs" Link="MobileAudioPreferences.cs" />
     <Compile Include="../../JoesScanner/Models/CallCardMetadata.cs" Link="CallCardMetadata.cs" />
     <Compile Include="../../JoesScanner/Models/CallItem.cs" Link="CallItem.cs" />
     <Compile Include="../../JoesScanner/Models/LiveCallState.cs" Link="LiveCallState.cs" />
     <Compile Include="../../JoesScanner/Services/AppStateStore.cs" Link="AppStateStore.cs" />
+    <Compile Include="../../JoesScanner/Services/AndroidAudioInterruption.cs" Link="AndroidAudioInterruption.cs" />
+    <Compile Include="../../JoesScanner/Services/AndroidClipFocusState.cs" Link="AndroidClipFocusState.cs" />
     <Compile Include="../../JoesScanner/Services/CallCardLayoutStore.cs" Link="CallCardLayoutStore.cs" />
     <Compile Include="../../JoesScanner/Services/CallCardOptionsService.cs" Link="CallCardOptionsService.cs" />
     <Compile Include="../../JoesScanner/Services/DbBootstrapper.cs" Link="DbBootstrapper.cs" />
+    <Compile Include="../../JoesScanner/Services/IosAudioState.cs" Link="IosAudioState.cs" />
     <Compile Include="../../JoesScanner/Services/LiveCallIndex.cs" Link="LiveCallIndex.cs" />
+    <Compile Include="../../JoesScanner/Services/LivePlaybackRequests.cs" Link="LivePlaybackRequests.cs" />
+    <Compile Include="../../JoesScanner/Services/LiveStreamRecovery.cs" Link="LiveStreamRecovery.cs" />
+    <Compile Include="../../JoesScanner/Services/MobileAudioPreferencesStore.cs" Link="MobileAudioPreferencesStore.cs" />
     <Compile Include="../../JoesScanner/Services/TrunkingRecorderCallFields.cs" Link="TrunkingRecorderCallFields.cs" />
   </ItemGroup>
 </Project>

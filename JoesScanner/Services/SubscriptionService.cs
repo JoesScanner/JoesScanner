@@ -285,7 +285,10 @@ namespace JoesScanner.Services
                     await _telemetryService.AdoptSessionTokenAsync(issuedToken, "auth_session_token_issued", cancellationToken).ConfigureAwait(false);
                 }
 
-                return new SubscriptionCheckResult(true, null, planSummary);
+                return new SubscriptionCheckResult(true, null, planSummary)
+                {
+                    VerifiedOnlineTier = subscription?.TierLevel
+                };
             }
             catch (OperationCanceledException)
             {

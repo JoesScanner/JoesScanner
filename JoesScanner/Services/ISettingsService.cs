@@ -1,3 +1,5 @@
+using JoesScanner.Models;
+
 namespace JoesScanner.Services
 {
     public interface ISettingsService
@@ -83,6 +85,7 @@ namespace JoesScanner.Services
         // When enabled on mobile platforms, Joe's Scanner will request audio playback that can
         // continue while other apps are also playing audio.
         bool MobileMixAudioWithOtherApps { get; set; }
+        MobileAudioPreferences MobileAudio { get; set; }
 
         // what3words
         bool What3WordsLinksEnabled { get; set; }

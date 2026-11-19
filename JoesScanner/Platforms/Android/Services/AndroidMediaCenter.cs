@@ -131,7 +131,8 @@ namespace JoesScanner.Platforms.Android.Services
 
             _isPlaying = isPlaying;
 
-            var state = isPlaying ? PlaybackStateCode.Playing : PlaybackStateCode.Stopped;
+            var state = isPlaying ? PlaybackStateCode.Playing
+                : _isConnected ? PlaybackStateCode.Paused : PlaybackStateCode.Stopped;
 
             var actions =
                 PlaybackState.ActionPlay |
@@ -286,6 +287,10 @@ style.SetShowActionsInCompactView(0, 1);
 
         public static void Clear(Context context)
         {
+            _isConnected = false;
+            _isPlaying = false;
+            _title = "Joe's Scanner";
+            _subtitle = "Disconnected";
             var nm = (NotificationManager?)context.GetSystemService(Context.NotificationService);
             nm?.Cancel(NotificationId);
 

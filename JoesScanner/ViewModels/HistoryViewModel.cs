@@ -2126,6 +2126,19 @@ private async Task SearchAsync()
 
             try
             {
+#if ANDROID || IOS
+                // Starting or selecting History playback is an explicit resume,
+                // just as it is when the user selects a recording in Live.
+                await RunOnMainThreadAsync(() =>
+                {
+                    playbackToken.ThrowIfCancellationRequested();
+#if ANDROID
+                    JoesScanner.Platforms.Android.Services.AndroidAudioEnvironment.RequestPlay();
+#else
+                    JoesScanner.Platforms.iOS.Services.IosAudioEnvironment.RequestPlay();
+#endif
+                });
+#endif
                 // Frozen linear archive mode (no paging, no list mutations during playback).
                 if (_isSnapshotSearchActive)
                 {
@@ -2141,9 +2154,8 @@ private async Task SearchAsync()
                         _activeCall = item;
                         OnPropertyChanged(nameof(ActiveCall));
 
-                        await PlayAudioAsync(item, playbackToken);
-
-                        if (playbackToken.IsCancellationRequested)
+                        var outcome = await PlayAudioAsync(item, playbackToken);
+                        if (!outcome.AdvancesQueue() || playbackToken.IsCancellationRequested)
                             break;
                     }
 
@@ -2166,9 +2178,8 @@ private async Task SearchAsync()
 
                     ScrollToIndex(index, ScrollToPosition.Start);
 
-                    await PlayAudioAsync(item, playbackToken);
-
-                    if (playbackToken.IsCancellationRequested)
+                    var outcome = await PlayAudioAsync(item, playbackToken);
+                    if (!outcome.AdvancesQueue() || playbackToken.IsCancellationRequested)
                         break;
 
                     // When we reach the end of the loaded window, load more newer calls and keep going.
@@ -2758,10 +2769,10 @@ private async Task LoadMoreOlderAsync()
 };
         }
 
-        private async Task PlayAudioAsync(CallItem item, CancellationToken playbackToken)
+        private async Task<PlaybackOutcome> PlayAudioAsync(CallItem item, CancellationToken playbackToken)
         {
             if (item == null || string.IsNullOrWhiteSpace(item.AudioUrl))
-                return;
+                return PlaybackOutcome.Skipped;
 
             if (_audioCts != null)
             {
@@ -2784,19 +2795,28 @@ private async Task LoadMoreOlderAsync()
 
             try
             {
-                var rate = GetPlaybackRate();
-                var url = await GetPlayableAudioUrlAsync(item.AudioUrl, token);
-                if (string.IsNullOrWhiteSpace(url))
-                    return;
+                Exception? failure = null;
+                var outcome = await PlaybackAttempt.RunAsync(async () =>
+                {
+                    var rate = GetPlaybackRate();
+                    var url = await GetPlayableAudioUrlAsync(item.AudioUrl, token);
+                    if (string.IsNullOrWhiteSpace(url))
+                        throw new InvalidOperationException("Audio could not be acquired for this recording.");
+                    await _audioPlaybackService.PlayAsync(url, rate, token);
+                }, token, ex => failure = ex);
 
-                await _audioPlaybackService.PlayAsync(url, rate, token);
-            }
-            catch (FirewallAuthenticationException ex)
-            {
-                await RunOnMainThreadAsync(() => StatusText = ex.Message);
-            }
-            catch
-            {
+                if (failure != null)
+                {
+                    AppLog.DebugWriteLine(() => $"History playback failed ({failure.GetType().Name}).");
+                    await RunOnMainThreadAsync(() =>
+                    {
+                        if (!token.IsCancellationRequested)
+                            StatusText = failure is FirewallAuthenticationException
+                                ? failure.Message
+                                : "Playback failed. Press Play to retry this recording.";
+                    });
+                }
+                return outcome;
             }
             finally
             {

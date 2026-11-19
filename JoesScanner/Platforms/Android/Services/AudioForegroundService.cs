@@ -27,7 +27,7 @@ namespace JoesScanner.Platforms.Android.Services
         public override StartCommandResult OnStartCommand(Intent? intent, StartCommandFlags flags, int startId)
         {
             EnsureForegroundStartedImmediate($"OnStartCommand startId={startId}");
-            return StartCommandResult.Sticky;
+            return StartCommandResult.NotSticky;
         }
 
         public override void OnDestroy()
@@ -48,6 +48,7 @@ namespace JoesScanner.Platforms.Android.Services
             }
 
             System.Threading.Interlocked.Exchange(ref _isForegroundReady, 0);
+            SystemMediaService.AndroidForegroundServiceStopped();
 
             base.OnDestroy();
         }
@@ -72,6 +73,7 @@ namespace JoesScanner.Platforms.Android.Services
             {
                 System.Threading.Interlocked.Exchange(ref _isForegroundReady, 0);
                 try { AppLog.Add(() => $"AndroidSvc: bootstrap StartForeground failed from {source}. {ex.GetType().Name}: {ex.Message}"); } catch { }
+                StopSelf();
                 return;
             }
 

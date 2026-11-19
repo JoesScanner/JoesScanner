@@ -3,7 +3,7 @@ using global::Android.Content;
 
 namespace JoesScanner.Platforms.Android.Services
 {
-    // Handles media notification actions and "becoming noisy" events.
+    // Handles explicit media notification actions. Route changes use a runtime receiver.
     // Maps Play to Connect, Stop to Disconnect via AndroidMediaCenter.
     [global::Android.Content.BroadcastReceiverAttribute(Enabled = true, Exported = false)]
     [global::Android.App.IntentFilterAttribute(new[]
@@ -11,8 +11,7 @@ namespace JoesScanner.Platforms.Android.Services
         MediaActionReceiver.ActionPlay,
         MediaActionReceiver.ActionStop,
         MediaActionReceiver.ActionNext,
-        MediaActionReceiver.ActionPrevious,
-        MediaActionReceiver.ActionAudioBecomingNoisy
+        MediaActionReceiver.ActionPrevious
     })]
     public sealed class MediaActionReceiver : global::Android.Content.BroadcastReceiver
     {
@@ -21,19 +20,12 @@ namespace JoesScanner.Platforms.Android.Services
         public const string ActionNext = "com.joesscanner.action.NEXT";
         public const string ActionPrevious = "com.joesscanner.action.PREV";
 
-        // Must be a literal for attribute usage.
-        public const string ActionAudioBecomingNoisy = "android.media.AUDIO_BECOMING_NOISY";
-
         public override void OnReceive(Context? context, Intent? intent)
         {
             if (context is null || intent?.Action is null)
                 return;
 
             var action = intent.Action;
-
-            // Treat route changes (headphones unplugged / BT disconnect) as Stop/Disconnect.
-            if (string.Equals(action, ActionAudioBecomingNoisy, StringComparison.Ordinal))
-                action = ActionStop;
 
             try
             {

@@ -27,7 +27,6 @@ namespace JoesScanner.ViewModels
         private readonly ISettingsService _settings;
         private readonly MainViewModel _mainViewModel;
         private readonly ITelemetryService _telemetryService;
-        private readonly ISystemMediaService _systemMediaService;
         private readonly IHistoryLookupsCacheService _historyLookupsCacheService;
         private readonly IAuthObservedTriplesSyncService _authObservedTriplesSyncService;
         private readonly ISubscriptionService _subscriptionService;
@@ -374,8 +373,9 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
         private string _bluetoothLabelAlbumToken = BluetoothLabelMapping.TokenTalkgroup;
         private string _bluetoothLabelComposerToken = BluetoothLabelMapping.TokenSite;
         private string _bluetoothLabelGenreToken = BluetoothLabelMapping.TokenReceiver;
-        private bool _mobileMixAudioWithOtherApps = true;
-        private bool _savedMobileMixAudioWithOtherApps = true;
+        private static bool SupportsMobileAudioOptions => OperatingSystem.IsAndroid() || OperatingSystem.IsIOS();
+        private MobileAudioPreferences _mobileAudio = MobileAudioPreferences.Default;
+        private MobileAudioPreferences _savedMobileAudio = MobileAudioPreferences.Default;
 
         // Audio filters (Phase 1 settings only; audio pipeline wiring in later phases)
         private bool _audioStaticFilterEnabled;
@@ -601,7 +601,6 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
             ISettingsService settingsService,
             MainViewModel mainViewModel,
             ITelemetryService telemetryService,
-            ISystemMediaService systemMediaService,
             IFilterProfileStore filterProfileStore,
             IHistoryLookupsCacheService historyLookupsCacheService,
             IAuthObservedTriplesSyncService authObservedTriplesSyncService,
@@ -611,7 +610,6 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
             _settings = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
             _mainViewModel = mainViewModel ?? throw new ArgumentNullException(nameof(mainViewModel));
             _telemetryService = telemetryService ?? throw new ArgumentNullException(nameof(telemetryService));
-            _systemMediaService = systemMediaService ?? throw new ArgumentNullException(nameof(systemMediaService));
 
             _filterProfileStore = filterProfileStore ?? throw new ArgumentNullException(nameof(filterProfileStore));
 
@@ -1445,21 +1443,37 @@ public bool WindowsAutoConnectOnStart
         }
 
 
-        public bool MobileMixAudioWithOtherApps
+        public int MobileAudioModeIndex
         {
-            get => _mobileMixAudioWithOtherApps;
+            get => (int)_mobileAudio.Mode;
             set
             {
-                if (_mobileMixAudioWithOtherApps == value)
-                    return;
-
-                _mobileMixAudioWithOtherApps = value;
-                AppLog.Add(() => $"Settings: MobileMixAudioWithOtherApps changed to {_mobileMixAudioWithOtherApps}. Autosave queued.");
-                OnPropertyChanged();
-                UpdateHasChanges();
-                QueueAutosaveNonConnection("Audio");
+                if (Enum.IsDefined((MobileAudioMode)value))
+                    SetMobileAudio(_mobileAudio with { Mode = (MobileAudioMode)value }, nameof(MobileAudioModeIndex));
             }
         }
+
+        public int AudioDisconnectionIndex
+        {
+            get => (int)_mobileAudio.OnDisconnect;
+            set
+            {
+                if (Enum.IsDefined((AudioDisconnectionBehavior)value))
+                    SetMobileAudio(_mobileAudio with { OnDisconnect = (AudioDisconnectionBehavior)value }, nameof(AudioDisconnectionIndex));
+            }
+        }
+
+        private void SetMobileAudio(MobileAudioPreferences preferences, string propertyName)
+        {
+            if (_mobileAudio == preferences)
+                return;
+
+            _mobileAudio = preferences;
+            OnPropertyChanged(propertyName);
+            UpdateHasChanges();
+            QueueAutosaveNonConnection("Audio");
+        }
+
 
         public bool What3WordsLinksEnabled
         {
@@ -2011,9 +2025,13 @@ public bool WindowsStartWithWindows
             _bluetoothLabelGenreToken = BluetoothLabelMapping.NormalizeToken(_settings.BluetoothLabelGenre, BluetoothLabelMapping.TokenReceiver);
             _savedBluetoothLabelGenreToken = _bluetoothLabelGenreToken;
 
-            _mobileMixAudioWithOtherApps = _settings.MobileMixAudioWithOtherApps;
-            _savedMobileMixAudioWithOtherApps = _mobileMixAudioWithOtherApps;
-            OnPropertyChanged(nameof(MobileMixAudioWithOtherApps));
+            if (SupportsMobileAudioOptions)
+            {
+                _mobileAudio = _settings.MobileAudio;
+                _savedMobileAudio = _mobileAudio;
+                OnPropertyChanged(nameof(MobileAudioModeIndex));
+                OnPropertyChanged(nameof(AudioDisconnectionIndex));
+            }
 
             // Ensure the pickers show the persisted selections when the Settings page opens.
             _bluetoothLabelArtistOption = GetBluetoothOptionOrDefault(_bluetoothLabelArtistToken, BluetoothLabelMapping.TokenAppName);
@@ -2295,7 +2313,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             string BluetoothLabelAlbum,
             string BluetoothLabelComposer,
             string BluetoothLabelGenre,
-            bool MobileMixAudioWithOtherApps,
+            MobileAudioPreferences MobileAudio,
             bool What3WordsLinksEnabled,
             string What3WordsApiKey,
             bool AudioStaticFilterEnabled,
@@ -2328,7 +2346,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                     _bluetoothLabelAlbumToken,
                     _bluetoothLabelComposerToken,
                     _bluetoothLabelGenreToken,
-                    _mobileMixAudioWithOtherApps,
+                    _mobileAudio,
                     _what3WordsLinksEnabled,
                     _what3WordsApiKey,
                     _audioStaticFilterEnabled,
@@ -2346,7 +2364,6 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
 #if WINDOWS
                 var updateStartup = snapshot.WindowsStartWithWindows != _savedWindowsStartWithWindows;
 #endif
-                var updateAudioSession = snapshot.MobileMixAudioWithOtherApps != _savedMobileMixAudioWithOtherApps;
                 var started = Stopwatch.GetTimestamp();
                 await Task.Run(() => PersistNonConnectionSettings(snapshot));
 
@@ -2364,18 +2381,6 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                     }
                 }
 #endif
-                if (updateAudioSession)
-                {
-                    try
-                    {
-                        await _systemMediaService.RefreshAudioSessionAsync(_mainViewModel.AudioEnabled, "SettingsSave:MobileMixAudioWithOtherApps");
-                    }
-                    catch (Exception ex)
-                    {
-                        AppLog.Add(() => $"Settings: audio session refresh failed ({ex.GetType().Name}).");
-                    }
-                }
-
                 _savedAutoPlay = snapshot.AutoPlay;
                 _savedWindowsAutoConnectOnStart = snapshot.WindowsAutoConnectOnStart;
                 _savedWindowsStartWithWindows = snapshot.WindowsStartWithWindows;
@@ -2386,7 +2391,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                 _savedBluetoothLabelAlbumToken = snapshot.BluetoothLabelAlbum;
                 _savedBluetoothLabelComposerToken = snapshot.BluetoothLabelComposer;
                 _savedBluetoothLabelGenreToken = snapshot.BluetoothLabelGenre;
-                _savedMobileMixAudioWithOtherApps = snapshot.MobileMixAudioWithOtherApps;
+                _savedMobileAudio = snapshot.MobileAudio;
                 _savedWhat3WordsLinksEnabled = snapshot.What3WordsLinksEnabled;
                 _savedWhat3WordsApiKey = snapshot.What3WordsApiKey;
                 _savedAudioStaticFilterEnabled = snapshot.AudioStaticFilterEnabled;
@@ -2427,7 +2432,8 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             _settings.BluetoothLabelAlbum = snapshot.BluetoothLabelAlbum;
             _settings.BluetoothLabelComposer = snapshot.BluetoothLabelComposer;
             _settings.BluetoothLabelGenre = snapshot.BluetoothLabelGenre;
-            _settings.MobileMixAudioWithOtherApps = snapshot.MobileMixAudioWithOtherApps;
+            if (SupportsMobileAudioOptions && snapshot.MobileAudio != _savedMobileAudio)
+                _settings.MobileAudio = snapshot.MobileAudio;
             _settings.What3WordsLinksEnabled = snapshot.What3WordsLinksEnabled;
             _settings.What3WordsApiKey = snapshot.What3WordsApiKey;
             _settings.AudioStaticFilterEnabled = snapshot.AudioStaticFilterEnabled;
@@ -3170,7 +3176,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                 || !string.Equals(_bluetoothLabelAlbumToken, _savedBluetoothLabelAlbumToken, StringComparison.Ordinal)
                 || !string.Equals(_bluetoothLabelComposerToken, _savedBluetoothLabelComposerToken, StringComparison.Ordinal)
                 || !string.Equals(_bluetoothLabelGenreToken, _savedBluetoothLabelGenreToken, StringComparison.Ordinal)
-                || _mobileMixAudioWithOtherApps != _savedMobileMixAudioWithOtherApps
+                || _mobileAudio != _savedMobileAudio
                 || _what3WordsLinksEnabled != _savedWhat3WordsLinksEnabled
                 || !string.Equals(_what3WordsApiKey ?? string.Empty, _savedWhat3WordsApiKey ?? string.Empty, StringComparison.Ordinal)
                 || _audioStaticFilterEnabled != _savedAudioStaticFilterEnabled

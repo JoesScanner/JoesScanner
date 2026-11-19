@@ -23,6 +23,8 @@ namespace JoesScanner.Services
     internal static class AppLog
     {
         public static void Add(Func<string> message) { }
+        public static void DebugWriteLine(Func<string> message) { }
+        public static void DebugWriteLine(string message) { }
     }
 
     internal static class AppPaths

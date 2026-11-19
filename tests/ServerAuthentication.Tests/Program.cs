@@ -25,7 +25,10 @@ var cases = new (string Name, Func<Task> Run)[]
     ("Rapid selections cancel obsolete playback and late completion cannot replace the latest selection", RapidPlaybackSelections),
     ("A canceled firewall waiter sends no audio request and does not poison the next selection", CanceledFirewallWait),
     ("Canceled credential issuance releases the firewall gate for the next selection", CanceledFirewallIssuance),
-    ("HTTP timeouts and unexpected cancellation remain playback failures", UnexpectedPlaybackTimeout)
+    ("HTTP timeouts and unexpected cancellation remain playback failures", UnexpectedPlaybackTimeout),
+    ("Only completion or deliberate skip advances playback; explicit retry retains the failed item", MobileRecoveryTests.PlaybackOutcomes),
+    ("Foreground recovery verifies hosted tiers and preserves custom history", MobileRecoveryTests.Entitlement),
+    ("Foreground recovery aborts a half-open socket, merges late audio, and delivers subsequent live calls once", MobileRecoveryTests.ReconnectAndLateAudio)
 };
 
 foreach (var (name, run) in cases)

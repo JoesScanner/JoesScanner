@@ -10,7 +10,8 @@ internal enum CallCardIdFallback
     Radio = 8
 }
 
-internal sealed record LiveCallSnapshot(CallCardMetadata Metadata, string? Transcription, CallCardIdFallback IdFallbacks);
+internal sealed record LiveCallSnapshot(CallCardMetadata Metadata, string? Transcription,
+    CallCardIdFallback IdFallbacks, string? AudioUrl = null);
 
 // A card owns this state through visible/pending transitions. The stream and HTTP lookups can
 // observe it on worker threads, while the UI reads an immutable snapshot to update its bindings.
@@ -20,6 +21,7 @@ internal sealed class LiveCallState(string serverUrl, string id)
     private readonly object _gate = new();
     private readonly long[] _fieldVersions = new long[(int)CallCardField.Lcn + 1];
     private long _transcriptionVersion;
+    private long _audioVersion;
     private LiveCallSnapshot _snapshot = new(new(), null, CallCardIdFallback.None);
     private bool _notificationPending;
     private DateTimeOffset _nextNotificationUtc;
@@ -72,9 +74,15 @@ internal sealed class LiveCallState(string serverUrl, string id)
             }
 
             changedTranscription = transcript != _snapshot.Transcription ? transcript : null;
-            var changed = current != metadata || changedTranscription != null;
+            var audioUrl = _snapshot.AudioUrl;
+            if (!string.IsNullOrWhiteSpace(update.AudioUrl) && version >= _audioVersion)
+            {
+                _audioVersion = version;
+                audioUrl = update.AudioUrl;
+            }
+            var changed = current != metadata || changedTranscription != null || audioUrl != _snapshot.AudioUrl;
             if (changed || fallbacks != _snapshot.IdFallbacks)
-                _snapshot = new(metadata, transcript, fallbacks);
+                _snapshot = new(metadata, transcript, fallbacks, audioUrl);
             return changed;
 
             T Newer<T>(CallCardField field, T previous, T candidate)
@@ -115,7 +123,7 @@ internal sealed class LiveCallState(string serverUrl, string id)
         lock (_gate)
         {
             if (_notificationPending || now < _nextNotificationUtc ||
-                (_snapshot.Transcription != null && _snapshot.Metadata.DurationSeconds != null))
+                !NeedsLookup(_snapshot))
                 return false;
 
             _notificationPending = true;
@@ -130,11 +138,10 @@ internal sealed class LiveCallState(string serverUrl, string id)
             _notificationPending = false;
     }
 
-    public bool NeedsNotificationLookup()
-    {
-        var snapshot = Read();
-        return snapshot.Transcription == null || snapshot.Metadata.DurationSeconds == null;
-    }
+    public bool NeedsNotificationLookup() => NeedsLookup(Read());
+
+    private static bool NeedsLookup(LiveCallSnapshot snapshot) =>
+        snapshot.Transcription == null || snapshot.Metadata.DurationSeconds == null || snapshot.AudioUrl == null;
 
     public CallItem? FindCard(IEnumerable<CallItem> visible, List<CallItem> pending, object pendingGate)
     {

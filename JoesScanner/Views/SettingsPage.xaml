@@ -950,40 +950,30 @@
         <controls:DeferredContentView x:Name="AudioBodyLayout" IsVisible="False">
             <controls:DeferredContentView.ContentTemplate>
                 <DataTemplate x:DataType="vm:SettingsViewModel">
-                    <Grid
-                RowDefinitions="Auto,Auto"
-                ColumnDefinitions="*,Auto"
-                RowSpacing="8"
-                ColumnSpacing="12"
-                Margin="0,0,0,4"
-                IsVisible="{OnPlatform WinUI=false, Default=true}">
+                    <VerticalStackLayout Spacing="8" Margin="0,0,0,4"
+                                         IsVisible="{OnPlatform Android=true, iOS=true, Default=false}">
+                        <Label Text="Mobile audio mode" FontSize="12"
+                               TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                        <Picker SelectedIndex="{Binding MobileAudioModeIndex, Mode=TwoWay}"
+                                SemanticProperties.Description="Mobile audio mode">
+                            <Picker.Items>
+                                <x:String>Mix normally</x:String>
+                                <x:String>Mix and duck</x:String>
+                                <x:String>Exclusive</x:String>
+                            </Picker.Items>
+                        </Picker>
 
-                <Label
-                    Grid.Row="0"
-                    Grid.Column="0"
-                    Text="Continue scanner audio while other apps are playing"
-                    FontSize="12"
-                    LineBreakMode="WordWrap"
-                    VerticalOptions="Center"
-                    HorizontalOptions="Fill"
-                    TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                        <Label Text="When headphones or Bluetooth disconnect" FontSize="12" LineBreakMode="WordWrap"
+                               TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                        <Picker SelectedIndex="{Binding AudioDisconnectionIndex, Mode=TwoWay}"
+                                SemanticProperties.Description="When headphones or Bluetooth disconnect">
+                            <Picker.Items>
+                                <x:String>Pause playback</x:String>
+                                <x:String>Continue through phone speaker</x:String>
+                            </Picker.Items>
+                        </Picker>
 
-                <controls:CompactToggleSwitch
-                    Grid.Row="0"
-                    Grid.Column="1"
-                    IsToggled="{Binding MobileMixAudioWithOtherApps}"
-                    Style="{StaticResource CompactToggleStyle}" />
-
-                <Label
-                    Grid.Row="1"
-                    Grid.Column="0"
-                    Grid.ColumnSpan="2"
-                    Text="When enabled on Android and iPhone, Joe's Scanner can keep playing alongside music, navigation, podcasts, or other app audio. This is not limited to Bluetooth."
-                    FontSize="11"
-                    Opacity="0.8"
-                    LineBreakMode="WordWrap"
-                    TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
-                    </Grid>
+                    </VerticalStackLayout>
                 </DataTemplate>
             </controls:DeferredContentView.ContentTemplate>
         </controls:DeferredContentView>

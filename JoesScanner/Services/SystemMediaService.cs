@@ -14,8 +14,6 @@ namespace JoesScanner.Services
             _settings = settings;
         }
 
-        private bool IsMobileMixAudioWithOtherAppsEnabled() => _settings.MobileMixAudioWithOtherApps;
-
         public void SetHandlers(Func<Task> onPlay, Func<Task> onStop, Func<Task>? onNext = null, Func<Task>? onPrevious = null)
         {
             _onPlay = onPlay;

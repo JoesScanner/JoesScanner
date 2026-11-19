@@ -9,9 +9,27 @@
     <Compile Include="../../JoesScanner/Helpers/HostedServerRules.cs" Link="HostedServerRules.cs" />
     <Compile Include="../../JoesScanner/Helpers/TextNormalizationHelper.cs" Link="TextNormalizationHelper.cs" />
     <Compile Include="../../JoesScanner/Models/ServerDirectoryEntry.cs" Link="ServerDirectoryEntry.cs" />
+    <Compile Include="../../JoesScanner/Models/MobileAudioPreferences.cs" Link="MobileAudioPreferences.cs" />
     <Compile Include="../../JoesScanner/Services/ISettingsService.cs" Link="ISettingsService.cs" />
     <Compile Include="../../JoesScanner/Services/ServerAuthentication.cs" Link="ServerAuthentication.cs" />
     <Compile Include="../../JoesScanner/Services/ServerAuthenticationHandler.cs" Link="ServerAuthenticationHandler.cs" />
     <Compile Include="../../JoesScanner/Services/LivePlaybackRequests.cs" Link="LivePlaybackRequests.cs" />
+    <Compile Include="../../JoesScanner/Services/PlaybackOutcome.cs" Link="PlaybackOutcome.cs" />
+    <Compile Include="../../JoesScanner/Services/CallStreamService.cs" Link="CallStreamService.cs" />
+    <Compile Include="../../JoesScanner/Services/ICallStreamService.cs" Link="ICallStreamService.cs" />
+    <Compile Include="../../JoesScanner/Services/IAddressDetectionService.cs" Link="IAddressDetectionService.cs" />
+    <Compile Include="../../JoesScanner/Services/ILocalCallsRepository.cs" Link="ILocalCallsRepository.cs" />
+    <Compile Include="../../JoesScanner/Services/ISubscriptionService.cs" Link="ISubscriptionService.cs" />
+    <Compile Include="../../JoesScanner/Services/ForegroundRecoveryEntitlement.cs" Link="ForegroundRecoveryEntitlement.cs" />
+    <Compile Include="../../JoesScanner/Services/LiveStreamRecovery.cs" Link="LiveStreamRecovery.cs" />
+    <Compile Include="../../JoesScanner/Services/LiveCallIndex.cs" Link="LiveCallIndex.cs" />
+    <Compile Include="../../JoesScanner/Services/TranscriptionSanitizer.cs" Link="TranscriptionSanitizer.cs" />
+    <Compile Include="../../JoesScanner/Services/TrunkingRecorderCallFields.cs" Link="TrunkingRecorderCallFields.cs" />
+    <Compile Include="../../JoesScanner/Data/DbCallRecord.cs" Link="DbCallRecord.cs" />
+    <Compile Include="../../JoesScanner/Models/CallCardLayout.cs" Link="CallCardLayout.cs" />
+    <Compile Include="../../JoesScanner/Models/CallCardMetadata.cs" Link="CallCardMetadata.cs" />
+    <Compile Include="../../JoesScanner/Models/CallItem.cs" Link="CallItem.cs" />
+    <Compile Include="../../JoesScanner/Models/LiveCallState.cs" Link="LiveCallState.cs" />
+    <Compile Include="../CallCardOptions.Tests/TestDoubles.cs" Link="ModelTestDoubles.cs" />
   </ItemGroup>
 </Project>

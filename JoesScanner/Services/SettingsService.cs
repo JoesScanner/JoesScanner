@@ -41,7 +41,6 @@ namespace JoesScanner.Services
         private const string KeyBluetoothAlbum = "bt_label_album";
         private const string KeyBluetoothComposer = "bt_label_composer";
         private const string KeyBluetoothGenre = "bt_label_genre";
-        private const string KeyMobileMixAudioWithOtherApps = "mobile_mix_audio_with_other_apps";
 
         private const string KeyWhat3WordsLinksEnabled = "what3words_links_enabled";
         private const string KeyWhat3WordsApiKey = "what3words_api_key";
@@ -73,6 +72,8 @@ namespace JoesScanner.Services
 
         private Dictionary<string, string> _cache = new(StringComparer.OrdinalIgnoreCase);
         private bool _initialized;
+        private readonly object _mobileAudioGate = new();
+        private MobileAudioPreferences? _mobileAudio;
 
         public SettingsService(IDatabasePathProvider dbPathProvider)
         {
@@ -546,8 +547,34 @@ namespace JoesScanner.Services
 
         public bool MobileMixAudioWithOtherApps
         {
-            get => GetBool(KeyMobileMixAudioWithOtherApps, true);
-            set => SetBool(KeyMobileMixAudioWithOtherApps, value);
+            get => GetBool(MobileAudioPreferencesStore.LegacyMixKey, true);
+            set => SetBool(MobileAudioPreferencesStore.LegacyMixKey, value);
+        }
+
+        public MobileAudioPreferences MobileAudio
+        {
+            get
+            {
+                // Audio focus and route callbacks should reuse the saved snapshot
+                // instead of reading SQLite for every recording or disconnect.
+                if (Volatile.Read(ref _mobileAudio) is { } saved)
+                    return saved;
+
+                lock (_mobileAudioGate)
+                {
+                    var preferences = _mobileAudio ?? MobileAudioPreferencesStore.Read(OperatingSystem.IsIOS());
+                    Volatile.Write(ref _mobileAudio, preferences);
+                    return preferences;
+                }
+            }
+            set
+            {
+                lock (_mobileAudioGate)
+                {
+                    MobileAudioPreferencesStore.Write(value);
+                    Volatile.Write(ref _mobileAudio, value);
+                }
+            }
         }
 
         public bool What3WordsLinksEnabled
