@@ -1,37 +1,54 @@
 namespace JoesScanner.Services;
 
+internal enum AndroidClipFocusStatus
+{
+    Pending,
+    Granted,
+    Denied,
+    TransientLoss,
+    DuckableLoss,
+    PermanentLoss
+}
+
 // One state object per request. Its callbacks and its release belong to that
 // request, even when a newer recording has already selected another one.
 internal sealed class AndroidClipFocusState
 {
-    private readonly TaskCompletionSource<bool> _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private readonly TaskCompletionSource _lost = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private TaskCompletionSource _changed = NewSignal();
     private bool _registered;
     private bool _released;
 
-    public Task<bool> Ready => _ready.Task;
-    public Task Lost => _lost.Task;
+    public AndroidClipFocusStatus Status { get; private set; }
+    public Task Changed => _changed.Task;
 
     public void Requested(bool registered, bool delayed = false)
     {
         _registered = registered;
         if (!delayed)
-            _ready.TrySetResult(registered);
+            SetStatus(registered ? AndroidClipFocusStatus.Granted : AndroidClipFocusStatus.Denied);
     }
 
-    public void ReadyWithoutFocus() => _ready.TrySetResult(true);
+    public void ReadyWithoutFocus() => SetStatus(AndroidClipFocusStatus.Granted);
 
-    public void OnGain()
+    public void OnChange(AndroidClipFocusStatus status)
     {
-        if (!_released)
-            _ready.TrySetResult(true);
+        if (_registered && !_released && Status != AndroidClipFocusStatus.PermanentLoss)
+            SetStatus(status);
     }
 
-    public void OnLoss()
+    // Android delivers focus change callbacks on the main looper. Pulse on each
+    // transition so a later gain is observed even if the loss already woke a waiter.
+    private void SetStatus(AndroidClipFocusStatus status)
     {
-        if (!_released)
-            _lost.TrySetResult();
+        if (Status == status)
+            return;
+        Status = status;
+        var prior = _changed;
+        _changed = NewSignal();
+        prior.TrySetResult();
     }
+
+    private static TaskCompletionSource NewSignal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public bool Release()
     {

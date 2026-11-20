@@ -11,7 +11,6 @@ namespace JoesScanner.Services;
 // Always enabled (no rate limiting). Identity is still required by the server (device_id and/or session_token).
 public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncService, IDisposable
 {
-    private const string DefaultAuthServerBaseUrl = "https://joesscanner.com";
 
     private readonly ISettingsService _settings;
     private readonly IDatabasePathProvider _dbPathProvider;
@@ -36,17 +35,8 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
         // HttpClient lifetime managed by DI.
     }
 
-    private Uri GetEndpoint()
-    {
-        var baseUrl = (_settings.AuthServerBaseUrl ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(baseUrl))
-            baseUrl = DefaultAuthServerBaseUrl;
 
-        baseUrl = baseUrl.TrimEnd('/');
-        return new Uri(baseUrl + "/wp-json/joes-scanner/v1/observed-triples-v2");
-    }
-
-    private static string TelemetryQueryString(ISettingsService settings)
+    private static string TelemetryQueryString(ISettingsService settings, string sessionToken)
     {
         var appVersion = AppInfo.Current.VersionString ?? string.Empty;
         var appBuild = AppInfo.Current.BuildString ?? string.Empty;
@@ -56,7 +46,6 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
         var osVersion = DeviceInfo.VersionString ?? string.Empty;
 
         var deviceId = settings.DeviceInstallId ?? string.Empty;
-        var sessionToken = settings.AuthSessionToken ?? string.Empty;
 
         var pairs = new List<(string k, string v)>
         {
@@ -103,24 +92,26 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
 
         try
         {
-            var baseUri = GetEndpoint();
-            var qs = TelemetryQueryString(_settings);
+            var session = WordPressSession.Capture(_settings);
+            var baseUri = session.Endpoint("observed-triples-v2");
+            var qs = TelemetryQueryString(_settings, session.Token);
             var full = baseUri + "?server_key=" + Uri.EscapeDataString(serverKey) + "&limit=5000&" + qs;
 
             AppLog.Add(() => $"AuthObserved: seed GET start. server={serverKey}");
 
+            if (!session.IsCurrent)
+
+                return null;
+
             using var resp = await _httpClient.GetAsync(full, cancellationToken).ConfigureAwait(false);
             if (!resp.IsSuccessStatusCode)
             {
-                var errBody = string.Empty;
-                try { errBody = await resp.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false); } catch { }
-                if (errBody.Length > 300) errBody = errBody.Substring(0, 300);
-                AppLog.Add(() => $"AuthObserved: seed GET failed. status={(int)resp.StatusCode} body='{errBody}'");
+                AppLog.Add(() => $"AuthObserved: seed GET failed. status={(int)resp.StatusCode}");
                 return null;
             }
 
             var body = await resp.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            if (string.IsNullOrWhiteSpace(body))
+            if (!session.IsCurrent || string.IsNullOrWhiteSpace(body))
                 return null;
 
             var dto = JsonSerializer.Deserialize<ObservedTriplesResponseDto>(body, JsonOptions);
@@ -153,7 +144,7 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
             }
 
             AppLog.Add(() => $"AuthObserved: seed GET ok. server={serverKey} items={items.Count}");
-            return items.Count == 0 ? null : items;
+            return !session.IsCurrent || items.Count == 0 ? null : items;
         }
         catch
         {
@@ -163,6 +154,7 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
 
     public async Task TryReportAsync(string serverKey, bool force, CancellationToken cancellationToken)
     {
+        var session = WordPressSession.Capture(_settings);
 
         if (string.IsNullOrWhiteSpace(serverKey))
             return;
@@ -184,7 +176,7 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
         }
         catch (Exception ex)
         {
-            AppLog.Add(() => $"AuthObserved: report query failed. server={serverKey} ex={ex.GetType().Name}: {ex.Message}");
+            AppLog.Add(() => $"AuthObserved: report query failed. server={serverKey} ex={ex.GetType().Name}");
             return;
         }
 
@@ -196,16 +188,17 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
             return;
         }
 
+
         var payload = new ObservedTriplesReportRequestDto
         {
             ServerKey = serverKey,
             DeviceId = _settings.DeviceInstallId ?? string.Empty,
-            SessionToken = _settings.AuthSessionToken ?? string.Empty,
+            SessionToken = session.Token,
             ForceTouch = force,
             Items = delta
         };
 
-        var endpoint = GetEndpoint();
+        var endpoint = session.Endpoint("observed-triples-v2");
 
         try
         {
@@ -213,34 +206,34 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
 
             var json = JsonSerializer.Serialize(payload, JsonOptions);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
+            if (!session.IsCurrent)
+                return;
             using var resp = await _httpClient.PostAsync(endpoint, content, cancellationToken).ConfigureAwait(false);
 
             if (!resp.IsSuccessStatusCode)
             {
-                var errBody = string.Empty;
-                try { errBody = await resp.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false); } catch { }
-                if (errBody.Length > 300) errBody = errBody.Substring(0, 300);
-                AppLog.Add(() => $"AuthObserved: report POST failed. status={(int)resp.StatusCode} body='{errBody}'");
+                AppLog.Add(() => $"AuthObserved: report POST failed. status={(int)resp.StatusCode}");
                 return;
             }
 
-            var okBody = string.Empty;
-            try { okBody = await resp.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false); } catch { }
-            if (okBody.Length > 300) okBody = okBody.Substring(0, 300);
-            AppLog.Add(() => $"AuthObserved: report POST ok. server={serverKey} items={delta.Count} body='{okBody}'");
+            AppLog.Add(() => $"AuthObserved: report POST ok. server={serverKey} items={delta.Count}");
 
-            AppStateStore.SetString(GetLastReportUtcKey(serverKey), DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture));
-            if (maxLastSeen.HasValue)
-                AppStateStore.SetString(GetLastCutoffUtcKey(serverKey), maxLastSeen.Value.ToString("O", CultureInfo.InvariantCulture));
+            session.TryApply(() =>
+            {
+                AppStateStore.SetString(GetLastReportUtcKey(serverKey), DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+                if (maxLastSeen.HasValue)
+                    AppStateStore.SetString(GetLastCutoffUtcKey(serverKey), maxLastSeen.Value.ToString("O", CultureInfo.InvariantCulture));
+            });
         }
         catch (Exception ex)
         {
-            AppLog.Add(() => $"AuthObserved: report POST exception. server={serverKey} ex={ex.GetType().Name}: {ex.Message}");
+            AppLog.Add(() => $"AuthObserved: report POST exception. server={serverKey} ex={ex.GetType().Name}");
         }
     }
 
     public async Task<IReadOnlyList<ObservedTriple>?> TrySyncExchangeAsync(string serverKey, bool force, CancellationToken cancellationToken)
     {
+        var session = WordPressSession.Capture(_settings);
         if (string.IsNullOrWhiteSpace(serverKey))
             return null;
 
@@ -257,20 +250,21 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
         }
         catch (Exception ex)
         {
-            AppLog.Add(() => $"AuthObserved: exchange query failed. server={serverKey} ex={ex.GetType().Name}: {ex.Message}");
+            AppLog.Add(() => $"AuthObserved: exchange query failed. server={serverKey} ex={ex.GetType().Name}");
             return null;
         }
+
 
         var payload = new ObservedTriplesReportRequestDto
         {
             ServerKey = serverKey,
             DeviceId = _settings.DeviceInstallId ?? string.Empty,
-            SessionToken = _settings.AuthSessionToken ?? string.Empty,
+            SessionToken = session.Token,
             ForceTouch = force,
             Items = delta
         };
 
-        var endpoint = GetEndpoint();
+        var endpoint = session.Endpoint("observed-triples-v2");
 
         try
         {
@@ -278,26 +272,21 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
 
             var json = JsonSerializer.Serialize(payload, JsonOptions);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
+            if (!session.IsCurrent)
+                return null;
             using var resp = await _httpClient.PostAsync(endpoint, content, cancellationToken).ConfigureAwait(false);
 
             if (!resp.IsSuccessStatusCode)
             {
-                var errBody = string.Empty;
-                try { errBody = await resp.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false); } catch { }
-                if (errBody.Length > 300) errBody = errBody.Substring(0, 300);
-                AppLog.Add(() => $"AuthObserved: exchange POST failed. status={(int)resp.StatusCode} body='{errBody}'");
+                AppLog.Add(() => $"AuthObserved: exchange POST failed. status={(int)resp.StatusCode}");
                 return null;
             }
 
             var body = string.Empty;
             try { body = await resp.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false); } catch { }
-            if (string.IsNullOrWhiteSpace(body))
+            if (!session.IsCurrent || string.IsNullOrWhiteSpace(body))
                 return null;
 
-            if (body.Length > 300)
-                AppLog.Add(() => $"AuthObserved: exchange POST ok. server={serverKey} items={delta.Count} body='{body.Substring(0, 300)}'");
-            else
-                AppLog.Add(() => $"AuthObserved: exchange POST ok. server={serverKey} items={delta.Count} body='{body}'");
 
             var dto = JsonSerializer.Deserialize<ObservedTriplesExchangeResponseDto>(body, JsonOptions);
             if (dto == null || !dto.Ok || dto.Items == null)
@@ -365,17 +354,20 @@ var merged = mergedMap.Values
     .ThenBy(x => x.TalkgroupLabel ?? x.TalkgroupValue ?? string.Empty, StringComparer.OrdinalIgnoreCase)
     .ToList();
 
-AppStateStore.SetString(GetLastReportUtcKey(serverKey), DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture));
-if (maxLastSeen.HasValue)
-    AppStateStore.SetString(GetLastCutoffUtcKey(serverKey), maxLastSeen.Value.ToString("O", CultureInfo.InvariantCulture));
+session.TryApply(() =>
+{
+    AppStateStore.SetString(GetLastReportUtcKey(serverKey), DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+    if (maxLastSeen.HasValue)
+        AppStateStore.SetString(GetLastCutoffUtcKey(serverKey), maxLastSeen.Value.ToString("O", CultureInfo.InvariantCulture));
+});
 
-AppLog.Add(() => $"AuthObserved: exchange merged ok. server={serverKey} merged={merged.Count} serverLastReportUtc='{dto.ServerLastReportUtc ?? string.Empty}'");
-return merged.Count == 0 ? null : merged;
+AppLog.Add(() => $"AuthObserved: exchange merged ok. server={serverKey} merged={merged.Count}");
+return !session.IsCurrent || merged.Count == 0 ? null : merged;
 
         }
         catch (Exception ex)
         {
-            AppLog.Add(() => $"AuthObserved: exchange POST exception. server={serverKey} ex={ex.GetType().Name}: {ex.Message}");
+            AppLog.Add(() => $"AuthObserved: exchange POST exception. server={serverKey} ex={ex.GetType().Name}");
             return null;
         }
     }

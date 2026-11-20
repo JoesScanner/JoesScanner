@@ -3,130 +3,336 @@ using JoesScanner.Services;
 
 internal static class IosAudioTests
 {
-    internal static void Run()
+    internal static async Task RunAsync()
     {
-        var activations = new List<IosAudioOptions>();
-        var releases = 0;
+        RecordingModesAndLeaseOwnership();
+        FailedDeactivation();
+        BoundedReleaseRetries();
+        await StalledPlaybackRecoveryAsync();
+        MissingAndOutOfOrderInterruptions();
+        await ResumeRecordingAndAdvanceAtBoundaryAsync();
+        PrivateRouteRecovery();
+        await StopAndReplaceAsync();
+        MediaResetAndPlayerRebuild();
+        ForegroundSocketRecovery();
+    }
+
+    private static void RecordingModesAndLeaseOwnership()
+    {
+        var events = new List<string>();
         var activationAllowed = true;
         var session = new IosClipSession(options =>
         {
-            activations.Add(options);
+            events.Add(options.ToString());
             return activationAllowed;
-        }, () => releases++);
+        }, () => { events.Add("release"); return true; });
 
         var mixed = session.TryStart(MobileAudioMode.MixNormally);
-        Check(session.ActiveMode == MobileAudioMode.MixNormally && activations[^1] == IosAudioOptions.Mix,
-            "Mix normally should activate a mixing-only session.");
+        Check(session.ActiveMode == MobileAudioMode.MixNormally && events[^1] == "Mix",
+            "Mix normally must activate with only the mix option.");
         session.Release(mixed);
-        var ducked = session.TryStart(MobileAudioMode.MixAndDuck);
-        Check(activations[^1] == (IosAudioOptions.Mix | IosAudioOptions.Duck),
-            "Mix and duck should use a mixing session with temporary ducking.");
-        session.Release(ducked);
-        Check(releases == 2 && session.ActiveMode == null,
-            "A completed ducking clip must immediately release its session.");
-        var exclusive = session.TryStart(MobileAudioMode.Exclusive);
-        Check(activations[^1] == IosAudioOptions.None && session.ActiveMode == MobileAudioMode.Exclusive,
-            "Exclusive should activate without mixing options.");
-        session.Release(ducked);
-        Check(releases == 2 && session.ActiveMode == MobileAudioMode.Exclusive,
-            "A stale callback must not release the next clip's session.");
-        session.Release(exclusive);
-        session.Release(exclusive);
-        Check(releases == 3, "Consecutive recordings must each release exactly once.");
+
+        var item = new IosRecordingState();
+        var selectedMode = item.ModeForActivation(MobileAudioMode.MixAndDuck);
         activationAllowed = false;
-        Check(session.TryStart(MobileAudioMode.Exclusive) == 0 && session.ActiveMode == null,
-            "A rejected activation must never own or start a clip.");
-        Console.WriteLine("PASS iOS modes, clip-only ducking, and stale session release");
-
+        Check(session.TryStart(selectedMode) == 0 && session.ActiveMode == null &&
+              item.ModeForActivation(MobileAudioMode.MixNormally) == MobileAudioMode.MixNormally,
+            "A denied activation must neither own a lease nor lock that recording's mode.");
         activationAllowed = true;
-        var suspension = new IosAudioSuspension();
-        var queue = new Queue<int>([1, 2, 3]);
-        var recording = queue.Peek();
-        var interrupted = session.TryStart(MobileAudioMode.MixAndDuck);
-        Check(suspension.BeginInterruption() && !suspension.BeginInterruption(),
-            "A duplicate begin must stay in the same interruption.");
+        var ducked = session.TryStart(selectedMode);
+        item.Activated(selectedMode);
+        Check(session.ActiveMode == MobileAudioMode.MixAndDuck &&
+              item.ModeForActivation(MobileAudioMode.Exclusive) == MobileAudioMode.MixAndDuck,
+            "A setting change cannot alter the active recording or its resumed segments.");
+        session.Release(ducked);
+        var resumed = session.TryStart(item.ModeForActivation(MobileAudioMode.Exclusive));
+        Check(events.TakeLast(3).SequenceEqual(["Mix, Duck", "release", "Mix, Duck"]),
+            "Ducking must be released before the next activation, including when resuming.");
+        session.Release(ducked);
+        Check(session.Owns(resumed) && events[^1] == "Mix, Duck", "Old release callbacks cannot unduck a new segment.");
+        session.Release(resumed);
+
+        var nextDucked = session.TryStart(new IosRecordingState().ModeForActivation(MobileAudioMode.MixAndDuck));
+        session.Release(nextDucked);
+        Check(events.TakeLast(4).SequenceEqual(["Mix, Duck", "release", "Mix, Duck", "release"]),
+            "Two consecutive ducked recordings each release priority.");
+        var nextExclusive = session.TryStart(new IosRecordingState().ModeForActivation(MobileAudioMode.Exclusive));
+        Check(events[^1] == "None" && session.ActiveMode == MobileAudioMode.Exclusive, "The next recording uses the new mode.");
+        session.Release(nextExclusive);
+        Check(events[^1] == "release" && session.ActiveMode == null, "Exclusive priority ends between recordings.");
+        Console.WriteLine("PASS iOS clip-scoped mixing, back-to-back ducking, stale release, and settings boundaries");
+    }
+
+    private static void FailedDeactivation()
+    {
+        var deactivationAllowed = false;
+        var deactivations = 0;
+        var activations = 0;
+        var session = new IosClipSession(_ => { activations++; return true; }, () =>
+        {
+            deactivations++;
+            return deactivationAllowed;
+        });
+        var outgoing = session.TryStart(MobileAudioMode.MixAndDuck);
+        Check(!session.Release(outgoing), "A failed release must leave native cleanup pending.");
+        Check(session.TryStart(MobileAudioMode.Exclusive) == 0 && activations == 1,
+            "A replacement cannot change category until the preceding deactivation succeeds.");
+        deactivationAllowed = true;
+        Check(session.FinishDeactivation(outgoing), "The original release can be retried.");
+        var replacement = session.TryStart(MobileAudioMode.Exclusive);
+        Check(session.FinishDeactivation(outgoing) && session.Owns(replacement) && deactivations == 3,
+            "A queued cleanup callback cannot deactivate a newer recording.");
+        session.Release(replacement);
+        Console.WriteLine("PASS iOS failed session release is retried before a new category can activate");
+    }
+
+    private static void BoundedReleaseRetries()
+    {
+        var calls = new List<string>();
+        var session = new IosClipSession(options => { calls.Add(options.ToString()); return true; },
+            () => { calls.Add("deactivate"); return false; },
+            () => { calls.Add("plain mix"); return true; });
+        var old = session.TryStart(MobileAudioMode.MixAndDuck);
+        Check(!session.Release(old), "A deactivation failure must retain lease-owned cleanup.");
+        var delays = new List<TimeSpan>();
+        while (session.NextReleaseDelay(old) is { } delay)
+        {
+            delays.Add(delay);
+            session.RetryRelease(old);
+        }
+        Check(delays.Count == 4 && delays.SequenceEqual(delays.Order()) &&
+              calls.Count(call => call == "plain mix") == 1 && session.PendingRelease == 0,
+            "The bounded backoff must fall back to a non-ducking category after native release retries fail.");
+
+        var newer = session.TryStart(MobileAudioMode.MixAndDuck);
+        var callsBeforeStaleRetry = calls.Count;
+        session.RetryRelease(old);
+        Check(session.Owns(newer) && session.ActiveMode == MobileAudioMode.MixAndDuck &&
+              calls.Count == callsBeforeStaleRetry,
+            "A delayed release must not deactivate or neutralize the next ducking lease.");
+
+        var stuckAttempts = 0;
+        var stuck = new IosClipSession(_ => true, () => { ++stuckAttempts; return false; }, () => false);
+        var stuckLease = stuck.TryStart(MobileAudioMode.Exclusive);
+        stuck.Release(stuckLease);
+        for (var retry = 0; retry < 10; retry++)
+            stuck.RetryRelease(stuckLease);
+        Check(stuckAttempts == 5 && stuck.PendingRelease == stuckLease && stuck.NextReleaseDelay(stuckLease) == null,
+            "If the OS rejects both deactivation and plain mixing, idle retries must stop at the budget.");
+        Console.WriteLine("PASS iOS bounded session-release retry, plain-mixing fallback, and stale lease fencing");
+    }
+
+    private static async Task StalledPlaybackRecoveryAsync()
+    {
+        static TimeSpan Elapsed(double seconds) => TimeSpan.FromSeconds(seconds);
+        var progress = new IosPlaybackProgress(12.5);
+        Check(!progress.IsStalled(12.5, waiting: true, Elapsed(0.25)) &&
+              !progress.IsStalled(12.5, waiting: true, Elapsed(1.9)) &&
+              progress.IsStalled(12.501, waiting: true, Elapsed(2.3)),
+            "WaitingToPlayAtSpecifiedRate with no meaningful progress must quickly release priority.");
+        var briefWait = new IosPlaybackProgress(1);
+        Check(!briefWait.IsStalled(1, true, Elapsed(0)) && !briefWait.IsStalled(1.25, false, Elapsed(1.9)),
+            "A brief buffer wait that recovers must keep the active lease.");
+        Check(new IosPlaybackProgress(12.5).IsStalled(12.49, waiting: false, Elapsed(5.1)),
+            "A player reporting Playing with a stationary or invalid timestamp must also time out.");
+
+        var recording = new IosRecordingState();
+        var released = 0;
+        var session = new IosClipSession(_ => true, () => { released++; return true; });
+        var mode = MobileAudioMode.MixAndDuck;
+        var lease = session.TryStart(mode);
+        recording.Activated(mode);
+        recording.Observe(12.5);
+        var retiredItem = new PlaybackCompletion();
+        Check(retiredItem.Reject() && session.Release(lease) && released == 1 &&
+              recording.TryRecoverFromStall() && recording.SeekTarget(0) == 12.5,
+            "Retire the stalled item before releasing priority and retain its position for one rebuild.");
+        var latest = session.TryStart(recording.ModeForActivation(MobileAudioMode.Exclusive));
+        Check(session.Owns(latest) && session.ActiveMode == mode && !retiredItem.Confirm(default) &&
+              !recording.TryRecoverFromStall(),
+            "The resumed clip keeps its original mode and bounded recovery, and the old item cannot signal completion.");
+        session.Release(latest);
+
+        var requests = new LivePlaybackRequests();
+        using var original = requests.Begin(manual: false);
+        var paused = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var retry = PlaybackAttempt.RunAsync(() => paused.Task.WaitAsync(original.Token), original.Token,
+            _ => throw new InvalidOperationException("Expected cancellation after stopping a stalled clip."));
+        requests.RetireCurrent();
+        Check(await retry == PlaybackOutcome.Canceled, "Explicit Stop must cancel the pending rebuild without advancing the queue.");
+        using var manual = requests.Begin(manual: true);
+        session.RetryRelease(lease);
+        Check(manual.CanContinue && !original.CanContinue, "An old cleanup cannot supersede a rapid manual selection.");
+        var failed = await PlaybackAttempt.RunAsync(() => Task.FromException(new TimeoutException()), manual.Token, _ => {});
+        Check(failed == PlaybackOutcome.Failed && !failed.AdvancesQueue(),
+            "A stall after the recovery budget must leave the recording pending.");
+        Console.WriteLine("PASS iOS waiting and no-progress stalls release the lease, preserve position, and honor Stop");
+    }
+
+    private static void MissingAndOutOfOrderInterruptions()
+    {
+        var state = new IosAudioSuspension();
+        state.RecommendResume(true);
+        Check(state.BeginInterruption() && !state.BeginInterruption() && state.IsBlocked,
+            "An unpaired early end cannot authorize playback after a later begin, and duplicate begins coalesce.");
+        state.Reconcile(canRetryActivation: false);
+        Check(state.IsBlocked, "Foregrounding alone cannot authorize audio when higher-priority audio is still possible.");
+        state.Reconcile(canRetryActivation: true);
+        Check(!state.IsBlocked && state.NeedsReconciliation, "An eligible foreground grants a probe for a missing legacy end.");
+        state.ActivationDenied();
+        Check(state.IsBlocked && state.RequiresPlay, "A rejected probe leaves the recording pending without spinning.");
+
+        state.SetCallActive(true);
+        state.RecommendResume(true);
+        Check(state.IsBlocked, "Even a positive resumption recommendation cannot bypass an observed call.");
+        state.SetCallActive(false);
+        Check(!state.IsBlocked, "The same recording may try to activate after the call ends.");
+        state.ActivationSucceeded();
+        state.RecommendResume(false);
+        Check(!state.IsBlocked && !state.NeedsReconciliation, "A stale negative recommendation cannot pause a resumed item.");
+
+        state.SetCallActive(true);
+        state.SetCallActive(false);
+        Check(state.IsBlocked, "CallKit alone must keep the recording pending until safe reconciliation.");
+        state.Reconcile(canRetryActivation: true);
+        Check(!state.IsBlocked, "An observed call ending is a fallback when neither native interruption notification arrives.");
+        state.ActivationSucceeded();
+        state.UnreportedPause();
+        state.RecommendResume(false);
+        state.Reconcile(canRetryActivation: true);
+        state.RecommendResume(true);
+        Check(state.RequiresPlay && state.IsBlocked, "A negative recommendation requires explicit action despite later foregrounding.");
+        state.RequestPlay();
+        Check(!state.IsBlocked, "Explicit Play can ask iOS to arbitrate again.");
+        Console.WriteLine("PASS iOS missing, duplicate, and reordered interruption signals require safe activation");
+    }
+
+    private static async Task ResumeRecordingAndAdvanceAtBoundaryAsync()
+    {
+        var session = new IosClipSession(_ => true, () => true);
+        var state = new IosAudioSuspension();
+        var position = new IosRecordingState();
+        var queue = new Queue<int>([10, 11, 12]);
+        var finished = new TaskCompletionSource();
+        var recording = PlaybackAttempt.RunAsync(() => finished.Task, CancellationToken.None, _ => { });
+        var outgoing = session.TryStart(MobileAudioMode.MixAndDuck);
+        position.Observe(5.4);
+        state.BeginInterruption();
         session.Invalidate();
-        session.Release(interrupted);
-        Check(suspension.IsBlocked && queue.Peek() == recording && releases == 3,
-            "A phone interruption must preserve the current recording and the OS-owned deactivation.");
-        suspension.EndInterruption(shouldResume: true);
-        Check(!suspension.IsBlocked && queue.Peek() == recording,
-            "Resume should continue the interrupted recording.");
-        suspension.EndInterruption(shouldResume: false);
-        Check(!suspension.IsBlocked, "A stale end callback must not block resumed playback.");
-        suspension.BeginInterruption();
-        suspension.Foreground();
-        Check(!suspension.IsBlocked, "Foreground recovery should allow iOS to arbitrate after a missing end.");
-        suspension.BeginInterruption();
-        suspension.EndInterruption(shouldResume: false);
-        suspension.Foreground();
-        Check(suspension.RequiresPlay, "A denied resume must require user action, including after foregrounding.");
-        suspension.RequestPlay();
-        Check(queue.Dequeue() == recording && queue.SequenceEqual([2, 3]),
-            "Only completion should move past the interrupted recording.");
-        Console.WriteLine("PASS iOS interrupted clip, duplicate or missing notifications, and queue boundary");
+        session.Release(outgoing);
+        Check(state.IsBlocked && !recording.IsCompleted && queue.Peek() == 10, "An interrupted segment cannot complete its recording.");
+        state.RecommendResume(true);
+        var resumed = session.TryStart(MobileAudioMode.MixAndDuck);
+        state.ActivationSucceeded();
+        Check(session.Owns(resumed) && position.SeekTarget(5.4) == null && position.SeekTarget(0) == 5.4,
+            "Resume the same prepared player or seek a rebuilt player to the saved position.");
 
+        state.BeginInterruption();
+        session.Invalidate();
+        finished.SetResult();
+        if ((await recording).AdvancesQueue())
+            queue.Dequeue();
+        Check(queue.Peek() == 11 && state.IsBlocked, "A real end at an interruption boundary advances once while the next item waits.");
+        state.RecommendResume(true);
+        Check(!state.IsBlocked && queue.SequenceEqual([11, 12]), "Recovery must not replay the completed item or skip a pending one.");
+        Console.WriteLine("PASS iOS resumption retains position and only true completion advances at an interruption boundary");
+    }
+
+    private static void PrivateRouteRecovery()
+    {
         var routes = new IosPrivateAudioRoutes();
-        Check(!routes.DeviceUnavailable(["bluetooth"], ["bluetooth", "speaker"]),
-            "A private output still present is not a disconnection.");
-        Check(routes.DeviceUnavailable(["bluetooth"], ["speaker"]) &&
-              !routes.DeviceUnavailable(["bluetooth"], ["speaker"]),
-            "A Bluetooth disconnect and its duplicate should produce one event.");
-        suspension.RouteDisconnected(AudioDisconnectionBehavior.PausePlayback);
-        suspension.BeginInterruption();
-        suspension.EndInterruption(shouldResume: true);
-        suspension.Foreground();
-        Check(suspension.IsBlocked && suspension.RequiresPlay,
-            "A route pause must survive call recovery and require an explicit action.");
-        suspension.RequestPlay();
-        routes.DeviceAvailable();
-        Check(routes.DeviceUnavailable(["wired"], ["speaker"]), "A wired headset removal should be handled between clips.");
-        suspension.UnreportedPause();
-        suspension.RouteDisconnected(AudioDisconnectionBehavior.ContinueThroughPhoneSpeaker);
-        Check(!suspension.IsBlocked && suspension.RouteGeneration == 2,
-            "A verified disconnect in Continue mode should resolve AVPlayer's automatic pause.");
-        Console.WriteLine("PASS iOS wired and Bluetooth disconnection, duplicate events, and route preferences");
+        var state = new IosAudioSuspension();
+        var pause = AudioDisconnectionBehavior.PausePlayback;
+        var keepPlaying = AudioDisconnectionBehavior.ContinueThroughPhoneSpeaker;
+        routes.AcceptCurrentRoute(["wired"]);
+        Check(!routes.Reconcile(["wired"], pause, out var disconnected) && !disconnected,
+            "An unchanged private route is safe after suspension.");
+        Check(routes.Reconcile([], pause, out disconnected) && disconnected &&
+              routes.Reconcile([], pause, out disconnected) && !disconnected,
+            "A missing or unknown private route requires Play and must be reported once.");
+        Check(!routes.DeviceUnavailable(["wired"], ["speaker"]), "A late callback for the reconciled route is a duplicate.");
+        state.RouteDisconnected(pause);
+        state.BeginInterruption();
+        state.RecommendResume(true);
+        state.Reconcile(canRetryActivation: true);
+        Check(state.RequiresPlay && state.IsBlocked, "A system resumption recommendation cannot override route privacy.");
+        routes.AcceptCurrentRoute([]);
+        state.RequestPlay();
+        Check(!routes.Reconcile([], pause, out _) && !state.IsBlocked &&
+              !routes.DeviceUnavailable(["wired"], ["speaker"]),
+            "An explicit Play accepts the speaker; a duplicate old removal must not pause it again.");
+        state.ActivationSucceeded();
 
-        var suspendedRoutes = new IosPrivateAudioRoutes();
-        suspendedRoutes.AcceptCurrentRoute(["wired"]);
-        Check(!suspendedRoutes.Reconcile(["wired"], AudioDisconnectionBehavior.PausePlayback),
-            "A confirmed private route should still be usable.");
-        Check(suspendedRoutes.Reconcile([], AudioDisconnectionBehavior.PausePlayback) &&
-              suspendedRoutes.Reconcile([], AudioDisconnectionBehavior.PausePlayback),
-            "A missing route event or initially unknown output must not erase the protected route.");
-        suspension.RouteDisconnected(AudioDisconnectionBehavior.PausePlayback);
-        suspension.Foreground();
-        Check(suspension.RequiresPlay, "Foreground activation cannot release the privacy pause.");
-        suspendedRoutes.AcceptCurrentRoute([]);
-        suspension.RequestPlay();
-        Check(!suspendedRoutes.Reconcile([], AudioDisconnectionBehavior.PausePlayback) && !suspension.RequiresPlay,
-            "An explicit Play can accept the new speaker route.");
-        suspendedRoutes.AcceptCurrentRoute(["bluetooth"]);
-        Check(!suspendedRoutes.Reconcile([], AudioDisconnectionBehavior.ContinueThroughPhoneSpeaker),
-            "The continue preference should allow a missing Bluetooth output.");
-        Console.WriteLine("PASS iOS privacy survives suspension with missing route notifications");
+        routes.AcceptCurrentRoute(["bluetooth"]);
+        Check(!routes.Reconcile([], keepPlaying, out disconnected) && disconnected,
+            "Continue can reconcile a missed Bluetooth disconnect without requiring Play.");
+        state.UnreportedPause();
+        state.RouteDeactivated(keepPlaying, hadClip: false);
+        state.RouteDeactivated(keepPlaying, hadClip: false);
+        Check(!state.IsBlocked && state.RouteGeneration == 2, "A verified Continue route change can resume the same item once.");
+        Console.WriteLine("PASS iOS suspended wired and Bluetooth privacy, speaker opt-in, and route deduplication");
+    }
 
+    private static async Task StopAndReplaceAsync()
+    {
+        var session = new IosClipSession(_ => true, () => true);
+        var state = new IosAudioSuspension();
+        var lifecycle = new MonitoringLifecycle();
+        var run = lifecycle.TryBeginStart()!;
+        lifecycle.Activate(run);
         var playback = new LivePlaybackRequests();
-        using var request = playback.Begin(manual: false);
-        suspension.BeginInterruption();
-        playback.CancelCurrent();
-        suspension.Stop();
-        suspension.EndInterruption(shouldResume: true);
-        Check(!request.CanContinue, "A late interruption end must not restart explicitly stopped playback.");
+        using var original = playback.Begin(manual: false);
+        var originalLease = session.TryStart(MobileAudioMode.MixAndDuck);
+        var oldSignal = session.SignalGeneration;
+        state.BeginInterruption();
+        session.Invalidate();
+        var completed = new TaskCompletionSource();
+        var result = PlaybackAttempt.RunAsync(() => completed.Task.WaitAsync(original.Token), original.Token, _ => { });
+        await lifecycle.StopAsync(_ => playback.RetireCurrent(), _ => session.InvalidatePendingSignals(), _ =>
+        {
+            state.Stop();
+            return Task.CompletedTask;
+        });
 
-        var generation = suspension.MediaGeneration;
-        suspension.MediaServicesLost();
-        suspension.RequestPlay();
-        Check(suspension.IsBlocked, "Explicit Play cannot start until iOS media services are available.");
-        suspension.MediaServicesReset();
-        suspension.MediaServicesReset();
-        suspension.Foreground();
-        Check(suspension.RequiresPlay && suspension.MediaGeneration == generation + 1,
-            "A media reset must invalidate the old player once and wait for explicit Play.");
-        suspension.RequestPlay();
-        Check(!suspension.IsBlocked, "Explicit Play should create a new player after a media reset.");
-        Console.WriteLine("PASS iOS media reset and explicit Stop during interruption");
+        using var newRequest = playback.Begin(manual: true);
+        state.RequestPlay();
+        var replacementLease = session.TryStart(MobileAudioMode.Exclusive);
+        if (session.IsCurrentSignal(oldSignal))
+            state.RecommendResume(false);
+        session.Release(originalLease);
+        Check(!session.IsCurrentSignal(oldSignal) && session.Owns(replacementLease) && newRequest.CanContinue,
+            "A queued old native signal or skipped player's release cannot alter a rapid manual replacement.");
+        Check(!(await result).AdvancesQueue() && !lifecycle.CanRecover(run) && !state.IsBlocked,
+            "Explicit Stop wins over a delayed recovery, and the next explicit action can activate normally.");
+        session.Release(replacementLease);
+        Console.WriteLine("PASS iOS explicit Stop and rapid manual replacement fence stale recovery and release callbacks");
+    }
 
+    private static void MediaResetAndPlayerRebuild()
+    {
+        var state = new IosAudioSuspension();
+        var recording = new IosRecordingState();
+        recording.Observe(7.5);
+        recording.Observe(0);
+        recording.Observe(double.NaN);
+        var initial = state.MediaGeneration;
+        state.MediaServicesLost();
+        state.RequestPlay();
+        Check(state.IsBlocked, "Explicit Play cannot start while media services are unavailable.");
+        state.MediaServicesReset();
+        state.MediaServicesReset();
+        state.Reconcile(canRetryActivation: true);
+        Check(state.RequiresPlay && state.MediaGeneration == initial + 1,
+            "Duplicate native or player reset reports must invalidate one generation and require Play.");
+        state.RequestPlay();
+        Check(!state.IsBlocked && recording.SeekTarget(0) == 7.5, "After Play a rebuilt item can seek the last reliable position.");
+        recording.Restart();
+        Check(recording.SeekTarget(0) == null, "If seeking fails, the replacement starts at the beginning.");
+        Console.WriteLine("PASS iOS media reset, saved clip position, and replay fallback");
+    }
+
+    private static void ForegroundSocketRecovery()
+    {
         var recovery = new LiveStreamRecovery();
         var since = DateTimeOffset.FromUnixTimeMilliseconds(1_700_000_000_800);
         var signal = recovery.Pending;
@@ -136,7 +342,7 @@ internal static class IosAudioTests
             "Foreground recovery should wake the socket and keep the earliest eligible boundary.");
         Check(!recovery.Pending.IsCompleted && recovery.Take() == null && new LiveStreamRecovery().Take() == null,
             "A handled recovery must not repeat or carry into a new monitoring run.");
-        Console.WriteLine("PASS iOS foreground recovery coalescing and per-run isolation");
+        Console.WriteLine("PASS iOS foreground socket recovery coalescing and per-run isolation");
     }
 
     private static void Check(bool condition, string message)

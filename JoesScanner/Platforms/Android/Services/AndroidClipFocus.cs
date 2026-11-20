@@ -11,8 +11,10 @@ internal sealed class AndroidClipFocus(AudioManager manager) : Java.Lang.Object,
     private AudioFocusRequestClass? _request;
     private readonly AndroidClipFocusState _state = new();
 
-    public Task<bool> Granted => _state.Ready;
-    public Task Lost => _state.Lost;
+    public AndroidClipFocusStatus Status => _state.Status;
+    public Task Changed => _state.Changed;
+
+    public event Action? LostAudibility;
 
     public void Request(MobileAudioMode mode, AudioAttributes attributes)
     {
@@ -46,10 +48,18 @@ internal sealed class AndroidClipFocus(AudioManager manager) : Java.Lang.Object,
 
     public void OnAudioFocusChange(AudioFocus focusChange)
     {
-        if (focusChange == AudioFocus.Gain)
-            _state.OnGain();
-        else if (focusChange is AudioFocus.Loss or AudioFocus.LossTransient or AudioFocus.LossTransientCanDuck)
-            _state.OnLoss();
+        var status = focusChange switch
+        {
+            AudioFocus.Gain => AndroidClipFocusStatus.Granted,
+            AudioFocus.Loss => AndroidClipFocusStatus.PermanentLoss,
+            AudioFocus.LossTransient => AndroidClipFocusStatus.TransientLoss,
+            AudioFocus.LossTransientCanDuck => AndroidClipFocusStatus.DuckableLoss,
+            _ => _state.Status
+        };
+        var previous = _state.Status;
+        _state.OnChange(status);
+        if (_state.Status != previous && _state.Status != AndroidClipFocusStatus.Granted)
+            LostAudibility?.Invoke();
     }
 
     public void Release()

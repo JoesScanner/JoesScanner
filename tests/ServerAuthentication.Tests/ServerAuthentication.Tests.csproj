@@ -6,17 +6,50 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="11.0.0" />
+    <PackageReference Include="SQLite" Version="3.54.1" />
+    <Compile Include="../../JoesScanner/Services/DbBootstrapper.cs" Link="DbBootstrapper.cs" />
+    <Compile Include="../../JoesScanner/Services/DurableLiveQueue.cs" Link="DurableLiveQueue.cs" />
+    <Compile Include="../../JoesScanner/Services/IDatabasePathProvider.cs" Link="IDatabasePathProvider.cs" />
     <Compile Include="../../JoesScanner/Helpers/HostedServerRules.cs" Link="HostedServerRules.cs" />
+    <Compile Include="../../JoesScanner/Helpers/ServerKeyHelper.cs" Link="ServerKeyHelper.cs" />
     <Compile Include="../../JoesScanner/Helpers/TextNormalizationHelper.cs" Link="TextNormalizationHelper.cs" />
     <Compile Include="../../JoesScanner/Models/ServerDirectoryEntry.cs" Link="ServerDirectoryEntry.cs" />
     <Compile Include="../../JoesScanner/Models/MobileAudioPreferences.cs" Link="MobileAudioPreferences.cs" />
     <Compile Include="../../JoesScanner/Services/ISettingsService.cs" Link="ISettingsService.cs" />
+    <Compile Include="../../JoesScanner/Services/WordPressSession.cs" Link="WordPressSession.cs" />
+    <Compile Include="../../JoesScanner/Services/SubscriptionService.cs" Link="SubscriptionService.cs" />
+    <Compile Include="../../JoesScanner/Services/ITelemetryService.cs" Link="ITelemetryService.cs" />
+    <Compile Include="../../JoesScanner/Services/AuthLookupsSyncService.cs" Link="AuthLookupsSyncService.cs" />
+    <Compile Include="../../JoesScanner/Services/IAuthLookupsSyncService.cs" Link="IAuthLookupsSyncService.cs" />
+    <Compile Include="../../JoesScanner/Services/CommunicationsSyncCoordinator.cs" Link="CommunicationsSyncCoordinator.cs" />
+    <Compile Include="../../JoesScanner/Services/CommunicationsService.cs" Link="CommunicationsService.cs" />
+    <Compile Include="../../JoesScanner/Services/ICommunicationsSyncCoordinator.cs" Link="ICommunicationsSyncCoordinator.cs" />
+    <Compile Include="../../JoesScanner/Services/ICommunicationsService.cs" Link="ICommunicationsService.cs" />
+    <Compile Include="../../JoesScanner/Models/CommsMessage.cs" Link="CommsMessage.cs" />
+    <Compile Include="../../JoesScanner/Helpers/DateParseHelper.cs" Link="DateParseHelper.cs" />
+    <Compile Include="../../JoesScanner/Helpers/DeviceInfoHelper.cs" Link="DeviceInfoHelper.cs" />
+    <Compile Include="../../JoesScanner/Services/SettingsService.cs" Link="SettingsService.cs" />
+    <Compile Include="../../JoesScanner/Services/SettingsService.SavedCredentials.cs" Link="SettingsService.SavedCredentials.cs" />
+    <Compile Include="../../JoesScanner/Services/ProtectedCredentialStorage.cs" Link="ProtectedCredentialStorage.cs" />
+    <Compile Include="../../JoesScanner/Services/SavedConnectionUrl.cs" Link="SavedConnectionUrl.cs" />
+    <Compile Include="../../JoesScanner/Services/DiagnosticRedaction.cs" Link="DiagnosticRedaction.cs" />
+    <Compile Include="../../JoesScanner/Services/DiagnosticZip.cs" Link="DiagnosticZip.cs" />
+    <EmbeddedResource Include="../../JoesScanner/Platforms/Android/AndroidManifest.xml" LogicalName="AndroidManifest.xml" />
+    <EmbeddedResource Include="../../JoesScanner/Platforms/Android/Resources/xml/credential_backup_rules.xml" LogicalName="credential_backup_rules.xml" />
+    <EmbeddedResource Include="../../JoesScanner/Platforms/Android/Resources/xml/credential_extraction_rules.xml" LogicalName="credential_extraction_rules.xml" />
     <Compile Include="../../JoesScanner/Services/ServerAuthentication.cs" Link="ServerAuthentication.cs" />
     <Compile Include="../../JoesScanner/Services/ServerAuthenticationHandler.cs" Link="ServerAuthenticationHandler.cs" />
     <Compile Include="../../JoesScanner/Services/LivePlaybackRequests.cs" Link="LivePlaybackRequests.cs" />
     <Compile Include="../../JoesScanner/Services/PlaybackOutcome.cs" Link="PlaybackOutcome.cs" />
+    <Compile Include="../../JoesScanner/Services/PlaybackCompletion.cs" Link="PlaybackCompletion.cs" />
     <Compile Include="../../JoesScanner/Services/CallStreamService.cs" Link="CallStreamService.cs" />
     <Compile Include="../../JoesScanner/Services/ICallStreamService.cs" Link="ICallStreamService.cs" />
+    <Compile Include="../../JoesScanner/Services/CallHistoryService.cs" Link="CallHistoryService.cs" />
+    <Compile Include="../../JoesScanner/Services/ICallHistoryService.cs" Link="ICallHistoryService.cs" />
+    <Compile Include="../../JoesScanner/Services/CallDownloadService.cs" Link="CallDownloadService.cs" />
+    <Compile Include="../../JoesScanner/Services/ICallDownloadService.cs" Link="ICallDownloadService.cs" />
+    <Compile Include="../../JoesScanner/Services/PlaybackOwnership.cs" Link="PlaybackOwnership.cs" />
     <Compile Include="../../JoesScanner/Services/IAddressDetectionService.cs" Link="IAddressDetectionService.cs" />
     <Compile Include="../../JoesScanner/Services/ILocalCallsRepository.cs" Link="ILocalCallsRepository.cs" />
     <Compile Include="../../JoesScanner/Services/ISubscriptionService.cs" Link="ISubscriptionService.cs" />
@@ -29,6 +62,10 @@
     <Compile Include="../../JoesScanner/Models/CallCardLayout.cs" Link="CallCardLayout.cs" />
     <Compile Include="../../JoesScanner/Models/CallCardMetadata.cs" Link="CallCardMetadata.cs" />
     <Compile Include="../../JoesScanner/Models/CallItem.cs" Link="CallItem.cs" />
+    <Compile Include="../../JoesScanner/Models/RecordingAccessContext.cs" Link="RecordingAccessContext.cs" />
+    <Compile Include="../../JoesScanner/Services/RecordingPlaybackAccess.cs" Link="RecordingPlaybackAccess.cs" />
+    <Compile Include="../../JoesScanner/Services/RecordingAudioRecovery.cs" Link="RecordingAudioRecovery.cs" />
+    <Compile Include="../../JoesScanner/Services/RecordingStorageReference.cs" Link="RecordingStorageReference.cs" />
     <Compile Include="../../JoesScanner/Models/LiveCallState.cs" Link="LiveCallState.cs" />
     <Compile Include="../CallCardOptions.Tests/TestDoubles.cs" Link="ModelTestDoubles.cs" />
   </ItemGroup>

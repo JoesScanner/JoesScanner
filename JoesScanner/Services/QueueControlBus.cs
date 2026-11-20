@@ -9,10 +9,6 @@ namespace JoesScanner.Services
         // Legacy: stops the current main tab audio immediately.
         public static event Action? StopMainAudioRequested;
 
-        // New: soft mutes the main tab audio without stopping the live queue.
-        // When muted, the main queue continues to run and consumes calls silently.
-        public static event Action<bool>? MainAudioMuteRequested;
-
         public static void RequestStopMainQueue()
         {
             try
@@ -35,15 +31,5 @@ namespace JoesScanner.Services
             }
         }
 
-        public static void RequestSetMainAudioMuted(bool isMuted)
-        {
-            try
-            {
-                MainAudioMuteRequested?.Invoke(isMuted);
-            }
-            catch
-            {
-            }
-        }
     }
 }

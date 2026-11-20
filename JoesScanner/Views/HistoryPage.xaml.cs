@@ -6,6 +6,7 @@ using System.Linq;
 using System;
 using System.Threading.Tasks;
 using System.Collections.Generic;
+using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Maui.ApplicationModel.DataTransfer;
 using Microsoft.Maui.Controls;
@@ -18,6 +19,8 @@ namespace JoesScanner.Views
         private readonly ICallDownloadService _downloadService;
         private readonly ISettingsService _settingsService;
         private int _ignoreNextScrollEvents;
+        private int _appearanceGeneration;
+        private bool _isAppearing;
         private bool _isDropdownOpen;
 
         private bool _addressAlertHandlersAttached;
@@ -38,6 +41,9 @@ namespace JoesScanner.Views
         {
             base.OnAppearing();
 
+            Interlocked.Increment(ref _appearanceGeneration);
+            _isAppearing = true;
+            _viewModel.UseHistoryDispatcher(Dispatcher);
             AttachAddressAlertHandlers();
 
             _viewModel.ScrollRequested -= OnScrollRequested;
@@ -91,6 +97,8 @@ namespace JoesScanner.Views
 
         protected override void OnDisappearing()
         {
+            _isAppearing = false;
+            Interlocked.Increment(ref _appearanceGeneration);
             base.OnDisappearing();
 
             _viewModel.ScrollRequested -= OnScrollRequested;
@@ -108,8 +116,11 @@ namespace JoesScanner.Views
 
         private void OnScrollRequested(CallItem call, ScrollToPosition position)
         {
-            MainThread.BeginInvokeOnMainThread(() =>
+            var generation = Volatile.Read(ref _appearanceGeneration);
+            void Scroll()
             {
+                if (!_isAppearing || generation != _appearanceGeneration)
+                    return;
                 try
                 {
                     _ignoreNextScrollEvents = 3;
@@ -118,7 +129,12 @@ namespace JoesScanner.Views
                 catch
                 {
                 }
-            });
+            }
+
+            if (Dispatcher.IsDispatchRequired)
+                Dispatcher.Dispatch(Scroll);
+            else
+                Scroll();
         }
 
         private void OnCallSelected(object sender, SelectionChangedEventArgs e)

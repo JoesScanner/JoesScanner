@@ -6,7 +6,8 @@ namespace JoesScanner.Services
     public interface IHistoryLookupsRepository
     {
         Task<(HistoryLookupData? Data, DateTime? FetchedUtc)> GetAsync(string serverKey, CancellationToken cancellationToken = default);
-        Task UpsertAsync(string serverKey, HistoryLookupData data, DateTime fetchedUtc, CancellationToken cancellationToken = default);
+        Task UpsertAsync(string serverKey, HistoryLookupData data, DateTime fetchedUtc, CancellationToken cancellationToken = default,
+            Func<Action, bool>? publish = null);
     }
 
     // Stores History dropdown lookup payloads per server.
@@ -80,9 +81,10 @@ LIMIT 1;";
             }
         }
 
-        public async Task UpsertAsync(string serverKey, HistoryLookupData data, DateTime fetchedUtc, CancellationToken cancellationToken = default)
+        public async Task UpsertAsync(string serverKey, HistoryLookupData data, DateTime fetchedUtc, CancellationToken cancellationToken = default,
+            Func<Action, bool>? publish = null)
         {
-            if (string.IsNullOrWhiteSpace(serverKey) || data == null)
+            if (RecordingStorageReference.ServerKey(serverKey) is not { } normalizedServerKey || data == null)
                 return;
 
             await EnsureSchemaAsync(cancellationToken);
@@ -115,14 +117,21 @@ DO UPDATE SET
     talkgroups_json = excluded.talkgroups_json,
     talkgroup_groups_json = excluded.talkgroup_groups_json;";
 
-            cmd.Parameters.AddWithValue("$server_key", serverKey);
+            cmd.Parameters.AddWithValue("$server_key", normalizedServerKey);
             cmd.Parameters.AddWithValue("$fetched_utc", fetchedUtc.ToUniversalTime().ToString("O"));
             cmd.Parameters.AddWithValue("$receivers", receiversJson);
             cmd.Parameters.AddWithValue("$sites", sitesJson);
             cmd.Parameters.AddWithValue("$talkgroups", talkgroupsJson);
             cmd.Parameters.AddWithValue("$groups", groupsJson);
 
-            await cmd.ExecuteNonQueryAsync(cancellationToken);
+            if (publish == null)
+                await cmd.ExecuteNonQueryAsync(cancellationToken);
+            else
+                publish(() =>
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    cmd.ExecuteNonQuery();
+                });
         }
 
         private async Task EnsureSchemaAsync(CancellationToken cancellationToken)

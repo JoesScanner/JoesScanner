@@ -1,4 +1,5 @@
 using Microsoft.Maui.Controls;
+using Microsoft.Maui.Graphics;
 using JoesScanner.Models;
 
 namespace JoesScanner.Services
@@ -18,6 +19,7 @@ namespace JoesScanner.Services
         private Task? _loopTask;
         private int _pageActiveCount;
         private long _lastSeq;
+        private long? _accountVersion;
         private int _pollTick;
         private List<CommsMessage> _messages = new();
         private string _statusText = string.Empty;
@@ -34,9 +36,10 @@ namespace JoesScanner.Services
         {
             get
             {
+                var accountVersion = _settings.ReadAccountSession().AccountVersion;
                 lock (_stateLock)
                 {
-                    return _messages.ToList();
+                    return _accountVersion == accountVersion ? _messages.ToList() : [];
                 }
             }
         }
@@ -151,115 +154,127 @@ namespace JoesScanner.Services
             }
         }
 
-        private async Task SyncOnceAsync(bool forceSnapshot, bool suppressAuthErrors, CancellationToken cancellationToken)
+        internal async Task SyncOnceAsync(bool forceSnapshot, bool suppressAuthErrors, CancellationToken cancellationToken)
         {
             await _syncLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+            WordPressSession? session = null;
             try
             {
-                var serverUrl = _settings.AuthServerBaseUrl ?? string.Empty;
-                var token = _settings.AuthSessionToken ?? string.Empty;
+                session = WordPressSession.Capture(_settings);
                 long sinceSeq;
-
+                var reset = false;
                 lock (_stateLock)
                 {
+                    if (_accountVersion != session.AccountVersion)
+                    {
+                        _accountVersion = session.AccountVersion;
+                        _lastSeq = 0;
+                        _statusText = string.Empty;
+                        reset = _messages.Count != 0;
+                        _messages = new();
+                        forceSnapshot = true;
+                    }
                     sinceSeq = _lastSeq;
                 }
+                if (reset && session.IsCurrent)
+                    RaiseChanged();
 
                 var result = await _communicationsService.SyncAsync(
-                    serverUrl,
-                    token,
-                    sinceSeq,
-                    forceSnapshot,
-                    cancellationToken).ConfigureAwait(false);
-
-                if (!result.Ok)
+                    session.BaseUrl, session.Token, sinceSeq, forceSnapshot, cancellationToken).ConfigureAwait(false);
+                var notify = false;
+                session.TryApply(() =>
                 {
-                    if (suppressAuthErrors && IsAuthNotReadyMessage(result.Message))
-                        return;
-
-                    var errorText = string.IsNullOrWhiteSpace(result.Message) ? "Unable to load messages." : result.Message;
-                    if (TryUpdateStatus(errorText))
-                        RaiseChanged();
-                    return;
-                }
-
-                var changed = false;
-                var newMessages = Messages.ToList();
-                long lastKnownId;
-
-                if (result.HasSnapshot)
-                {
-                    newMessages = result.Snapshot
-                        .OrderByDescending(m => m.CreatedAtUtc)
-                        .ToList();
-
-                    changed |= ReplaceMessagesIfNeeded(newMessages);
-                    lastKnownId = newMessages.Count > 0 ? newMessages.Max(m => m.Id) : 0;
-                }
-                else
-                {
-                    var deletes = result.Changes
-                        .Where(c => string.Equals(c.Type, "delete", StringComparison.OrdinalIgnoreCase))
-                        .Select(c => c.MessageId)
-                        .ToHashSet();
-
-                    if (deletes.Count > 0)
+                    if (!result.Ok)
                     {
-                        newMessages.RemoveAll(m => deletes.Contains(m.Id));
-                        changed = true;
+                        if (suppressAuthErrors && IsAuthNotReadyMessage(result.Message))
+                            return;
+
+                        var errorText = string.IsNullOrWhiteSpace(result.Message) ? "Unable to load messages." : result.Message;
+                        notify = TryUpdateStatus(errorText);
+                        return;
                     }
 
-                    var upserts = result.Changes
-                        .Where(c => string.Equals(c.Type, "upsert", StringComparison.OrdinalIgnoreCase) && c.Message != null)
-                        .Select(c => c.Message!)
-                        .ToList();
+                    var changed = false;
+                    var newMessages = Messages.ToList();
+                    long lastKnownId;
 
-                    if (upserts.Count > 0)
+                    if (result.HasSnapshot)
                     {
-                        foreach (var msg in upserts)
-                        {
-                            var existingIndex = newMessages.FindIndex(x => x.Id == msg.Id);
-                            if (existingIndex >= 0)
-                                newMessages[existingIndex] = msg;
-                            else
-                                newMessages.Add(msg);
-                        }
-
-                        newMessages = newMessages
+                        newMessages = result.Snapshot
                             .OrderByDescending(m => m.CreatedAtUtc)
                             .ToList();
 
-                        changed = true;
+                        changed |= ReplaceMessagesIfNeeded(newMessages);
+                        lastKnownId = newMessages.Count > 0 ? newMessages.Max(m => m.Id) : 0;
+                    }
+                    else
+                    {
+                        var deletes = result.Changes
+                            .Where(c => string.Equals(c.Type, "delete", StringComparison.OrdinalIgnoreCase))
+                            .Select(c => c.MessageId)
+                            .ToHashSet();
+
+                        if (deletes.Count > 0)
+                        {
+                            newMessages.RemoveAll(m => deletes.Contains(m.Id));
+                            changed = true;
+                        }
+
+                        var upserts = result.Changes
+                            .Where(c => string.Equals(c.Type, "upsert", StringComparison.OrdinalIgnoreCase) && c.Message != null)
+                            .Select(c => c.Message!)
+                            .ToList();
+
+                        if (upserts.Count > 0)
+                        {
+                            foreach (var msg in upserts)
+                            {
+                                var existingIndex = newMessages.FindIndex(x => x.Id == msg.Id);
+                                if (existingIndex >= 0)
+                                    newMessages[existingIndex] = msg;
+                                else
+                                    newMessages.Add(msg);
+                            }
+
+                            newMessages = newMessages
+                                .OrderByDescending(m => m.CreatedAtUtc)
+                                .ToList();
+
+                            changed = true;
+                        }
+
+                        if (changed)
+                            changed |= ReplaceMessagesIfNeeded(newMessages);
+
+                        lastKnownId = newMessages.Count > 0 ? newMessages.Max(m => m.Id) : 0;
                     }
 
-                    if (changed)
-                        changed |= ReplaceMessagesIfNeeded(newMessages);
+                    lock (_stateLock)
+                    {
+                        if (result.NextSeq > _lastSeq)
+                            _lastSeq = result.NextSeq;
+                    }
 
-                    lastKnownId = newMessages.Count > 0 ? newMessages.Max(m => m.Id) : 0;
-                }
+                    if (TryUpdateLastKnown(lastKnownId))
+                        changed = true;
 
-                lock (_stateLock)
-                {
-                    if (result.NextSeq > _lastSeq)
-                        _lastSeq = result.NextSeq;
-                }
+                    var newStatusText = newMessages.Count == 0 ? "No messages yet." : string.Empty;
+                    if (TryUpdateStatus(newStatusText))
+                        changed = true;
 
-                if (TryUpdateLastKnown(lastKnownId))
-                    changed = true;
-
-                var newStatusText = newMessages.Count == 0 ? "No messages yet." : string.Empty;
-                if (TryUpdateStatus(newStatusText))
-                    changed = true;
-
-                if (changed)
+                    notify = changed;
+                });
+                if (notify && session.IsCurrent)
                     RaiseChanged();
             }
             catch (OperationCanceledException)
             {
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                if (TryUpdateStatus(ex.Message))
+                var changed = false;
+                session?.TryApply(() => changed = TryUpdateStatus("Unable to load messages."));
+                if (changed && session!.IsCurrent)
                     RaiseChanged();
             }
             finally

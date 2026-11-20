@@ -13,9 +13,13 @@ namespace JoesScanner.Platforms.Android.Services
     public static class AndroidMediaCenter
     {
         public const string NotificationChannelId = "joesscanner_playback";
-        public const int NotificationId = 41001;
+        private const int StandaloneNotificationId = 41001;
+        internal const string ExtraMonitoringRun = "app.joesscanner.media_run";
+        internal static int NotificationIdForRun(long runId) =>
+            runId == 0 ? StandaloneNotificationId : StandaloneNotificationId + 1 + (int)(runId & 0x3fffffff);
 
         private static MediaSession? _session;
+        private static long _monitoringRunId;
         private static string _title = "Joe's Scanner";
         private static string _subtitle = "Disconnected";
         private static bool _isConnected;
@@ -45,11 +49,27 @@ namespace JoesScanner.Platforms.Android.Services
 
             _session = new MediaSession(context, "JoesScannerMediaSession");
             _session.SetFlags(MediaSessionFlags.HandlesMediaButtons | MediaSessionFlags.HandlesTransportControls);
-            _session.SetCallback(new SessionCallback());
+            _session.SetCallback(new SessionCallback(_monitoringRunId));
             _session.Active = true;
 
             EnsureChannel(context);
             SetPlaybackState(context, false);
+        }
+
+        internal static void BeginMonitoringRun(Context context, long runId)
+        {
+            Clear(context);
+            _monitoringRunId = runId;
+            _subtitle = "Starting monitoring";
+        }
+
+        internal static void EndMonitoringRun(Context context, long runId)
+        {
+            if (_monitoringRunId != runId)
+                return;
+
+            Clear(context);
+            _monitoringRunId = 0;
         }
 
         public static void SetConnected(Context context, bool isConnected)
@@ -151,12 +171,10 @@ namespace JoesScanner.Platforms.Android.Services
             UpdateNotification(context);
         }
 
-        public static void HandleAction(Context context, string? action)
+        internal static void HandleAction(long runId, string? action)
         {
-            if (string.IsNullOrWhiteSpace(action))
+            if (runId != _monitoringRunId || (runId == 0 ? _session == null : !SystemMediaService.AndroidForeground.IsCurrent(runId)))
                 return;
-
-            EnsureInitialized(context);
 
             try
             {
@@ -225,7 +243,7 @@ namespace JoesScanner.Platforms.Android.Services
                 .SetContentTitle(_title)
                 .SetContentText(_subtitle)
                 .SetOnlyAlertOnce(true)
-                .SetOngoing(_isConnected);
+                .SetOngoing(_isConnected || _monitoringRunId != 0);
 
             if (contentPending != null)
                 builder.SetContentIntent(contentPending);
@@ -282,7 +300,7 @@ style.SetShowActionsInCompactView(0, 1);
             if (nm == null)
                 return;
 
-            nm.Notify(NotificationId, BuildNotification(context));
+            nm.Notify(NotificationIdForRun(_monitoringRunId), BuildNotification(context));
         }
 
         public static void Clear(Context context)
@@ -292,7 +310,7 @@ style.SetShowActionsInCompactView(0, 1);
             _title = "Joe's Scanner";
             _subtitle = "Disconnected";
             var nm = (NotificationManager?)context.GetSystemService(Context.NotificationService);
-            nm?.Cancel(NotificationId);
+            nm?.Cancel(NotificationIdForRun(_monitoringRunId));
 
             if (_session != null)
             {
@@ -343,6 +361,10 @@ private static void EnsureChannel(Context context)
         {
             var intent = new Intent(context, typeof(MediaActionReceiver));
             intent.SetAction(action);
+            // Extras alone do not distinguish PendingIntents. Bind the identity
+            // as well as the payload to the run which published this notification.
+            intent.SetData(global::Android.Net.Uri.Parse($"joesscanner://monitoring/{_monitoringRunId}"));
+            intent.PutExtra(ExtraMonitoringRun, _monitoringRunId);
 
             return PendingIntent.GetBroadcast(
                 context,
@@ -351,32 +373,32 @@ private static void EnsureChannel(Context context)
                 GetPendingIntentFlags())!;
         }
 
-        private sealed class SessionCallback : MediaSession.Callback
+        private sealed class SessionCallback(long runId) : MediaSession.Callback
         {
             public override void OnPlay()
             {
-                try { _ = _onPlay?.Invoke()!; } catch { }
+                HandleAction(runId, MediaActionReceiver.ActionPlay);
             }
 
             public override void OnStop()
             {
-                try { _ = _onStop?.Invoke(); } catch { }
+                HandleAction(runId, MediaActionReceiver.ActionStop);
             }
 
             public override void OnPause()
             {
                 // App semantics: Pause maps to Stop and Disconnect.
-                try { _ = _onStop?.Invoke(); } catch { }
+                HandleAction(runId, MediaActionReceiver.ActionStop);
             }
 
             public override void OnSkipToNext()
             {
-                try { _ = _onNext?.Invoke(); } catch { }
+                HandleAction(runId, MediaActionReceiver.ActionNext);
             }
 
             public override void OnSkipToPrevious()
             {
-                try { _ = _onPrevious?.Invoke(); } catch { }
+                HandleAction(runId, MediaActionReceiver.ActionPrevious);
             }
         }
     }

@@ -32,19 +32,14 @@ internal sealed class ServerAuthentication(ISettingsService settings, HttpClient
             return null;
         }
 
-        if (settings.TryGetServerCredentials(configured.AbsoluteUri, out var username, out var password))
-            return BuildBasicAuthorization(username, password);
-
-        username = settings.BasicAuthUsername.Trim();
-        password = settings.BasicAuthPassword.Trim();
-        if (string.IsNullOrWhiteSpace(username) ||
+        if (!settings.TryGetServerCredentials(configured.AbsoluteUri, out var username, out var password) ||
             !Uri.TryCreate(settings.ServerUrl, UriKind.Absolute, out var current) ||
             !HostedServerRules.SameOrigin(configured, current))
         {
             return null;
         }
 
-        return BuildBasicAuthorization(username, TextNormalizationHelper.NormalizeSmartQuotes(password));
+        return BuildBasicAuthorization(username, password);
     }
 
     internal async Task<AuthenticationHeaderValue> GetFirewallAuthorizationAsync(
@@ -137,11 +132,12 @@ internal sealed class ServerAuthentication(ISettingsService settings, HttpClient
 
     private Session ReadSession(int? directoryId)
     {
-        var token = settings.AuthSessionToken.Trim();
+        var (baseUrl, rawToken, version, _) = settings.ReadAccountSession();
+        var token = rawToken.Trim();
         if (string.IsNullOrEmpty(token) || !settings.HasActiveHostedSubscription())
             throw new FirewallAuthenticationException("Firewall credentials require a verified Joe's Scanner account with an active subscription. Verify your account in Settings.");
 
-        var baseUrl = settings.AuthServerBaseUrl.Trim();
+        baseUrl = baseUrl.Trim();
         if (string.IsNullOrEmpty(baseUrl))
             baseUrl = "https://joesscanner.com";
 
@@ -153,7 +149,7 @@ internal sealed class ServerAuthentication(ISettingsService settings, HttpClient
         }
 
         var endpoint = new Uri(baseUri.AbsoluteUri.TrimEnd('/') + "/wp-json/joes-scanner/v1/server-firewall-credentials");
-        return new Session(endpoint, token, directoryId > 0 ? directoryId : null, settings.DeviceInstallId);
+        return new Session(endpoint, token, directoryId > 0 ? directoryId : null, settings.DeviceInstallId, version);
     }
 
     private async Task<AuthenticationHeaderValue> RequestFirewallAuthorizationAsync(
@@ -194,7 +190,7 @@ internal sealed class ServerAuthentication(ISettingsService settings, HttpClient
     private static AuthenticationHeaderValue BuildBasicAuthorization(string username, string password) =>
         new("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{username}:{password}")));
 
-    private sealed record Session(Uri Endpoint, string Token, int? DirectoryId, string DeviceId);
+    private sealed record Session(Uri Endpoint, string Token, int? DirectoryId, string DeviceId, long Version);
     private sealed record FirewallCredentialsResponse(bool Ok, string? Username, string? Password);
 
     private sealed class CacheEntry
@@ -206,4 +202,5 @@ internal sealed class ServerAuthentication(ISettingsService settings, HttpClient
     }
 }
 
-internal sealed class FirewallAuthenticationException(string message) : HttpRequestException(message);
+internal sealed class FirewallAuthenticationException(string message, System.Net.HttpStatusCode? status = null)
+    : HttpRequestException(message, null, status);

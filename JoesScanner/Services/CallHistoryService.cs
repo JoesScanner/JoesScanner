@@ -22,33 +22,43 @@ namespace JoesScanner.Services
         private readonly ISettingsService _settingsService;
         private readonly ILocalCallsRepository _localCallsRepository;
         private readonly IHistoryLookupsRepository _lookupsRepository;
+        private readonly ISubscriptionService _subscriptionService;
         private readonly HttpClient _httpClient;
         private readonly JsonSerializerOptions _jsonOptions;
+        private readonly TimeProvider _clock;
 
         private int _draw = 1;
 
         
         private static readonly SemaphoreSlim _persistSemaphore = new SemaphoreSlim(1, 1);
-public CallHistoryService(
+        public CallHistoryService(
             ISettingsService settingsService,
             ILocalCallsRepository localCallsRepository,
-            IHistoryLookupsRepository lookupsRepository)
+            IHistoryLookupsRepository lookupsRepository,
+            ISubscriptionService subscriptionService)
+            : this(settingsService, localCallsRepository, lookupsRepository, subscriptionService, null, TimeProvider.System)
+        {
+        }
+
+        internal CallHistoryService(ISettingsService settingsService, ILocalCallsRepository localCallsRepository,
+            IHistoryLookupsRepository lookupsRepository, ISubscriptionService subscriptionService, HttpClient? httpClient,
+            TimeProvider clock)
         {
             _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
             _localCallsRepository = localCallsRepository ?? throw new ArgumentNullException(nameof(localCallsRepository));
             _lookupsRepository = lookupsRepository ?? throw new ArgumentNullException(nameof(lookupsRepository));
+            _subscriptionService = subscriptionService;
+            _clock = clock;
 
             // Important: some mobile stacks can behave poorly with Brotli auto-decompression.
             // We explicitly keep this to gzip/deflate to avoid hangs on certain Android builds.
-            var handler = new HttpClientHandler
+            _httpClient = httpClient ?? ServerAuthenticationHandler.CreateClient(_settingsService, new HttpClientHandler
             {
                 AllowAutoRedirect = false,
                 AutomaticDecompression =
                     DecompressionMethods.GZip |
                     DecompressionMethods.Deflate
-            };
-
-            _httpClient = ServerAuthenticationHandler.CreateClient(_settingsService, handler);
+            });
             _httpClient.Timeout = TimeSpan.FromSeconds(12);
             _httpClient.DefaultRequestVersion = HttpVersion.Version11;
             _httpClient.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
@@ -138,6 +148,7 @@ public CallHistoryService(
             CancellationToken cancellationToken = default)
         {
             windowSize = Math.Clamp(windowSize, 5, 100);
+            var grant = await VerifyHistoryAsync(cancellationToken).ConfigureAwait(false);
 
             var head = await FetchCallsPageAsync(
                 start: 0,
@@ -145,6 +156,7 @@ public CallHistoryService(
                 filters: filters,
                 dateFromLocal: dateFromLocal,
                 dateToLocal: dateToLocal,
+                grant: grant,
                 cancellationToken: cancellationToken);
 
             var total = head.TotalMatches;
@@ -167,7 +179,7 @@ public CallHistoryService(
                 cancellationToken.ThrowIfCancellationRequested();
 
                 var mid = low + ((high - low) / 2);
-                var midCall = await FetchCallAtIndexAsync(mid, filters, dateFromLocal, dateToLocal, cancellationToken);
+                var midCall = await FetchCallAtIndexAsync(mid, filters, dateFromLocal, dateToLocal, grant, cancellationToken);
                 if (midCall == null)
                     break;
 
@@ -194,10 +206,10 @@ public CallHistoryService(
             CallItem? callB = null;
 
             if (candidateA >= 0 && candidateA < total)
-                callA = await FetchCallAtIndexAsync(candidateA, filters, dateFromLocal, dateToLocal, cancellationToken);
+                callA = await FetchCallAtIndexAsync(candidateA, filters, dateFromLocal, dateToLocal, grant, cancellationToken);
 
             if (candidateB >= 0 && candidateB < total)
-                callB = await FetchCallAtIndexAsync(candidateB, filters, dateFromLocal, dateToLocal, cancellationToken);
+                callB = await FetchCallAtIndexAsync(candidateB, filters, dateFromLocal, dateToLocal, grant, cancellationToken);
 
             var bestIndex = 0;
             if (callA != null && callB != null)
@@ -224,7 +236,7 @@ public CallHistoryService(
             if (start > maxStart)
                 start = maxStart;
 
-            var page = await FetchCallsPageAsync(start, windowSize, filters, dateFromLocal, dateToLocal, cancellationToken);
+            var page = await FetchCallsPageAsync(start, windowSize, filters, dateFromLocal, dateToLocal, grant, cancellationToken);
             var anchorIndex = bestIndex - start;
             if (anchorIndex < 0)
                 anchorIndex = 0;
@@ -237,7 +249,7 @@ public CallHistoryService(
                 StartIndex = start,
                 AnchorGlobalIndex = bestIndex,
                 AnchorIndex = anchorIndex,
-                TotalMatches = total
+                TotalMatches = page.TotalMatches
             };
         }
 
@@ -260,7 +272,8 @@ public CallHistoryService(
         {
             try
             {
-                var page = await FetchCallsPageAsync(start, length, filters, dateFromLocal, dateToLocal, cancellationToken);
+                var grant = await VerifyHistoryAsync(cancellationToken).ConfigureAwait(false);
+                var page = await FetchCallsPageAsync(start, length, filters, dateFromLocal, dateToLocal, grant, cancellationToken);
                 return new HistoryCallsPage
                 {
                     Calls = page.Calls,
@@ -280,6 +293,7 @@ private async Task<CallItem?> FetchCallAtIndexAsync(
     HistorySearchFilters filters,
     DateTime? dateFromLocal,
     DateTime? dateToLocal,
+    RecordingPlaybackAccess.HistoryGrant grant,
     CancellationToken cancellationToken)
 {
     if (globalIndex < 0)
@@ -287,24 +301,47 @@ private async Task<CallItem?> FetchCallAtIndexAsync(
         return null;
     }
 
-    var page = await GetCallsPageAsync(globalIndex, 1, filters, dateFromLocal, dateToLocal, cancellationToken).ConfigureAwait(false);
+    var page = await FetchCallsPageAsync(globalIndex, 1, filters, dateFromLocal, dateToLocal, grant, cancellationToken).ConfigureAwait(false);
     return page.Calls.FirstOrDefault();
 }
 
-private async Task<CallsPage> FetchCallsPageAsync(int start, int length, HistorySearchFilters filters, DateTime? dateFromLocal, DateTime? dateToLocal, CancellationToken cancellationToken)
+        private Task<RecordingPlaybackAccess.HistoryGrant> VerifyHistoryAsync(CancellationToken token) =>
+            RecordingPlaybackAccess.VerifyHistoryAsync(_settingsService, _subscriptionService,
+                NormalizeBaseUrl(_settingsService.ServerUrl), token, _clock);
+
+        private async Task<CallsPage> FetchCallsPageAsync(int start, int length, HistorySearchFilters filters,
+            DateTime? dateFromLocal, DateTime? dateToLocal, RecordingPlaybackAccess.HistoryGrant grant,
+            CancellationToken cancellationToken)
         {
             start = Math.Max(0, start);
             length = Math.Clamp(length, 0, 200);
 
-            var baseUrl = NormalizeBaseUrl(_settingsService.ServerUrl);
+            var baseUrl = grant.Server;
             if (string.IsNullOrWhiteSpace(baseUrl))
                 return new CallsPage();
 
+            ValidateSearchGrant(grant, cancellationToken);
+            string? restrictedDateSearch = null;
+            if (grant.Cutoff is { } cutoff)
+            {
+                var lower = dateFromLocal is { } from && new DateTimeOffset(from) > cutoff
+                    ? new DateTimeOffset(from) : cutoff;
+                var now = _clock.GetUtcNow();
+                var upper = dateToLocal is { } to && new DateTimeOffset(to) < now
+                    ? new DateTimeOffset(to) : now;
+                if (RecordingPlaybackAccess.RoundStartToSecond(lower) > upper)
+                    return new CallsPage();
+                restrictedDateSearch = RecordingPlaybackAccess.DateSearch(lower, upper);
+                dateFromLocal = lower.LocalDateTime;
+                dateToLocal = upper.LocalDateTime;
+            }
+
+            var recordingAccess = new RecordingAccessContext(RecordingOrigin.History, grant.Tier != null, grant.Account);
             var callsUrl = baseUrl + "/calljson";
-            var payload = BuildDataTablesPayload(_draw, start, length, filters, dateFromLocal, dateToLocal);
+            var payload = BuildDataTablesPayload(_draw, start, length, filters, dateFromLocal, dateToLocal, restrictedDateSearch);
             _draw++;
 
-            HttpResponseMessage? response = null;
+            HttpStatusCode statusCode;
             string body;
 
             // Trunking Recorder /calljson expects a DataTables payload; on Joe's hosted setup we must also
@@ -338,7 +375,14 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
             request.Headers.TryAddWithoutValidation("Accept", "application/json, text/javascript, */*; q=0.01");
             request.Headers.TryAddWithoutValidation("X-Requested-With", "XMLHttpRequest");
 
-            if (dateFromLocal.HasValue)
+            if (restrictedDateSearch != null)
+            {
+                var separator = restrictedDateSearch.IndexOf('|');
+                var dateStart = WebUtility.UrlEncode(restrictedDateSearch[..separator]);
+                var dateEnd = WebUtility.UrlEncode(restrictedDateSearch[(separator + 1)..]);
+                request.Headers.Referrer = new Uri($"{baseUrl}/?DateStart={dateStart}&DateEnd={dateEnd}");
+            }
+            else if (dateFromLocal.HasValue)
             {
                 var from = dateFromLocal.Value.Date;
                 var to = dateToLocal?.Date ?? from.AddDays(1);
@@ -369,8 +413,9 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
 
             try
             {
-                response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeoutCts.Token).ConfigureAwait(false);
-                AppLog.Add(() => $"History: calljson response headers received. url={callsUrl} status={(int)response.StatusCode} {response.ReasonPhrase ?? string.Empty}");
+                using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeoutCts.Token).ConfigureAwait(false);
+                statusCode = response.StatusCode;
+                AppLog.Add(() => $"History: calljson response headers received. url={callsUrl} status={(int)response.StatusCode}");
                 body = await response.Content.ReadAsStringAsync(timeoutCts.Token).ConfigureAwait(false);
                 AppLog.Add(() => $"History: calljson body read. url={callsUrl} bytes={body?.Length ?? 0}");
             }
@@ -380,17 +425,18 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
                 throw;
             }
 
-            if (!response.IsSuccessStatusCode)
+            ValidateSearchGrant(grant, cancellationToken);
+            if ((int)statusCode is < 200 or >= 300)
             {
-                var statusInt = (int)response.StatusCode;
+                var statusInt = (int)statusCode;
 
-                if (response.StatusCode == HttpStatusCode.Unauthorized || response.StatusCode == HttpStatusCode.Forbidden)
-                    throw new InvalidOperationException($"History auth failed (HTTP {statusInt} {response.ReasonPhrase}).");
+                if (statusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+                    throw new InvalidOperationException($"History auth failed (HTTP {statusInt}).");
 
-                AppLog.Add(() => $"History: calljson failed. url={callsUrl} status={statusInt} reason={response.ReasonPhrase ?? string.Empty} body={Truncate(body, 500)}");
+                AppLog.Add(() => $"History: calljson failed. status={statusInt}");
 
                 throw new InvalidOperationException(
-                    $"History calljson failed (HTTP {statusInt} {response.ReasonPhrase}). Body={Truncate(body, 400)}");
+                    $"History calljson failed (HTTP {statusInt}).");
             }
 
             if (string.IsNullOrWhiteSpace(body))
@@ -416,13 +462,20 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
                 foreach (var e in data.EnumerateArray())
                 {
                     var row = ParseRow(e);
+                    if (!grant.Allows(CallStreamService.TryParseTimestampUtc(row.StartTime, row.StartTimeUTC)))
+                    {
+                        // The server can return data outside the requested time range.
+                        // Do not expose those rows or offer pagination past them.
+                        totalMatches = Math.Min(totalMatches, start + result.Count);
+                        continue;
+                    }
 
                     // Persist the raw call properties for offline history (per-server retention is enforced in the repository).
                     var record = MapToDbRecord(row, baseUrl);
                     if (record != null)
                         rowsToPersist.Add(record);
 
-                    var call = ConvertRowToCallItem(row, baseUrl);
+                    var call = ConvertRowToCallItem(row, baseUrl, recordingAccess);
                     if (call != null)
                         result.Add(call);
                 }
@@ -476,21 +529,18 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
             };
         }
 
+        private void ValidateSearchGrant(RecordingPlaybackAccess.HistoryGrant grant, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            if (!RecordingPlaybackAccess.IsSelected(_settingsService, grant.Server))
+                throw new InvalidOperationException("The selected recorder changed during History search.");
+            grant.Validate(_settingsService);
+        }
+
         private static string NormalizeBaseUrl(string? url)
         {
             var baseUrl = (url ?? string.Empty).Trim();
             return baseUrl.TrimEnd('/');
-        }
-
-        private static string Truncate(string? value, int maxChars)
-        {
-            if (string.IsNullOrEmpty(value))
-                return string.Empty;
-
-            if (maxChars <= 0)
-                return string.Empty;
-
-            return value.Length <= maxChars ? value : value.Substring(0, maxChars);
         }
 
         private static IReadOnlyList<HistoryLookupItem> PrependAll(IReadOnlyList<HistoryLookupItem> items)
@@ -512,7 +562,7 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
 
                 if (!response.IsSuccessStatusCode)
                 {
-            AppLog.Add(() => $"History: lookup failed. url={uri} status={(int)response.StatusCode} reason={response.ReasonPhrase ?? string.Empty} body={Truncate(body, 500)}");
+                    AppLog.Add(() => $"History: lookup failed. status={(int)response.StatusCode}");
                     return Array.Empty<HistoryLookupItem>();
                 }
 
@@ -544,7 +594,7 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
 
                 if (!response.IsSuccessStatusCode)
                 {
-            AppLog.Add(() => $"History: talkgroups lookup failed. url={uri} status={(int)response.StatusCode} reason={response.ReasonPhrase ?? string.Empty} body={Truncate(body, 500)}");
+                    AppLog.Add(() => $"History: talkgroups lookup failed. status={(int)response.StatusCode}");
                     return (Array.Empty<HistoryLookupItem>(), new Dictionary<string, IReadOnlyList<HistoryLookupItem>>(StringComparer.OrdinalIgnoreCase));
                 }
                 if (string.IsNullOrWhiteSpace(body))
@@ -966,7 +1016,8 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
                 .ToList();
         }
 
-        private static DataTablesPayload BuildDataTablesPayload(int draw, int start, int length, HistorySearchFilters filters, DateTime? dateFromLocal, DateTime? dateToLocal)
+        private static DataTablesPayload BuildDataTablesPayload(int draw, int start, int length, HistorySearchFilters filters,
+            DateTime? dateFromLocal, DateTime? dateToLocal, string? restrictedDateSearch)
         {
             // Match the Trunking Recorder /calljson DataTables column schema.
             // Filters are applied via per-column search values, which is what TR expects.
@@ -1015,7 +1066,11 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
             
             // Date filter: Trunking Recorder expects this via the Date column's per-column search value.
             // The server-side schema uses the formatted Date string (e.g. 2/22/2026) rather than StartTime.
-            if (dateFromLocal.HasValue)
+            if (restrictedDateSearch != null)
+            {
+                columns[2].Search.Value = restrictedDateSearch;
+            }
+            else if (dateFromLocal.HasValue)
             {
                 var from = dateFromLocal.Value;
                 var to = dateToLocal ?? from.AddDays(1);
@@ -1405,7 +1460,7 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
                 SiteId = CapTextRaw(r.SiteID),
                 SiteLabel = CapTextRaw(r.SiteLabel),
                 VoiceReceiver = CapTextRaw(r.VoiceReceiver),
-                AudioFilename = CapTextRaw(r.AudioFilename),
+                AudioFilename = RecordingStorageReference.ForCache(ExtractFirstUrlOrPath(r.AudioFilename)),
                 AudioStartPos = audioStartPos,
                 CallDurationSeconds = durationSeconds,
                 CallText = CapTextRaw(r.CallText),
@@ -1415,7 +1470,7 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
             };
         }
 
-        private static CallItem? ConvertRowToCallItem(CallRow r, string baseUrl)
+        private static CallItem? ConvertRowToCallItem(CallRow r, string baseUrl, RecordingAccessContext access)
         {
             try
             {
@@ -1429,6 +1484,8 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
 
                 var audioUrl = string.Empty;
                 var audioToken = ExtractFirstUrlOrPath(r.AudioFilename);
+                if (audioToken.StartsWith("//", StringComparison.Ordinal) && Uri.TryCreate(baseUrl, UriKind.Absolute, out var server))
+                    audioToken = server.Scheme + ":" + audioToken;
                 if (!string.IsNullOrWhiteSpace(audioToken))
                 {
                     try
@@ -1459,6 +1516,9 @@ private async Task<CallsPage> FetchCallsPageAsync(int start, int length, History
                 return new CallItem
                 {
                     BackendId = rawId,
+                    RecordingServer = baseUrl,
+                    RecordingTimeUtc = CallStreamService.TryParseTimestampUtc(r.StartTime, r.StartTimeUTC),
+                    RecordingAccess = access,
                     Timestamp = metadata.Timestamp ?? DateTime.Now,
                     CallDurationSeconds = metadata.DurationSeconds ?? 0,
                     Talkgroup = metadata.Talkgroup ?? string.Empty,

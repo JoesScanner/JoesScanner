@@ -16,10 +16,10 @@ namespace JoesScanner.Services
             Func<Task>? onPrevious = null);
 
         // Start any platform specific session or foreground component that should exist while connected.
-        Task StartSessionAsync(bool audioEnabled);
+        Task StartSessionAsync(bool audioEnabled, long monitoringRunId);
 
         // Stop and tear down platform specific session or foreground component.
-        Task StopSessionAsync();
+        Task StopSessionAsync(long monitoringRunId);
 
         // Update the OS visible now playing card.
         void UpdateNowPlaying(string title, string subtitle, bool audioEnabled);

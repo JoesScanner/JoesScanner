@@ -13,7 +13,8 @@ public partial class SystemMediaService
     private readonly List<(MPRemoteCommand Command, NSObject Target)> _iosRemoteTargets = [];
     private NowPlayingMetadata _iosMetadata = new();
     private bool _iosPublished;
-    private long _iosPublication;
+    private readonly MonitoringTransportOwnership _iosTransport = new();
+    private long _iosMonitoringRunId;
     private MPMediaItemArtwork? _iosArtwork;
 
     private partial void PlatformSetHandlers(Func<Task> onPlay, Func<Task> onStop, Func<Task>? onNext, Func<Task>? onPrevious)
@@ -28,8 +29,8 @@ public partial class SystemMediaService
             _iosRemoteTargets.Clear();
 
             Register(center.PlayCommand, InvokePlayAsync);
-            Register(center.PauseCommand, InvokeStopAsync);
-            Register(center.StopCommand, InvokeStopAsync);
+            Register(center.PauseCommand, InvokeStopAsync, stopsMonitoring: true);
+            Register(center.StopCommand, InvokeStopAsync, stopsMonitoring: true);
             if (onNext != null)
                 Register(center.NextTrackCommand, InvokeNextAsync);
             if (onPrevious != null)
@@ -37,16 +38,17 @@ public partial class SystemMediaService
             SetRemoteCommands(false);
         });
 
-    private void Register(MPRemoteCommand command, Func<Task> handler)
+    private void Register(MPRemoteCommand command, Func<Task> handler, bool stopsMonitoring = false)
     {
         var target = command.AddTarget(_ =>
         {
-            // The OS can deliver an already queued command after its clip ended.
-            // Recheck ownership on the dispatcher before invoking the callback.
-            var publication = Interlocked.Read(ref _iosPublication);
+            var publication = _iosTransport.Capture();
+            if (publication == null || publication.RunId == 0)
+                return MPRemoteCommandHandlerStatus.NoActionableNowPlayingItem;
+
             MainThread.BeginInvokeOnMainThread(async () =>
             {
-                if (_iosPublished && _iosPublication == publication)
+                if (_iosTransport.CanDispatch(publication, _iosMonitoringRunId, stopsMonitoring))
                     await handler();
             });
             return MPRemoteCommandHandlerStatus.Success;
@@ -55,17 +57,22 @@ public partial class SystemMediaService
             _iosRemoteTargets.Add((command, target));
     }
 
-    private partial Task PlatformStartSessionAsync(bool audioEnabled) =>
+    private partial Task PlatformStartSessionAsync(bool audioEnabled, long monitoringRunId) =>
         MainThread.InvokeOnMainThreadAsync(() =>
         {
             _ = _settings.MobileAudio;
-            _iosMonitoringWatch ??= IosAudioEnvironment.Watch(_settings);
+            _iosMonitoringWatch ??= IosAudioEnvironment.Watch(_settings, monitoring: true);
+            _iosMonitoringRunId = monitoringRunId;
         });
 
-    private partial Task PlatformStopSessionAsync() => MainThread.InvokeOnMainThreadAsync(() =>
+    private partial Task PlatformStopSessionAsync(long monitoringRunId) => MainThread.InvokeOnMainThreadAsync(() =>
     {
+        if (_iosMonitoringRunId != monitoringRunId)
+            return;
+        _iosMonitoringRunId = 0;
         _iosMonitoringWatch?.Dispose();
         _iosMonitoringWatch = null;
+        _iosMetadata = new();
         ClearIosNowPlaying();
     });
 
@@ -100,7 +107,7 @@ public partial class SystemMediaService
                 IsLiveStream = false
             };
             _iosPublished = true;
-            Interlocked.Increment(ref _iosPublication);
+            _iosTransport.Publish(_iosMonitoringRunId);
             SetRemoteCommands(_iosMonitoringWatch != null);
         });
 
@@ -116,6 +123,7 @@ public partial class SystemMediaService
             return;
 
         _iosPublished = false;
+        _iosTransport.Clear();
         SetRemoteCommands(false);
         MPNowPlayingInfoCenter.DefaultCenter.NowPlaying = null!; // MediaPlayer clears metadata with nil.
     }

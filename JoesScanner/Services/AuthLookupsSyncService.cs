@@ -12,7 +12,6 @@ namespace JoesScanner.Services
     // Gated by telemetry. Default servers are always enabled; custom servers respect the user's telemetry setting.
     public sealed class AuthLookupsSyncService : IAuthLookupsSyncService, IDisposable
     {
-        private const string DefaultAuthServerBaseUrl = "https://joesscanner.com";
 
         private static readonly TimeSpan ReportMinInterval = TimeSpan.FromHours(20);
 
@@ -38,15 +37,6 @@ namespace JoesScanner.Services
             // HttpClient lifetime is managed by DI; do not dispose.
         }
 
-        private Uri GetLookupsEndpoint()
-        {
-            var baseUrl = (_settings.AuthServerBaseUrl ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(baseUrl))
-                baseUrl = DefaultAuthServerBaseUrl;
-
-            baseUrl = baseUrl.TrimEnd('/');
-            return new Uri(baseUrl + "/wp-json/joes-scanner/v1/lookups");
-        }
 
         private bool IsEnabled()
         {
@@ -69,7 +59,7 @@ namespace JoesScanner.Services
             return sb.ToString();
         }
 
-        private static string TelemetryQueryString(ISettingsService settings)
+        private static string TelemetryQueryString(ISettingsService settings, string sessionToken)
         {
             var appVersion = AppInfo.Current.VersionString ?? string.Empty;
             var appBuild = AppInfo.Current.BuildString ?? string.Empty;
@@ -80,7 +70,6 @@ namespace JoesScanner.Services
 
             // Keep the same parameter names as the existing Auth API endpoints.
             var deviceId = settings.DeviceInstallId ?? string.Empty;
-            var sessionToken = settings.AuthSessionToken ?? string.Empty;
 
             var pairs = new List<(string k, string v)>
             {
@@ -122,25 +111,27 @@ namespace JoesScanner.Services
 
             try
             {
-                var baseUri = GetLookupsEndpoint();
+                var session = WordPressSession.Capture(_settings);
+                var baseUri = session.Endpoint("lookups");
 
-                var qs = TelemetryQueryString(_settings);
+                var qs = TelemetryQueryString(_settings, session.Token);
                 var full = baseUri + "?server_key=" + Uri.EscapeDataString(serverKey) + "&" + qs;
 
                 AppLog.Add(() => $"AuthLookups: seed GET start. server={serverKey}");
 
+                if (!session.IsCurrent)
+
+                    return null;
+
                 using var resp = await _httpClient.GetAsync(full, cancellationToken).ConfigureAwait(false);
                 if (!resp.IsSuccessStatusCode)
                 {
-                    var errBody = string.Empty;
-                    try { errBody = await resp.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false); } catch { }
-                    if (errBody.Length > 300) errBody = errBody.Substring(0, 300);
-                    AppLog.Add(() => $"AuthLookups: seed GET failed. status={(int)resp.StatusCode} body='{errBody}'");
+                    AppLog.Add(() => $"AuthLookups: seed GET failed. status={(int)resp.StatusCode}");
                     return null;
                 }
 
                 var body = await resp.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-                if (string.IsNullOrWhiteSpace(body))
+                if (!session.IsCurrent || string.IsNullOrWhiteSpace(body))
                     return null;
 
                 LookupsResponseDto? dto = null;
@@ -170,7 +161,7 @@ namespace JoesScanner.Services
 
                 AppLog.Add(() => $"AuthLookups: seed GET ok. server={serverKey} receivers={receivers?.Count ?? 0} sites={sites?.Count ?? 0} talkgroups={talkgroups?.Count ?? 0}");
 
-                return new HistoryLookupData
+                return !session.IsCurrent ? null : new HistoryLookupData
                 {
                     Receivers = receivers ?? new List<HistoryLookupItem>(),
                     Sites = sites ?? new List<HistoryLookupItem>(),
@@ -233,6 +224,8 @@ namespace JoesScanner.Services
                     return;
                 }
 
+                var session = WordPressSession.Capture(_settings);
+
                 var payload = new
                 {
                     server_key = serverKey,
@@ -248,7 +241,7 @@ namespace JoesScanner.Services
                     app_build = AppInfo.Current.BuildString ?? string.Empty,
                     os_version = DeviceInfo.VersionString ?? string.Empty,
                     device_id = _settings.DeviceInstallId ?? string.Empty,
-                    session_token = _settings.AuthSessionToken ?? string.Empty,
+                    session_token = session.Token,
 
                     receivers_json = receiversJson,
                     sites_json = sitesJson,
@@ -262,19 +255,22 @@ namespace JoesScanner.Services
 
                 AppLog.Add(() => $"AuthLookups: report POST start. server={serverKey} bytes={json.Length}");
 
-                using var resp = await _httpClient.PostAsync(GetLookupsEndpoint(), content, cancellationToken).ConfigureAwait(false);
+                if (!session.IsCurrent)
+                    return;
+                using var resp = await _httpClient.PostAsync(session.Endpoint("lookups"), content, cancellationToken).ConfigureAwait(false);
                 if (!resp.IsSuccessStatusCode)
                 {
-                    var errBody = string.Empty;
-                    try { errBody = await resp.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false); } catch { }
-                    if (errBody.Length > 300) errBody = errBody.Substring(0, 300);
-                    AppLog.Add(() => $"AuthLookups: report POST failed. status={(int)resp.StatusCode} body='{errBody}'");
+                    AppLog.Add(() => $"AuthLookups: report POST failed. status={(int)resp.StatusCode}");
                     return;
                 }
 
                 // Record success.
-                AppStateStore.SetString(GetLastReportUtcKey(serverKey), DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
-                AppStateStore.SetString(GetLastReportHashKey(serverKey), hash);
+                if (!session.TryApply(() =>
+                    {
+                        AppStateStore.SetString(GetLastReportUtcKey(serverKey), DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
+                        AppStateStore.SetString(GetLastReportHashKey(serverKey), hash);
+                    }))
+                    return;
 
                 AppLog.Add(() => $"AuthLookups: report POST ok. server={serverKey}");
             }

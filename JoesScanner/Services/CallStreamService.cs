@@ -32,6 +32,7 @@ namespace JoesScanner.Services
 
         // Mirrors DEFAULT_CONFIG["poll_batch"] from the server.
         private const int PollBatchSize = 25;
+        private static readonly TimeSpan LiveOnlyPollWindow = TimeSpan.FromSeconds(30);
 
         // DataTables draw counter used by the calljson endpoint.
         private int _draw = 1;
@@ -94,9 +95,15 @@ namespace JoesScanner.Services
             string callsUrl,
             CancellationToken cancellationToken,
             int start,
-            int length)
+            int length,
+            string? dateSearch = null) =>
+            (await FetchFormPageAsync(callsUrl, cancellationToken, start, length, dateSearch)).Rows;
+
+        private async Task<RecordingPage> FetchFormPageAsync(
+            string callsUrl, CancellationToken cancellationToken, int start, int length, string? dateSearch,
+            Uri? referrer = null)
         {
-            var payload = BuildDataTablesPayload(Interlocked.Increment(ref _draw), start, length);
+            var payload = BuildDataTablesPayload(Interlocked.Increment(ref _draw), start, length, dateSearch);
 
             var pairs = new List<KeyValuePair<string, string>>
             {
@@ -120,8 +127,9 @@ namespace JoesScanner.Services
                 pairs.Add(new($"columns[{i}][search][regex]", c.Search?.Regex == true ? "true" : "false"));
             }
 
-            using var content = new FormUrlEncodedContent(pairs);
-            using var response = await _httpClient.PostAsync(callsUrl, content, cancellationToken);
+            using var request = new HttpRequestMessage(HttpMethod.Post, callsUrl) { Content = new FormUrlEncodedContent(pairs) };
+            request.Headers.Referrer = referrer;
+            using var response = await _httpClient.SendAsync(request, cancellationToken);
 
             if (!response.IsSuccessStatusCode)
             {
@@ -135,31 +143,10 @@ namespace JoesScanner.Services
                 }
 
                 throw new HttpRequestException(
-                    $"Server returned HTTP {statusInt} {response.ReasonPhrase} when calling {callsUrl}.");
+                    $"Server returned HTTP {statusInt} {response.ReasonPhrase} when calling {callsUrl}.", null, statusCode);
             }
 
-            var json = await response.Content.ReadAsStringAsync(cancellationToken);
-            var rows = new List<CallRow>();
-
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-
-            if (root.TryGetProperty("data", out var rowsElement) && rowsElement.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var item in rowsElement.EnumerateArray())
-                {
-                    rows.Add(ParseRow(item));
-                }
-            }
-            else if (root.TryGetProperty("rows", out rowsElement) && rowsElement.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var item in rowsElement.EnumerateArray())
-                {
-                    rows.Add(ParseRow(item));
-                }
-            }
-
-            return rows;
+            return await ReadRecordingPageAsync(response.Content, length, cancellationToken);
         }
 
         // Continuously polls the server and yields new calls as CallItem objects.
@@ -202,6 +189,8 @@ namespace JoesScanner.Services
             // When WebSocket is unavailable, fall back to polling and retry WS after a short cooldown.
             var wsDisableUntilUtc = DateTime.MinValue;
             DateTimeOffset? foregroundPollFloor = null;
+            var livePollSince = _clock.GetUtcNow();
+            RecordingPlaybackAccess.HistoryGrant? pollGrant = null;
 
             while (!cancellationToken.IsCancellationRequested)
             {
@@ -212,6 +201,8 @@ namespace JoesScanner.Services
                     skipInitialBatch = true;
                     wsDisableUntilUtc = DateTime.MinValue;
                     foregroundPollFloor = null;
+                    livePollSince = _clock.GetUtcNow();
+                    pollGrant = null;
                 }
                 currentServerUrl = baseUrl;
 
@@ -257,6 +248,7 @@ namespace JoesScanner.Services
 
                 // Prefer the Trunking Recorder WebSocket feed when available.
                 // This reduces polling load and gives us call-level update notifications.
+                var socketOpenedAfter = _clock.GetUtcNow();
                 using var socket = allowWebSocket && DateTime.UtcNow >= wsDisableUntilUtc
                     ? await OpenSocketForLiveAsync(baseUrl, recovery != null, cancellationToken)
                     : null;
@@ -266,10 +258,13 @@ namespace JoesScanner.Services
                 {
                     // Establish the replacement live connection before checking the
                     // account or fetching history. The server can already send calls.
-                    resumeSince = await GetAuthorizedRecoveryCutoffAsync(baseUrl, requested, cancellationToken);
+                    pollGrant = await GetHistoryGrantAsync(baseUrl, cancellationToken);
+                    if (pollGrant != null)
+                        resumeSince = requested;
                     if (!string.Equals(baseUrl, (_settingsService.ServerUrl ?? string.Empty).TrimEnd('/'), StringComparison.Ordinal))
                         continue;
                     foregroundPollFloor = resumeSince ?? recoveryRequestedAt;
+                    livePollSince = recoveryRequestedAt;
                 }
 
                 if (socket != null)
@@ -290,9 +285,10 @@ namespace JoesScanner.Services
                     }
 
                     await foreach (var item in StreamFromWebSocketWithRecoveryAsync(socket, baseUrl, callsUrl,
-                        liveCalls, recovery, resumeSince, foregroundPollFloor, cancellationToken))
+                        liveCalls, recovery, resumeSince, foregroundPollFloor, socketOpenedAfter, pollGrant, cancellationToken))
                         yield return item;
 
+                    livePollSince = _clock.GetUtcNow();
                     if (recovery?.Pending.IsCompleted != true)
                     {
                         if (recovery != null)
@@ -307,9 +303,9 @@ namespace JoesScanner.Services
                 if (allowWebSocket && DateTime.UtcNow >= wsDisableUntilUtc)
                     wsDisableUntilUtc = DateTime.UtcNow.AddSeconds(5);
 
-                if (resumeSince is { } authorizedSince)
+                if (resumeSince is { } authorizedSince && pollGrant != null)
                 {
-                    await foreach (var call in RecoverRecentCallsAsync(baseUrl, callsUrl, liveCalls, authorizedSince, cancellationToken))
+                    await foreach (var call in RecoverRecentCallsAsync(baseUrl, callsUrl, liveCalls, authorizedSince, pollGrant, cancellationToken))
                         yield return call;
                 }
 
@@ -320,7 +316,8 @@ namespace JoesScanner.Services
 
                 try
                 {
-                    rows = await FetchLatestAsync(callsUrl, cancellationToken);
+                    pollGrant = await GetHistoryGrantAsync(baseUrl, cancellationToken, pollGrant);
+                    rows = await PollCallsAsync(baseUrl, callsUrl, pollGrant, livePollSince, cancellationToken);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
@@ -347,6 +344,11 @@ namespace JoesScanner.Services
                     AppLog.DebugWriteLine(() => $"[CallStreamService] [AuthError] {ex}");
                     AppLog.Add(() => $"CallStream: auth error. {ex.Message}");
                 }
+                catch (RecordingAccessException ex)
+                {
+                    isAuthError = true;
+                    errorMessage = ex.Message;
+                }
                 catch (HttpRequestException ex)
                 {
                     // Retry once on transient transport failures (for example: "Socket closed").
@@ -357,7 +359,7 @@ namespace JoesScanner.Services
                     {
                         await Task.Delay(TimeSpan.FromMilliseconds(500), cancellationToken);
                         pollVersion = LiveCallState.NextVersion();
-                        rows = await FetchLatestAsync(callsUrl, cancellationToken);
+                        rows = await PollCallsAsync(baseUrl, callsUrl, pollGrant, livePollSince, cancellationToken);
                     }
                     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                     {
@@ -375,6 +377,11 @@ namespace JoesScanner.Services
                         errorMessage = retryAuth.Message;
                         AppLog.DebugWriteLine(() => $"[CallStreamService] [AuthError] {retryAuth}");
                         AppLog.Add(() => $"CallStream: auth error after retry. {retryAuth.Message}");
+                    }
+                    catch (RecordingAccessException retryAuth)
+                    {
+                        isAuthError = true;
+                        errorMessage = retryAuth.Message;
                     }
                     catch (Exception retryEx)
                     {
@@ -471,7 +478,7 @@ namespace JoesScanner.Services
                         };
                     }
 
-                    skipYieldForThisBatch = true;
+                    skipYieldForThisBatch = pollGrant != null;
                     skipInitialBatch = false;
                 }
 
@@ -494,11 +501,21 @@ namespace JoesScanner.Services
                     // Never let local persistence break streaming.
                 }
 
-                foreach (var r in rows)
+                foreach (var r in InPlaybackOrder(rows))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                    if (pollGrant != null)
+                    {
+                        if (!pollGrant.IsCurrent(_settingsService))
+                            break;
+                        if (!AllowsHistoryRow(pollGrant, r))
+                            continue;
+                    }
 
-                    var item = BuildCallItemFromRow(r, baseUrl, liveCalls, pollVersion, skipYieldForThisBatch);
+                    // General calljson snapshots are History. Only the separately
+                    // bounded current-only poll can establish a new Live observation.
+                    var item = BuildCallItemFromRow(r, baseUrl, liveCalls, pollVersion, skipYieldForThisBatch,
+                        pollGrant != null ? RecordingOrigin.History : RecordingOrigin.Live);
 
                     if (item != null)
                     {
@@ -529,6 +546,9 @@ namespace JoesScanner.Services
             // Use a 2 hour window to satisfy the review goal.
             AppLog.Add(() => "AppleTest: starting 2 hour backfill");
             var cutoffUtc = DateTimeOffset.UtcNow.AddHours(-2);
+            var grant = await GetHistoryGrantAsync(baseUrl, cancellationToken);
+            if (grant == null)
+                yield break;
 
             var rows = new List<CallRow>();
             var start = 0;
@@ -547,14 +567,18 @@ namespace JoesScanner.Services
                     // Primary: use the same request format as the normal poller.
                     // On the hosted Joe's Scanner gateway, the form-encoded DataTables request can 502,
                     // while the existing JSON-as-form payload works reliably.
-                    page = await FetchLatestAsync(callsUrl, cancellationToken, start, PollBatchSize);
+                    page = await FetchHistoryRowsAsync(callsUrl, grant, cancellationToken, start, PollBatchSize);
                 }
                 catch (HttpRequestException ex) when (ex.Message.Contains("HTTP 502", StringComparison.OrdinalIgnoreCase))
                 {
                     // Fallback: some self-hosted servers ignore JSON paging and require classic form encoding.
                     try
                     {
-                        page = await FetchLatestFormAsync(callsUrl, cancellationToken, start, PollBatchSize);
+                        ValidateHistoryGrant(grant, cancellationToken);
+                        var dateSearch = GetHistoryDateSearch(grant);
+                        page = await FetchLatestFormAsync(callsUrl, cancellationToken, start, PollBatchSize, dateSearch);
+                        ValidateHistoryGrant(grant, cancellationToken);
+                        page.RemoveAll(row => !AllowsHistoryRow(grant, row));
                     }
                     catch (Exception ex2)
                     {
@@ -586,7 +610,7 @@ namespace JoesScanner.Services
 
             // Only keep calls within the window, then order them oldest to newest.
             var filtered = rows
-                .Select(r => new { Row = r, TimeUtc = ParseTimestampUtc(r.StartTime, r.StartTimeUTC) })
+                .Select(r => new { Row = r, TimeUtc = TryParseTimestampUtc(r.StartTime, r.StartTimeUTC) })
                 .Where(x => x.TimeUtc >= cutoffUtc)
                 .OrderBy(x => x.TimeUtc)
                 .Select(x => x.Row)
@@ -597,30 +621,74 @@ namespace JoesScanner.Services
             foreach (var r in filtered)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (!grant.IsCurrent(_settingsService))
+                    yield break;
 
-                var item = BuildCallItemFromRow(r, baseUrl, liveCalls, LiveCallState.NextVersion());
+                var item = BuildCallItemFromRow(r, baseUrl, liveCalls, LiveCallState.NextVersion(), origin: RecordingOrigin.History);
                 if (item != null)
                     yield return item;
             }
         }
 
-        private async Task<DateTimeOffset?> GetAuthorizedRecoveryCutoffAsync(string baseUrl, DateTimeOffset since,
-            CancellationToken token)
+        private Task<RecordingPlaybackAccess.HistoryGrant?> GetHistoryGrantAsync(string server, CancellationToken token,
+            RecordingPlaybackAccess.HistoryGrant? previous = null) =>
+            ForegroundRecoveryEntitlement.TryVerifyAsync(_settingsService, _subscriptionService, server, _clock, token, previous);
+
+        private void ValidateHistoryGrant(RecordingPlaybackAccess.HistoryGrant grant, CancellationToken token)
         {
-            try
+            token.ThrowIfCancellationRequested();
+            grant.Validate(_settingsService);
+        }
+
+        private string? GetHistoryDateSearch(RecordingPlaybackAccess.HistoryGrant grant) =>
+            grant.Cutoff is { } cutoff ? RecordingPlaybackAccess.DateSearch(cutoff, _clock.GetUtcNow()) : null;
+
+        private static bool AllowsHistoryRow(RecordingPlaybackAccess.HistoryGrant grant, CallRow row) =>
+            grant.Allows(TryParseTimestampUtc(row.StartTime, row.StartTimeUTC));
+
+        private async Task<List<CallRow>> FetchHistoryRowsAsync(string callsUrl, RecordingPlaybackAccess.HistoryGrant grant,
+            CancellationToken token, int start, int length)
+        {
+            ValidateHistoryGrant(grant, token);
+            var rows = await FetchLatestAsync(callsUrl, token, start, length, GetHistoryDateSearch(grant),
+                () => ValidateHistoryGrant(grant, token)).ConfigureAwait(false);
+            ValidateHistoryGrant(grant, token);
+            rows.RemoveAll(row => !AllowsHistoryRow(grant, row));
+            return rows;
+        }
+
+        private async Task<List<CallRow>> PollCallsAsync(string baseUrl, string callsUrl,
+            RecordingPlaybackAccess.HistoryGrant? grant, DateTimeOffset liveSince, CancellationToken token)
+        {
+            if (grant != null)
+                return await FetchHistoryRowsAsync(callsUrl, grant, token, 0, PollBatchSize).ConfigureAwait(false);
+
+            // The firewall still authorizes ongoing Live monitoring. When History
+            // cannot be verified, request only new recordings since polling began
+            // or the old socket was retired. Reject out-of-window responses locally.
+            var upper = _clock.GetUtcNow();
+            var recent = upper - LiveOnlyPollWindow;
+            var lower = liveSince > recent ? liveSince : recent;
+            if (RecordingPlaybackAccess.RoundStartToSecond(lower) > upper)
+                return [];
+            void ValidateRecorder()
             {
-                return await ForegroundRecoveryEntitlement.GetCutoffAsync(_settingsService, _subscriptionService,
-                    baseUrl, since, _clock, token);
+                token.ThrowIfCancellationRequested();
+                if (!RecordingPlaybackAccess.IsSelected(_settingsService, baseUrl))
+                    throw RecordingPlaybackAccess.VerificationRequired();
             }
-            catch (Exception ex) when (!token.IsCancellationRequested)
-            {
-                AppLog.Add(() => $"Foreground recovery entitlement could not be verified ({ex.GetType().Name}).");
-                return null;
-            }
+
+            ValidateRecorder();
+            var rows = await FetchLatestAsync(callsUrl, token, 0, PollBatchSize,
+                RecordingPlaybackAccess.DateSearch(lower, upper), ValidateRecorder).ConfigureAwait(false);
+            ValidateRecorder();
+            rows.RemoveAll(row => TryParseTimestampUtc(row.StartTime, row.StartTimeUTC) is not { } time ||
+                time < lower || time > upper);
+            return rows;
         }
 
         private async IAsyncEnumerable<CallItem> RecoverRecentCallsAsync(string baseUrl, string callsUrl, LiveCallIndex liveCalls,
-            DateTimeOffset since, [EnumeratorCancellation] CancellationToken token)
+            DateTimeOffset since, RecordingPlaybackAccess.HistoryGrant grant, [EnumeratorCancellation] CancellationToken token)
         {
             const int maxPages = 4;
             var rows = new List<(CallRow Row, DateTimeOffset Time)>();
@@ -631,7 +699,7 @@ namespace JoesScanner.Services
             {
                 for (var page = 0; page < maxPages; page++)
                 {
-                    var records = await FetchLatestAsync(callsUrl, deadline.Token, page * PollBatchSize, PollBatchSize)
+                    var records = await FetchHistoryRowsAsync(callsUrl, grant, deadline.Token, page * PollBatchSize, PollBatchSize)
                         .ConfigureAwait(false);
                     var reachedCutoff = false;
                     foreach (var row in records)
@@ -648,16 +716,23 @@ namespace JoesScanner.Services
                 }
             }
             catch (Exception ex) when (!token.IsCancellationRequested &&
-                                        ex is HttpRequestException or CallStreamAuthException or FirewallAuthenticationException or OperationCanceledException)
+                                        ex is HttpRequestException or CallStreamAuthException or FirewallAuthenticationException or
+                                            RecordingAccessException or OperationCanceledException)
             {
                 AppLog.Add(() => $"Foreground call recovery ended early ({ex.GetType().Name}).");
             }
 
-            foreach (var (row, _) in rows.OrderBy(entry => entry.Time))
+            foreach (var (row, timestamp) in rows.OrderBy(entry => entry.Time).ThenBy(entry => entry.Row.DT_RowId, StringComparer.Ordinal))
             {
                 token.ThrowIfCancellationRequested();
+                if (!grant.IsCurrent(_settingsService))
+                    yield break;
+                if (!grant.Allows(timestamp))
+                    continue;
                 await PersistWebSocketRowAsync(row, baseUrl, token);
-                if (BuildCallItemFromRow(row, baseUrl, liveCalls, version) is { } call)
+                if (!grant.IsCurrent(_settingsService))
+                    yield break;
+                if (BuildCallItemFromRow(row, baseUrl, liveCalls, version, origin: RecordingOrigin.History) is { } call)
                     yield return call;
             }
         }
@@ -679,7 +754,11 @@ namespace JoesScanner.Services
         private static DateTimeOffset ParseTimestampUtc(string? startTime, string? startTimeUtc) =>
             TryParseTimestampUtc(startTime, startTimeUtc) ?? DateTimeOffset.UtcNow;
 
-        private static DateTimeOffset? TryParseTimestampUtc(string? startTime, string? startTimeUtc)
+        private static IEnumerable<CallRow> InPlaybackOrder(IEnumerable<CallRow> rows) =>
+            rows.OrderBy(row => TryParseTimestampUtc(row.StartTime, row.StartTimeUTC))
+                .ThenBy(row => row.DT_RowId, StringComparer.Ordinal);
+
+        internal static DateTimeOffset? TryParseTimestampUtc(string? startTime, string? startTimeUtc)
         {
             var value = !string.IsNullOrWhiteSpace(startTimeUtc) ? startTimeUtc : startTime;
             if (string.IsNullOrWhiteSpace(value))
@@ -707,6 +786,218 @@ namespace JoesScanner.Services
             return null;
         }
 
+        public async Task<string?> RefreshRecordingAudioAsync(CallItem item, string server, DateTimeOffset? recordedAt,
+            CancellationToken cancellationToken)
+        {
+            server = server.TrimEnd('/');
+            var key = RecordingStorageReference.ServerKey(server);
+            var state = item.LiveState;
+            var itemServer = item.RecordingServer ?? state?.ServerUrl;
+            if (key == null || !Uri.TryCreate(server, UriKind.Absolute, out var recorder) ||
+                recorder.UserInfo.Length != 0 || recorder.Query.Length != 0 || recorder.Fragment.Length != 0 ||
+                !RecordingPlaybackAccess.IsSelected(_settingsService, server) || string.IsNullOrWhiteSpace(item.BackendId) ||
+                itemServer != null && RecordingStorageReference.ServerKey(itemServer) != key ||
+                state != null && (state.Id != item.BackendId || RecordingStorageReference.ServerKey(state.ServerUrl) != key))
+                return null;
+
+            recordedAt ??= item.RecordingTimeUtc;
+            var access = item.RecordingAccess;
+            var protectedServer = access?.Protected == true || HostedServerRules.RequiresApiFirewallCredentials(_settingsService, server);
+            RecordingPlaybackAccess.HistoryGrant? grant = null;
+            if (protectedServer)
+            {
+                RecordingPlaybackAccess.RequireAccount(_settingsService, server, access?.Account);
+                grant = await RecordingPlaybackAccess.VerifyHistoryAsync(_settingsService, _subscriptionService, server,
+                    cancellationToken, _clock, protectedSource: true).ConfigureAwait(false);
+                if (grant.Account != access?.Account)
+                    throw RecordingPlaybackAccess.VerificationRequired();
+            }
+
+            var version = LiveCallState.NextVersion();
+            var priorUrl = state?.Read().AudioUrl ?? item.AudioUrl;
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            deadline.CancelAfter(TimeSpan.FromSeconds(20));
+            var token = deadline.Token;
+
+            void Validate()
+            {
+                token.ThrowIfCancellationRequested();
+                if (!RecordingPlaybackAccess.IsSelected(_settingsService, server) || grant == null &&
+                    HostedServerRules.RequiresApiFirewallCredentials(_settingsService, server))
+                    throw new RecordingAccessException("The recorder or hosted account changed during recording lookup.");
+                grant?.Validate(_settingsService);
+                if (grant?.Allows(recordedAt) == false)
+                    throw new RecordingAccessException("This recording is outside the Standard 24-hour history window.");
+            }
+
+            async Task<RecordingPage> ReadPageAsync(string? dateSearch, int start, int length)
+            {
+                Validate();
+                var page = await FetchRecordingAudioPageAsync(server, dateSearch, start, length, Validate, token)
+                    .ConfigureAwait(false);
+                Validate();
+                return page;
+            }
+
+            try
+            {
+                CallRow? row;
+                if (recordedAt is { } time)
+                {
+                    var second = DateTimeOffset.FromUnixTimeSeconds(time.ToUnixTimeSeconds());
+                    var lower = second.AddSeconds(-2);
+                    if (grant?.Cutoff is { } cutoff && cutoff > lower)
+                        lower = cutoff;
+                    var upper = second.AddSeconds(2);
+                    if (grant?.Tier == 1 && _clock.GetUtcNow() < upper)
+                        upper = _clock.GetUtcNow();
+
+                    // The Date filter is in recorder wall time. A zero-row query
+                    // can supply its UTC offset without searching recent recordings.
+                    var localOffset = time.ToLocalTime().Offset;
+                    string DateRange(TimeSpan offset) => RecordingPlaybackAccess.DateSearch(lower, upper, offset);
+                    var probe = await ReadPageAsync(DateRange(localOffset), 0, 0).ConfigureAwait(false);
+                    if (grant?.Cutoff is { } latestCutoff && latestCutoff > lower)
+                        lower = latestCutoff;
+                    row = await FindRecordingAsync(DateRange(probe.UtcOffset ?? localOffset), lower, upper)
+                        .ConfigureAwait(false);
+
+                    // The browser's shared-call flow also accepts an epoch Date
+                    // value. This covers older DST offsets on compatible servers.
+                    // Restrict it to unrestricted history because the server
+                    // controls the time window for an epoch lookup.
+                    if (row == null && grant?.Tier != 1 && probe.UtcOffset != null)
+                        row = await FindRecordingAsync(second.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture),
+                            maxPages: 2)
+                            .ConfigureAwait(false);
+                }
+                else
+                {
+                    // An ID-only notification or older custom row may lack a time.
+                    row = await FindRecordingAsync(null).ConfigureAwait(false);
+                }
+
+                if (row == null)
+                {
+                    Validate();
+                    if (state?.Read().AudioUrl is { } observed && observed != priorUrl)
+                        return observed;
+                    var reason = recordedAt == null ? "The recording has no stored time and was absent from the bounded lookup."
+                        : "The recorder did not return this recording in the bounded time lookup.";
+                    throw new RecordingAudioUnavailableException(detail: reason);
+                }
+
+                var snapshot = ToLiveSnapshot(row, server);
+                Validate();
+                if (state == null)
+                    return snapshot.AudioUrl;
+                state.ObserveRecoveredAudio(snapshot, version, priorUrl);
+                var latest = state.Read().AudioUrl;
+                return latest != priorUrl ? latest : snapshot.AudioUrl;
+            }
+            catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested &&
+                (deadline.IsCancellationRequested || ex.InnerException is TimeoutException))
+            {
+                throw new HttpRequestException("Recording metadata lookup timed out.", ex);
+            }
+
+            async Task<CallRow?> FindRecordingAsync(string? dateSearch, DateTimeOffset? lower = null,
+                DateTimeOffset? upper = null, int maxPages = 5)
+            {
+                const int pageSize = 200;
+                var seen = new HashSet<(string? Id, string? Time)>();
+                for (int pageIndex = 0, start = 0; pageIndex < maxPages; pageIndex++)
+                {
+                    var page = await ReadPageAsync(dateSearch, start, pageSize).ConfigureAwait(false);
+                    var progressed = false;
+                    var inWindow = lower == null;
+                    foreach (var candidate in page.Rows)
+                    {
+                        progressed |= seen.Add((candidate.DT_RowId, candidate.StartTimeUTC ?? candidate.StartTime));
+                        var timestamp = TryParseTimestampUtc(candidate.StartTime, candidate.StartTimeUTC);
+                        if (lower != null && !(timestamp >= lower && timestamp <= upper))
+                            continue;
+                        inWindow = true;
+                        if (!string.Equals(candidate.DT_RowId?.Trim(), item.BackendId, StringComparison.Ordinal))
+                            continue;
+                        if (recordedAt != null && timestamp?.ToUnixTimeSeconds() != recordedAt.Value.ToUnixTimeSeconds() ||
+                            grant?.Allows(timestamp) == false)
+                            continue;
+                        return candidate;
+                    }
+
+                    start += page.Rows.Count;
+                    if (!inWindow || !progressed || (page.FilteredCount is { } total ? start >= total : page.Rows.Count < pageSize))
+                        break;
+                }
+                return null;
+            }
+        }
+
+        private sealed record RecordingPage(List<CallRow> Rows, TimeSpan? UtcOffset, int? FilteredCount);
+
+        private async Task<RecordingPage> FetchRecordingAudioPageAsync(string server, string? dateSearch, int start, int length,
+            Action validate, CancellationToken token)
+        {
+            var url = server + "/calljson";
+            var separator = dateSearch?.IndexOf('|') ?? -1;
+            var referrer = separator >= 0 && dateSearch != null
+                ? new Uri($"{server}/?DateStart={WebUtility.UrlEncode(dateSearch[..separator])}&DateEnd={WebUtility.UrlEncode(dateSearch[(separator + 1)..])}")
+                : new Uri(server + "/");
+            var payload = BuildDataTablesPayload(Interlocked.Increment(ref _draw), start, length, dateSearch);
+            var json = JsonSerializer.Serialize(payload, _jsonOptions);
+            foreach (var contentType in new[] { "application/x-www-form-urlencoded", "application/json" })
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Post, url)
+                {
+                    Content = new StringContent(json, Encoding.UTF8, contentType)
+                };
+                request.Headers.Referrer = referrer;
+                validate();
+                using var response = await _httpClient.SendAsync(request, token).ConfigureAwait(false);
+                if (response.StatusCode is HttpStatusCode.BadRequest or HttpStatusCode.UnsupportedMediaType)
+                    continue;
+                if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+                    throw new RecordingAccessException("The recorder denied the recording lookup.");
+                response.EnsureSuccessStatusCode();
+                return await ReadRecordingPageAsync(response.Content, length, token).ConfigureAwait(false);
+            }
+            validate();
+            try { return await FetchFormPageAsync(url, token, start, length, dateSearch, referrer).ConfigureAwait(false); }
+            catch (CallStreamAuthException)
+            {
+                throw new RecordingAccessException("The recorder denied the recording lookup.");
+            }
+        }
+
+        private static async Task<RecordingPage> ReadRecordingPageAsync(HttpContent content, int length, CancellationToken token)
+        {
+            var json = await content.ReadAsStringAsync(token).ConfigureAwait(false);
+            try
+            {
+                using var document = JsonDocument.Parse(json);
+                var root = document.RootElement;
+                if (root.ValueKind != JsonValueKind.Object)
+                    throw new HttpRequestException("The recorder returned an invalid call-list response.");
+                var rows = new List<CallRow>();
+                if ((root.TryGetProperty("data", out var data) || root.TryGetProperty("rows", out data)) &&
+                    data.ValueKind == JsonValueKind.Array)
+                    foreach (var row in data.EnumerateArray().Take(length))
+                        rows.Add(ParseRow(row));
+                var offsetText = GetString(root, "serverTimeZoneOffset")?.Trim().TrimStart('+');
+                TimeSpan? offset = TimeSpan.TryParseExact(offsetText, @"hh\:mm", CultureInfo.InvariantCulture, out var positive)
+                    ? positive : TimeSpan.TryParse(offsetText, CultureInfo.InvariantCulture, out var signed) ? signed : null;
+                if (offset < TimeSpan.FromHours(-14) || offset > TimeSpan.FromHours(14) || offset?.Ticks % TimeSpan.TicksPerMinute != 0)
+                    offset = null;
+                return new(rows, offset, int.TryParse(GetString(root, "recordsFiltered"), NumberStyles.None,
+                    CultureInfo.InvariantCulture, out var count) ? count : null);
+            }
+            catch (JsonException ex)
+            {
+                throw new HttpRequestException("The recorder returned an invalid call-list response.", ex);
+            }
+        }
+
         public async Task RefreshCallMetadataAsync(IReadOnlyList<CallItem> calls, CancellationToken cancellationToken)
         {
             var baseUrl = (_settingsService.ServerUrl ?? string.Empty).TrimEnd('/');
@@ -720,19 +1011,27 @@ namespace JoesScanner.Services
                 return;
 
             var version = LiveCallState.NextVersion();
-            var rows = await FetchCatchupRowsAsync(baseUrl + "/calljson", targets.Keys, false, cancellationToken).ConfigureAwait(false);
+            var grant = await GetHistoryGrantAsync(baseUrl, cancellationToken);
+            if (grant == null)
+                return;
+            var rows = await FetchCatchupRowsAsync(baseUrl + "/calljson", targets.Keys, false, cancellationToken, grant: grant)
+                .ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
             if (baseUrl != (_settingsService.ServerUrl ?? string.Empty).TrimEnd('/'))
                 return;
             foreach (var row in rows)
             {
+                if (!grant.IsCurrent(_settingsService))
+                    return;
+                if (!AllowsHistoryRow(grant, row))
+                    continue;
                 if (row.DT_RowId?.Trim() is { } id && targets.TryGetValue(id, out var state))
                     state.Observe(ToLiveSnapshot(row, state.ServerUrl), version);
             }
         }
 
         private CallItem? BuildCallItemFromRow(CallRow r, string baseUrl, LiveCallIndex liveCalls, long version,
-            bool skipYieldForThisBatch = false)
+            bool skipYieldForThisBatch = false, RecordingOrigin origin = RecordingOrigin.Live)
         {
             var rawId = r.DT_RowId?.Trim();
             if (string.IsNullOrEmpty(rawId))
@@ -762,6 +1061,9 @@ namespace JoesScanner.Services
             {
                 BackendId = rawId,
                 LiveState = state,
+                RecordingTimeUtc = TryParseTimestampUtc(r.StartTime, r.StartTimeUTC),
+                RecordingServer = baseUrl,
+                RecordingAccess = new RecordingAccessContext(origin, HostedServerRules.RequiresApiFirewallCredentials(_settingsService, baseUrl)),
                 Timestamp = metadata.Timestamp ?? DateTime.Now,
                 CallDurationSeconds = metadata.DurationSeconds ?? 0,
                 Talkgroup = metadata.Talkgroup ?? string.Empty,
@@ -800,12 +1102,13 @@ namespace JoesScanner.Services
                 return null;
 
             var path = filename.Trim();
-            var url = path.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
-                      path.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
-                ? path
-                : $"{serverUrl}/{path.TrimStart('/')}";
-            return Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https"
-                ? SanitizeAudioUrl(uri.AbsoluteUri)
+            if (path.StartsWith("//", StringComparison.Ordinal) && Uri.TryCreate(serverUrl, UriKind.Absolute, out var server))
+                path = server.Scheme + ":" + path;
+            else if (!path.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+                !path.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                path = $"{serverUrl}/{path.TrimStart('/')}";
+            return Uri.TryCreate(path, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https"
+                ? uri.AbsoluteUri
                 : null;
         }
 
@@ -818,6 +1121,7 @@ namespace JoesScanner.Services
             {
                 BackendId = state.Id,
                 LiveState = state,
+                RecordingTimeUtc = TryParseTimestampUtc(row.StartTime, row.StartTimeUTC),
                 IsLiveUpdate = true,
                 Transcription = transcript ?? string.Empty
             };
@@ -899,7 +1203,7 @@ namespace JoesScanner.Services
                 SiteId = CapTextRaw(r.SiteID),
                 SiteLabel = CapTextRaw(r.SiteLabel),
                 VoiceReceiver = CapTextRaw(r.VoiceReceiver),
-                AudioFilename = CapTextRaw(r.AudioFilename),
+                AudioFilename = RecordingStorageReference.ForCache(r.AudioFilename),
                 AudioStartPos = audioStartPos,
                 CallDurationSeconds = durationSeconds,
                 CallText = CapTextRaw(r.CallText),
@@ -934,7 +1238,8 @@ namespace JoesScanner.Services
         }
 
         private async Task<List<CallRow>> FetchCatchupRowsAsync(string callsUrl, IEnumerable<string> ids,
-            bool includeLatestPage, CancellationToken cancellationToken)
+            bool includeLatestPage, CancellationToken cancellationToken, string? dateSearch = null,
+            RecordingPlaybackAccess.HistoryGrant? grant = null)
         {
             const int pageSize = 200;
             const int maxPages = 5;
@@ -943,7 +1248,9 @@ namespace JoesScanner.Services
 
             for (var page = 0; page < maxPages; page++)
             {
-                var rows = await FetchLatestAsync(callsUrl, cancellationToken, page * pageSize, pageSize).ConfigureAwait(false);
+                var rows = grant == null
+                    ? await FetchLatestAsync(callsUrl, cancellationToken, page * pageSize, pageSize, dateSearch).ConfigureAwait(false)
+                    : await FetchHistoryRowsAsync(callsUrl, grant, cancellationToken, page * pageSize, pageSize).ConfigureAwait(false);
                 foreach (var row in rows)
                 {
                     var matched = row.DT_RowId?.Trim() is { } id && remaining.Remove(id);
@@ -1032,21 +1339,16 @@ namespace JoesScanner.Services
 
         private async Task<List<CallRow>> FetchLatestAsync(
             string callsUrl,
-            CancellationToken cancellationToken)
-        {
-            return await FetchLatestAsync(callsUrl, cancellationToken, 0, PollBatchSize);
-        }
-
-        private async Task<List<CallRow>> FetchLatestAsync(
-            string callsUrl,
             CancellationToken cancellationToken,
             int start,
-            int length)
+            int length,
+            string? dateSearch = null,
+            Action? validateFallback = null)
         {
             // Attempt JSON body first (works reliably on the hosted gateway in our environment).
             try
             {
-                var payload = BuildDataTablesPayload(Interlocked.Increment(ref _draw), start, length);
+                var payload = BuildDataTablesPayload(Interlocked.Increment(ref _draw), start, length, dateSearch);
 
                 var jsonBody = JsonSerializer.Serialize(payload, _jsonOptions);
                 using var content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
@@ -1094,20 +1396,22 @@ namespace JoesScanner.Services
             catch
             {
                 // Fallback: DataTables form encoding.
-                return await FetchLatestFormAsync(callsUrl, cancellationToken, start, length);
+                validateFallback?.Invoke();
+                return await FetchLatestFormAsync(callsUrl, cancellationToken, start, length, dateSearch);
             }
         }
 
         private async IAsyncEnumerable<CallItem> StreamFromWebSocketWithRecoveryAsync(
             WebSocket ws, string baseUrl, string callsUrl, LiveCallIndex liveCalls, LiveStreamRecovery? recovery,
-            DateTimeOffset? resumeSince, DateTimeOffset? foregroundFloor,
+            DateTimeOffset? resumeSince, DateTimeOffset? foregroundFloor, DateTimeOffset socketOpenedAfter,
+            RecordingPlaybackAccess.HistoryGrant? historyGrant,
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
             using var session = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             var token = session.Token;
             var buffer = new byte[64 * 1024];
             var receive = ReadWebSocketRowsAsync(ws, buffer, token);
-            Task<List<CallRow>>? catchup = null;
+            Task<(RecordingPlaybackAccess.HistoryGrant? Grant, List<CallRow> Rows)>? catchup = null;
             LiveCallState[] targets = [];
             long catchupVersion = 0;
 
@@ -1115,9 +1419,9 @@ namespace JoesScanner.Services
             {
                 // Subscribe on the replacement socket before recovering the gap, so
                 // calls received while calljson runs can still be drained afterwards.
-                if (resumeSince is { } authorizedSince)
+                if (resumeSince is { } authorizedSince && historyGrant != null)
                 {
-                    await foreach (var call in RecoverRecentCallsAsync(baseUrl, callsUrl, liveCalls, authorizedSince, token))
+                    await foreach (var call in RecoverRecentCallsAsync(baseUrl, callsUrl, liveCalls, authorizedSince, historyGrant, token))
                         yield return call;
                 }
 
@@ -1146,26 +1450,58 @@ namespace JoesScanner.Services
                         if (rows == null)
                             yield break;
 
-                        foreach (var row in rows)
+                        var checkedHistory = false;
+                        foreach (var row in InPlaybackOrder(rows))
                         {
                             token.ThrowIfCancellationRequested();
+                            var recordedAt = TryParseTimestampUtc(row.StartTime, row.StartTimeUTC);
                             if (!row.IsUpdateNotification && foregroundFloor is { } floor &&
-                                TryParseTimestampUtc(row.StartTime, row.StartTimeUTC) is { } timestamp && timestamp < floor &&
+                                recordedAt is { } timestamp && timestamp < floor &&
                                 !(row.DT_RowId?.Trim() is { } rowId && liveCalls.Find(rowId) != null))
                                 continue;
+
+                            // Reconnects can deliver older full rows. Only observations
+                            // dated after this connection attempt have Live provenance.
+                            var origin = recordedAt >= socketOpenedAfter ? RecordingOrigin.Live : RecordingOrigin.History;
+                            if (!row.IsUpdateNotification && origin == RecordingOrigin.History)
+                            {
+                                if (!checkedHistory)
+                                {
+                                    historyGrant = await GetHistoryGrantAsync(baseUrl, token, historyGrant);
+                                    checkedHistory = true;
+                                }
+
+                                if (historyGrant == null || !historyGrant.IsCurrent(_settingsService) ||
+                                    !historyGrant.Allows(recordedAt))
+                                    continue;
+                            }
                             await PersistWebSocketRowAsync(row, baseUrl, token);
+                            if (!row.IsUpdateNotification && origin == RecordingOrigin.History &&
+                                (historyGrant == null || !historyGrant.IsCurrent(_settingsService) || !historyGrant.Allows(recordedAt)))
+                                continue;
 
                             CallItem? call;
                             if (row.IsUpdateNotification)
                             {
-                                var state = row.DT_RowId?.Trim() is { } id ? liveCalls.Find(id) : null;
+                                var id = row.DT_RowId?.Trim();
+                                var state = id != null ? liveCalls.Find(id) : null;
                                 call = ObserveExistingCall(row, state, version);
                                 if (state != null)
                                     liveCalls.QueueNotification(state, DateTimeOffset.UtcNow);
+                                else if (id is { Length: > 0 })
+                                {
+                                    var update = new LiveCallState(baseUrl, id);
+                                    update.Observe(ToLiveSnapshot(row, baseUrl), version);
+                                    call = new CallItem
+                                    {
+                                        BackendId = id, RecordingServer = baseUrl, LiveState = update,
+                                        IsRecordingNotification = true
+                                    };
+                                }
                             }
                             else
                             {
-                                call = BuildCallItemFromRow(row, baseUrl, liveCalls, version);
+                                call = BuildCallItemFromRow(row, baseUrl, liveCalls, version, origin: origin);
                             }
 
                             if (call != null)
@@ -1184,9 +1520,14 @@ namespace JoesScanner.Services
 
                     if (catchup is { IsCompleted: true })
                     {
-                        foreach (var row in await catchup)
+                        var (grant, rows) = await catchup;
+                        foreach (var row in rows)
                         {
                             token.ThrowIfCancellationRequested();
+                            if (grant == null || !grant.IsCurrent(_settingsService))
+                                break;
+                            if (!AllowsHistoryRow(grant, row))
+                                continue;
                             // Catch-up pages can include historical rows that were never Live cards.
                             // Leave them untracked so a subsequent full WebSocket row can insert a new call.
                             var state = row.DT_RowId?.Trim() is { } id ? liveCalls.Find(id) : null;
@@ -1205,7 +1546,7 @@ namespace JoesScanner.Services
                     {
                         targets = scheduled;
                         catchupVersion = LiveCallState.NextVersion();
-                        catchup = FetchWebSocketCatchupAsync(callsUrl, targets, token);
+                        catchup = FetchWebSocketCatchupAsync(baseUrl, callsUrl, targets, token);
                     }
                 }
             }
@@ -1221,22 +1562,26 @@ namespace JoesScanner.Services
             }
         }
 
-        private async Task<List<CallRow>> FetchWebSocketCatchupAsync(
-            string callsUrl, LiveCallState[] targets, CancellationToken cancellationToken)
+        private async Task<(RecordingPlaybackAccess.HistoryGrant? Grant, List<CallRow> Rows)> FetchWebSocketCatchupAsync(
+            string server, string callsUrl, LiveCallState[] targets, CancellationToken cancellationToken)
         {
             try
             {
-                return await FetchCatchupRowsAsync(callsUrl, targets.Select(state => state.Id),
-                    targets.Length == 0, cancellationToken).ConfigureAwait(false);
+                var grant = await GetHistoryGrantAsync(server, cancellationToken);
+                if (grant == null)
+                    return (null, []);
+                var rows = await FetchCatchupRowsAsync(callsUrl, targets.Select(state => state.Id),
+                    targets.Length == 0, cancellationToken, grant: grant).ConfigureAwait(false);
+                return (grant, rows);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                return [];
+                return (null, []);
             }
             catch (Exception ex)
             {
                 AppLog.Add(() => $"CallStream: WebSocket metadata catch-up failed ({ex.GetType().Name}).");
-                return [];
+                return (null, []);
             }
         }
 
@@ -1305,34 +1650,6 @@ namespace JoesScanner.Services
             {
                 AppLog.Add(() => $"CallStream: WebSocket parse error ({ex.GetType().Name}).");
                 return (null, 0);
-            }
-        }
-
-private static string SanitizeAudioUrl(string audioUrl)
-        {
-            if (string.IsNullOrWhiteSpace(audioUrl))
-                return string.Empty;
-
-            try
-            {
-                if (!Uri.TryCreate(audioUrl, UriKind.Absolute, out var uri))
-                    return audioUrl;
-
-                if (!string.IsNullOrEmpty(uri.UserInfo))
-                {
-                    var builder = new UriBuilder(uri)
-                    {
-                        UserName = string.Empty,
-                        Password = string.Empty
-                    };
-                    return builder.Uri.ToString();
-                }
-
-                return audioUrl;
-            }
-            catch
-            {
-                return audioUrl;
             }
         }
 
@@ -1514,7 +1831,7 @@ private static string SanitizeAudioUrl(string audioUrl)
         }
 
         // Builds the DataTables payload used by the calljson endpoint.
-        private static DataTablesPayload BuildDataTablesPayload(int draw, int start, int length)
+        private static DataTablesPayload BuildDataTablesPayload(int draw, int start, int length, string? dateSearch = null)
         {
             var cols = new[]
             {
@@ -1560,7 +1877,7 @@ private static string SanitizeAudioUrl(string audioUrl)
                     Name = name,
                     Searchable = true,
                     Orderable = false,
-                    Search = new DataTablesSearch { Value = string.Empty, Regex = false }
+                    Search = new DataTablesSearch { Value = name == "Date" ? dateSearch ?? string.Empty : string.Empty, Regex = false }
                 });
             }
 

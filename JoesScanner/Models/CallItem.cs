@@ -19,6 +19,11 @@ namespace JoesScanner.Models
         private bool _isToneHot;
         private string _backendId = string.Empty;
         internal LiveCallState? LiveState { get; init; }
+        internal DateTimeOffset? RecordingTimeUtc { get; init; }
+        internal string? RecordingServer { get; init; }
+        internal RecordingAccessContext? RecordingAccess { get; set; }
+        internal bool IsRecordingNotification { get; init; }
+        internal long LivePlaybackOwner { get; set; }
         internal bool HasUnplayedLateAudio { get; private set; }
 
         internal bool ConsumeLateAudio()

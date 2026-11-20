@@ -29,8 +29,7 @@ namespace JoesScanner.Platforms.Android.Services
 
             try
             {
-                // IMPORTANT: AndroidMediaCenter.HandleAction expects (Context, action)
-                AndroidMediaCenter.HandleAction(context, action);
+                AndroidMediaCenter.HandleAction(intent.GetLongExtra(AndroidMediaCenter.ExtraMonitoringRun, 0), action);
             }
             catch
             {

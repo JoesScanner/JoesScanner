@@ -15,21 +15,29 @@ namespace JoesScanner.Services
     public sealed class CallDownloadService : ICallDownloadService
     {
         private readonly ISettingsService _settingsService;
+        private readonly ISubscriptionService _subscriptionService;
         private readonly HttpClient _httpClient;
+        private readonly TimeProvider _clock;
 
-        public CallDownloadService(ISettingsService settingsService)
+        public CallDownloadService(ISettingsService settingsService, ISubscriptionService subscriptionService)
+            : this(settingsService, subscriptionService, null, TimeProvider.System)
+        {
+        }
+
+        internal CallDownloadService(ISettingsService settingsService, ISubscriptionService subscriptionService,
+            HttpClient? httpClient, TimeProvider clock)
         {
             _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
+            _subscriptionService = subscriptionService;
+            _clock = clock;
 
-            var handler = new HttpClientHandler
+            _httpClient = httpClient ?? ServerAuthenticationHandler.CreateClient(_settingsService, new HttpClientHandler
             {
                 AllowAutoRedirect = false,
                 AutomaticDecompression =
                     DecompressionMethods.GZip |
                     DecompressionMethods.Deflate
-            };
-
-            _httpClient = ServerAuthenticationHandler.CreateClient(_settingsService, handler);
+            });
             _httpClient.Timeout = TimeSpan.FromSeconds(25);
             _httpClient.DefaultRequestVersion = HttpVersion.Version11;
             _httpClient.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
@@ -52,13 +60,11 @@ namespace JoesScanner.Services
 
             try
             {
-                using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-
-                using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                using var response = await AcquireRecordingAsync(call, uri, cancellationToken);
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    AppLog.Add(() => $"Download: single failed. HTTP {(int)response.StatusCode} {response.ReasonPhrase} for {uri}");
+                    AppLog.Add(() => $"Download: single failed. HTTP {(int)response.StatusCode}.");
                     await ShowErrorAsync("Download failed", $"Server returned {(int)response.StatusCode} ({response.ReasonPhrase}).");
                     return;
                 }
@@ -67,14 +73,19 @@ namespace JoesScanner.Services
                 await using var outStream = File.Create(tempPath);
                 await inStream.CopyToAsync(outStream, cancellationToken);
             }
-            catch (TaskCanceledException)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                return;
+            }
+            catch (RecordingAccessException ex)
+            {
+                await ShowErrorAsync("Download failed", ex.Message);
                 return;
             }
             catch (Exception ex)
             {
-                AppLog.Add(() => $"Download: single failed. ex={ex.GetType().Name}: {ex.Message}");
-                await ShowErrorAsync("Download failed", $"Could not download the audio file: {ex.Message}");
+                AppLog.Add(() => $"Download: single failed ({ex.GetType().Name}).");
+                await ShowErrorAsync("Download failed", ex is FirewallAuthenticationException ? ex.Message : "Could not download the audio file.");
                 return;
             }
 
@@ -104,7 +115,7 @@ namespace JoesScanner.Services
 
                 await using var zipFileStream = File.Create(zipPath);
                 using var zip = new ZipArchive(zipFileStream, ZipArchiveMode.Create, leaveOpen: false);
-                string? firewallError = null;
+                string? accessError = null;
 
                 var downloadedCount = 0;
                 var failedCount = 0;
@@ -123,13 +134,11 @@ namespace JoesScanner.Services
 
                     try
                     {
-                        using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-
-                        using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                        using var response = await AcquireRecordingAsync(call, uri, cancellationToken);
 
                         if (!response.IsSuccessStatusCode)
                         {
-                            AppLog.Add(() => $"Download: range item {i + 1} failed. HTTP {(int)response.StatusCode} for {uri}");
+                            AppLog.Add(() => $"Download: range item {i + 1} failed. HTTP {(int)response.StatusCode}.");
                             failedCount++;
                             continue;
                         }
@@ -141,30 +150,30 @@ namespace JoesScanner.Services
                         await inStream.CopyToAsync(entryStream, cancellationToken);
                         downloadedCount++;
                     }
-                    catch (TaskCanceledException)
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                     {
                         throw;
                     }
-                    catch (FirewallAuthenticationException ex)
+                    catch (Exception ex) when (ex is FirewallAuthenticationException or RecordingAccessException)
                     {
-                        firewallError ??= ex.Message;
+                        accessError ??= ex.Message;
                         failedCount++;
                     }
                     catch (Exception ex)
                     {
-                        AppLog.Add(() => $"Download: range item {i + 1} failed. ex={ex.GetType().Name}: {ex.Message}");
+                        AppLog.Add(() => $"Download: range item {i + 1} failed ({ex.GetType().Name}).");
                         failedCount++;
                     }
                 }
 
                 if (downloadedCount == 0)
                 {
-                    await ShowErrorAsync("Download failed", firewallError ??
+                    await ShowErrorAsync("Download failed", accessError ??
                         "Could not download any of the selected calls. Check your connection and server settings.");
                     return;
                 }
             }
-            catch (TaskCanceledException)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 return;
             }
@@ -184,6 +193,22 @@ namespace JoesScanner.Services
                 AppLog.Add(() => $"Download: share zip failed. ex={ex.GetType().Name}: {ex.Message}");
                 await ShowErrorAsync("Save failed", $"The zip was created but could not be shared: {ex.Message}");
             }
+        }
+
+        private async Task<HttpResponseMessage> AcquireRecordingAsync(CallItem call, Uri uri, CancellationToken token)
+        {
+            var server = call.RecordingServer ?? call.LiveState?.ServerUrl ?? _settingsService.ServerUrl ?? "";
+            var access = call.RecordingAccess ?? new RecordingAccessContext(RecordingOrigin.History, false);
+            if (HostedServerRules.RequiresApiFirewallCredentials(_settingsService, uri) &&
+                !HostedServerRules.RequiresApiFirewallCredentials(_settingsService, server))
+                throw new RecordingAccessException("The recording's hosted server could not be verified.");
+
+            await RecordingPlaybackAccess.VerifyAsync(_settingsService, _subscriptionService, server,
+                call.RecordingTimeUtc, access, currentLive: false, requireAccount: access.Protected, token, _clock)
+                .ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+            return await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
         }
 
         private Uri? TryBuildAudioUri(CallItem call)
@@ -208,7 +233,7 @@ namespace JoesScanner.Services
                 return builder.Uri;
             }
 
-            var baseUrl = NormalizeBaseUrl(_settingsService.ServerUrl);
+            var baseUrl = NormalizeBaseUrl(call.RecordingServer ?? call.LiveState?.ServerUrl ?? _settingsService.ServerUrl);
             if (string.IsNullOrWhiteSpace(baseUrl))
                 return null;
 

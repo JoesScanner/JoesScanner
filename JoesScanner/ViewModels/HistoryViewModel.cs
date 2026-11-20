@@ -15,8 +15,7 @@ namespace JoesScanner.ViewModels
 {
     // View model for the History tab.
     // History is an explicit, fixed result set returned by search and never ingests new calls.
-    // Playback and media controls are independent from the Main tab.
-    public sealed class HistoryViewModel : BindableObject
+    public sealed partial class HistoryViewModel : BindableObject
     {
         private readonly ICallHistoryService _callHistoryService;
         private readonly IAudioPlaybackService _audioPlaybackService;
@@ -24,6 +23,7 @@ namespace JoesScanner.ViewModels
         private readonly IAddressDetectionService _addressDetectionService;
         private readonly IWhat3WordsService _what3WordsService;
         private readonly ISubscriptionService _subscriptionService;
+        private readonly ICallStreamService _callStreamService;
         private readonly IFilterProfileStore _filterProfileStore;
         private readonly IHistoryLookupsCacheService _historyLookupsCacheService;
         private readonly IToneAlertService _toneAlertService;
@@ -32,15 +32,7 @@ namespace JoesScanner.ViewModels
         private bool _isDownloadRangeSelecting;
         private string _downloadRangePrompt = string.Empty;
 
-        private CancellationTokenSource? _audioCts;
-        private CancellationTokenSource? _queuePlaybackCts;
         private CancellationTokenSource? _searchCts;
-        private readonly SemaphoreSlim _playbackLock = new SemaphoreSlim(1, 1);
-
-        // When Stop is pressed while another playback operation holds the lock, we still want the
-        // stop to be instant. We do immediate cancellation + UI changes, then finish cleanup the next
-        // time the lock is acquired.
-        private volatile bool _stopCleanupPending;
 
 
         private readonly SemaphoreSlim _lookupsLock = new SemaphoreSlim(1, 1);
@@ -142,12 +134,15 @@ private HistorySearchFilters? _activeSearchFilters;
             IAddressDetectionService addressDetectionService,
             IWhat3WordsService what3WordsService,
             ISubscriptionService subscriptionService,
+            ICallStreamService callStreamService,
             IFilterProfileStore filterProfileStore,
             IHistoryLookupsCacheService historyLookupsCacheService,
-            IToneAlertService toneAlertService)
+            IToneAlertService toneAlertService,
+            PlaybackOwnership playbackOwnership)
         {
             _callHistoryService = callHistoryService ?? throw new ArgumentNullException(nameof(callHistoryService));
             _audioPlaybackService = audioPlaybackService ?? throw new ArgumentNullException(nameof(audioPlaybackService));
+            _playbackOwnership = playbackOwnership;
             _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
             _addressDetectionService = addressDetectionService ?? throw new ArgumentNullException(nameof(addressDetectionService));
             _what3WordsService = what3WordsService ?? throw new ArgumentNullException(nameof(what3WordsService));
@@ -171,6 +166,7 @@ private HistorySearchFilters? _activeSearchFilters;
 
             
             _subscriptionService = subscriptionService ?? throw new ArgumentNullException(nameof(subscriptionService));
+            _callStreamService = callStreamService;
             _filterProfileStore = filterProfileStore ?? throw new ArgumentNullException(nameof(filterProfileStore));
             _historyLookupsCacheService = historyLookupsCacheService ?? throw new ArgumentNullException(nameof(historyLookupsCacheService));
 			_toneAlertService = toneAlertService ?? throw new ArgumentNullException(nameof(toneAlertService));
@@ -192,40 +188,7 @@ private HistorySearchFilters? _activeSearchFilters;
             _selectedFilterProfileNameOption = NoneProfileNameOption;
             _isCustomFilterProfileName = false;
 
-            Calls.CollectionChanged += (_, e) =>
-            {
-                // Collection mutations can happen from background operations. Command CanExecute and
-                // PropertyChanged notifications must run on the UI thread or MAUI will ignore / throw.
-                try
-                {
-                    MainThread.BeginInvokeOnMainThread(() =>
-                    {
-                        OnPropertyChanged(nameof(IsHistoryMediaButtonsEnabled));
-                        OnPropertyChanged(nameof(IsStopEnabled));
-                        RefreshCommandStates();
-                    });
-                }
-                catch
-                {
-                }
-
-                // History page: if calls already have detected addresses (or after detection runs),
-                // ensure bottom alert popups are created.
-                try
-                {
-                    if (e?.NewItems != null)
-                    {
-                        foreach (var item in e.NewItems)
-                        {
-                            if (item is CallItem call && call.HasDetectedAddress)
-                            {
-                                try { MainThread.BeginInvokeOnMainThread(() => AddAddressAlertIfNew(call)); } catch { }
-                            }
-                        }
-                    }
-                }
-                catch { }
-            };
+            Calls.CollectionChanged += OnHistoryCallsChanged;
 
             HourOptions = Enumerable.Range(0, 24).ToList();
             MinuteOptions = Enumerable.Range(0, 60).ToList();
@@ -252,8 +215,13 @@ private HistorySearchFilters? _activeSearchFilters;
             LoadMoreOlderCommand = new Command(async () => await SafeRunAsync(LoadMoreOlderAsync, "History.LoadMoreOlder"), () => CanLoadMoreOlder);
             UnlimitedHistoryCommand = new Command(async () => await SafeRunAsync(UnlimitedHistoryAsync, "History.UnlimitedHistory"), () => !IsLoading);
             PlayFromCallCommand = new Command<CallItem>(async c => await SafeRunAsync(() => PlayFromCallAsync(c), "History.PlayFromCall"), c => !IsLoading && c != null);
-            PlayCommand = new Command(async () => await SafeRunAsync(PlayAsync, "History.Play"), () => !IsLoading && Calls.Count > 0 && !_isQueuePlaybackRunning);
+            PlayCommand = new Command(async () => await SafeRunAsync(PlayAsync, "History.Play"), () => !IsLoading && IsPlayEnabled);
             StopCommand = new Command(async () => await SafeRunAsync(StopAsync, "History.Stop"), () => true);
+#if ANDROID
+            JoesScanner.Platforms.Android.Services.AndroidAudioEnvironment.ResumeStateChanged += OnMobileResumeStateChanged;
+#elif IOS
+            JoesScanner.Platforms.iOS.Services.IosAudioEnvironment.ResumeStateChanged += OnMobileResumeStateChanged;
+#endif
             // Allow transport/speed controls while playback is running even if the visible Calls list
             // is temporarily cleared/replaced by paging or background refresh.
             NextCommand = new Command(async () => await SafeRunAsync(SkipNextAsync, "History.Next"), () => !IsLoading && (Calls.Count > 0 || _isQueuePlaybackRunning));
@@ -859,12 +827,35 @@ private HistorySearchFilters? _activeSearchFilters;
         public bool IsHistoryMediaButtonsEnabled => _isQueuePlaybackRunning || Calls.Count > 0;
         public bool IsStopEnabled => _isQueuePlaybackRunning;
 
-        public bool IsPlayEnabled => !_isQueuePlaybackRunning && Calls.Count > 0;
+        private bool CanResumeMobilePlayback =>
+#if ANDROID
+            _isQueuePlaybackRunning && JoesScanner.Platforms.Android.Services.AndroidAudioEnvironment.RequiresPlay;
+#elif IOS
+            _isQueuePlaybackRunning && JoesScanner.Platforms.iOS.Services.IosAudioEnvironment.RequiresPlay;
+#else
+            false;
+#endif
 
-        public bool ShowHistoryPlayButton => !_isQueuePlaybackRunning;
+        public bool IsPlayEnabled => CanResumeMobilePlayback || (!_isQueuePlaybackRunning && Calls.Count > 0);
+
+        public bool ShowHistoryPlayButton => !_isQueuePlaybackRunning || CanResumeMobilePlayback;
 
         public bool ShowHistoryStopButton => _isQueuePlaybackRunning;
 
+#if ANDROID || IOS
+        private void OnMobileResumeStateChanged()
+        {
+            var lease = Volatile.Read(ref _historyOwnership);
+            _ = RunOnMainThreadAsync(() =>
+            {
+                if (!OwnsHistoryPage(lease) || !_isQueuePlaybackRunning)
+                    return;
+                OnPropertyChanged(nameof(ShowHistoryPlayButton));
+                OnPropertyChanged(nameof(IsPlayEnabled));
+                PlayCommand.ChangeCanExecute();
+            });
+        }
+#endif
 
         public bool IsHistoryPlaybackRunning => _isQueuePlaybackRunning;
 
@@ -937,39 +928,25 @@ private HistorySearchFilters? _activeSearchFilters;
         public async Task OnPageOpenedAsync()
         {
             AppLog.Add(() => "History: OnPageOpenedAsync invoked.");
-            RefreshShow247Button();
 
             // Refresh History gating every time the page opens so switching servers (hosted vs custom)
             // immediately updates the UI (date pickers) without requiring a restart or a Search.
             try
             {
-                void RefreshGating()
+                await RunOnMainThreadAsync(() =>
                 {
+                    TakeHistoryPlaybackOwnership();
+                    RefreshShow247Button();
                     _enforceHistory24HourLimit = ShouldEnforce24HourHistoryLimit();
                     OnPropertyChanged(nameof(CanPickDateRange));
 
                     var nowLocal = DateTime.Now;
                     _historyCutoffLocal = _enforceHistory24HourLimit ? nowLocal.AddHours(-24) : DateTime.MinValue;
                     _historyUpperLimitLocal = _enforceHistory24HourLimit ? nowLocal : DateTime.MaxValue;
-                }
-
-                if (MainThread.IsMainThread)
-                    RefreshGating();
-                else
-                    await MainThread.InvokeOnMainThreadAsync(RefreshGating);
+                });
             }
             catch
             {
-            }
-
-            // Only mute the Main tab audio. Do not stop or disconnect the live queue.
-            try
-            {
-                QueueControlBus.RequestSetMainAudioMuted(true);
-            }
-            catch (Exception ex)
-            {
-                AppLog.Add(() => $"History: RequestSetMainAudioMuted failed. ex={ex.GetType().Name}: {ex.Message}");
             }
 
             // Load locally stored profiles first so the UI is usable even when the server is unreachable
@@ -1199,13 +1176,6 @@ public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
             }
 
             return items.FirstOrDefault();
-        }
-
-        public async Task OnPageClosedAsync()
-        {
-            try { _searchCts?.Cancel(); } catch { }
-            try { await StopAsync(); } catch { }
-            QueueControlBus.RequestSetMainAudioMuted(false);
         }
 
         private async Task LoadLookupsAsync()
@@ -1438,8 +1408,7 @@ public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
 
         private bool ShouldEnforce24HourHistoryLimit()
         {
-            // Only gate Joe's hosted server. Custom servers are never gated.
-            if (!IsHostedJoeServerSelected())
+            if (!IsProtectedServerSelected())
                 return false;
 
             // Tier rules:
@@ -1453,9 +1422,7 @@ public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
         {
             try
             {
-                // Custom servers are always full access.
-                // Joe's hosted server only shows this for premium (tier >= 2).
-                Show247Button = !IsHostedJoeServerSelected() || _settingsService.SubscriptionTierLevel >= 2;
+                Show247Button = !IsProtectedServerSelected() || _settingsService.SubscriptionTierLevel >= 2;
             }
             catch
             {
@@ -1464,24 +1431,8 @@ public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
         }
 
 
-        private bool IsHostedJoeServerSelected()
-        {
-            try
-            {
-                var raw = (_settingsService.ServerUrl ?? string.Empty).Trim();
-                if (string.IsNullOrWhiteSpace(raw))
-                    return false;
-
-                if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri))
-                    return false;
-
-                return HostedServerRules.IsHostedServerUri(uri);
-            }
-            catch
-            {
-                return false;
-            }
-        }
+        private bool IsProtectedServerSelected() =>
+            HostedServerRules.RequiresApiFirewallCredentials(_settingsService, _settingsService.ServerUrl ?? "");
 
         private async Task NotifyHistoryLimitAsync()
         {
@@ -1519,20 +1470,8 @@ public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
         {
             try
             {
-                if (!IsHostedJoeServerSelected())
-                    return true;
-
-                var result = await _subscriptionService.EnsureSubscriptionAsync(cancellationToken);
-                if (result == null || !result.IsAllowed)
-                {
-                    var msg = (result?.Message ?? "Subscription not active").Trim();
-                    if (string.IsNullOrWhiteSpace(msg))
-                        msg = "Subscription not active";
-
-                    StatusText = msg;
-                    return false;
-                }
-
+                await RecordingPlaybackAccess.VerifyHistoryAsync(_settingsService, _subscriptionService,
+                    _settingsService.ServerUrl ?? "", cancellationToken);
                 return true;
             }
             catch (OperationCanceledException)
@@ -1540,9 +1479,9 @@ public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
                 StatusText = "Subscription check timed out";
                 return false;
             }
-            catch
+            catch (RecordingAccessException ex)
             {
-                StatusText = "Subscription check failed";
+                StatusText = ex.Message;
                 return false;
             }
         }
@@ -1590,11 +1529,6 @@ private async Task SearchAsync()
                 // Hard safety timeout so the UI never gets stuck in a perpetual "Searching" state.
                 _searchCts.CancelAfter(TimeSpan.FromSeconds(25));
                 var searchToken = _searchCts.Token;
-
-                // A History search intentionally takes ownership of playback.
-                // Force the Main tab into a true stopped state (same effect as tapping Stop)
-                // so returning to the Main tab requires an explicit Play to resume.
-                QueueControlBus.RequestStopMainQueue();
 
                 await StopAsync();
 
@@ -1760,7 +1694,7 @@ private async Task SearchAsync()
             {
                 await RunOnMainThreadAsync(() =>
                 {
-                    StatusText = ex is FirewallAuthenticationException ? ex.Message : "Search failed";
+                    StatusText = ex is FirewallAuthenticationException or RecordingAccessException ? ex.Message : "Search failed";
                     RefreshCommandStates();
                 }).ConfigureAwait(false);
             }
@@ -1835,28 +1769,17 @@ private async Task SearchAsync()
                 // In History, we play "down" toward newer calls. As the user approaches the bottom, append more newer calls.
                 if (lastVisibleItemIndex >= Calls.Count - 1 - PrefetchThresholdItems)
                 {
-                    if (nowUtc < _nextAllowedNewerLoadUtc)
+                    if (nowUtc < _nextAllowedNewerLoadUtc || _historyOwnership is not { } lease)
                         return;
 
                     _nextAllowedNewerLoadUtc = nowUtc.AddMilliseconds(700);
 
-                    _ = await AppendNewerPageAsync(CancellationToken.None);
+                    _ = await AppendNewerPageAsync(lease);
                 }
             }
             catch
             {
             }
-        }
-
-        private static Task RunOnMainThreadAsync(Action action)
-        {
-            if (MainThread.IsMainThread)
-            {
-                action();
-                return Task.CompletedTask;
-            }
-
-            return MainThread.InvokeOnMainThreadAsync(action);
         }
 
         private void StartPrefetchNewerIfNeeded()
@@ -2024,213 +1947,37 @@ private async Task SearchAsync()
             }
         }
 
-        private async Task PlayFromCallAsync(CallItem call)
+        private Task PlayFromCallAsync(CallItem call) => PlayHistoryQueueAsync(() =>
         {
-            if (call == null || Calls.Count == 0)
-                return;
-
             var index = Calls.IndexOf(call);
-            if (index < 0)
-                return;
+            return index >= 0 ? index : null;
+        });
 
-            await PlayFromIndexAsync(index);
-        }
-
-        private async Task PlayAsync()
+        private Task PlayAsync() => PlayHistoryQueueAsync(() =>
         {
-            if (Calls.Count == 0)
-                return;
-
-            if (_isQueuePlaybackRunning)
-                return;
-
-            var startIndex = _currentIndex;
-            if (startIndex < 0)
-                startIndex = 0;
-            if (startIndex >= Calls.Count)
-                startIndex = Math.Max(0, Calls.Count - 1);
-
-            await PlayFromIndexAsync(startIndex);
-        }
-
-        private async Task SkipNextAsync()
-        {
-            if (Calls.Count == 0)
-                return;
-
-            if (_currentIndex < 0)
-            {
-                await PlayFromIndexAsync(0);
-                return;
-            }
-
-            if (_currentIndex >= Calls.Count - 1)
-                return;
-
-            await PlayFromIndexAsync(_currentIndex + 1);
-        }
-
-        private async Task SkipPreviousAsync()
-        {
-            if (Calls.Count == 0)
-                return;
-
-            if (_currentIndex < 0)
-            {
-                await PlayFromIndexAsync(0);
-                return;
-            }
-
-            if (_currentIndex <= 0)
-                return;
-
-            await PlayFromIndexAsync(_currentIndex - 1);
-        }
-
-        private async Task PlayFromIndexAsync(int startIndex)
-        {
-            CancellationTokenSource? myPlaybackCts = null;
-            CancellationToken playbackToken;
-
-            await _playbackLock.WaitAsync().ConfigureAwait(false);
-            try
-            {
-                if (_stopCleanupPending)
-                {
-                    _stopCleanupPending = false;
-                    await StopAsyncCore().ConfigureAwait(false);
-                }
-
-                await StopAsyncCore().ConfigureAwait(false);
-
-                if (Calls == null || Calls.Count == 0)
-                    return;
-
-                _queuePlaybackCts = new CancellationTokenSource();
-                myPlaybackCts = _queuePlaybackCts;
-                playbackToken = myPlaybackCts.Token;
-
-                _isQueuePlaybackRunning = true;
-                OnPropertyChanged(nameof(IsHistoryPlaybackRunning));
-                OnPropertyChanged(nameof(IsPlayEnabled));
-                OnPropertyChanged(nameof(IsStopEnabled));
-                OnPropertyChanged(nameof(ShowHistoryPlayButton));
-                OnPropertyChanged(nameof(ShowHistoryStopButton));
-                StatusText = "Playing";
-                RefreshCommandStates();
-            }
-            finally
-            {
-                _playbackLock.Release();
-            }
-
-            try
-            {
 #if ANDROID || IOS
-                // Starting or selecting History playback is an explicit resume,
-                // just as it is when the user selects a recording in Live.
-                await RunOnMainThreadAsync(() =>
-                {
-                    playbackToken.ThrowIfCancellationRequested();
+            if (CanResumeMobilePlayback)
+            {
 #if ANDROID
-                    JoesScanner.Platforms.Android.Services.AndroidAudioEnvironment.RequestPlay();
+                SystemMediaService.PrepareAndroidPlaybackService();
+                JoesScanner.Platforms.Android.Services.AndroidAudioEnvironment.RequestPlay();
 #else
-                    JoesScanner.Platforms.iOS.Services.IosAudioEnvironment.RequestPlay();
+                JoesScanner.Platforms.iOS.Services.IosAudioEnvironment.RequestPlay();
 #endif
-                });
+                return null;
+            }
 #endif
-                // Frozen linear archive mode (no paging, no list mutations during playback).
-                if (_isSnapshotSearchActive)
-                {
-                    startIndex = Math.Clamp(startIndex, 0, Calls.Count - 1);
-                    _currentIndex = startIndex;
+            if (_isQueuePlaybackRunning)
+                return null;
+            return _currentIndex;
+        });
 
-					for (var i = startIndex; i < Calls.Count; i++)
-                    {
-                        playbackToken.ThrowIfCancellationRequested();
+        private Task SkipNextAsync() => PlayHistoryQueueAsync(() =>
+            _currentIndex >= Calls.Count - 1 ? null : _currentIndex + 1);
 
-						_currentIndex = i;
-						var item = Calls[i];
-                        _activeCall = item;
-                        OnPropertyChanged(nameof(ActiveCall));
+        private Task SkipPreviousAsync() => PlayHistoryQueueAsync(() =>
+            _currentIndex == 0 ? null : Math.Max(0, _currentIndex - 1));
 
-                        var outcome = await PlayAudioAsync(item, playbackToken);
-                        if (!outcome.AdvancesQueue() || playbackToken.IsCancellationRequested)
-                            break;
-                    }
-
-                    return;
-                }
-
-                // Legacy paging mode.
-                startIndex = Math.Clamp(startIndex, 0, Calls.Count - 1);
-                _currentIndex = startIndex;
-
-                var index = startIndex;
-                while (index < Calls.Count)
-                {
-                    playbackToken.ThrowIfCancellationRequested();
-
-                    _currentIndex = index;
-                    var item = Calls[index];
-                    _activeCall = item;
-                    OnPropertyChanged(nameof(ActiveCall));
-
-                    ScrollToIndex(index, ScrollToPosition.Start);
-
-                    var outcome = await PlayAudioAsync(item, playbackToken);
-                    if (!outcome.AdvancesQueue() || playbackToken.IsCancellationRequested)
-                        break;
-
-                    // When we reach the end of the loaded window, load more newer calls and keep going.
-                    if (index >= Calls.Count - 1)
-                    {
-                        var added = await AppendNewerPageAsync(playbackToken);
-                        if (added > 0)
-                        {
-                            StatusText = "Playing";
-                            // Continue with the next item (the list grew).
-                            index++;
-                            continue;
-                        }
-
-                        // No more calls available within the selected range.
-                        break;
-                    }
-
-                    index++;
-                }
-            }
-            catch (OperationCanceledException)
-            {
-            }
-            catch
-            {
-            }
-            finally
-            {
-                await _playbackLock.WaitAsync().ConfigureAwait(false);
-                try
-                {
-                    if (_stopCleanupPending)
-                    {
-                        _stopCleanupPending = false;
-                        await StopAsyncCore().ConfigureAwait(false);
-                    }
-
-                    if (ReferenceEquals(_queuePlaybackCts, myPlaybackCts))
-                    {
-                        await StopAsyncCore().ConfigureAwait(false);
-                    }
-                }
-                finally
-                {
-                    _playbackLock.Release();
-                }
-            }
-        }
-
-        
         private async Task UnlimitedHistoryAsync()
         {
             try
@@ -2269,143 +2016,6 @@ private async Task LoadMoreOlderAsync()
 
             return string.Create(CultureInfo.InvariantCulture, $"{c.Timestamp:O}|{c.Talkgroup}|{c.Site}|{c.CallDurationSeconds:0.###}");
         }
-        private async Task<int> AppendNewerPageAsync(CancellationToken token)
-        {
-            var acquired = false;
-            try
-            {
-                if (_activeSearchFilters == null)
-                    return 0;
-
-                if (!CanLoadMoreNewer)
-                    return 0;
-
-                if (Calls.Count == 0)
-                    return 0;
-
-                await _prefetchSemaphore.WaitAsync(token).ConfigureAwait(false);
-                acquired = true;
-                try
-                {
-                    if (_activeSearchFilters == null)
-                        return 0;
-
-                    if (!CanLoadMoreNewer)
-                        return 0;
-
-                    if (_isPaging)
-                        return 0;
-
-                    _isPaging = true;
-                    await RunOnMainThreadAsync(RefreshCommandStates).ConfigureAwait(false);
-
-                    // Prefer the prefetched buffer. If it is not ready yet, wait for it.
-                    await RunOnMainThreadAsync(StartPrefetchNewerIfNeeded).ConfigureAwait(false);
-
-                    if ((_prefetchedNewerCalls == null || _prefetchedNewerCalls.Count == 0) && _prefetchNewerTask != null && !_prefetchNewerTask.IsCompleted)
-                    {
-                        var completed = await Task.WhenAny(_prefetchNewerTask, Task.Delay(Timeout.Infinite, token)).ConfigureAwait(false);
-                        if (!ReferenceEquals(completed, _prefetchNewerTask))
-                            token.ThrowIfCancellationRequested();
-                    }
-
-                    var newCalls = _prefetchedNewerCalls;
-                    var newStartIndex = _prefetchedNewerStartIndex;
-
-                    // If prefetch did not populate, fall back to a direct fetch.
-                    if (newCalls == null || newCalls.Count == 0)
-                    {
-                        var newStart = Math.Max(0, _activeStartIndex - _activeWindowSize);
-                        var length = _activeStartIndex - newStart;
-                        if (length <= 0)
-                            return 0;
-
-                        newStartIndex = newStart;
-                        var page = await _callHistoryService.GetCallsPageAsync(newStart, length, _activeSearchFilters, _activeDateFromLocal, _activeDateToLocal, token).ConfigureAwait(false);
-                        if (page?.Calls == null || page.Calls.Count == 0)
-                            return 0;
-
-                        if (page.TotalMatches > 0)
-                            _activeTotalMatches = page.TotalMatches;
-
-                        newCalls = page.Calls.ToList();
-                    }
-
-                    _prefetchedNewerCalls = null;
-
-                    newCalls = newCalls
-                        .Where(IsWithinHistoryWindow)
-                        .OrderBy(c => c.Timestamp)
-                        .ToList();
-
-                    if (newCalls.Count == 0)
-                    {
-                        _historyUpperLimitReached = true;
-                        await RunOnMainThreadAsync(() =>
-                        {
-                            StatusText = "Reached the end of the selected date range.";
-                        }).ConfigureAwait(false);
-
-                        await RunOnMainThreadAsync(RefreshCommandStates).ConfigureAwait(false);
-                        return 0;
-                    }
-
-                    // Only append calls that are strictly newer than what we already have at the end.
-                    var lastTs = Calls.LastOrDefault()?.Timestamp;
-                    if (lastTs.HasValue)
-                        newCalls = newCalls.Where(c => c.Timestamp > lastTs.Value).ToList();
-
-                    if (newCalls.Count == 0)
-                    {
-                        await RunOnMainThreadAsync(StartPrefetchNewerIfNeeded).ConfigureAwait(false);
-                        await RunOnMainThreadAsync(RefreshCommandStates).ConfigureAwait(false);
-                        return 0;
-                    }
-
-                    var added = 0;
-                    await RunOnMainThreadAsync(() =>
-                    {
-                        foreach (var c in newCalls)
-                        {
-                            Calls.Add(c);
-                            added++;
-                        }
-                    }).ConfigureAwait(false);
-
-                    if (added > 0)
-                    {
-                        _activeStartIndex = newStartIndex;
-
-                        // Apply address + what3words detection to newly appended History calls.
-                        StartAddressDetectionForHistoryCalls(newCalls);
-
-                        await RunOnMainThreadAsync(() =>
-                        {
-                            StatusText = $"{_activeTotalMatches} match(es), showing {Calls.Count}";
-                        }).ConfigureAwait(false);
-
-                        await RunOnMainThreadAsync(StartPrefetchNewerIfNeeded).ConfigureAwait(false);
-                    }
-
-                    await RunOnMainThreadAsync(RefreshCommandStates).ConfigureAwait(false);
-                    return added;
-                }
-                finally
-                {
-                    _isPaging = false;
-                    await RunOnMainThreadAsync(RefreshCommandStates).ConfigureAwait(false);
-                    if (acquired)
-                        _prefetchSemaphore.Release();
-                }
-            }
-            catch
-            {
-                _isPaging = false;
-                try { await RunOnMainThreadAsync(RefreshCommandStates).ConfigureAwait(false); } catch { }
-                return 0;
-            }
-        }
-
 
         private async Task<int> PrependNewerPageAsync(CancellationToken token, CallItem? keepVisible = null)
         {
@@ -2654,100 +2264,16 @@ private async Task LoadMoreOlderAsync()
             }
         }
 
-        private async Task StopAsync()
+        private void ClearHistoryPlayingCards()
         {
-            // Immediate user intent: cancel tokens and stop the player *right now*.
-            // Do this BEFORE waiting on any locks so Stop feels instantaneous.
-            try
-            {
-                if (_queuePlaybackCts != null)
-                {
-                    try { _queuePlaybackCts.Cancel(); } catch { }
-                }
-
-                if (_audioCts != null)
-                {
-                    try { _audioCts.Cancel(); } catch { }
-                }
-
-                // Fire-and-forget: we don't want to block the UI command on teardown.
-                _ = _audioPlaybackService.StopAsync();
-            }
-            catch
-            {
-            }
-
-            // Flip UI state immediately.
-            _isQueuePlaybackRunning = false;
-            OnPropertyChanged(nameof(IsHistoryPlaybackRunning));
-            OnPropertyChanged(nameof(IsPlayEnabled));
-            OnPropertyChanged(nameof(IsStopEnabled));
-            OnPropertyChanged(nameof(ShowHistoryPlayButton));
-            OnPropertyChanged(nameof(ShowHistoryStopButton));
-
-            try
-            {
-                if (Calls != null)
-                {
-                    foreach (var c in Calls)
-                    {
-                        if (c != null && c.IsPlaying)
-                            c.IsPlaying = false;
-                    }
-                }
-            }
-            catch
-            {
-            }
-
-            RefreshCommandStates();
-
-            // Best-effort full cleanup under the playback lock. If we can't acquire the lock
-            // instantly, mark it pending so the next lock acquisition will finish cleanup.
-            if (await _playbackLock.WaitAsync(0).ConfigureAwait(false))
-            {
-                try
-                {
-                    await StopAsyncCore().ConfigureAwait(false);
-                }
-                finally
-                {
-                    _playbackLock.Release();
-                }
-            }
-            else
-            {
-                _stopCleanupPending = true;
-            }
+            foreach (var card in Calls)
+                if (card.IsPlaying)
+                    card.IsPlaying = false;
         }
 
-        private async Task StopAsyncCore()
+        private void SetHistoryPlaybackStopped()
         {
-            if (_queuePlaybackCts != null)
-            {
-                try { _queuePlaybackCts.Cancel(); } catch { }
-                try { _queuePlaybackCts.Dispose(); } catch { }
-                _queuePlaybackCts = null;
-            }
-
-            if (_audioCts != null)
-            {
-                try { _audioCts.Cancel(); } catch { }
-                try { _audioCts.Dispose(); } catch { }
-                _audioCts = null;
-            }
-
-            try { await _audioPlaybackService.StopAsync(); } catch { }
-
-            if (Calls != null)
-            {
-                foreach (var c in Calls)
-                {
-                    if (c != null && c.IsPlaying)
-                        c.IsPlaying = false;
-                }
-            }
-
+            ClearHistoryPlayingCards();
             _isQueuePlaybackRunning = false;
             OnPropertyChanged(nameof(IsHistoryPlaybackRunning));
             OnPropertyChanged(nameof(IsPlayEnabled));
@@ -2769,58 +2295,56 @@ private async Task LoadMoreOlderAsync()
 };
         }
 
-        private async Task<PlaybackOutcome> PlayAudioAsync(CallItem item, CancellationToken playbackToken)
+        private async Task<PlaybackOutcome> PlayAudioAsync(CallItem item, double rate, PlaybackOwnership.Lease lease,
+            LivePlaybackRequests.Request request)
         {
-            if (item == null || string.IsNullOrWhiteSpace(item.AudioUrl))
-                return PlaybackOutcome.Skipped;
-
-            if (_audioCts != null)
-            {
-                try { _audioCts.Cancel(); } catch { }
-                _audioCts.Dispose();
-                _audioCts = null;
-            }
-
-            _audioCts = CancellationTokenSource.CreateLinkedTokenSource(playbackToken);
-            var token = _audioCts.Token;
-
-            // Avoid toggling IsPlaying on every item (causes full list redraw / flashing).
-            // Only clear the previous active item.
-            if (_activeCall != null && !ReferenceEquals(_activeCall, item))
-            {
-                try { _activeCall.IsPlaying = false; } catch { }
-            }
-
-            item.IsPlaying = true;
+            var token = request.Token;
+            token.ThrowIfCancellationRequested();
+            string? acquiredAudio = null;
 
             try
             {
                 Exception? failure = null;
+                var completion = new PlaybackCompletion();
                 var outcome = await PlaybackAttempt.RunAsync(async () =>
                 {
-                    var rate = GetPlaybackRate();
-                    var url = await GetPlayableAudioUrlAsync(item.AudioUrl, token);
-                    if (string.IsNullOrWhiteSpace(url))
-                        throw new InvalidOperationException("Audio could not be acquired for this recording.");
-                    await _audioPlaybackService.PlayAsync(url, rate, token);
-                }, token, ex => failure = ex);
+                    var server = item.RecordingServer ?? _settingsService.ServerUrl ?? "";
+                    var context = item.RecordingAccess ?? new RecordingAccessContext(RecordingOrigin.History, false);
+                    var protectedServer = context.Protected || HostedServerRules.RequiresApiFirewallCredentials(_settingsService, server);
+                    if (protectedServer &&
+                        DurableLiveQueue.ServerKey(server) != DurableLiveQueue.ServerKey(_settingsService.ServerUrl ?? ""))
+                        throw new RecordingAccessException("Select this recording's server before playing hosted audio.");
+                    await RecordingPlaybackAccess.VerifyAsync(_settingsService, _subscriptionService, server,
+                        item.RecordingTimeUtc, context, currentLive: false, requireAccount: protectedServer, token).ConfigureAwait(false);
+                    acquiredAudio = await RecordingAudioRecovery.AcquireAsync(item.AudioUrl,
+                        refreshToken => _callStreamService.RefreshRecordingAudioAsync(item, server, item.RecordingTimeUtc, refreshToken),
+                        (url, acquireToken) =>
+                        {
+                            if (protectedServer)
+                                RecordingPlaybackAccess.RequireAccount(_settingsService, server, context.Account);
+                            return GetPlayableAudioUrlAsync(url, acquireToken);
+                        }, token).ConfigureAwait(false);
+                    await PlayHistoryOnDeviceAsync(lease, acquiredAudio, rate, token, completion).ConfigureAwait(false);
+                }, token, ex => failure = ex, completion).ConfigureAwait(false);
 
                 if (failure != null)
                 {
                     AppLog.DebugWriteLine(() => $"History playback failed ({failure.GetType().Name}).");
-                    await RunOnMainThreadAsync(() =>
+                    await PublishHistoryPlaybackAsync(lease, request, () =>
                     {
-                        if (!token.IsCancellationRequested)
-                            StatusText = failure is FirewallAuthenticationException
+                        StatusText = failure is FirewallAuthenticationException or RecordingAccessException or RecordingAudioUnavailableException
                                 ? failure.Message
                                 : "Playback failed. Press Play to retry this recording.";
-                    });
+                    }).ConfigureAwait(false);
                 }
                 return outcome;
             }
             finally
             {
-                item.IsPlaying = false;
+                if (Uri.TryCreate(acquiredAudio, UriKind.Absolute, out var file) && file.IsFile &&
+                    Path.GetDirectoryName(file.LocalPath) == FileSystem.CacheDirectory &&
+                    Path.GetFileName(file.LocalPath).StartsWith("hist_", StringComparison.Ordinal))
+                    try { File.Delete(file.LocalPath); } catch (IOException) { }
             }
         }
 
@@ -2831,7 +2355,7 @@ private async Task LoadMoreOlderAsync()
                 // Some servers (including hosted history items) may send media URLs where
                 // percent signs have been percent-encoded (e.g. %2520 instead of %20). That
                 // produces 404s when requesting the file. Normalize '%25' back to '%'.
-                var normalizedAudioUrl = Regex.Replace(audioUrl, "(?i)%25", "%");
+                var normalizedAudioUrl = audioUrl.Contains('?') ? audioUrl : Regex.Replace(audioUrl, "(?i)%25", "%");
                 if (!Uri.TryCreate(normalizedAudioUrl, UriKind.Absolute, out var uri))
                     return normalizedAudioUrl;
 
@@ -2844,8 +2368,7 @@ private async Task LoadMoreOlderAsync()
 
                 var sanitized = sanitizedBuilder.Uri;
 
-                var authentication = ServerAuthentication.For(_settingsService);
-                if (!authentication.RequiresFirewall(sanitized) && authentication.GetCustomAuthorization(sanitized) == null)
+                if (sanitized.Scheme is not ("http" or "https"))
                     return sanitized.AbsoluteUri;
 
                 // Download to local temp to avoid credentialed URLs.
@@ -2862,21 +2385,23 @@ private async Task LoadMoreOlderAsync()
                 using var req = new HttpRequestMessage(HttpMethod.Get, sanitized);
 
                 using var resp = await _audioHttpClient.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, token);
-                if (!resp.IsSuccessStatusCode)
+                resp.EnsureSuccessStatusCode();
+                try
                 {
-                    return null;
-                }
-
-                await using (var fs = File.Create(path))
-                {
+                    await using var fs = File.Create(path);
                     await resp.Content.CopyToAsync(fs, token);
+                }
+                catch
+                {
+                    try { File.Delete(path); } catch (IOException) { }
+                    throw;
                 }
 
                 // Return a file URI so Apple AVPlayer can resolve it reliably.
                 // Other platforms also accept file:// URIs.
                 return new Uri(path).AbsoluteUri;
             }
-            catch (Exception ex) when (ex is OperationCanceledException or FirewallAuthenticationException)
+            catch (Exception ex) when (ex is OperationCanceledException or FirewallAuthenticationException or HttpRequestException)
             {
                 throw;
             }
@@ -3000,6 +2525,10 @@ private void DecreasePlaybackSpeedStep()
         
         private void StartAddressDetectionForHistoryCalls(IReadOnlyList<CallItem> calls)
         {
+            var lease = Volatile.Read(ref _historyOwnership);
+            if (lease == null)
+                return;
+
             try
             {
                 if (calls == null || calls.Count == 0)
@@ -3022,6 +2551,9 @@ private void DecreasePlaybackSpeedStep()
 
                     foreach (var call in calls)
                     {
+                        if (lease.Token.IsCancellationRequested)
+                            break;
+
                         try
                         {
                             if (call == null)
@@ -3030,26 +2562,19 @@ private void DecreasePlaybackSpeedStep()
                             if (string.IsNullOrWhiteSpace(call.Transcription))
                                 continue;
 
-                            // IMPORTANT:
-                            // CallItem derives from BindableObject and its property change notifications should be
-                            // raised on the UI thread. If we mutate bound properties from a background thread,
-                            // History can appear like address detection "doesn't work" because the UI never updates.
-                            await MainThread.InvokeOnMainThreadAsync(() =>
+                            var wasApplied = await ReadHistoryUiAsync(() =>
                             {
+                                if (!OwnsHistoryPage(lease))
+                                    return false;
                                 _addressDetectionService.Apply(call);
-                            });
+                                if (call.HasDetectedAddress)
+                                    AddAddressAlertIfNew(call);
+                                return true;
+                            }).ConfigureAwait(false);
+                            if (!wasApplied)
+                                break;
 
-                            if (call.HasDetectedAddress)
-                            {
-                                try
-                                {
-                                    // AddAddressAlertIfNew enforces the max-3-visible + hidden backlog rules.
-                                    MainThread.BeginInvokeOnMainThread(() => AddAddressAlertIfNew(call));
-                                }
-                                catch { }
-                            }
-
-                            try { _ = _what3WordsService.ResolveCoordinatesIfNeededAsync(call, CancellationToken.None); } catch { }
+                            try { _ = _what3WordsService.ResolveCoordinatesIfNeededAsync(call, lease.Token); } catch { }
 
                             applied++;
                             if (!string.IsNullOrWhiteSpace(call.DetectedAddress))
@@ -3076,20 +2601,6 @@ private void DecreasePlaybackSpeedStep()
 {
     try
     {
-        // MAUI/iOS requires collection mutations on the UI thread.
-        if (!MainThread.IsMainThread)
-        {
-            try
-            {
-                AppLog.Add(() => $"AddrAlert(Hist): Add request off UI thread. Scheduling on UI thread. callId={call?.BackendId ?? "(null)"}");
-                MainThread.BeginInvokeOnMainThread(() => AddAddressAlertIfNew(call));
-            }
-            catch
-            {
-            }
-            return;
-        }
-
         if (call == null || !call.HasDetectedAddress)
         {
             try

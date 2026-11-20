@@ -7,12 +7,12 @@ namespace JoesScanner.Services
         {
         }
 
-        private partial Task PlatformStartSessionAsync(bool audioEnabled)
+        private partial Task PlatformStartSessionAsync(bool audioEnabled, long monitoringRunId)
         {
             return Task.CompletedTask;
         }
 
-        private partial Task PlatformStopSessionAsync()
+        private partial Task PlatformStopSessionAsync(long monitoringRunId)
         {
             return Task.CompletedTask;
         }

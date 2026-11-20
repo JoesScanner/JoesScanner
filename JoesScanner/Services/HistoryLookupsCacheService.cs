@@ -74,10 +74,14 @@ namespace JoesScanner.Services
                     {
                         try
                         {
+                            var accountSession = WordPressSession.Capture(_settingsService);
                             var seeded = await _authLookupsSyncService.TryFetchSeedAsync(serverKey, cancellationToken).ConfigureAwait(false);
-                            if (seeded != null)
+                            if (seeded != null && accountSession.IsCurrent)
                             {
-                                await _repo.UpsertAsync(serverKey, seeded, DateTime.UtcNow, cancellationToken).ConfigureAwait(false);
+                                await _repo.UpsertAsync(serverKey, seeded, DateTime.UtcNow, cancellationToken,
+                                    accountSession.TryApply).ConfigureAwait(false);
+                                if (!accountSession.IsCurrent)
+                                    return;
                                 cached = seeded;
                                 fetchedUtc = DateTime.UtcNow;
                                 AppLog.Add(() => $"History: seeded lookups from Auth API. server={serverKey} receivers={seeded.Receivers?.Count ?? 0} sites={seeded.Sites?.Count ?? 0} talkgroups={seeded.Talkgroups?.Count ?? 0}");

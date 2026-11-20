@@ -1,3 +1,4 @@
+using System.Net;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
@@ -8,21 +9,22 @@ namespace JoesScanner.Services
 {
     public sealed class SubscriptionService : ISubscriptionService, IDisposable
     {
-        private const string DefaultAuthServerBaseUrl = "https://joesscanner.com";
-
         private readonly ISettingsService _settings;
         private readonly ITelemetryService _telemetryService;
         private readonly HttpClient _httpClient;
 
         public SubscriptionService(ISettingsService settings, ITelemetryService telemetryService)
+            : this(settings, telemetryService, WordPressSession.CreateClient())
+        {
+            _httpClient.Timeout = TimeSpan.FromSeconds(10);
+        }
+
+        internal SubscriptionService(ISettingsService settings, ITelemetryService telemetryService, HttpClient httpClient)
         {
             _settings = settings ?? throw new ArgumentNullException(nameof(settings));
             _telemetryService = telemetryService ?? throw new ArgumentNullException(nameof(telemetryService));
 
-            _httpClient = new HttpClient
-            {
-                Timeout = TimeSpan.FromSeconds(10)
-            };
+            _httpClient = httpClient;
         }
 
         public void Dispose()
@@ -30,331 +32,155 @@ namespace JoesScanner.Services
             try { _httpClient.Dispose(); } catch { }
         }
 
-        private Uri GetAuthEndpoint()
-        {
-            var baseUrl = (_settings.AuthServerBaseUrl ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(baseUrl))
-                baseUrl = DefaultAuthServerBaseUrl;
-
-            baseUrl = baseUrl.TrimEnd('/');
-            return new Uri(baseUrl + "/wp-json/joes-scanner/v1/auth");
-        }
-
         public async Task<SubscriptionCheckResult> EnsureSubscriptionAsync(CancellationToken cancellationToken)
         {
-            string basicUser;
-            string basicPass;
-            if (HostedServerRules.IsHostedStreamServerUrl(_settings.ServerUrl))
-            {
-                basicUser = _settings.BasicAuthUsername.Trim();
-                basicPass = _settings.BasicAuthPassword.Trim();
-            }
-            else
-            {
-                // Directory and custom selections store independent scanner settings. Use the
-                // saved WordPress account when verifying a protected directory connection.
-                _settings.TryGetServerCredentials(HostedServerRules.DefaultServerUrl, out basicUser, out basicPass);
-            }
-
-            basicPass = TextNormalizationHelper.NormalizeSmartQuotes(basicPass);
-            if (string.IsNullOrWhiteSpace(basicUser) || string.IsNullOrWhiteSpace(basicPass))
-            {
-                return new SubscriptionCheckResult(false, "missing_credentials",
-                    "Enter your username and password in Settings before connecting to the default server.");
-            }
-
-            // Persist the last authenticated username so other services can
-            // reliably know which account is in use, even when scanner calls use
-            // a separate service credential.
-            _settings.LastAuthUsername = basicUser;
-
-            var appVersion = AppInfo.Current.VersionString ?? string.Empty;
-            var appBuild = AppInfo.Current.BuildString ?? string.Empty;
-
-            var platform = DeviceInfo.Platform.ToString();
-            var type = DeviceInfo.Idiom.ToString();
-            var model = DeviceInfoHelper.CombineManufacturerAndModel(DeviceInfo.Manufacturer, DeviceInfo.Model);
-            var osVersion = DeviceInfo.VersionString ?? string.Empty;
-
-            var payload = new
-            {
-                username = basicUser,
-                password = basicPass,
-                device_platform = platform,
-                device_type = type,
-                device_model = model,
-                app_version = appVersion,
-                app_build = appBuild,
-                os_version = osVersion,
-                device_id = _settings.DeviceInstallId,
-
-                // Allows the server to correlate attempts across the same app run.
-                session_token = _settings.AuthSessionToken
-            };
-
+            var server = _settings.ServerUrl;
+            var attempt = WordPressSession.Capture(_settings);
+            string user, password;
+            Uri endpoint;
             try
             {
-                // Use UnsafeRelaxedJsonEscaping so special characters like apostrophes in
-                // passwords are sent as literal characters (e.g. ') rather than Unicode escapes
-                // (e.g. '). The default JavaScriptEncoder escapes ' which causes
-                // authentication failures for passwords containing apostrophes.
-                var authJsonOptions = new JsonSerializerOptions
+                endpoint = attempt.Endpoint("auth");
+                _settings.TryGetServerCredentials(HostedServerRules.DefaultServerUrl, out user, out password);
+            }
+            catch (CredentialStorageException ex)
+            {
+                return new(false, "credential_storage_unavailable", ex.Message);
+            }
+
+            password = TextNormalizationHelper.NormalizeSmartQuotes(password);
+            if (string.IsNullOrWhiteSpace(user) || string.IsNullOrWhiteSpace(password))
+                return new(false, "missing_credentials", _settings.SavedCredentialWarning ??
+                    "Enter your username and password in Settings before connecting.");
+
+            bool IsSelected() => string.Equals(server, _settings.ServerUrl, StringComparison.Ordinal);
+            static SubscriptionCheckResult Replaced() =>
+                new(false, "account_changed", "The recorder or hosted account changed during verification.");
+            var payload = new
+            {
+                username = user,
+                password,
+                device_platform = DeviceInfo.Platform.ToString(),
+                device_type = DeviceInfo.Idiom.ToString(),
+                device_model = DeviceInfoHelper.CombineManufacturerAndModel(DeviceInfo.Manufacturer, DeviceInfo.Model),
+                app_version = AppInfo.Current.VersionString ?? string.Empty,
+                app_build = AppInfo.Current.BuildString ?? string.Empty,
+                os_version = DeviceInfo.VersionString ?? string.Empty,
+                device_id = _settings.DeviceInstallId,
+                session_token = attempt.Token
+            };
+
+            if (!attempt.IsCurrent || !IsSelected())
+                return Replaced();
+
+            HttpStatusCode status;
+            AuthResponseDto? responseBody = null;
+            try
+            {
+                var options = new JsonSerializerOptions
                 {
                     Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
                 };
-                var json = JsonSerializer.Serialize(payload, authJsonOptions);
-                using var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-                using var response = await _httpClient.PostAsync(GetAuthEndpoint(), content, cancellationToken).ConfigureAwait(false);
-                var responseBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-
-                AuthResponseDto? authResponse = null;
+                using var content = new StringContent(JsonSerializer.Serialize(payload, options), Encoding.UTF8, "application/json");
+                using var response = await _httpClient.PostAsync(endpoint, content, cancellationToken).ConfigureAwait(false);
+                status = response.StatusCode;
+                var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
                 try
                 {
-                    authResponse = JsonSerializer.Deserialize<AuthResponseDto>(
-                        responseBody,
+                    responseBody = JsonSerializer.Deserialize<AuthResponseDto>(body,
                         new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
                 }
-                catch
-                {
-                }
-
-                var statusInt = (int)response.StatusCode;
-                var nowUtc = DateTime.UtcNow;
-
-                // Any HTTP response counts as "server contacted", so there is no grace window on a denial.
-                if (!response.IsSuccessStatusCode)
-                {
-                    _settings.SubscriptionLastCheckUtc = nowUtc;
-                    _settings.SubscriptionLastStatusOk = false;
-                    _settings.SubscriptionLastValidatedOnline = false;
-                    _settings.SubscriptionTierLevel = 0;
-
-                    var sub = authResponse?.Subscription;
-                    var planLabel = (sub?.LevelLabel ?? sub?.Level ?? string.Empty).Trim();
-                    var priceText = (sub?.PriceId ?? string.Empty).Trim();
-
-                    _settings.SubscriptionLastLevel = planLabel;
-                    _settings.SubscriptionPriceId = priceText;
-
-                    _settings.SubscriptionExpiresUtc = DateParseHelper.TryParseUtc(sub?.ExpiresAt);
-                    _settings.SubscriptionRenewalUtc = null;
-
-                    _settings.SubscriptionLastMessage = (authResponse?.Message ?? response.ReasonPhrase ?? "Denied").Trim();
-
-                    return new SubscriptionCheckResult(false, "http_" + statusInt.ToString(CultureInfo.InvariantCulture), _settings.SubscriptionLastMessage);
-                }
-
-                if (authResponse == null)
-                {
-                    _settings.SubscriptionLastCheckUtc = nowUtc;
-                    _settings.SubscriptionLastStatusOk = false;
-                    _settings.SubscriptionLastValidatedOnline = false;
-                    _settings.SubscriptionTierLevel = 0;
-                    _settings.SubscriptionLastLevel = string.Empty;
-                    _settings.SubscriptionExpiresUtc = null;
-                    _settings.SubscriptionRenewalUtc = null;
-                    _settings.SubscriptionLastMessage = "Invalid server response";
-
-                    return new SubscriptionCheckResult(false, "invalid_response", _settings.SubscriptionLastMessage);
-                }
-
-                if (!authResponse.Ok)
-                {
-                    _settings.SubscriptionLastCheckUtc = nowUtc;
-                    _settings.SubscriptionLastStatusOk = false;
-                    _settings.SubscriptionLastValidatedOnline = false;
-                    _settings.SubscriptionTierLevel = 0;
-
-                    var sub = authResponse.Subscription;
-                    var planLabel = (sub?.LevelLabel ?? sub?.Level ?? string.Empty).Trim();
-                    var priceText = (sub?.PriceId ?? string.Empty).Trim();
-
-                    _settings.SubscriptionLastLevel = planLabel;
-                    _settings.SubscriptionPriceId = priceText;
-
-                    _settings.SubscriptionExpiresUtc = DateParseHelper.TryParseUtc(sub?.ExpiresAt);
-                    _settings.SubscriptionRenewalUtc = null;
-
-                    _settings.SubscriptionLastMessage = (authResponse.Message ?? "Denied").Trim();
-
-                    return new SubscriptionCheckResult(false, authResponse.Error ?? "denied", _settings.SubscriptionLastMessage);
-                }
-
-                var subscription = authResponse.Subscription;
-
-                // Some failures can still be HTTP 200, but the subscription is inactive.
-                if (subscription != null && !subscription.Active)
-                {
-                    _settings.SubscriptionLastCheckUtc = nowUtc;
-                    _settings.SubscriptionLastStatusOk = false;
-                    _settings.SubscriptionLastValidatedOnline = false;
-                    _settings.SubscriptionTierLevel = 0;
-
-                    var planLabel = (subscription.LevelLabel ?? subscription.Level ?? string.Empty).Trim();
-                    var priceText = (subscription.PriceId ?? string.Empty).Trim();
-
-                    _settings.SubscriptionLastLevel = planLabel;
-                    _settings.SubscriptionPriceId = priceText;
-
-                    _settings.SubscriptionExpiresUtc = DateParseHelper.TryParseUtc(subscription.ExpiresAt);
-                    _settings.SubscriptionRenewalUtc = null;
-
-                    _settings.SubscriptionLastMessage = (authResponse.Message ?? "No active subscription").Trim();
-
-                    return new SubscriptionCheckResult(false, authResponse.Error ?? "no_active_subscription", _settings.SubscriptionLastMessage);
-                }
-
-                // Defensive expiry check: reject if the returned validity window is already in the past,
-                // even when the server reports ok:true and active:true. This guards against the server
-                // returning a false positive for an expired subscription.
-                if (subscription != null)
-                {
-                    var periodEnd = DateParseHelper.TryParseUtc(subscription.PeriodEndAt)
-                                    ?? DateParseHelper.TryParseUtc(subscription.ExpiresAt)
-                                    ?? DateParseHelper.TryParseUtc(subscription.TrialEndsAt);
-
-                    if (periodEnd.HasValue && periodEnd.Value < nowUtc)
-                    {
-                        _settings.SubscriptionLastCheckUtc = nowUtc;
-                        _settings.SubscriptionLastStatusOk = false;
-                        _settings.SubscriptionLastValidatedOnline = false;
-                        _settings.SubscriptionTierLevel = 0;
-
-                        var planLabel = (subscription.LevelLabel ?? subscription.Level ?? string.Empty).Trim();
-                        var priceText = (subscription.PriceId ?? string.Empty).Trim();
-
-                        _settings.SubscriptionLastLevel = planLabel;
-                        _settings.SubscriptionPriceId = priceText;
-                        _settings.SubscriptionExpiresUtc = periodEnd;
-                        _settings.SubscriptionRenewalUtc = null;
-
-                        var localDate = periodEnd.Value.ToLocalTime().ToString("yyyy-MM-dd");
-                        _settings.SubscriptionLastMessage = $"Subscription expired on {localDate}.";
-
-                        return new SubscriptionCheckResult(false, "expired", _settings.SubscriptionLastMessage);
-                    }
-                }
-
-                // Success
-                _settings.SubscriptionLastCheckUtc = nowUtc;
-                _settings.SubscriptionLastStatusOk = true;
-                _settings.SubscriptionLastValidatedOnline = true;
-
-                var level = (subscription?.LevelLabel ?? subscription?.Level ?? string.Empty).Trim();
-                var price = (subscription?.PriceId ?? string.Empty).Trim();
-
-                _settings.SubscriptionLastLevel = level;
-                _settings.SubscriptionPriceId = price;
-                _settings.SubscriptionTierLevel = subscription?.TierLevel ?? 0;
-
-                _settings.SubscriptionExpiresUtc = DateParseHelper.TryParseUtc(subscription?.ExpiresAt);
-
-                var statusText = (subscription?.Status ?? string.Empty).Trim().ToLowerInvariant();
-                var renewalRaw = statusText == "trialing"
-                    ? (subscription?.TrialEndsAt ?? subscription?.PeriodEndAt ?? subscription?.ExpiresAt)
-                    : (subscription?.PeriodEndAt ?? subscription?.ExpiresAt ?? subscription?.TrialEndsAt);
-
-                var renewalUtc = DateParseHelper.TryParseUtc(renewalRaw);
-
-                // For trialing subscriptions, treat renewal as unknown and rely on the message summary instead.
-                _settings.SubscriptionRenewalUtc = statusText == "trialing" ? null : renewalUtc;
-
-                var planSummary = BuildPlanSummary(subscription);
-
-                if (string.IsNullOrWhiteSpace(planSummary))
-                    planSummary = (authResponse.Message ?? string.Empty).Trim();
-
-                // If we already had richer cached text, do not downgrade it to OK.
-                if (string.IsNullOrWhiteSpace(planSummary))
-                {
-                    var prior = (_settings.SubscriptionLastMessage ?? string.Empty).Trim();
-                    if (!string.IsNullOrWhiteSpace(prior) && !string.Equals(prior, "OK", StringComparison.OrdinalIgnoreCase))
-                        planSummary = prior;
-                }
-
-                if (string.IsNullOrWhiteSpace(planSummary))
-                    planSummary = "OK";
-
-                _settings.SubscriptionLastMessage = planSummary;
-
-                // If the server issued a session token, adopt it so telemetry uses the same mechanism for all devices.
-                var issuedToken = (authResponse.SessionToken ?? string.Empty).Trim();
-                if (!string.IsNullOrWhiteSpace(issuedToken))
-                {
-                    await _telemetryService.AdoptSessionTokenAsync(issuedToken, "auth_session_token_issued", cancellationToken).ConfigureAwait(false);
-                }
-
-                return new SubscriptionCheckResult(true, null, planSummary)
-                {
-                    VerifiedOnlineTier = subscription?.TierLevel
-                };
+                catch (JsonException) { }
             }
-            catch (OperationCanceledException)
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested &&
+                ex is HttpRequestException or IOException or TaskCanceledException)
             {
-                throw;
+                return ApplyOffline();
             }
-            catch
+
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!attempt.IsCurrent || !IsSelected())
+                return Replaced();
+
+            var code = (int)status;
+            if (code == 429 || code >= 500)
+                return new(false, "http_" + code, $"The account service is temporarily unavailable (HTTP {code}).");
+
+            var subscription = responseBody?.Subscription;
+            var now = DateTime.UtcNow;
+            var expires = DateParseHelper.TryParseUtc(subscription?.ExpiresAt);
+            var trial = string.Equals(subscription?.Status, "trialing", StringComparison.OrdinalIgnoreCase);
+            var effectiveEnd = DateParseHelper.TryParseUtc(subscription?.PeriodEndAt) ?? expires ??
+                DateParseHelper.TryParseUtc(subscription?.TrialEndsAt);
+            var issuedToken = (responseBody?.SessionToken ?? "").Trim();
+            string Safe(string? value) => DiagnosticRedaction.SanitizeAuthenticationMessage(value, user, password, attempt.Token, issuedToken);
+            var allowed = code is >= 200 and < 300 && responseBody is { Ok: true } &&
+                subscription is { Active: true } && !(effectiveEnd < now);
+            string message;
+            if (allowed)
             {
-                // Unreachable auth server.
-                // Policy (strict):
-                // - If the cached subscription has a known validity end date and it is still current, allow.
-                // - If the cached subscription is expired, deny (do not connect to the default server).
-                // - If no validity end date is available, deny until the auth server can be contacted again.
-
-                var nowUtc = DateTime.UtcNow;
-
-                // Strict gating: offline cached access is allowed for connecting, but it is not considered
-                // a validated online state for premium feature unlocks.
-                _settings.SubscriptionLastValidatedOnline = false;
-
-                if (_settings.SubscriptionLastStatusOk)
-                {
-                    var validUntilUtc = GetCachedValidUntilUtc();
-
-                    if (validUntilUtc.HasValue)
-                    {
-                        if (nowUtc <= validUntilUtc.Value)
-                        {
-                            _settings.SubscriptionLastMessage = BuildOfflineMessage(validUntilUtc.Value);
-                            return new SubscriptionCheckResult(true, "offline_cached", _settings.SubscriptionLastMessage);
-                        }
-
-                        var localDate = DateTime.SpecifyKind(validUntilUtc.Value, DateTimeKind.Utc).ToLocalTime().ToString("yyyy-MM-dd");
-                        _settings.SubscriptionLastMessage = $"Auth server unreachable and cached subscription is expired (expired {localDate}).";
-                        _settings.SubscriptionLastCheckUtc = nowUtc;
-                        _settings.SubscriptionLastStatusOk = false;
-                        _settings.SubscriptionTierLevel = 0;
-                        return new SubscriptionCheckResult(false, "expired_offline", _settings.SubscriptionLastMessage);
-                    }
-
-                    _settings.SubscriptionLastMessage = "Auth server unreachable and cached subscription has no validity date. Reconnect when online to verify your subscription.";
-                    _settings.SubscriptionLastCheckUtc = nowUtc;
-                    _settings.SubscriptionLastStatusOk = false;
-                    _settings.SubscriptionTierLevel = 0;
-                    return new SubscriptionCheckResult(false, "no_validity_offline", _settings.SubscriptionLastMessage);
-                }
-
-                _settings.SubscriptionLastCheckUtc = nowUtc;
-                _settings.SubscriptionLastStatusOk = false;
-                _settings.SubscriptionTierLevel = 0;
-                _settings.SubscriptionLastMessage = "Auth server unreachable and no valid cached subscription is available.";
-
-                return new SubscriptionCheckResult(false, "unreachable", _settings.SubscriptionLastMessage);
+                message = Safe(BuildPlanSummary(subscription));
+                if (string.IsNullOrWhiteSpace(message))
+                    message = Safe(responseBody?.Message);
+                if (string.IsNullOrWhiteSpace(message))
+                    message = "OK";
             }
-        }
+            else if (effectiveEnd < now)
+                message = $"Subscription expired on {effectiveEnd.Value.ToLocalTime():yyyy-MM-dd}.";
+            else
+                message = Safe(responseBody?.Message ?? (code is >= 200 and < 300
+                    ? "The account server did not confirm an active subscription."
+                    : $"Authentication request denied (HTTP {code})."));
 
-        private DateTime? GetCachedValidUntilUtc()
-        {
-            // Prefer renewal (period end) if available; otherwise fall back to expires.
-            // Both are stored as UTC by SubscriptionService.
-            if (_settings.SubscriptionRenewalUtc.HasValue)
-                return _settings.SubscriptionRenewalUtc.Value;
+            var published = false;
+            var snapshot = new HostedSubscriptionSnapshot(allowed, allowed, allowed ? subscription!.TierLevel : 0, now,
+                allowed ? expires : effectiveEnd, trial ? null : DateParseHelper.TryParseUtc(subscription?.PeriodEndAt) ?? expires,
+                Safe(subscription?.LevelLabel ?? subscription?.Level), Safe(subscription?.PriceId), message);
+            if (!attempt.TryApply(() =>
+                {
+                    if (!IsSelected())
+                        return;
+                    _settings.SaveHostedSubscription(snapshot);
+                    published = true;
+                }) || !published)
+                return Replaced();
 
-            if (_settings.SubscriptionExpiresUtc.HasValue)
-                return _settings.SubscriptionExpiresUtc.Value;
+            if (allowed && !string.IsNullOrWhiteSpace(issuedToken))
+                await _telemetryService.AdoptSessionTokenAsync(issuedToken, "auth_session_token_issued", cancellationToken,
+                    attempt.Version).ConfigureAwait(false);
 
-            return null;
+            var current = _settings.ReadAccountSession();
+            if (!IsSelected() || (!attempt.IsCurrent &&
+                (current.Version != attempt.Version + 1 || !allowed || issuedToken.Length == 0 || current.Token != issuedToken)))
+                return Replaced();
+            return new(allowed, allowed ? null : "http_" + code, message)
+            {
+                VerifiedOnlineTier = allowed ? snapshot.Tier : null
+            };
+
+            SubscriptionCheckResult ApplyOffline()
+            {
+                SubscriptionCheckResult result = Replaced();
+                attempt.TryApply(() =>
+                {
+                    if (!IsSelected())
+                        return;
+                    var cached = _settings.ReadHostedSubscription();
+                    var until = cached.RenewalUtc ?? cached.ExpiresUtc;
+                    var usable = cached.IsAllowed && until.HasValue && until.Value >= DateTime.UtcNow;
+                    var note = usable ? BuildOfflineMessage(until!.Value) :
+                        "Auth server unreachable and no valid cached subscription is available.";
+                    _settings.SaveHostedSubscription(cached with
+                    {
+                        IsAllowed = usable,
+                        VerifiedOnline = false,
+                        Tier = usable ? cached.Tier : 0,
+                        Message = note
+                    });
+                    result = new(usable, usable ? "offline_cached" : "unreachable", note);
+                });
+                return result;
+            }
         }
 
         private static string BuildOfflineMessage(DateTime validUntilUtc)

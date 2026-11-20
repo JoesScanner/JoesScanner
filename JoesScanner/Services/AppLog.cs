@@ -1,13 +1,11 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.IO.Compression;
 using System.Linq;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
-using System.Text.RegularExpressions;
 using Microsoft.Maui.Storage;
 
 namespace JoesScanner.Services
@@ -41,13 +39,6 @@ namespace JoesScanner.Services
 
         private static volatile bool _isEnabled;
 
-
-        private static readonly Regex AuthorizationHeaderRegex = new(@"(?i)(authorization\s*[:=]\s*)(basic|bearer)\s+[^,;\s]+", RegexOptions.Compiled);
-        private static readonly Regex BasicTokenRegex = new(@"(?i)(\bBasic\s+)[A-Za-z0-9+/=]{8,}", RegexOptions.Compiled);
-        private static readonly Regex BearerTokenRegex = new(@"(?i)(\bBearer\s+)[A-Za-z0-9._~+/-]{8,}", RegexOptions.Compiled);
-        private static readonly Regex PasswordValueRegex = new(@"(?i)([""']?password[""']?\s*[:=]\s*)(""(?:\\.|[^""])*""|'(?:\\.|[^'])*'|[^,;\r\n}\]]+)", RegexOptions.Compiled);
-        private static readonly Regex SessionTokenRegex = new(@"(?i)([""']?session[_-]?token[""']?\s*[:=]\s*)(""(?:\\.|[^""])*""|'(?:\\.|[^'])*'|[^,;\r\n}\]]+)", RegexOptions.Compiled);
-        private static readonly Regex UsernameValueRegex = new(@"(?i)([""']?username[""']?\s*[:=]\s*)(""(?:\\.|[^""])*""|'(?:\\.|[^'])*'|[^,;\r\n}\]]+)", RegexOptions.Compiled);
 
         static AppLog()
         {
@@ -526,7 +517,7 @@ namespace JoesScanner.Services
             if (!_isEnabled || string.IsNullOrWhiteSpace(message))
                 return;
 
-            var sanitized = SanitizeLogMessage(message);
+            var sanitized = DiagnosticRedaction.Sanitize(message);
             if (string.IsNullOrWhiteSpace(sanitized))
                 return;
 
@@ -544,23 +535,6 @@ namespace JoesScanner.Services
             // If the channel is full, DropOldest mode makes this succeed while keeping recent logs.
             var generation = Volatile.Read(ref _writeGeneration);
             FileChannel.Writer.TryWrite(new LogWriteItem(line, generation));
-        }
-
-        private static string SanitizeLogMessage(string message)
-        {
-            if (string.IsNullOrWhiteSpace(message))
-                return string.Empty;
-
-            var sanitized = message;
-
-            try { sanitized = AuthorizationHeaderRegex.Replace(sanitized, "$1$2 [REDACTED]"); } catch { }
-            try { sanitized = BasicTokenRegex.Replace(sanitized, "$1[REDACTED]"); } catch { }
-            try { sanitized = BearerTokenRegex.Replace(sanitized, "$1[REDACTED]"); } catch { }
-            try { sanitized = PasswordValueRegex.Replace(sanitized, "$1[REDACTED]"); } catch { }
-            try { sanitized = SessionTokenRegex.Replace(sanitized, "$1[REDACTED]"); } catch { }
-            try { sanitized = UsernameValueRegex.Replace(sanitized, "$1[REDACTED]"); } catch { }
-
-            return sanitized;
         }
 
         // Returns a snapshot of up to maxLines log entries as an array.
@@ -589,45 +563,9 @@ namespace JoesScanner.Services
                 if (string.IsNullOrWhiteSpace(cacheDir))
                     return null;
 
-                Directory.CreateDirectory(cacheDir);
-
-                var zipPath = Path.Combine(cacheDir, $"joesscanner_logs_{DateTime.Now:yyyyMMdd_HHmmss}.zip");
-                if (File.Exists(zipPath))
-                {
-                    try { File.Delete(zipPath); } catch { }
-                }
-
-                var logFiles = GetMostRecentLogFiles(maxLogFiles);
-
-                using (var zip = ZipFile.Open(zipPath, ZipArchiveMode.Create))
-                {
-                    // Snapshot.txt (oldest to newest for readability)
-                    var snapshotLines = GetSnapshot(snapshotMaxLines).Reverse().ToArray();
-                    var snapshotText = string.Join(Environment.NewLine, snapshotLines);
-
-                    var snapshotEntry = zip.CreateEntry("snapshot.txt", CompressionLevel.Fastest);
-                    await using (var entryStream = snapshotEntry.Open())
-                    await using (var writer = new StreamWriter(entryStream))
-                    {
-                        await writer.WriteAsync(snapshotText).ConfigureAwait(false);
-                    }
-
-                    // Include file logs
-                    for (var i = 0; i < logFiles.Count; i++)
-                    {
-                        var filePath = logFiles[i];
-                        if (!File.Exists(filePath))
-                            continue;
-
-                        var name = Path.GetFileName(filePath);
-                        if (string.IsNullOrWhiteSpace(name))
-                            continue;
-
-                        zip.CreateEntryFromFile(filePath, $"files/{name}", CompressionLevel.Fastest);
-                    }
-                }
-
-                return zipPath;
+                var snapshot = GetSnapshot(snapshotMaxLines).Reverse().ToArray();
+                return await Task.Run(() => DiagnosticZip.CreateAsync(cacheDir, GetLogsDirectory(), snapshot, maxLogFiles))
+                    .ConfigureAwait(false);
             }
             catch
             {
@@ -635,34 +573,5 @@ namespace JoesScanner.Services
             }
         }
 
-        private static List<string> GetMostRecentLogFiles(int maxFiles)
-        {
-            try
-            {
-                if (maxFiles <= 0)
-                    return [];
-
-                var dir = GetLogsDirectory();
-                if (!Directory.Exists(dir))
-                    return [];
-
-                var files = Directory.EnumerateFiles(dir, "app_log_*.txt", SearchOption.TopDirectoryOnly)
-                    .Select(p =>
-                    {
-                        try { return new FileInfo(p); } catch { return null; }
-                    })
-                    .Where(f => f != null)
-                    .OrderByDescending(f => f!.LastWriteTimeUtc)
-                    .Take(maxFiles)
-                    .Select(f => f!.FullName)
-                    .ToList();
-
-                return files;
-            }
-            catch
-            {
-                return [];
-            }
-        }
     }
 }

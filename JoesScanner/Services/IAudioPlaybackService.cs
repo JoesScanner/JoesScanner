@@ -7,6 +7,7 @@ namespace JoesScanner.Services
 
         // Plays the specified audio URL at the given playbackRate (for example 0.75x, 1.0x, 1.5x).
         Task PlayAsync(string audioUrl, double playbackRate, CancellationToken cancellationToken = default);
+        Task PlayAsync(string audioUrl, double playbackRate, CancellationToken cancellationToken, PlaybackCompletion completion);
 
         // Stops any active playback and releases underlying audio resources.
         Task StopAsync();

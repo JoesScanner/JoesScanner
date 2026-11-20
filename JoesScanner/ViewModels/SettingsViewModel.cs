@@ -26,7 +26,6 @@ namespace JoesScanner.ViewModels
     {
         private readonly ISettingsService _settings;
         private readonly MainViewModel _mainViewModel;
-        private readonly ITelemetryService _telemetryService;
         private readonly IHistoryLookupsCacheService _historyLookupsCacheService;
         private readonly IAuthObservedTriplesSyncService _authObservedTriplesSyncService;
         private readonly ISubscriptionService _subscriptionService;
@@ -535,14 +534,7 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
                     // Coalesce edits within the existing autosave debounce window.
                     await Task.Delay(150);
                     _autoSaveQueued = false;
-                    try
-                    {
-                        await SaveNonConnectionSettingsAsync();
-                    }
-                    catch (Exception ex)
-                    {
-                        AppLog.Add(() => $"Settings: autosave failed ({ex.GetType().Name}).");
-                    }
+                    await TrySaveNonConnectionSettingsAsync();
                 }
             }
             finally
@@ -600,7 +592,6 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
         public SettingsViewModel(
             ISettingsService settingsService,
             MainViewModel mainViewModel,
-            ITelemetryService telemetryService,
             IFilterProfileStore filterProfileStore,
             IHistoryLookupsCacheService historyLookupsCacheService,
             IAuthObservedTriplesSyncService authObservedTriplesSyncService,
@@ -609,7 +600,6 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
         {
             _settings = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
             _mainViewModel = mainViewModel ?? throw new ArgumentNullException(nameof(mainViewModel));
-            _telemetryService = telemetryService ?? throw new ArgumentNullException(nameof(telemetryService));
 
             _filterProfileStore = filterProfileStore ?? throw new ArgumentNullException(nameof(filterProfileStore));
 
@@ -650,7 +640,7 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
             InitializeFromSettings();
             AppLog.Add(() => $"Settings timing: view model initialization={Stopwatch.GetElapsedTime(initializationStarted).TotalMilliseconds:F1} ms.");
 
-            SaveCommand = new Command(async () => await SaveNonConnectionSettingsAsync());
+            SaveCommand = new Command(async () => await TrySaveNonConnectionSettingsAsync());
             ResetServerCommand = new Command(ResetServerUrl);
 
             // Validate always saves first, then validates.
@@ -716,10 +706,16 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
                 var received = 0;
                 try
                 {
+                    var accountSession = WordPressSession.Capture(_settings);
                     var triples = await _authObservedTriplesSyncService.TrySyncExchangeAsync(serverUrl, force: true, CancellationToken.None);
                     received = triples?.Count ?? 0;
                     if (triples != null)
-                        replaced = await Task.Run(() => _filterService.ReplaceFromObservedTriples(triples, serverUrl));
+                        replaced = await Task.Run(() =>
+                        {
+                            var count = 0;
+                            accountSession.TryApply(() => count = _filterService.ReplaceFromObservedTriples(triples, serverUrl));
+                            return count;
+                        });
                 }
                 catch
                 {
@@ -958,11 +954,12 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
 
                 // Then fetch the canonical server view and merge it in. This keeps both sides converging
                 // without making the settings page wait on network success.
+                var accountSession = WordPressSession.Capture(_settings);
                 var triples = await _authObservedTriplesSyncService.TryFetchSeedAsync(serverKey, CancellationToken.None);
                 if (triples == null || triples.Count == 0)
                     return;
 
-                _filterService.SeedFromObservedTriples(triples, serverKey);
+                accountSession.TryApply(() => _filterService.SeedFromObservedTriples(triples, serverKey));
             }
             catch (Exception ex)
             {
@@ -1348,6 +1345,11 @@ public bool IsDirectoryLoading
                     return;
 
                 _authServerBaseUrl = newValue;
+                if (HostedServerRules.IsHostedStreamServerUrl(_serverUrl))
+                {
+                    BasicAuthUsername = string.Empty;
+                    BasicAuthPassword = string.Empty;
+                }
                 OnPropertyChanged();
                 UpdateHasChanges();
             }
@@ -1469,9 +1471,22 @@ public bool WindowsAutoConnectOnStart
                 return;
 
             _mobileAudio = preferences;
+            if (preferences == _savedMobileAudio)
+                SetMobileAudioSaveError(false);
             OnPropertyChanged(propertyName);
             UpdateHasChanges();
             QueueAutosaveNonConnection("Audio");
+        }
+
+        private bool _hasMobileAudioSaveError;
+        public bool HasMobileAudioSaveError => _hasMobileAudioSaveError;
+
+        private void SetMobileAudioSaveError(bool value)
+        {
+            if (_hasMobileAudioSaveError == value)
+                return;
+            _hasMobileAudioSaveError = value;
+            OnPropertyChanged(nameof(HasMobileAudioSaveError));
         }
 
 
@@ -1990,6 +2005,12 @@ public bool WindowsStartWithWindows
 
             _basicAuthUsername = _settings.BasicAuthUsername ?? string.Empty;
             _basicAuthPassword = _settings.BasicAuthPassword ?? string.Empty;
+            if (_settings.SavedCredentialWarning is { } credentialWarning)
+            {
+                ServerValidationMessage = credentialWarning;
+                ServerValidationIsError = true;
+                HasServerValidationResult = true;
+            }
 
             // Derived flag: treat built-in server(s) as the default connection.
             _useDefaultConnection = HostedServerRules.IsProvidedDefaultServerUrl(_serverUrl);
@@ -2329,7 +2350,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             int AddressDetectionMinAddressChars,
             int AddressDetectionMaxCandidatesPerCall);
 
-        private async Task SaveNonConnectionSettingsAsync()
+        private async Task<bool> TrySaveNonConnectionSettingsAsync()
         {
             await _settingsSaveGate.WaitAsync();
             try
@@ -2365,7 +2386,23 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                 var updateStartup = snapshot.WindowsStartWithWindows != _savedWindowsStartWithWindows;
 #endif
                 var started = Stopwatch.GetTimestamp();
-                await Task.Run(() => PersistNonConnectionSettings(snapshot));
+                try
+                {
+                    await Task.Run(() => PersistNonConnectionSettings(snapshot));
+                }
+                catch (Exception ex)
+                {
+                    if (SupportsMobileAudioOptions && _mobileAudio != _savedMobileAudio)
+                        SetMobileAudioSaveError(true);
+                    if (ex is CredentialStorageException)
+                    {
+                        ServerValidationMessage = ex.Message;
+                        ServerValidationIsError = true;
+                        HasServerValidationResult = true;
+                    }
+                    AppLog.Add(() => $"Settings: save failed ({ex.GetType().Name}).");
+                    return false;
+                }
 
 #if WINDOWS
                 if (updateStartup)
@@ -2392,6 +2429,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                 _savedBluetoothLabelComposerToken = snapshot.BluetoothLabelComposer;
                 _savedBluetoothLabelGenreToken = snapshot.BluetoothLabelGenre;
                 _savedMobileAudio = snapshot.MobileAudio;
+                SetMobileAudioSaveError(false);
                 _savedWhat3WordsLinksEnabled = snapshot.What3WordsLinksEnabled;
                 _savedWhat3WordsApiKey = snapshot.What3WordsApiKey;
                 _savedAudioStaticFilterEnabled = snapshot.AudioStaticFilterEnabled;
@@ -2413,6 +2451,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                 var elapsed = Stopwatch.GetElapsedTime(started);
                 if (elapsed.TotalMilliseconds >= 100)
                     AppLog.Add(() => $"Settings: save completed in {elapsed.TotalMilliseconds:F0} ms.");
+                return true;
             }
             finally
             {
@@ -2432,10 +2471,9 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             _settings.BluetoothLabelAlbum = snapshot.BluetoothLabelAlbum;
             _settings.BluetoothLabelComposer = snapshot.BluetoothLabelComposer;
             _settings.BluetoothLabelGenre = snapshot.BluetoothLabelGenre;
-            if (SupportsMobileAudioOptions && snapshot.MobileAudio != _savedMobileAudio)
-                _settings.MobileAudio = snapshot.MobileAudio;
             _settings.What3WordsLinksEnabled = snapshot.What3WordsLinksEnabled;
-            _settings.What3WordsApiKey = snapshot.What3WordsApiKey;
+            if (snapshot.What3WordsApiKey != _savedWhat3WordsApiKey)
+                _settings.What3WordsApiKey = snapshot.What3WordsApiKey;
             _settings.AudioStaticFilterEnabled = snapshot.AudioStaticFilterEnabled;
             _settings.AudioStaticAttenuatorVolume = snapshot.AudioStaticAttenuatorVolume;
             _settings.AudioToneFilterEnabled = snapshot.AudioToneFilterEnabled;
@@ -2448,6 +2486,8 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             _settings.AddressDetectionMinConfidencePercent = snapshot.AddressDetectionMinConfidencePercent;
             _settings.AddressDetectionMinAddressChars = snapshot.AddressDetectionMinAddressChars;
             _settings.AddressDetectionMaxCandidatesPerCall = snapshot.AddressDetectionMaxCandidatesPerCall;
+            if (SupportsMobileAudioOptions && snapshot.MobileAudio != _savedMobileAudio)
+                _settings.MobileAudio = snapshot.MobileAudio;
         }
 
         private void ResetServerUrl()
@@ -2459,15 +2499,29 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             BasicAuthPassword = string.Empty;
         }
 
+        private readonly ConnectionValidationRequests _connectionValidations = new();
+
         private async Task SaveThenValidateServerUrlAsync()
         {
             // Validation can change connection/auth state even when the selected server URL is the same.
             // Always stop the active connection after a successful validation so the next play/connect
             // starts from a clean validated state.
+            var request = _connectionValidations.Begin();
+            var inputs = (ServerUrl, AuthServerBaseUrl, BasicAuthUsername, BasicAuthPassword, _selectedDirectoryServer?.Url);
+            bool IsCurrent() => _connectionValidations.IsCurrent(request);
+            bool OwnsInputs() => IsCurrent() &&
+                inputs == (ServerUrl, AuthServerBaseUrl, BasicAuthUsername, BasicAuthPassword, _selectedDirectoryServer?.Url);
             var previousServerUrlSnapshot = _savedServerUrl ?? string.Empty;
 
-            await SaveNonConnectionSettingsAsync();
-            await ValidateServerUrlAsync();
+            if (!await TrySaveNonConnectionSettingsAsync() || !OwnsInputs())
+            {
+                if (IsCurrent())
+                    IsValidatingServer = false;
+                return;
+            }
+            if (!await ValidateServerUrlAsync(IsCurrent, OwnsInputs,
+                    (session, apply) => _connectionValidations.TryApply(request, session, OwnsInputs, apply)) || !IsCurrent())
+                return;
 
             if (!ServerValidationIsError)
             {
@@ -2493,6 +2547,8 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                 {
                 }
 
+                if (!IsCurrent())
+                    return;
                 var newServerUrl = _settings.ServerUrl ?? string.Empty;
 
                 // When switching servers, also clear any existing main queue items and address alerts so
@@ -2518,7 +2574,8 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             return (value ?? string.Empty).Trim().TrimEnd('/');
         }
 
-        private async Task ValidateServerUrlAsync()
+        private async Task<bool> ValidateServerUrlAsync(Func<bool> isCurrent, Func<bool> ownsInputs,
+            Func<WordPressSession, Action, bool> publish)
         {
             var selectedDirectoryServerAtStart = _selectedDirectoryServer;
             var selectedDirectoryServerUrlAtStart = (selectedDirectoryServerAtStart?.Url ?? string.Empty).Trim().TrimEnd('/');
@@ -2551,7 +2608,8 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                 ServerValidationMessage = "Enter a server url first.";
                 ServerValidationIsError = true;
                 IsValidatingServer = false;
-                return;
+                Interlocked.Decrement(ref _suppressDirectorySelectionSync);
+                return false;
             }
 
             var isDefaultServer = HostedServerRules.IsHostedStreamServerUrl(url);
@@ -2559,7 +2617,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             try
             {
                 var hasAuth = !string.IsNullOrWhiteSpace(BasicAuthUsername);
-                AppLog.Add(() => $"Validate: url={url}, isDefault={isDefaultServer}, hasBasicAuth={hasAuth}");
+                AppLog.Add(() => $"Validate: isDefault={isDefaultServer}, hasBasicAuth={hasAuth}");
             }
             catch
             {
@@ -2568,9 +2626,14 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
 
             try
             {
-                var destination = new Uri(url, UriKind.Absolute);
-                if (destination.Scheme is not ("http" or "https") || destination.UserInfo.Length != 0)
-                    throw new HttpRequestException("Use an HTTP or HTTPS scanner server URL without embedded credentials.");
+                if (!SavedConnectionUrl.TryParse(url, out _, out var safeUrl, out var embedded))
+                    throw new HttpRequestException("Enter a valid HTTP or HTTPS scanner server address.");
+                url = safeUrl;
+                var destination = new Uri(safeUrl);
+                if (embedded != null && HostedServerRules.RequiresApiFirewallCredentials(_settings, destination))
+                    throw new FirewallAuthenticationException("Hosted server addresses must not contain embedded credentials.");
+                var probeUsername = embedded?.Username ?? BasicAuthUsername.Trim();
+                var probePassword = embedded?.Password ?? BasicAuthPassword;
 
                 if (isDefaultServer)
                 {
@@ -2580,30 +2643,38 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                     var accountUsername = (BasicAuthUsername ?? string.Empty).Trim();
                     var accountPassword = TextNormalizationHelper.NormalizeSmartQuotes((BasicAuthPassword ?? string.Empty).Trim());
 
+                    var accountBase = AuthServerBaseUrl;
+                    var authUrl = SavedConnectionUrl.AccountEndpoint(accountBase);
+                    var savedSession = WordPressSession.Capture(_settings);
+                    var matchesSavedEndpoint = savedSession.Endpoint("auth") == authUrl;
+                    var hasSavedAccount = matchesSavedEndpoint &&
+                        _settings.TryGetServerCredentials(DefaultServerUrl, out _, out _);
+
                     if (string.IsNullOrWhiteSpace(accountUsername) || string.IsNullOrWhiteSpace(accountPassword))
                     {
-                        // Hosted default server requires a valid Joe's Scanner account subscription.
-                        // Do NOT allow a "validated" state without user-entered account credentials.
-                        ServerValidationMessage =
-                            "Enter your Joe's Scanner username and password, then tap Validate.";
+                        if (accountUsername.Length == 0 && accountPassword.Length == 0 && hasSavedAccount &&
+                            HostedServerRules.IsHostedStreamServerUrl(_settings.ServerUrl))
+                        {
+                            await _mainViewModel.ApplyHostedAccountAsync(string.Empty, false,
+                                () => ownsInputs() && savedSession.IsCurrentAccount, () =>
+                            {
+                                publish(savedSession, () => _settings.ClearServerCredentials(DefaultServerUrl));
+                            });
+                            if (!ownsInputs())
+                                return false;
+                        }
+                        var notice = !hasSavedAccount && matchesSavedEndpoint ? _settings.SavedCredentialWarning : null;
+                        ServerValidationMessage = notice ?? "Enter your Joe's Scanner username and password, then tap Validate.";
                         ServerValidationIsError = true;
-
-                        // Do not show the "validated" prefix in the header.
                         SetShowValidationPrefix(false);
-
-                        _settings.SubscriptionLastStatusOk = false;
-                        _settings.AuthSessionToken = string.Empty;
-                        _settings.SubscriptionLastMessage = ServerValidationMessage;
-                        _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
-
-                        try { _settings.ClearServerCredentials(DefaultServerUrl); } catch { }
-
                         UpdateSubscriptionSummaryFromSettings();
-                        IsValidatingServer = false;
-                        return;
+                        return false;
                     }
 
-                    var authUrl = BuildAuthServerUrl("/wp-json/joes-scanner/v1/auth");
+                    var session = matchesSavedEndpoint && savedSession.IsCurrent &&
+                        (!_settings.TryGetServerCredentials(DefaultServerUrl, out var savedUser, out _) ||
+                         string.Equals(savedUser, accountUsername, StringComparison.OrdinalIgnoreCase))
+                        ? savedSession.Token : string.Empty;
 
                     var appVersion = AppInfo.Current.VersionString ?? string.Empty;
                     var appBuild = AppInfo.Current.BuildString ?? string.Empty;
@@ -2629,7 +2700,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                         os_version = osVersion,
                         device_id = _settings.DeviceInstallId,
 
-                        session_token = _settings.AuthSessionToken
+                        session_token = session
                     };
 
                     // Use UnsafeRelaxedJsonEscaping so special characters like apostrophes in
@@ -2643,25 +2714,22 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                     var json = JsonSerializer.Serialize(payload, authJsonOptions);
                     using var content = new StringContent(json, Encoding.UTF8, "application/json");
 
+                    if (!ownsInputs() || !savedSession.IsCurrentAccount)
+                        return false;
                     using var authResponseMessage = await _httpClient.PostAsync(authUrl, content);
                     var responseBody = await authResponseMessage.Content.ReadAsStringAsync();
+                    if (!ownsInputs() || !savedSession.IsCurrentAccount)
+                        return false;
 
                     if (!authResponseMessage.IsSuccessStatusCode)
                     {
                         var statusInt = (int)authResponseMessage.StatusCode;
                         ServerValidationMessage =
-                            $"Auth server responded with HTTP {statusInt} {authResponseMessage.ReasonPhrase}.";
+                            $"Auth server responded with HTTP {statusInt}.";
                         ServerValidationIsError = true;
 
-                        _settings.SubscriptionLastStatusOk = false;
-                        _settings.AuthSessionToken = string.Empty;
-                        _settings.SubscriptionLastMessage = ServerValidationMessage;
-                        _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
-
-                        try { _settings.ClearServerCredentials(DefaultServerUrl); } catch { }
-
                         UpdateSubscriptionSummaryFromSettings();
-                        return;
+                        return false;
                     }
 
                     AuthResponseDto? authResponse = null;
@@ -2680,47 +2748,28 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                         ServerValidationMessage = "Auth server returned an unexpected response.";
                         ServerValidationIsError = true;
 
-                        _settings.SubscriptionLastStatusOk = false;
-                        _settings.AuthSessionToken = string.Empty;
-                        _settings.SubscriptionLastMessage = ServerValidationMessage;
-                        _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
-
                         UpdateSubscriptionSummaryFromSettings();
-                        return;
+                        return false;
                     }
 
                     if (!authResponse.Ok)
                     {
-                        var code = authResponse.Error ?? "unknown_error";
-                        var msg = authResponse.Message ?? "Account validation failed.";
-                        ServerValidationMessage =
-                            $"Account validation failed ({code}): {msg}";
+                        ServerValidationMessage = DiagnosticRedaction.SanitizeAuthenticationMessage(
+                            authResponse.Message ?? "Account validation failed.", accountUsername, accountPassword, session);
                         ServerValidationIsError = true;
 
-                        _settings.SubscriptionLastStatusOk = false;
-                        _settings.AuthSessionToken = string.Empty;
-                        _settings.SubscriptionLastMessage = ServerValidationMessage;
-                        _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
-
                         UpdateSubscriptionSummaryFromSettings();
-                        return;
+                        return false;
                     }
 
                     var sub = authResponse.Subscription;
                     if (sub == null || !sub.Active)
                     {
-                        var subStatus = sub?.Status ?? "unknown";
-                        ServerValidationMessage =
-                            $"Account validated but subscription is not active (status: {subStatus}).";
+                        ServerValidationMessage = "Account validated but subscription is not active.";
                         ServerValidationIsError = true;
 
-                        _settings.SubscriptionLastStatusOk = false;
-                        _settings.AuthSessionToken = string.Empty;
-                        _settings.SubscriptionLastMessage = ServerValidationMessage;
-                        _settings.SubscriptionLastCheckUtc = DateTime.UtcNow;
-
                         UpdateSubscriptionSummaryFromSettings();
-                        return;
+                        return false;
                     }
 
                     var planLabelRaw = sub.LevelLabel ?? sub.Level ?? string.Empty;
@@ -2791,40 +2840,31 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                         planSummary = string.Empty;
                     }
 
-                    // IMPORTANT: top header must not show plan details.
+                    var committed = false;
+                    await _mainViewModel.ApplyHostedAccountAsync(accountUsername, !matchesSavedEndpoint,
+                        () => ownsInputs() && savedSession.IsCurrentAccount, () =>
+                    {
+                        committed = publish(savedSession, () =>
+                        {
+                            _settings.AuthServerBaseUrl = accountBase;
+                            _settings.SetServerCredentials(DefaultServerUrl, accountUsername, accountPassword);
+                            _settings.ServerUrl = DefaultServerUrl;
+                            string Safe(string? value) => DiagnosticRedaction.SanitizeAuthenticationMessage(
+                                value, accountUsername, accountPassword, session, authResponse.SessionToken ?? "");
+                            _settings.SaveHostedSubscription(new(true, true, sub.TierLevel, DateTime.UtcNow,
+                                DateParseHelper.TryParseUtc(sub.ExpiresAt), null, Safe(planLabel), Safe(priceIdRaw), Safe(planSummary)));
+                            _settings.AuthSessionToken = authResponse.SessionToken ?? string.Empty;
+                        });
+                        if (committed)
+                            _mainViewModel.ServerUrl = DefaultServerUrl;
+                    });
+                    if (!committed || !ownsInputs())
+                        return false;
                     ServerValidationMessage = "Joe's Scanner account validated.";
                     ServerValidationIsError = false;
 
-                    _settings.ServerUrl = DefaultServerUrl;
-                    _settings.AuthServerBaseUrl = AuthServerBaseUrl;
-                    _settings.SubscriptionTierLevel = sub.TierLevel;
-                    _settings.SubscriptionExpiresUtc = DateParseHelper.TryParseUtc(sub.ExpiresAt);
-                    var nowUtc = DateTime.UtcNow;
-                    _settings.SubscriptionLastCheckUtc = nowUtc;
-                    _settings.SubscriptionLastStatusOk = true;
-                    _settings.SubscriptionPriceId = priceIdRaw;
-                    _settings.SubscriptionLastLevel = planLabel;
-                    _settings.SubscriptionRenewalUtc = null;
-
-                    // Plan details are stored for the connection box summary only.
-                    _settings.SubscriptionLastMessage = planSummary;
-
-                    _settings.AuthSessionToken = authResponse.SessionToken ?? string.Empty;
-                    await _telemetryService.AdoptSessionTokenAsync(authResponse.SessionToken ?? string.Empty, "settings_validate_auth_success", CancellationToken.None);
-
-                    
-
-                    // Persist the WordPress account after successful account validation.
-                    _settings.BasicAuthUsername = accountUsername;
-                    _settings.BasicAuthPassword = accountPassword;
-                    _settings.SetServerCredentials(DefaultServerUrl, accountUsername, accountPassword);
-                    _settings.LastAuthUsername = accountUsername;
-
-                    _mainViewModel.ServerUrl = DefaultServerUrl;
-
-
                     // Mark connection as saved so plan and renewal info appears immediately after the first successful verify.
-                    Interlocked.Exchange(ref _suppressDirectorySelectionSync, 1);
+                    Interlocked.Increment(ref _suppressDirectorySelectionSync);
                     try
                     {
                         UseDefaultConnection = true;
@@ -2834,7 +2874,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                     }
                     finally
                     {
-                        Interlocked.Exchange(ref _suppressDirectorySelectionSync, 0);
+                        Interlocked.Decrement(ref _suppressDirectorySelectionSync);
                     }
 
                     _savedAuthServerBaseUrl = _authServerBaseUrl;
@@ -2859,18 +2899,25 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                         throw new FirewallAuthenticationException("Could not load the server's firewall configuration. Refresh the server directory and try again.");
 
                     var subscription = await _subscriptionService.EnsureSubscriptionAsync(CancellationToken.None);
+                    if (!ownsInputs())
+                        return false;
                     if (!subscription.IsAllowed)
                         throw new FirewallAuthenticationException(subscription.Message ?? "Verify your Joe's Scanner account in Settings.");
 
+                    var directorySession = WordPressSession.Capture(_settings);
                     using var request = new HttpRequestMessage(HttpMethod.Head, destination);
                     using var response = await _scannerValidationClient.SendAsync(request);
+                    if (!ownsInputs() || !directorySession.IsCurrentAccount)
+                        return false;
                     if (!response.IsSuccessStatusCode && response.StatusCode != HttpStatusCode.NotImplemented)
                         throw new HttpRequestException($"Scanner server verification failed (HTTP {(int)response.StatusCode}).");
 
-                    _settings.ServerUrl = url;
-                    _settings.BasicAuthUsername = string.Empty;
-                    _settings.BasicAuthPassword = string.Empty;
-                    _settings.ClearServerCredentials(url);
+                    if (!publish(directorySession, () =>
+                        {
+                            _settings.ClearServerCredentials(url);
+                            _settings.ServerUrl = url;
+                        }))
+                        return false;
                     BasicAuthUsername = string.Empty;
                     BasicAuthPassword = string.Empty;
                     _mainViewModel.ServerUrl = url;
@@ -2880,7 +2927,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                 else
                 {
                     var userProvidedAnyAuth =
-                        !string.IsNullOrWhiteSpace(BasicAuthUsername) || !string.IsNullOrWhiteSpace(BasicAuthPassword);
+                        !string.IsNullOrWhiteSpace(probeUsername) || !string.IsNullOrWhiteSpace(probePassword);
 
                     async Task<HttpResponseMessage> SendHeadAsync(bool includeAuth)
                     {
@@ -2897,8 +2944,8 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
 
                         if (includeAuth)
                         {
-                            var u = (BasicAuthUsername ?? string.Empty).Trim();
-                            var p = TextNormalizationHelper.NormalizeSmartQuotes((BasicAuthPassword ?? string.Empty).Trim());
+                            var u = probeUsername;
+                            var p = probePassword;
 
                             if (!string.IsNullOrWhiteSpace(u) || !string.IsNullOrWhiteSpace(p))
                             {
@@ -2915,10 +2962,12 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
 
                     // For custom servers, always try without basic auth first.
                     using var noAuthResponse = await SendHeadAsync(includeAuth: false);
+                    if (!ownsInputs())
+                        return false;
 
                     try
                     {
-                        AppLog.Add(() => $"Validate: response (no auth) HTTP {(int)noAuthResponse.StatusCode} {noAuthResponse.ReasonPhrase}");
+                        AppLog.Add(() => $"Validate: response (no auth) HTTP {(int)noAuthResponse.StatusCode}");
                     }
                     catch
                     {
@@ -2936,7 +2985,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                         else
                         {
                             ServerValidationMessage =
-                                $"Server reachable (HTTP {statusInt} {noAuthResponse.ReasonPhrase}).";
+                                $"Server reachable (HTTP {statusInt}).";
                         }
 
                         // If the server is reachable without auth, clear any user-entered credentials.
@@ -2960,16 +3009,9 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                         ServerValidationIsError = false;
 
                         var finalUrl = url.Trim();
+                        _settings.ClearServerCredentials(finalUrl);
                         _settings.ServerUrl = finalUrl;
-
-                        // Persist what we actually used (blank for no-auth success).
-                        var effectiveUser = string.Empty;
-                        var effectivePass = string.Empty;
-
-                        _settings.BasicAuthUsername = effectiveUser;
-                        _settings.BasicAuthPassword = effectivePass;
-                        _settings.SetServerCredentials(finalUrl, effectiveUser, effectivePass);
-
+                        ServerUrl = finalUrl;
                         _mainViewModel.ServerUrl = finalUrl;
                     }
                     else if (statusCode == HttpStatusCode.Unauthorized || statusCode == HttpStatusCode.Forbidden)
@@ -2977,8 +3019,11 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                         // If auth is required and the user provided credentials, retry with basic auth.
                         if (!userProvidedAnyAuth)
                         {
-                            ServerValidationMessage =
-                                $"Authentication required (HTTP {statusInt} {noAuthResponse.ReasonPhrase}). " +
+                            var notice = string.Equals(SavedConnectionUrl.Scope(url),
+                                SavedConnectionUrl.Scope(_settings.ServerUrl), StringComparison.Ordinal)
+                                ? _settings.SavedCredentialWarning : null;
+                            ServerValidationMessage = notice ??
+                                $"Authentication required (HTTP {statusInt}). " +
                                 "Enter a basic auth username and password, then tap Validate.";
                             ServerValidationIsError = true;
                         }
@@ -2986,10 +3031,12 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                         {
                             // Retry with auth.
                             using var authResponse = await SendHeadAsync(includeAuth: true);
+                            if (!ownsInputs())
+                                return false;
 
                             try
                             {
-                                AppLog.Add(() => $"Validate: response (with auth) HTTP {(int)authResponse.StatusCode} {authResponse.ReasonPhrase}");
+                                AppLog.Add(() => $"Validate: response (with auth) HTTP {(int)authResponse.StatusCode}");
                             }
                             catch
                             {
@@ -3007,34 +3054,30 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                                 else
                                 {
                                     ServerValidationMessage =
-                                        $"Server reachable (HTTP {authStatusInt} {authResponse.ReasonPhrase}).";
+                                        $"Server reachable (HTTP {authStatusInt}).";
                                 }
 
                                 ServerValidationIsError = false;
 
                                 var finalUrl = url.Trim();
+                                _settings.SetServerCredentials(finalUrl, probeUsername, probePassword);
                                 _settings.ServerUrl = finalUrl;
-
-                                var effectiveUser = (BasicAuthUsername ?? string.Empty).Trim();
-                                var effectivePass = TextNormalizationHelper.NormalizeSmartQuotes((BasicAuthPassword ?? string.Empty).Trim());
-
-                                _settings.BasicAuthUsername = effectiveUser;
-                                _settings.BasicAuthPassword = effectivePass;
-                                _settings.SetServerCredentials(finalUrl, effectiveUser, effectivePass);
-
+                                ServerUrl = finalUrl;
+                                BasicAuthUsername = probeUsername;
+                                BasicAuthPassword = probePassword;
                                 _mainViewModel.ServerUrl = finalUrl;
                             }
                             else if (authStatus == HttpStatusCode.Unauthorized || authStatus == HttpStatusCode.Forbidden)
                             {
                                 ServerValidationMessage =
-                                    $"Authentication failed (HTTP {authStatusInt} {authResponse.ReasonPhrase}). " +
+                                    $"Authentication failed (HTTP {authStatusInt}). " +
                                     "Check basic auth username and password and that the server or firewall is configured to allow this client.";
                                 ServerValidationIsError = true;
                             }
                             else
                             {
                                 ServerValidationMessage =
-                                    $"Server responded with HTTP {authStatusInt} {authResponse.ReasonPhrase}.";
+                                    $"Server responded with HTTP {authStatusInt}.";
                                 ServerValidationIsError = true;
                             }
                         }
@@ -3042,38 +3085,47 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                     else
                     {
                         ServerValidationMessage =
-                            $"Server responded with HTTP {statusInt} {noAuthResponse.ReasonPhrase}.";
+                            $"Server responded with HTTP {statusInt}.";
                         ServerValidationIsError = true;
                     }
                 }
             }
+            catch (CredentialStorageException ex)
+            {
+                if (!isCurrent())
+                    return false;
+                ServerValidationMessage = ex.Message;
+                ServerValidationIsError = true;
+            }
             catch (FirewallAuthenticationException ex)
             {
+                if (!isCurrent())
+                    return false;
                 ServerValidationMessage = ex.Message;
                 ServerValidationIsError = true;
             }
             catch (HttpRequestException ex)
             {
+                if (!isCurrent())
+                    return false;
                 try
                 {
-                    AppLog.Add(() => $"Validate: HttpRequestException: {ex.Message}");
-                    AppLog.Add(() => ex.ToString());
-                    if (ex.InnerException != null)
-                        AppLog.Add(() => $"Validate: Inner: {ex.InnerException}");
+                    AppLog.Add(() => $"Validate: HTTP request failed ({ex.StatusCode}).");
                 }
                 catch
                 {
                 }
 
-                ServerValidationMessage = $"Could not reach server: {ex.Message}";
+                ServerValidationMessage = $"Could not reach server: {DiagnosticRedaction.Sanitize(ex.Message)}";
                 ServerValidationIsError = true;
             }
-            catch (TaskCanceledException ex)
+            catch (TaskCanceledException)
             {
+                if (!isCurrent())
+                    return false;
                 try
                 {
                     AppLog.Add(() => "Validate: timed out.");
-                    AppLog.Add(() => ex.ToString());
                 }
                 catch
                 {
@@ -3084,16 +3136,17 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             }
             catch (Exception ex)
             {
+                if (!isCurrent())
+                    return false;
                 try
                 {
-                    AppLog.Add(() => $"Validate: unexpected exception: {ex.Message}");
-                    AppLog.Add(() => ex.ToString());
+                    AppLog.Add(() => $"Validate: unexpected exception ({ex.GetType().Name}).");
                 }
                 catch
                 {
                 }
 
-                ServerValidationMessage = $"Unexpected error validating server: {ex.Message}";
+                ServerValidationMessage = $"Unexpected error validating server: {DiagnosticRedaction.Sanitize(ex.Message)}";
                 ServerValidationIsError = true;
             }
             finally
@@ -3102,7 +3155,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                 {
                     // Keep the picker locked to the user-selected listed server during Validate.
                     // Only fall back to URL-based sync when Custom server was actually selected.
-                    if (!selectedCustomAtStart && selectedDirectoryServerAtStart != null)
+                    if (isCurrent() && !selectedCustomAtStart && selectedDirectoryServerAtStart != null)
                     {
                         var liveMatch = _directoryServers.FirstOrDefault(s =>
                             !s.IsCustom &&
@@ -3125,7 +3178,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                             SyncSelectedDirectoryServerFromCurrentUrl();
                         }
                     }
-                    else
+                    else if (isCurrent())
                     {
                         SyncSelectedDirectoryServerFromCurrentUrl();
                     }
@@ -3138,21 +3191,10 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                     Interlocked.Decrement(ref _suppressDirectorySelectionSync);
                 }
 
-                // If validation succeeded, treat the current connection settings as saved
-                // so the Validate button returns to its normal (blue) state.
-                if (!ServerValidationIsError)
-                {
-                    _savedAuthServerBaseUrl = _authServerBaseUrl;
-                    _savedServerUrl = _serverUrl;
-                    _savedUseDefaultConnection = _useDefaultConnection;
-                    _savedBasicAuthUsername = _basicAuthUsername;
-                    _savedBasicAuthPassword = _basicAuthPassword;
-
-                    UpdateHasChanges();
-                }
-
-                IsValidatingServer = false;
+                if (isCurrent())
+                    IsValidatingServer = false;
             }
+            return isCurrent() && !ServerValidationIsError;
         }
 
         private void UpdateHasChanges()

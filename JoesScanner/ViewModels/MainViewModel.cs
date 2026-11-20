@@ -15,7 +15,7 @@ namespace JoesScanner.ViewModels
 {
     // Main view model for the primary JoesScanner client screen.
     // Handles streaming calls, playback, theme, jump-to-live, and global audio enable state.
-    public class MainViewModel : BindableObject
+    public partial class MainViewModel : BindableObject
     {
         // View hint: "Jump to live" is a user action and should force the main queue list
         // to visually snap back to the newest call even if the user had scrolled into history.
@@ -38,23 +38,20 @@ namespace JoesScanner.ViewModels
         private readonly IToneAlertService _toneAlertService;
 private readonly IPlaybackCoordinator _playbackCoordinator;
 
-        private CancellationTokenSource? _cts;
+        private readonly MonitoringLifecycle _monitoring = new();
+        private readonly DurableLiveQueue _durableQueue;
+        private readonly DurablePlaybackCommit _playbackCommit;
+        private readonly LiveQueueWake _queueWake = new();
+        private readonly LivePlaybackRequests _transportLookups = new();
+        private DurableLiveQueue.Run? _durableRun;
+        private CallItem? _manualPlaybackTarget;
         private readonly LivePlaybackRequests _playbackRequests = new();
-        private readonly SemaphoreSlim _nativePlaybackGate = new(1);
+        private readonly PlaybackOwnership _playbackOwnership;
+        private readonly SemaphoreSlim _liveCompletionGate = new(1);
 
-        // Set true only when the user explicitly disconnects.
-        // Used to decide whether we should clear the "last connected" intent across restarts.
-        private volatile bool _userRequestedStop;
-
-        // Prevent overlapping start/stop transitions when the user taps play or stop repeatedly during startup/shutdown.
-        private int _monitoringTransitionState;
         private int _refreshingCallMetadata;
 
         private int _audioToggleSerial;
-        // When true, the live queue continues to run but audio output is suppressed.
-        // This is used when the user navigates to the History tab.
-        private volatile bool _isMainAudioSoftMuted;
-
         private bool _isRunning;
         private string _serverUrl = string.Empty;
         private bool _autoPlay;
@@ -74,14 +71,17 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
         // Most recently finished call, used as the anchor when nothing is playing.
         private CallItem? _lastPlayedCall;
         private CallItem? _retryPlaybackCall;
+        private CallItem? _awaitingAutomaticAudio;
+        private CallItem? _notifiedRecording;
+        private (string? Server, string Id)? _lastAudioNotificationRetry;
+        public bool CanSkipUnavailableRecording => _retryPlaybackCall != null && _unavailableRecording;
+        private bool _unavailableRecording;
 
         // True while we are playing through the backlog.
         private bool _isQueuePlaybackRunning;
         private int _queuePlaybackVersion;
 
-        // True when we should resume playback after a temporary soft mute (History tab, etc.).
-        // This prevents the UI from starting playback when AutoPlay is off and nothing was playing.
-        private bool _resumePlaybackAfterSoftMute;
+        private bool _resumeAfterHistory;
 
         // When the user explicitly starts monitoring (presses Play/Start Monitoring), keep queue playback alive
         // even if AutoPlay is off. Otherwise calls can arrive and scroll but never advance audio unless the
@@ -174,6 +174,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
         // Only affects audio (mute or unmute), never starts or stops the stream.
         public ICommand ToggleAudioCommand { get; }
         public ICommand ResumeMobilePlaybackCommand { get; }
+        public ICommand SkipUnavailableRecordingCommand { get; }
         public bool CanResumePlayback => _retryPlaybackCall != null || IsMobilePlaybackPaused;
 
         public bool IsMobilePlaybackPaused =>
@@ -186,11 +187,18 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 #endif
 
 #if ANDROID
-        private const string MobileMonitoringExplicitlyStoppedKey = "android_monitoring_explicitly_stopped";
+        private const string MonitoringExplicitlyStoppedKey = "android_monitoring_explicitly_stopped";
+        private Task? _androidNotificationPermissionPrompt;
 #elif IOS
-        private const string MobileMonitoringExplicitlyStoppedKey = "ios_monitoring_explicitly_stopped";
+        private const string MonitoringExplicitlyStoppedKey = "ios_monitoring_explicitly_stopped";
         private LiveStreamRecovery? _iosForegroundRecovery;
+#else
+        private const string MonitoringExplicitlyStoppedKey = "monitoring_explicitly_stopped";
 #endif
+
+        private readonly MonitoringIntentStore _monitoringIntent =
+            new(MonitoringExplicitlyStoppedKey, message => AppLog.Add(message));
+        private (long Owner, string? Server, string? Account) _startingMonitoringScope;
 
         // Command to play a specific call audio when the user taps it.
         public ICommand PlayAudioCommand { get; }
@@ -225,7 +233,9 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 			IPlaybackCoordinator playbackCoordinator,
             IAddressDetectionService addressDetectionService,
             IWhat3WordsService what3WordsService,
-            IToneAlertService toneAlertService)
+            IToneAlertService toneAlertService,
+            DurableLiveQueue durableQueue,
+            PlaybackOwnership playbackOwnership)
         {
             _callStreamService = callStreamService ?? throw new ArgumentNullException(nameof(callStreamService));
             _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
@@ -238,6 +248,9 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 			_addressDetectionService = addressDetectionService ?? throw new ArgumentNullException(nameof(addressDetectionService));
 			_what3WordsService = what3WordsService ?? throw new ArgumentNullException(nameof(what3WordsService));
 			_toneAlertService = toneAlertService ?? throw new ArgumentNullException(nameof(toneAlertService));
+            _durableQueue = durableQueue;
+            _playbackOwnership = playbackOwnership;
+            _playbackCommit = new DurablePlaybackCommit(durableQueue.CommitCompletionAsync);
 
 			_toneAlertService.ToneDetected += OnToneDetected;
 			_toneAlertService.HotTalkgroupsChanged += OnHotTalkgroupsChanged;
@@ -282,11 +295,12 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             SetConnectionStatus(ConnectionStatus.Stopped);
 
             // Commands.
-            StartCommand = new Command(Start, () => !IsRunning);
-            StopCommand = new Command(async () => await StopMonitoringAsync(), () => IsRunning);
+            StartCommand = new Command(Start, () => _monitoring.Current == null);
+            StopCommand = new Command(async () => await StopMonitoringAsync(), () => _monitoring.Current != null);
             OpenDonateCommand = new Command(async () => await OpenDonateAsync());
             ToggleAudioCommand = new Command(async () => await OnToggleAudioAsync());
             ResumeMobilePlaybackCommand = new Command(async () => await ResumeMobilePlaybackAsync());
+            SkipUnavailableRecordingCommand = new Command(async () => await SkipUnavailableRecordingAsync());
 #if ANDROID
             AndroidAudioEnvironment.ResumeStateChanged += () => OnPropertyChanged(nameof(CanResumePlayback));
 #elif IOS
@@ -334,19 +348,13 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             // When another tab (History, etc.) takes over playback, stop the live queue.
             QueueControlBus.StopMainQueueRequested += () =>
             {
-                try
+                _ = MainThread.InvokeOnMainThreadAsync(async () =>
                 {
-                    if (!IsRunning)
-                        return;
-
-                    _ = MainThread.InvokeOnMainThreadAsync(async () =>
+                    if (_monitoring.Current != null)
                     {
                         try { await StopMonitoringAsync(); } catch { }
-                    });
-                }
-                catch
-                {
-                }
+                    }
+                });
             };
 
             // When another tab (History, etc.) opens, stop main tab audio playback if it is running.
@@ -365,62 +373,37 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                 }
             };
 
-            // History tab: soft mute without interrupting the live queue.
-            QueueControlBus.MainAudioMuteRequested += (isMuted) =>
-            {
-                try
-                {
-                    _ = MainThread.InvokeOnMainThreadAsync(async () =>
-                    {
-                        try { await SetMainAudioSoftMuteAsync(isMuted); } catch { }
-                    });
-                }
-                catch
-                {
-                }
-            };
-        }
-
-        private async Task SetMainAudioSoftMuteAsync(bool isMuted)
-        {
-            _isMainAudioSoftMuted = isMuted;
-
-            if (isMuted)
-            {
-                // Only resume when unmuted if something was already playing.
-                _resumePlaybackAfterSoftMute =
-                    IsRunning &&
-                    AudioEnabled &&
-                    (_isQueuePlaybackRunning || _currentPlayingCall != null);
-
-                // Cancel any in-flight playback immediately, but do not reset queue state.
-                _playbackRequests.CancelCurrent();
-
-                try { await _audioPlaybackService.StopAsync(); } catch { }
-                return;
-            }
-
-			// Unmuted: never start new playback when nothing was playing.
-			if (_resumePlaybackAfterSoftMute && IsRunning && AudioEnabled)
-            {
-                _resumePlaybackAfterSoftMute = false;
-				_ = RequestQueuePlaybackAsync("SoftMuteUnmuteResume", true);
-                return;
-            }
-
-            _resumePlaybackAfterSoftMute = false;
+            _playbackOwnership.Changed += OnPlaybackOwnershipChanged;
         }
 
         private async Task ResumeMobilePlaybackAsync()
         {
+            if (_playbackOwnership.Live is not { } live)
+                return;
             if (_retryPlaybackCall is { } retry)
             {
+                if (_playbackCommit.Pending is { } pending && pending.Id == retry.BackendId &&
+                    DurableLiveQueue.ServerKey(retry.RecordingServer ?? retry.LiveState?.ServerUrl ?? "") == pending.Run.Server)
+                {
+                    var run = _monitoring.Current;
+                    try
+                    {
+                        await FlushLiveCompletionAsync(live.Token);
+                        if (_playbackOwnership.IsCurrent(live) && ReferenceEquals(_retryPlaybackCall, retry) && _monitoring.CanRecover(run))
+                        {
+                            SetPlaybackRetry(null);
+                            await RequestQueuePlaybackAsync("PlaybackProgressSaved", true);
+                        }
+                    }
+                    catch (OperationCanceledException) when (live.Token.IsCancellationRequested) { }
+                    catch (Exception ex) { AppLog.Add(() => $"Live queue completion could not be saved ({ex.GetType().Name})."); }
+                    return;
+                }
                 await OnCallTappedAsync(retry);
                 return;
             }
 #if ANDROID
-            if (IsRunning)
-                SystemMediaService.PrepareAndroidMonitoringService();
+            SystemMediaService.PrepareAndroidPlaybackService();
             AndroidAudioEnvironment.RequestPlay();
 #elif IOS
             IosAudioEnvironment.RequestPlay();
@@ -433,11 +416,80 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 #endif
         }
 
+        private async Task SkipUnavailableRecordingAsync()
+        {
+            var item = _retryPlaybackCall;
+            var run = _monitoring.Current;
+            if (_playbackOwnership.Live is not { } live || !CanSkipUnavailableRecording || item == null || !_monitoring.CanRecover(run) ||
+                _durableRun is not { } durable || !TryGetDurableRecording(item, durable, out var id, out _))
+                return;
+
+            using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(run!.Token, live.Token);
+            try
+            {
+                await _durableQueue.MarkAsync(durable, id, PlaybackOutcome.Skipped, cancellation.Token);
+                if (_playbackOwnership.IsCurrent(live) && _monitoring.CanRecover(run) && ReferenceEquals(_retryPlaybackCall, item))
+                {
+                    SetPlaybackRetry(null);
+                    LastQueueEvent = "Unavailable recording skipped.";
+                    await RequestQueuePlaybackAsync("SkippedUnavailableRecording", true);
+                }
+            }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+            catch (Exception ex)
+            {
+                AppLog.DebugWriteLine(() => $"Live recording could not be skipped ({ex.GetType().Name}).");
+                LastQueueEvent = "Could not save the skip. The recording is still pending.";
+            }
+        }
+
+        private void ResumeAwaitingAudio(string? server, string id, LiveCallSnapshot? observation)
+        {
+            if (server == null || DurableLiveQueue.ServerKey(server) is not { } key)
+                return;
+            bool Matches(CallItem item) => item.BackendId == id &&
+                DurableLiveQueue.ServerKey(item.RecordingServer ?? item.LiveState?.ServerUrl ?? "") == key;
+            var url = observation?.AudioUrl;
+            if (url != null && _currentPlayingCall is { } active && Matches(active) && active.AudioUrl != url)
+                ApplyObservation(active);
+            if (_awaitingAutomaticAudio is not { } waiting || !Matches(waiting))
+                return;
+            if (url == null)
+            {
+                if (_lastAudioNotificationRetry == (key, id))
+                    return;
+                _lastAudioNotificationRetry = (key, id);
+            }
+            else
+            {
+                if (waiting.AudioUrl == url)
+                    return;
+                ApplyObservation(waiting);
+                _notifiedRecording = waiting;
+            }
+            SetPlaybackRetry(null);
+            _ = RequestQueuePlaybackAsync("RecordingAudioUpdated", true);
+
+            void ApplyObservation(CallItem item)
+            {
+                if (item.LiveState is { } state && observation != null)
+                {
+                    state.Observe(observation, LiveCallState.NextVersion());
+                    item.ApplyLiveUpdate();
+                }
+                else if (url != null)
+                    item.AudioUrl = url;
+            }
+        }
+
         private Task SystemPlayAsync()
         {
             return MainThread.InvokeOnMainThreadAsync(async () =>
             {
-                if (IsMonitoringTransitionInProgress)
+                if (_playbackOwnership.Live == null)
+                    return;
+                var run = _monitoring.Current;
+                if (run is { IsActive: false })
                     return;
 
                 if (CanResumePlayback)
@@ -445,10 +497,9 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                     await ResumeMobilePlaybackAsync();
                     return;
                 }
-                if (!IsRunning)
-                    await StartMonitoringAsync();
+                run ??= await StartMonitoringCoreAsync();
 
-                if (IsRunning && AudioEnabled)
+                if (_monitoring.CanRecover(run) && AudioEnabled)
                     _ = RequestQueuePlaybackAsync("UserPlay", true);
             });
         }
@@ -456,7 +507,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 #if IOS
         private void OnIosForegroundRecovered(DateTimeOffset since)
         {
-            if (!IsRunning || _userRequestedStop || _cts?.IsCancellationRequested != false)
+            if (!_monitoring.CanRecover(_monitoring.Current))
                 return;
 
             _iosForegroundRecovery?.Request(since);
@@ -469,7 +520,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
         {
             return MainThread.InvokeOnMainThreadAsync(async () =>
             {
-                if (IsRunning)
+                if (_monitoring.Current != null)
                     await StopMonitoringAsync();
             });
         }
@@ -503,11 +554,9 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 
                 _isRunning = value;
                 OnPropertyChanged();
-                OnPropertyChanged(nameof(MediaPlayStopIcon));
+                NotifyMonitoringControls();
                 OnPropertyChanged(nameof(IsMediaButtonsEnabled));
                 OnPropertyChanged(nameof(IsSpeedButtonsEnabled));
-                ((Command)StartCommand).ChangeCanExecute();
-                ((Command)StopCommand).ChangeCanExecute();
 
                 if (!_isRunning)
                 {
@@ -516,7 +565,12 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             }
         }
 
-        private bool IsMonitoringTransitionInProgress => Volatile.Read(ref _monitoringTransitionState) != 0;
+        private void NotifyMonitoringControls()
+        {
+            OnPropertyChanged(nameof(MediaPlayStopIcon));
+            ((Command)StartCommand).ChangeCanExecute();
+            ((Command)StopCommand).ChangeCanExecute();
+        }
 
         // Indicates whether audio playback is enabled.
         // This does not affect streaming, only whether audio is played.
@@ -601,10 +655,15 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 
 		private Task RequestQueuePlaybackAsync(string reason, bool userInitiated)
 		{
+            if (_playbackOwnership.Live is not { } live)
+                return Task.CompletedTask;
+            var run = _monitoring.Current;
 			return MainThread.InvokeOnMainThreadAsync(async () =>
 			{
 				try
 				{
+                    if (!_playbackOwnership.IsCurrent(live) || !_monitoring.CanRecover(run))
+                        return;
 					// Always pull AutoPlay from the settings service so the Settings page is the single source of truth.
 					_autoPlay = _settingsService.AutoPlay;
             What3WordsLinksEnabled = _settingsService.What3WordsLinksEnabled;
@@ -614,15 +673,16 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 						userInitiated: userInitiated,
 						isRunning: IsRunning,
 						audioEnabled: AudioEnabled,
-						isMainAudioSoftMuted: _isMainAudioSoftMuted,
+						isMainAudioSoftMuted: false,
 						isAlreadyPlaying: _currentPlayingCall != null,
 						isQueuePlaybackRunning: _isQueuePlaybackRunning,
-						visibleQueueCount: GetQueuedPlayableCandidateCount());
+						visibleQueueCount: _durableRun != null ? Math.Max(1, GetQueuedPlayableCandidateCount()) : GetQueuedPlayableCandidateCount());
 
 					if (!canStart || _playbackRequests.HasManualSelection || _retryPlaybackCall != null)
 						return;
 
-					await EnsureQueuePlaybackAsync();
+                    _queueWake.Signal();
+					await EnsureQueuePlaybackAsync(live);
 				}
 				catch
 				{
@@ -640,7 +700,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 
         // Icon for the premium media play/stop button.
         // Shows play when disconnected, stop when connected.
-        public string MediaPlayStopIcon => IsRunning ? "mc_stop.png" : "mc_play.png";
+        public string MediaPlayStopIcon => _monitoring.Current != null ? "mc_stop.png" : "mc_play.png";
 
         // Base server URL used for all API calls and displayed in the UI.
         public string ServerUrl
@@ -668,7 +728,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 
                 // Contract: changing servers from Settings must stop queue playback and disconnect.
                 // The user must explicitly press Play again to connect and resume.
-                if (IsRunning)
+                if (_monitoring.Current != null)
                 {
                     _ = StopForServerChangeAsync(oldValue, _serverUrl);
                 }
@@ -690,6 +750,36 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             catch (Exception ex)
             {
                 AppLog.Add(() => $"Error stopping for server change: {ex.Message}");
+            }
+        }
+
+        private bool _changingHostedAccount;
+        private readonly SemaphoreSlim _hostedAccountTransition = new(1);
+
+        internal async Task ApplyHostedAccountAsync(string nextUsername, bool authorityChanged, Func<bool> canApply, Action save)
+        {
+            await _hostedAccountTransition.WaitAsync();
+            try
+            {
+                if (!canApply())
+                    return;
+                var selected = _settingsService.ServerUrl ?? "";
+                var switching = authorityChanged || RecordingPlaybackAccess.AccountKey(_settingsService, selected) !=
+                    RecordingPlaybackAccess.AccountKeyForUsername(nextUsername);
+                if (switching)
+                {
+                    _changingHostedAccount = true;
+                    await StopMonitoringAsync();
+                    if (canApply())
+                        await ClearQueueForServerSwitchAsync();
+                }
+                if (canApply())
+                    save();
+            }
+            finally
+            {
+                _changingHostedAccount = false;
+                _hostedAccountTransition.Release();
             }
         }
 
@@ -1034,13 +1124,11 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                 _pendingCalls.Clear();
             }
 
-            // _pendingCalls newest is at index 0. Insert oldest first so ordering remains newest at index 0.
             for (var i = pending.Count - 1; i >= 0; i--)
             {
-                Calls.Insert(0, pending[i]);
+                if (!Calls.Contains(pending[i]))
+                    InsertLiveCardInDisplayOrder(pending[i]);
             }
-
-            EnforceMaxCalls();
         }
 
         private void EnqueuePendingCall(CallItem call)
@@ -1076,8 +1164,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             if (promoted == null)
                 return false;
 
-            Calls.Insert(0, promoted);
-            EnforceMaxCalls();
+            InsertLiveCardInDisplayOrder(promoted);
 
             return true;
         }
@@ -1095,7 +1182,8 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                 return false;
 
             var idx = Calls.IndexOf(anchor);
-            return idx > 0;
+            return idx > 0 || (idx < 0 && Calls.Count > 0 && HasDurablePosition(anchor) &&
+                CompareCardOrder(anchor, Calls[0]) < 0);
         }
 
         private bool IsPlayableForQueue(CallItem? call)
@@ -1134,7 +1222,11 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 
             var anchorIndex = Calls.IndexOf(currentItem);
             if (anchorIndex < 0)
+            {
+                if (_durableRun is { } durable && TryGetDurableRecording(currentItem, durable, out _, out _))
+                    return null;
                 anchorIndex = Calls.Count - 1;
+            }
 
             for (var i = anchorIndex - 1; i >= 0; i--)
             {
@@ -1154,20 +1246,24 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             {
                 var anchor = _currentPlayingCall ?? _lastPlayedCall;
                 var startIndex = Calls.Count - 1;
+                var offscreenAnchor = false;
 
                 if (anchor != null)
                 {
                     var anchorIndex = Calls.IndexOf(anchor);
                     if (anchorIndex >= 0)
-                    {
                         startIndex = anchorIndex - 1;
-                    }
+                    else
+                        offscreenAnchor = HasDurablePosition(anchor);
                 }
 
                 for (var i = Calls.Count - 1; i >= 0; i--)
                 {
                     var call = Calls[i];
-                    if ((i <= startIndex || (call.HasUnplayedLateAudio && call != _currentPlayingCall)) &&
+                    var newer = offscreenAnchor
+                        ? CompareCardOrder(call, anchor!) > 0
+                        : i <= startIndex;
+                    if ((newer || (call.HasUnplayedLateAudio && call != _currentPlayingCall)) &&
                         IsPlayableForQueue(call))
                         count++;
                 }
@@ -1260,6 +1356,10 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
         private void StartPlayableUrlPrefetchForUpcomingCall(CallItem currentItem)
         {
             var nextCall = PeekNextPlayableQueuedCallAfter(currentItem);
+            var server = nextCall?.RecordingServer ?? nextCall?.LiveState?.ServerUrl ?? _settingsService.ServerUrl;
+            // Protected acquisitions always authorize the exact recording first.
+            if (nextCall?.RecordingAccess?.Protected == true || HostedServerRules.RequiresApiFirewallCredentials(_settingsService, server))
+                nextCall = null;
             if (nextCall == null || string.IsNullOrWhiteSpace(nextCall.AudioUrl))
             {
                 ClearPrefetchedPlayableUrl(deleteCompletedTempFile: true);
@@ -1280,7 +1380,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             try
             {
                 prefetchCts = new CancellationTokenSource();
-                prefetchTask = GetPlayableAudioUrlAsync(nextCall.AudioUrl, prefetchCts.Token);
+                prefetchTask = GetPlayableAudioUrlAsync(nextCall.AudioUrl, prefetchCts.Token, forceDownload: true);
             }
             catch
             {
@@ -1514,20 +1614,14 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             : "https://www.joesscanner.com/products/one-time-donation/";
         public void Start()
         {
-            AppLog.Add(() => "User clicked Start Monitoring");
-
-            // Cross-platform: user explicitly started monitoring, so the run should drive queue playback
-            // even when AutoPlay is off.
-            _userRunShouldDriveQueue = true;
-
+            AppLog.Add("User clicked Start Monitoring");
             _ = MainThread.InvokeOnMainThreadAsync(async () =>
             {
                 try
                 {
-                    await StartMonitoringAsync();
-
-                    if (IsRunning && AudioEnabled && (_settingsService.AutoPlay || _userRunShouldDriveQueue))
-                        _ = RequestQueuePlaybackAsync("UserStartMonitoring", userInitiated: _userRunShouldDriveQueue);
+                    var run = await StartMonitoringCoreAsync(driveQueue: true);
+                    if (_monitoring.CanRecover(run) && AudioEnabled)
+                        _ = RequestQueuePlaybackAsync("UserStartMonitoring", userInitiated: true);
                 }
                 catch
                 {
@@ -1535,122 +1629,103 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             });
         }
 
-        public async Task StartMonitoringAsync()
+        public Task StartMonitoringAsync() =>
+            MainThread.InvokeOnMainThreadAsync(async () => { await StartMonitoringCoreAsync(); });
+
+        private async Task<MonitoringLifecycle.Run?> StartMonitoringCoreAsync(bool driveQueue = false,
+            long? automaticStopRevision = null)
         {
-            if (IsRunning)
-                return;
+            if (_changingHostedAccount)
+                return null;
+            var run = _monitoring.TryBeginStart(automaticStopRevision);
+            if (run == null)
+                return null;
 
-            if (Interlocked.CompareExchange(ref _monitoringTransitionState, 1, 0) != 0)
-            {
-                AppLog.Add(() => "Connect ignored: monitoring transition already in progress.");
-                return;
-            }
-
+            var intentRevision = _monitoringIntent.BeginStart();
+            var token = run.Token;
             try
             {
-                if (IsRunning)
-                    return;
-
+                NotifyMonitoringControls();
                 SetConnectionStatus(ConnectionStatus.Connecting);
-
-                // Starting a new monitoring run resets any prior user-stop intent.
-                _userRequestedStop = false;
-
                 var serverUrl = _settingsService.ServerUrl ?? string.Empty;
-
-                if (string.IsNullOrWhiteSpace(serverUrl) || !Uri.TryCreate(serverUrl, UriKind.Absolute, out _))
+                if (!Uri.TryCreate(serverUrl, UriKind.Absolute, out var serverUri))
                 {
-                    var msg = "Select a server in Settings and press Validate before connecting.";
-                    try { AppLog.Add(() => $"Connect blocked: missing or invalid server url: '{serverUrl}'"); } catch { }
-                    SetConnectionStatus(ConnectionStatus.Error, msg);
-                    return;
+                    SetConnectionStatus(ConnectionStatus.Error, "Select a server in Settings and press Validate before connecting.");
+                    return null;
                 }
-
-                var isJoesScannerServer = false;
 
 #if ANDROID
-                // Request foreground service before subscription I/O can yield and the
-                // user can lock the phone or leave the activity.
-                SystemMediaService.PrepareAndroidMonitoringService();
+                // Request foreground promotion while an activity is still visible.
+                // The old run can drain audio while the replacement is promoted.
+                SystemMediaService.BeginAndroidMonitoringRun(run.Id);
 #endif
-
-                if (Uri.TryCreate(serverUrl, UriKind.Absolute, out var serverUri))
+                await run.WaitForInitializationAsync(run.PreviousCleanup);
+                token.ThrowIfCancellationRequested();
+                try { await FlushLiveCompletionAsync(token); }
+                catch (Exception ex) when (!token.IsCancellationRequested)
                 {
-                    isJoesScannerServer =
-                        HostedServerRules.IsHostedServerUri(serverUri);
+                    AppLog.Add(() => $"Live queue completion could not be saved before connecting ({ex.GetType().Name}).");
+                    SetConnectionStatus(ConnectionStatus.Error, "Could not save playback progress. Try connecting again.");
+                    return null;
                 }
+                token.ThrowIfCancellationRequested();
 
+                var isJoesScannerServer = HostedServerRules.IsHostedServerUri(serverUri);
                 _telemetryService.TrackConnectionAttempt(serverUrl, isJoesScannerServer);
 
-                if (HostedServerRules.RequiresApiFirewallCredentials(_settingsService, serverUrl))
+                var protectedServer = HostedServerRules.RequiresApiFirewallCredentials(_settingsService, serverUrl);
+                var account = protectedServer ? RecordingPlaybackAccess.AccountKey(_settingsService, serverUrl) : null;
+                var serverKey = DurableLiveQueue.ServerKey(serverUrl);
+                _startingMonitoringScope = (run.Id, serverKey, account);
+                int? verifiedTier = null;
+                if (protectedServer)
                 {
-                    AppLog.Add(() => "Verifying Joe's Scanner subscription before connecting.");
-
+                    AppLog.Add("Verifying Joe's Scanner subscription before connecting.");
                     try
                     {
-                        var subResult = await _subscriptionService.EnsureSubscriptionAsync(CancellationToken.None);
-                        if (!subResult.IsAllowed)
+                        var result = await _subscriptionService.EnsureSubscriptionAsync(token).WaitAsync(token);
+                        token.ThrowIfCancellationRequested();
+                        if (!result.IsAllowed || account == null ||
+                            account != RecordingPlaybackAccess.AccountKey(_settingsService, serverUrl))
                         {
-                            AppLog.Add(() => $"Subscription check failed: {subResult.ErrorCode} {subResult.Message}");
-
-                            SetConnectionStatus(ConnectionStatus.AuthFailed,
-                                subResult.Message ?? "Subscription not active");
-
-                            return;
+                            SetConnectionStatus(ConnectionStatus.AuthFailed, result.Message ?? "Subscription not active");
+                            return null;
                         }
 
-                        AppLog.Add(() => "Subscription check passed, starting stream.");
                         UpdateSubscriptionSummaryFromSettings();
+                        verifiedTier = result.VerifiedOnlineTier;
                     }
-                    catch (Exception ex)
+                    catch (Exception ex) when (!token.IsCancellationRequested)
                     {
-                        AppLog.Add(() => $"Subscription check error: {ex.Message}");
+                        AppLog.Add(() => $"Subscription check failed ({ex.GetType().Name}).");
                         SetConnectionStatus(ConnectionStatus.Error, "Subscription check error");
-                        return;
+                        return null;
                     }
                 }
                 else
                 {
-                    AppLog.Add(() => $"Custom server detected ({serverUrl}), skipping Joe's Scanner subscription check.");
                     ShowSubscriptionSummary = false;
                     SubscriptionSummary = string.Empty;
                 }
 
-                if (_cts != null)
-                {
-                    try { _cts.Cancel(); } catch { }
+                await EnsureSystemMediaSessionStartedAsync(run);
+                token.ThrowIfCancellationRequested();
 
-                    _cts.Dispose();
-                    _cts = null;
-                }
-
-                _cts = new CancellationTokenSource();
-                var token = _cts.Token;
-
-                AppStateStore.SetBool("last_connected_on_exit", true);
-#if ANDROID || IOS
-                AppStateStore.SetBool(MobileMonitoringExplicitlyStoppedKey, false);
-#endif
                 LiveStreamRecovery? recovery = null;
 #if ANDROID
-                AndroidAudioEnvironment.RequestPlay();
+                if (_playbackOwnership.Live != null)
+                    AndroidAudioEnvironment.RequestPlay();
 #elif IOS
-                IosAudioEnvironment.RequestPlay();
+                if (!automaticStopRevision.HasValue && _playbackOwnership.Live != null)
+                    IosAudioEnvironment.RequestPlay();
                 recovery = _iosForegroundRecovery = new LiveStreamRecovery();
 #endif
 
-                IsRunning = true;
-
                 if (IsAppleIosTestAccount())
                 {
-                    // Ensure Apple review account immediately produces audible playback.
                     AudioEnabled = true;
                     AutoPlay = true;
                 }
-
-                await EnsureSystemMediaSessionStartedAsync();
-
-                _telemetryService.StartMonitoringHeartbeat(serverUrl);
 
                 _currentPlayingCall = null;
                 SetPlaybackRetry(null);
@@ -1658,85 +1733,79 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                     card.ConsumeLateAudio();
                 ClearPendingCalls();
                 ClearPrefetchedPlayableUrl(deleteCompletedTempFile: true);
+                _lastPlayedCall = Calls.FirstOrDefault();
 
-                if (Calls.Count > 0)
+                var durable = serverKey != null
+                    ? new DurableLiveQueue.Run(serverKey, run.Id, verifiedTier, protectedServer, account)
+                    : null;
+                if (durable != null && !IsCurrentLiveScope(durable))
+                    return null;
+                _durableRun = durable;
+                if (durable != null)
                 {
-                    _lastPlayedCall = Calls[0];
+                    try
+                    {
+                        var explicitlyStopped = await Task.Run(() =>
+                            _monitoringIntent.WasExplicitlyStopped(durable.Server, durable.Account, durable.Protected), token);
+                        await _durableQueue.OpenAsync(durable, DateTimeOffset.UtcNow, token, explicitlyStopped);
+                    }
+                    catch (Exception ex) when (!token.IsCancellationRequested)
+                    {
+                        _durableRun = null;
+                        AppLog.Add(() => $"Live queue storage could not be opened ({ex.GetType().Name}).");
+                        SetConnectionStatus(ConnectionStatus.Error, "Live queue storage is unavailable. Try connecting again.");
+                        return null;
+                    }
                 }
-                else
-                {
-                    _lastPlayedCall = null;
-                }
+                token.ThrowIfCancellationRequested();
 
+                if (durable != null)
+                    await _monitoringIntent.SaveStartedAsync(intentRevision, durable.Server, durable.Account, token);
+                token.ThrowIfCancellationRequested();
+                if ((durable != null && !IsCurrentLiveScope(durable)) || !_monitoring.Activate(run))
+                    return null;
+
+                _userRunShouldDriveQueue = driveQueue;
+                IsRunning = true;
                 UpdateQueueDerivedState();
+                if (!_monitoring.CanRecover(run))
+                    return null;
+                _ = Task.Run(() => RunCallStreamLoopAsync(run, recovery, durable), token);
+                _telemetryService.StartMonitoringHeartbeat(serverUrl);
 
-                _ = Task.Run(() => RunCallStreamLoopAsync(token, recovery));
-
-                // Best-effort preload of History lookups. Never blocks connecting.
-                // If it fails, History page can still load lookups on demand and cache later.
                 _ = Task.Run(() => _historyLookupsCacheService.PreloadAsync(
-                    forceReload: false,
-                    reason: "connect",
-                    cancellationToken: CancellationToken.None));
+                    forceReload: false, reason: "connect", cancellationToken: token), token);
+                if (durable != null && (_settingsService.AutoPlay || driveQueue))
+                    _ = RequestQueuePlaybackAsync("RestoreLocalLiveQueue", driveQueue);
+                return run;
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                return null;
             }
             finally
             {
-                try
-                {
-#if ANDROID
-                    if (!IsRunning)
-                        await _systemMediaService.StopSessionAsync();
-#endif
-                }
-                finally
-                {
-                    Interlocked.Exchange(ref _monitoringTransitionState, 0);
-                }
+                await _monitoring.AbortStartAsync(run, RetireMonitoringPlatform, CleanupMonitoringRunAsync);
             }
         }
 
-        public async Task StartMonitoringWithAutoplayAsync()
+        public Task StartMonitoringWithAutoplayAsync() => RestoreMonitoringAsync(driveQueue: true);
+
+        private async Task EnsureSystemMediaSessionStartedAsync(MonitoringLifecycle.Run run)
         {
-#if ANDROID || IOS
-            if (AppStateStore.GetBool(MobileMonitoringExplicitlyStoppedKey, false))
-                return;
-#endif
-            await StartMonitoringAsync();
-
-            // Autoplay connect still counts as an active monitoring run.
-            _userRunShouldDriveQueue = true;
-
-            try
-            {
-				if (IsRunning && _audioEnabled && _settingsService.AutoPlay)
-					await RequestQueuePlaybackAsync("ConnectAutoplay", false);
-            }
-            catch
-            {
-            }
-
-        }
-
-
-        private async Task EnsureSystemMediaSessionStartedAsync()
-        {
-            try
-            {
 #if ANDROID
-                await EnsureAndroidNotificationPermissionAsync();
+            await EnsureAndroidNotificationPermissionAsync(run);
 #endif
-            }
-            catch
-            {
-            }
-
+            run.Token.ThrowIfCancellationRequested();
             try
             {
-                await _systemMediaService.StartSessionAsync(AudioEnabled);
+                await _systemMediaService.StartSessionAsync(AudioEnabled, run.Id);
+                run.Token.ThrowIfCancellationRequested();
                 _systemMediaService.UpdateNowPlaying("Connected", "Joes Scanner", AudioEnabled);
             }
-            catch
+            catch (Exception ex) when (!run.Token.IsCancellationRequested)
             {
+                AppLog.DebugWriteLine(() => $"Could not initialize monitoring media controls ({ex.GetType().Name}).");
             }
         }
 
@@ -1749,33 +1818,54 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
         }
 
 #if ANDROID
-        private static async Task EnsureAndroidNotificationPermissionAsync()
+        private async Task EnsureAndroidNotificationPermissionAsync(MonitoringLifecycle.Run run)
+        {
+            if (!OperatingSystem.IsAndroidVersionAtLeast(33))
+                return;
+
+            if (_androidNotificationPermissionPrompt is not { IsCompleted: false })
+            {
+                PermissionStatus status;
+                try
+                {
+                    status = await Permissions.CheckStatusAsync<Permissions.PostNotifications>().WaitAsync(run.Token);
+                }
+                catch (Exception ex) when (!run.Token.IsCancellationRequested)
+                {
+                    AppLog.DebugWriteLine(() => $"Could not check notification permission ({ex.GetType().Name}).");
+                    return;
+                }
+                run.Token.ThrowIfCancellationRequested();
+                if (status == PermissionStatus.Granted)
+                    return;
+                _androidNotificationPermissionPrompt = RequestAndroidNotificationPermissionAsync();
+            }
+
+            await run.WaitForInitializationAsync(_androidNotificationPermissionPrompt);
+        }
+
+        private static async Task RequestAndroidNotificationPermissionAsync()
         {
             try
             {
-                if (!OperatingSystem.IsAndroidVersionAtLeast(33))
-                    return;
-
-                var status = await Permissions.CheckStatusAsync<Permissions.PostNotifications>();
-                if (status != PermissionStatus.Granted)
-                {
-                    await Permissions.RequestAsync<Permissions.PostNotifications>();
-                }
+                await Permissions.RequestAsync<Permissions.PostNotifications>();
             }
-            catch
+            catch (Exception ex)
             {
+                AppLog.DebugWriteLine(() => $"Could not request notification permission ({ex.GetType().Name}).");
             }
         }
 #endif
 
-        private async Task RunCallStreamLoopAsync(CancellationToken token, LiveStreamRecovery? recovery)
+        private async Task RunCallStreamLoopAsync(MonitoringLifecycle.Run run, LiveStreamRecovery? recovery, DurableLiveQueue.Run? durable)
         {
+            var token = run.Token;
             var retryDelay = TimeSpan.FromSeconds(2);
 
             // Important behavior contract:
             // This loop must continue attempting to reconnect until the user explicitly clicks Stop.
             // It must never terminate itself due to transient network, polling, or WebSocket failures.
-            while (!token.IsCancellationRequested)
+            while (!token.IsCancellationRequested && (durable == null || IsCurrentLiveScope(durable)))
             {
                 try
                 {
@@ -1784,18 +1874,49 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                         await foreach (var call in _callStreamService.GetCallStreamAsync(
                             await MainThread.InvokeOnMainThreadAsync(SnapshotLiveCalls), token, recovery))
                         {
-                            if (token.IsCancellationRequested)
+                            if (token.IsCancellationRequested || durable != null && !IsCurrentLiveScope(durable))
                                 break;
 
                             if (call == null)
                                 continue;
 
+                            if (call.IsRecordingNotification)
+                            {
+                                var notification = call.LiveState;
+                                var saved = durable != null && notification != null &&
+                                    DurableLiveQueue.ServerKey(notification.ServerUrl) == durable.Server &&
+                                    await SaveLiveObservationAsync(durable, notification.Id, null, notification.Read(),
+                                        RecordingOrigin.Unknown, existingOnly: true, token);
+                                await MainThread.InvokeOnMainThreadAsync(() =>
+                                {
+                                    if (!_monitoring.CanRecover(run) || durable != null && !IsCurrentLiveScope(durable))
+                                        return;
+                                    ResumeAwaitingAudio(call.RecordingServer, call.BackendId, notification?.Read());
+                                    if (saved)
+                                        RequestQueueForLiveArrival("SavedRecordingNotification");
+                                });
+                                continue;
+                            }
+
+                            var savedObservation = durable != null && call.LiveState is { } observed &&
+                                DurableLiveQueue.ServerKey(observed.ServerUrl) == durable.Server &&
+                                await SaveLiveObservationAsync(durable, observed.Id, call.RecordingTimeUtc, observed.Read(),
+                                    call.RecordingAccess?.Origin ?? RecordingOrigin.Unknown, call.IsLiveUpdate, token);
+
                             try
                             {
                                 await MainThread.InvokeOnMainThreadAsync(() =>
                                 {
-                                    if (token.IsCancellationRequested)
+                                    if (!_monitoring.CanRecover(run) || durable != null && !IsCurrentLiveScope(durable))
                                         return;
+
+                                    if (!call.IsLiveUpdate && call.RecordingAccess is { } access)
+                                    {
+                                        call.LivePlaybackOwner = run.Id;
+                                        call.RecordingAccess = access with { Account = durable?.Account };
+                                    }
+                                    if (call.LiveState is { } audioObservation && audioObservation.Read() is { AudioUrl: not null } audioSnapshot)
+                                        ResumeAwaitingAudio(audioObservation.ServerUrl, audioObservation.Id, audioSnapshot);
 
                                     if (!call.IsLiveUpdate || !string.IsNullOrEmpty(call.Transcription))
                                         TotalCallsReceived++;
@@ -1803,6 +1924,13 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                                     if (call.IsLiveUpdate && call.LiveState is { } state)
                                     {
                                         ApplyLiveUpdate(state, call);
+                                        RequestQueueForLiveArrival("UpdatedLiveRecording");
+                                        return;
+                                    }
+                                    if (call.LiveState is { } incoming && FindLiveCard(incoming) is { } restored)
+                                    {
+                                        ApplyLiveUpdate(incoming, call, restored);
+                                        RequestQueueForLiveArrival("UpdatedRestoredRecording");
                                         return;
                                     }
 
@@ -1852,6 +1980,8 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                                         if (_filterService.ShouldHide(call))
                                         {
                                             LastQueueEvent = $"Call dropped by filter at {DateTime.Now:T}";
+                                            if (savedObservation)
+                                                RequestQueueForLiveArrival("SavedFilteredRecording");
                                             return;
                                         }
 
@@ -1888,10 +2018,9 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                                     }
                                     else
                                     {
-                                        Calls.Insert(0, call);
+                                        InsertLiveCardInDisplayOrder(call);
                                         TotalCallsInserted++;
                                         LastQueueEvent = $"Inserted call at {DateTime.Now:T}";
-                                        EnforceMaxCalls();
                                         UpdateQueueDerivedState();
                                     }
 
@@ -1901,6 +2030,14 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                             catch (Exception ex)
                             {
                                 AppLog.DebugWriteLine(() => $"Error updating UI for call: {ex}");
+                                if (savedObservation)
+                                {
+                                    await MainThread.InvokeOnMainThreadAsync(() =>
+                                    {
+                                        if (_monitoring.CanRecover(run))
+                                            RequestQueueForLiveArrival("SavedRecording");
+                                    });
+                                }
                             }
                         }
 
@@ -1912,7 +2049,8 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                             {
                                 await MainThread.InvokeOnMainThreadAsync(() =>
                                 {
-                                    SetConnectionStatus(ConnectionStatus.ServerUnreachable, "Stream ended. Reconnecting.");
+                                    if (_monitoring.CanRecover(run))
+                                        SetConnectionStatus(ConnectionStatus.ServerUnreachable, "Stream ended. Reconnecting.");
                                 });
                             }
                             catch
@@ -1932,7 +2070,8 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                         {
                             await MainThread.InvokeOnMainThreadAsync(() =>
                             {
-                                SetConnectionStatus(ConnectionStatus.ServerUnreachable, ex.Message);
+                                if (_monitoring.CanRecover(run))
+                                    SetConnectionStatus(ConnectionStatus.ServerUnreachable, ex.Message);
                             });
                         }
                         catch
@@ -1948,7 +2087,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                     {
                         await MainThread.InvokeOnMainThreadAsync(() =>
                         {
-                            if (_cts == null || _cts.Token != token)
+                            if (!_monitoring.CanRecover(run))
                                 return;
 
                             SetConnectionStatus(ConnectionStatus.Connecting);
@@ -1978,7 +2117,8 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                     {
                         await MainThread.InvokeOnMainThreadAsync(() =>
                         {
-                            SetConnectionStatus(ConnectionStatus.ServerUnreachable, "Unexpected stream error. Reconnecting.");
+                            if (_monitoring.CanRecover(run))
+                                SetConnectionStatus(ConnectionStatus.ServerUnreachable, "Unexpected stream error. Reconnecting.");
                         });
                     }
                     catch
@@ -1995,126 +2135,105 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                 }
             }
 
-            // Only perform the full stop cleanup when the user explicitly cancels.
-            try
-            {
-                await MainThread.InvokeOnMainThreadAsync(async () =>
-                {
-                    // Only stop if this is still the active run
-                    if (_cts == null || _cts.Token != token)
-                        return;
-
-                    _telemetryService.StopMonitoringHeartbeat("stream_loop_end");
-
-                    IsRunning = false;
-
-                    // Only clear the reconnect flag when the user explicitly disconnected.
-                    // If the app was terminated or backgrounded while still "connected", we want the next launch
-                    // to auto reconnect.
-                    if (_userRequestedStop)
-                        AppStateStore.SetBool("last_connected_on_exit", false);
-
-                    if (_audioPlaybackService != null)
-                    {
-                        try
-                        {
-                            ClearPrefetchedPlayableUrl(deleteCompletedTempFile: true);
-                await _audioPlaybackService.StopAsync();
-                        }
-                        catch
-                        {
-                        }
-                    }
-
-                    _currentPlayingCall = null;
-                    _lastPlayedCall = null;
-                    ClearPendingCalls();
-
-                    UpdateQueueDerivedState();
-                });
-            }
-            catch
-            {
-            }
         }
 
-        public async Task StopMonitoringAsync()
+        private Task<bool> SaveLiveObservationAsync(DurableLiveQueue.Run run, string id, DateTimeOffset? recordedAt,
+            LiveCallSnapshot snapshot, RecordingOrigin origin, bool existingOnly, CancellationToken token) =>
+            DurableLiveQueue.PersistObservationAsync(
+                () => _durableQueue.ObserveAsync(run, id, recordedAt, snapshot, token, origin, existingOnly),
+                ex => AppLog.Add(() => $"Live queue storage unavailable; retrying the recording ({ex.GetType().Name})."), token);
+
+        public Task StopMonitoringAsync() =>
+            MainThread.InvokeOnMainThreadAsync(StopMonitoringCoreAsync);
+
+        private Task StopMonitoringCoreAsync()
         {
-            if (Interlocked.CompareExchange(ref _monitoringTransitionState, 1, 0) != 0)
+            var durable = _durableRun;
+            Task? saveIntent = null;
+            var cleanup = _monitoring.StopAsync(run => saveIntent = RecordMonitoringStop(run), RetireMonitoringPlatform, async run =>
             {
-                AppLog.Add(() => "Stop ignored: monitoring transition already in progress.");
-                return;
-            }
+                await CleanupMonitoringRunAsync(run);
+                if (durable?.Owner == run.Id)
+                {
+                    try
+                    {
+                        await FlushLiveCompletionAsync();
+                        await _durableQueue.StopAsync(durable);
+                    }
+                    catch (Exception ex)
+                    {
+                        AppLog.Add(() => $"Live queue Stop could not be saved ({ex.GetType().Name}).");
+                    }
+                }
+            });
+            return saveIntent == null ? cleanup : Task.WhenAll(cleanup, saveIntent);
+        }
 
-            try
-            {
-                AppLog.Add(() => "User clicked Stop monitoring.");
-            _telemetryService.StopMonitoringHeartbeat("user_stop");
-
-            // Explicit user disconnect. This should clear the "auto reconnect" intent.
-            _userRequestedStop = true;
+        private Task RecordMonitoringStop(MonitoringLifecycle.Run? run)
+        {
+            var stopped = _durableRun;
+            var starting = _startingMonitoringScope.Owner == run?.Id ? _startingMonitoringScope : default;
+            // The veto depends only on captured run state, even if reading
+            // connection settings would currently need SQLite.
+            var saveIntent = _monitoringIntent.SaveStoppedAsync(stopped?.Server ?? starting.Server,
+                stopped != null ? stopped.Account : starting.Account);
+            _startingMonitoringScope = default;
+            _durableRun = null;
+            _notifiedRecording = null;
+            _lastAudioNotificationRetry = null;
+            AppLog.Add("Stop monitoring requested.");
 #if IOS
             _iosForegroundRecovery = null;
 #endif
-
-            ClearPendingCalls();
-            ClearPrefetchedPlayableUrl(deleteCompletedTempFile: true);
-
-            if (_cts != null)
-            {
-                try { _cts.Cancel(); } catch { }
-
-                _cts.Dispose();
-                _cts = null;
-            }
-
-            _playbackRequests.CancelCurrent();
-
-            IsRunning = false;
-
+            InvalidateLivePlayback();
+            _resumeAfterHistory = false;
             _userRunShouldDriveQueue = false;
 
-            try
-            {
-                ClearPrefetchedPlayableUrl(deleteCompletedTempFile: true);
-                await _audioPlaybackService.StopAsync();
-            }
-            catch
-            {
-            }
+            if (run?.IsActive == true)
+                _telemetryService.StopMonitoringHeartbeat("user_stop");
 
-            try
-            {
-                await _systemMediaService.StopSessionAsync();
-                _systemMediaService.Clear();
-#if ANDROID
-                AndroidAudioEnvironment.RequestPlay();
-#endif
-            }
-            catch
-            {
-            }
-
-            foreach (var call in Calls)
-            {
-                if (call.IsPlaying)
-                    call.IsPlaying = false;
-            }
-
-            _currentPlayingCall = null;
+            IsRunning = false;
+            SetConnectionStatus(ConnectionStatus.Stopped);
+            ClearPendingCalls();
             _lastPlayedCall = null;
             SetPlaybackRetry(null);
             UpdateQueueDerivedState();
+            return saveIntent;
+        }
 
-#if ANDROID || IOS
-            AppStateStore.SetBool(MobileMonitoringExplicitlyStoppedKey, true);
-#endif
-            AppStateStore.SetBool("last_connected_on_exit", false);
-            }
-            finally
+        private void RetireMonitoringPlatform(MonitoringLifecycle.Run run)
+        {
+#if ANDROID
+            try { SystemMediaService.EndAndroidMonitoringRun(run.Id); }
+            catch (Exception ex)
             {
-                Interlocked.Exchange(ref _monitoringTransitionState, 0);
+                AppLog.DebugWriteLine(() => $"Could not stop the Android audio service ({ex.GetType().Name}).");
             }
+#endif
+            NotifyMonitoringControls();
+        }
+
+        private async Task CleanupMonitoringRunAsync(MonitoringLifecycle.Run run)
+        {
+            // Detach remote commands before waiting for an outgoing clip to drain.
+            try { await _systemMediaService.StopSessionAsync(run.Id); }
+            catch (Exception ex)
+            {
+                AppLog.DebugWriteLine(() => $"Could not close monitoring media controls ({ex.GetType().Name}).");
+            }
+
+#if ANDROID
+            if (_playbackOwnership.Live != null)
+                AndroidAudioEnvironment.RequestPlay();
+#endif
+        }
+
+        private (string? Server, string? Account) CurrentMonitoringScope()
+        {
+            var selected = _settingsService.ServerUrl ?? "";
+            return (DurableLiveQueue.ServerKey(selected),
+                HostedServerRules.RequiresApiFirewallCredentials(_settingsService, selected)
+                    ? RecordingPlaybackAccess.AccountKey(_settingsService, selected) : null);
         }
 
         // Clears the visible main queue (Calls), any pending calls, and any address alerts.
@@ -2162,39 +2281,26 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             UpdateQueueDerivedState();
         }
 
-        public async Task RestartMonitoringIfRunningAsync()
+        public Task RestartMonitoringIfRunningAsync() =>
+            MainThread.InvokeOnMainThreadAsync(async () =>
+            {
+                if (!_monitoring.CanRecover(_monitoring.Current))
+                    return;
+
+                var stop = StopMonitoringCoreAsync();
+                var revision = _monitoring.StopRevision;
+                await stop;
+                if (revision == _monitoring.StopRevision)
+                    await StartMonitoringCoreAsync();
+            });
+
+        public Task StopAudioFromToggleAsync()
         {
-            if (!IsRunning)
-                return;
-
-            await StopMonitoringAsync();
-            await StartMonitoringAsync();
-        }
-
-        public async Task StopAudioFromToggleAsync()
-        {
-            _playbackRequests.CancelCurrent();
-
-            try
-            {
-                ClearPrefetchedPlayableUrl(deleteCompletedTempFile: true);
-                await _audioPlaybackService.StopAsync();
-            }
-            catch (Exception ex)
-            {
-                AppLog.DebugWriteLine(() => $"Error stopping audio: {ex}");
-            }
-
-            foreach (var call in Calls)
-            {
-                if (call.IsPlaying)
-                    call.IsPlaying = false;
-            }
-
-            _currentPlayingCall = null;
-
+            _resumeAfterHistory = false;
+            InvalidateLivePlayback();
             OnPropertyChanged(nameof(CallsWaiting));
             OnPropertyChanged(nameof(IsCallsWaitingVisible));
+            return Task.CompletedTask;
         }
 
         public Task StopAudioFromSettingsAsync()
@@ -2249,17 +2355,21 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 
         private async Task OnCallTappedAsync(CallItem? item, bool preserveQueueAnchor, bool continueQueueFromPlayedCall = false)
         {
-            if (item == null)
+            if (item == null || _playbackOwnership.Live is not { } live)
                 return;
 
+#if ANDROID
+            using var androidPlayback = _monitoring.Current == null ? SystemMediaService.BeginAndroidStandalonePlayback() : null;
+#endif
             var priorLastPlayed = preserveQueueAnchor ? _lastPlayedCall : null;
             var wasQueuePlaybackRunning = preserveQueueAnchor && _isQueuePlaybackRunning;
-            using var request = BeginManualPlayback();
+            using var request = BeginManualPlayback(live);
+            _manualPlaybackTarget = item;
             var token = request.Token;
 
             try
             {
-                await _audioPlaybackService.StopAsync();
+                await FlushLiveCompletionAsync(request.Token);
                 if (!request.CanContinue)
                     return;
 
@@ -2288,6 +2398,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                 if (shouldResumeQueueAfterManualPlayback)
                 {
                     LastQueueEvent = "Tapped call finished; restarting queue";
+                    _manualPlaybackTarget = null;
                     request.Dispose();
                     _ = RequestQueuePlaybackAsync("TappedCallFinished", true);
                 }
@@ -2302,60 +2413,89 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                 if (request.CanContinue)
                     SetPlaybackRetry(item);
             }
+            finally
+            {
+                if (request.IsCurrent)
+                    _manualPlaybackTarget = null;
+            }
         }
 
         private async Task JumpToLiveAsync()
         {
-            using var request = BeginManualPlayback();
+            if (_playbackOwnership.Live is not { } live)
+                return;
+#if ANDROID
+            using var androidPlayback = _monitoring.Current == null ? SystemMediaService.BeginAndroidStandalonePlayback() : null;
+#endif
+            var failedRecording = _retryPlaybackCall;
+            using var request = BeginManualPlayback(live);
             var token = request.Token;
+            var resumeOnExit = false;
             try
             {
-                await _audioPlaybackService.StopAsync();
+                await FlushLiveCompletionAsync(request.Token);
                 if (!request.CanContinue)
                     return;
 
                 ClearPlayingSelection();
-                CallItem? newest = null;
-                foreach (var card in Calls)
-                    card.ConsumeLateAudio();
-
-                lock (_pendingCallsLock)
+                var durable = _durableRun;
+                var run = _monitoring.Current;
+                var playTarget = AudioEnabled;
+                CallItem? newest;
+                if (durable != null && _monitoring.CanRecover(run))
                 {
-                    if (_pendingCalls.Count > 0)
-                        newest = _pendingCalls[0];
-                }
-
-                if (newest == null)
-                {
-                    if (Calls.Count == 0)
+                    var failedId = failedRecording != null && TryGetDurableRecording(failedRecording, durable, out var id, out _)
+                        ? id : null;
+                    var jump = await _durableQueue.JumpToLiveAsync(durable, LocalRecoveryFloor(durable), !playTarget, token, failedId);
+                    if (!request.CanContinue || !_monitoring.CanRecover(run))
+                        return;
+                    if (jump == null)
                     {
-                        _currentPlayingCall = null;
+                        resumeOnExit = true;
+                        LastQueueEvent = "No live call available";
+                        return;
+                    }
+
+                    var row = jump.Target;
+                    playTarget = jump.PlayTarget;
+                    // A skipped or already-terminal edge should not hold up
+                    // future Live arrivals, even if its explicit replay fails.
+                    resumeOnExit = !playTarget || row.Snapshot == null;
+                    newest = ResolveDurableCard(durable, row);
+                    _manualPlaybackTarget = newest;
+                    if (playTarget && row.Snapshot == null)
+                        await RefreshTransportCardAsync(newest, token);
+                    if (!request.CanContinue || !_monitoring.CanRecover(run))
+                        return;
+                    ShowDurableCard(newest);
+                    // A Live arrival can commit immediately after the jump transaction.
+                    // Preserve those cards when moving the display to the live edge.
+                    DrainPendingCallsToVisible();
+                }
+                else
+                {
+                    lock (_pendingCallsLock)
+                        newest = _pendingCalls.FirstOrDefault();
+                    newest ??= Calls.FirstOrDefault();
+                    if (newest == null)
+                    {
                         _lastPlayedCall = null;
                         UpdateQueueDerivedState();
                         LastQueueEvent = "Jump to live ignored (no calls)";
                         return;
                     }
-
-                    newest = Calls[0];
-                }
-                else
-                {
-                    // Clear pending backlog when jumping live.
-                    ClearPendingCalls();
-
-                    // Ensure newest pending is visible at the top.
-                    var idx = Calls.IndexOf(newest);
-                    if (idx < 0)
+                    if (!Calls.Contains(newest))
                     {
-                        Calls.Insert(0, newest);
-                        EnforceMaxCalls();
+                        ClearPendingCalls();
+                        InsertLiveCardInDisplayOrder(newest);
                     }
-                    else if (idx > 0)
-                    {
-                        Calls.RemoveAt(idx);
-                        Calls.Insert(0, newest);
-                    }
+                    _manualPlaybackTarget = newest;
                 }
+
+                // Cached cards can otherwise request automatic late-audio playback
+                // for a recording the user just chose to skip.
+                foreach (var card in Calls)
+                    card.ConsumeLateAudio();
 
                 // Force the UI list to snap back to the newest call even if the user was
                 // scrolled into history (which intentionally disables auto-follow).
@@ -2367,13 +2507,11 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                 {
                 }
 
-                _currentPlayingCall = null;
-
-                if (!AudioEnabled)
+                if (!playTarget || !AudioEnabled)
                 {
                     _lastPlayedCall = newest;
                     UpdateQueueDerivedState();
-                    LastQueueEvent = "Jumped to live (audio off)";
+                    LastQueueEvent = AudioEnabled ? "Jumped to live; waiting for new calls" : "Jumped to live (audio off)";
                     return;
                 }
 
@@ -2386,9 +2524,11 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                 if (!request.CanContinue || !outcome.AdvancesQueue())
                     return;
 
-				if (AudioEnabled && IsRunning && _settingsService.AutoPlay && CallsWaiting > 0)
+                if (AudioEnabled && IsRunning && (_settingsService.AutoPlay || _userRunShouldDriveQueue) &&
+                    (durable != null || CallsWaiting > 0))
                 {
                     LastQueueEvent = "Jump to live finished; restarting queue";
+                    _manualPlaybackTarget = null;
                     request.Dispose();
 					_ = RequestQueuePlaybackAsync("JumpToLiveFinished", true);
                 }
@@ -2403,6 +2543,20 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             catch (Exception ex)
             {
                 ReportPlaybackFailure(ex, request);
+            }
+            finally
+            {
+                if (request.IsCurrent)
+                {
+                    _manualPlaybackTarget = null;
+                    if (resumeOnExit && request.CanContinue && IsRunning && AudioEnabled &&
+                        (_settingsService.AutoPlay || _userRunShouldDriveQueue))
+                    {
+                        SetPlaybackRetry(null);
+                        request.Dispose();
+                        _ = RequestQueuePlaybackAsync("JumpToLiveResume", true);
+                    }
+                }
             }
         }
 
@@ -2501,65 +2655,125 @@ private static string SpeedStepToLabel(double step)
         _ => "1x"
     };
 }
-        private async Task EnsureQueuePlaybackAsync()
+        private async Task<CallItem?> GetNextDurableCallAsync(DurableLiveQueue.Run durable, CancellationToken token, int version)
         {
-            if (_isQueuePlaybackRunning || _playbackRequests.HasManualSelection)
-                return;
-
-            if (!AudioEnabled || !IsRunning)
-                return;
-
-            _isQueuePlaybackRunning = true;
-            var version = ++_queuePlaybackVersion;
-            var aborted = false;
-            var hadFailure = false;
-
-            LastQueueEvent = "Queue playback started";
-
-            try
+            var floor = LocalRecoveryFloor(durable);
+            var row = await _durableQueue.NextAsync(durable, floor, token);
+            if (version != _queuePlaybackVersion || token.IsCancellationRequested || _playbackRequests.HasManualSelection)
+                return null;
+            if (row == null)
             {
-                while (version == _queuePlaybackVersion && AudioEnabled && IsRunning)
-                {
-                    var next = GetNextQueuedCall();
-                    if (next == null)
-                        break;
-
-                    UpdateQueueDerivedState();
-
-                    using var request = _playbackRequests.Begin(manual: false);
-                    var outcome = await PlayAudioAsync(next, request);
-                    hadFailure = outcome == PlaybackOutcome.Failed;
-
-                    if (!outcome.AdvancesQueue() || !AudioEnabled || !IsRunning || !request.CanContinue)
-                    {
-                        aborted = true;
-                        break;
-                    }
-                }
+                var transient = GetNextQueuedCall();
+                if (transient == null || transient.RecordingTimeUtc == null)
+                    return transient;
+                if (DurableLiveQueue.DurableAudioUrl(transient.AudioUrl) != null ||
+                    !TryGetDurableRecording(transient, durable, out var id, out _))
+                    return null;
+                return await _durableQueue.IsPendingAsync(durable, id, floor, token) ? transient : null;
             }
-            catch (Exception ex)
+
+            var card = ResolveDurableCard(durable, row);
+            ShowDurableCard(card);
+            return card;
+        }
+
+        private CallItem ResolveDurableCard(DurableLiveQueue.Run durable, DurableLiveQueue.Recording row)
+        {
+            bool Matches(CallItem? item) => item?.LiveState is { } state && state.Id == row.Id &&
+                DurableLiveQueue.ServerKey(state.ServerUrl) == durable.Server && durable.Owns(item.RecordingAccess);
+
+            var card = Matches(_notifiedRecording) ? _notifiedRecording :
+                Calls.FirstOrDefault(Matches);
+            if (card == null)
             {
-                aborted = true;
-                AppLog.DebugWriteLine(() => $"Error in EnsureQueuePlaybackAsync: {ex}");
+                lock (_pendingCallsLock)
+                    card = _pendingCalls.Find(Matches);
+                card ??= Matches(_currentPlayingCall) ? _currentPlayingCall :
+                    Matches(_retryPlaybackCall) ? _retryPlaybackCall :
+                    Matches(_lastPlayedCall) ? _lastPlayedCall : null;
             }
-            finally
+            if (card == null)
+                return row.ToCallItem(durable.Server);
+
+            if (row.Snapshot is { } snapshot && card.LiveState is { } state)
             {
-                if (version == _queuePlaybackVersion)
-                {
-                    _isQueuePlaybackRunning = false;
-                    UpdateQueueDerivedState();
-                    if (!hadFailure)
-                        LastQueueEvent = aborted ? "Queue playback aborted" : "Queue playback finished";
-                }
+                state.Observe(snapshot, 0);
+                card.ApplyLiveUpdate();
+            }
+            return card;
+        }
+
+        private void ShowDurableCard(CallItem card)
+        {
+            if (ReferenceEquals(_notifiedRecording, card))
+                _notifiedRecording = null;
+            lock (_pendingCallsLock)
+                _pendingCalls.Remove(card);
+            if (!Calls.Contains(card) && card.LiveState is { } state && FindLiveCard(state) == null && !_filterService.ShouldHide(card))
+                InsertLiveCardInDisplayOrder(card);
+        }
+
+        private void InsertLiveCardInDisplayOrder(CallItem card)
+        {
+            var index = 0;
+            while (index < Calls.Count && CompareCardOrder(Calls[index], card) >= 0)
+                index++;
+            if (index < MaxCallsToKeep)
+            {
+                Calls.Insert(index, card);
+                EnforceMaxCalls();
             }
         }
 
-        private double GetEffectivePlaybackRate(CallItem item)
+        private static int CompareCardOrder(CallItem left, CallItem right)
         {
-            if (GetBacklogCountForStartingCall(item) <= 0)
+            if (left.RecordingTimeUtc is not { } leftTime || right.RecordingTimeUtc is not { } rightTime)
+                return left.Timestamp.CompareTo(right.Timestamp);
+            var time = leftTime.CompareTo(rightTime);
+            return time != 0 ? time : StringComparer.Ordinal.Compare(left.BackendId, right.BackendId);
+        }
+
+        private bool HasDurablePosition(CallItem item) =>
+            _durableRun is { } durable && TryGetDurableRecording(item, durable, out _, out _);
+
+        private long LocalRecoveryFloor(DurableLiveQueue.Run run)
+        {
+            var now = DateTimeOffset.UtcNow;
+            return DurableLiveQueue.HistoricalFloor(run.Protected || HostedServerRules.RequiresApiFirewallCredentials(_settingsService, run.Server),
+                run.VerifiedTier, IsCurrentLiveScope(run) &&
+                _settingsService.SubscriptionLastStatusOk && _settingsService.SubscriptionLastValidatedOnline &&
+                (_settingsService.SubscriptionExpiresUtc is not { } expires || expires > now.UtcDateTime),
+                _settingsService.SubscriptionTierLevel, now);
+        }
+
+        private bool IsCurrentLiveScope(DurableLiveQueue.Run run)
+        {
+            var selected = _settingsService.ServerUrl ?? "";
+            return DurableLiveQueue.ServerKey(selected) == run.Server &&
+                HostedServerRules.RequiresApiFirewallCredentials(_settingsService, selected) == run.Protected &&
+                (!run.Protected || run.Account == RecordingPlaybackAccess.AccountKey(_settingsService, selected));
+        }
+
+        private static bool TryGetDurableRecording(CallItem item, DurableLiveQueue.Run run, out string id, out DateTimeOffset time)
+        {
+            id = item.BackendId;
+            time = item.RecordingTimeUtc.GetValueOrDefault();
+            return item.LiveState is { } state && DurableLiveQueue.ServerKey(state.ServerUrl) == run.Server &&
+                run.Owns(item.RecordingAccess) &&
+                item.RecordingTimeUtc != null && id.Length != 0;
+        }
+
+        private async Task<double> GetEffectivePlaybackRateAsync(CallItem item, CancellationToken token)
+        {
+            var step = PlaybackSpeedStep;
+            if (step == 0)
                 return 1.0;
 
-            var step = PlaybackSpeedStep;
+            var catchingUp = _durableRun is { } durable && TryGetDurableRecording(item, durable, out var id, out var time)
+                ? await _durableQueue.HasNewerPendingAsync(durable, LocalRecoveryFloor(durable), new(id, time.UtcTicks), token)
+                : GetBacklogCountForStartingCall(item) > 0;
+            if (!catchingUp)
+                return 1.0;
 
             return step switch
             {
@@ -2698,6 +2912,7 @@ private static string SpeedStepToLabel(double step)
             {
                 var anchor = _currentPlayingCall ?? _lastPlayedCall;
                 var anchorIndex = anchor != null ? Calls.IndexOf(anchor) : -1;
+                var offscreenAnchor = anchorIndex < 0 && anchor != null && HasDurablePosition(anchor);
 
                 for (var i = 0; i < Calls.Count; i++)
                 {
@@ -2707,6 +2922,10 @@ private static string SpeedStepToLabel(double step)
                     if (anchorIndex >= 0)
                     {
                         isHistory = i > anchorIndex;
+                    }
+                    else if (offscreenAnchor)
+                    {
+                        isHistory = CompareCardOrder(call, anchor!) < 0;
                     }
 
                     if (call.IsHistory != isHistory)
@@ -2761,7 +2980,7 @@ private static string SpeedStepToLabel(double step)
 
         private async Task PlaySingleCallWithoutQueueAsync(CallItem item, LivePlaybackRequests.Request request)
         {
-            if (string.IsNullOrWhiteSpace(item.AudioUrl) || _filterService.ShouldHide(item))
+            if (_filterService.ShouldHide(item))
                 return;
 
             string? playbackUrl = null;
@@ -2769,12 +2988,15 @@ private static string SpeedStepToLabel(double step)
             _currentPlayingCall = item;
             try
             {
-                playbackUrl = await GetPlayableAudioUrlAsync(item.AudioUrl, request.Token);
+                playbackUrl = await AcquireRecordingAudioAsync(item, request.Token);
                 if (!request.CanContinue || string.IsNullOrWhiteSpace(playbackUrl))
                     return;
 
                 try { _systemMediaService.UpdateNowPlaying(BuildNowPlayingMetadataSnapshot(item), AudioEnabled); } catch { }
-                await PlayOnDeviceAsync(playbackUrl, 1.0, request, request.Token);
+                var completion = new PlaybackCompletion();
+                await PlayOnDeviceAsync(item, playbackUrl, 1.0, request, request.Token, completion);
+                if (completion.Confirmed && request.CanContinue && HasDurablePosition(item))
+                    CompleteQueuedCall(item);
             }
             finally
             {
@@ -2788,28 +3010,61 @@ private static string SpeedStepToLabel(double step)
         private async Task<PlaybackOutcome> PlayAudioAsync(CallItem item, LivePlaybackRequests.Request request,
             bool allowMutedPlayback = false)
         {
-            if (!AudioEnabled || !request.CanContinue)
+            if (_playbackOwnership.Live == null || !AudioEnabled || !request.CanContinue)
                 return PlaybackOutcome.Canceled;
 
-            var softMuted = _isMainAudioSoftMuted;
-            var outcome = string.IsNullOrWhiteSpace(item.AudioUrl) || _filterService.ShouldHide(item) ||
+            var completion = new PlaybackCompletion();
+            Exception? failure = null;
+            var outcome = _filterService.ShouldHide(item) ||
                           (!allowMutedPlayback && _filterService.ShouldMute(item))
                 ? PlaybackOutcome.Skipped
-                : await PlaybackAttempt.RunAsync(() => PlayAudioCoreAsync(item, request), request.Token,
-                    ex => ReportPlaybackFailure(ex, request));
-            if (outcome == PlaybackOutcome.Completed && softMuted)
-                outcome = PlaybackOutcome.Skipped;
+                : await PlaybackAttempt.RunAsync(async () =>
+                {
+                    if (_durableRun is { } durable && TryGetDurableRecording(item, durable, out var id, out _))
+                        await _durableQueue.MarkPlayingAsync(durable, id, request.Token);
+                    request.Token.ThrowIfCancellationRequested();
+                    await PlayAudioCoreAsync(item, request, completion);
+                }, request.Token,
+                    ex => { failure = ex; ReportPlaybackFailure(ex, request); }, completion);
 
             if (request.CanContinue)
             {
                 if (outcome.AdvancesQueue())
                 {
+                    if (outcome == PlaybackOutcome.Skipped && _durableRun is { } durable &&
+                        TryGetDurableRecording(item, durable, out var id, out _))
+                    {
+                        try { await _durableQueue.MarkAsync(durable, id, outcome, request.Token); }
+                        catch (Exception ex) when (!request.Token.IsCancellationRequested)
+                        {
+                            ReportPlaybackFailure(ex, request);
+                            SetPlaybackRetry(item);
+                            return PlaybackOutcome.Failed;
+                        }
+                        if (!request.CanContinue)
+                            return PlaybackOutcome.Canceled;
+                    }
                     CompleteQueuedCall(item);
                     _lastQueuePlaybackFinishedAtUtc = DateTimeOffset.UtcNow;
                 }
                 else if (outcome == PlaybackOutcome.Failed)
                 {
+                    // A fresh verification can remove a historical row from the
+                    // eligible set. Keep it pending and reselect eligible Live.
+                    if (!request.IsManual && failure is RecordingAccessException && _durableRun is { } current &&
+                        TryGetDurableRecording(item, current, out var withheldId, out _) &&
+                        !await _durableQueue.IsPendingAsync(current, withheldId, LocalRecoveryFloor(current), request.Token))
+                        return PlaybackOutcome.Withheld;
+                    if (!request.CanContinue)
+                        return PlaybackOutcome.Canceled;
                     SetPlaybackRetry(item);
+                    if (failure is RecordingAudioUnavailableException && _durableRun is { } scope &&
+                        TryGetDurableRecording(item, scope, out _, out _))
+                    {
+                        _unavailableRecording = true;
+                        _awaitingAutomaticAudio = request.IsManual ? null : item;
+                        OnPropertyChanged(nameof(CanSkipUnavailableRecording));
+                    }
                 }
                 if (_currentPlayingCall == item)
                     _currentPlayingCall = null;
@@ -2819,12 +3074,13 @@ private static string SpeedStepToLabel(double step)
             return outcome;
         }
 
-        private async Task PlayAudioCoreAsync(CallItem item, LivePlaybackRequests.Request request)
+        private async Task PlayAudioCoreAsync(CallItem item, LivePlaybackRequests.Request request, PlaybackCompletion completion)
         {
             var userToken = request.Token;
 
             // Playback watchdog (prevents the queue from hanging forever on truly stuck playback).
-            var rateForTimeout = GetEffectivePlaybackRate(item);
+            var rateForTimeout = await GetEffectivePlaybackRateAsync(item, userToken);
+            userToken.ThrowIfCancellationRequested();
             var playbackSeconds = item.CallDurationSeconds > 0
                 ? (item.CallDurationSeconds / Math.Max(rateForTimeout, 0.1))
                 : 0;
@@ -2842,9 +3098,7 @@ private static string SpeedStepToLabel(double step)
 #if ANDROID || IOS
             // Mobile playback has its own prepare and audible-playback watchdogs. Time spent
             // waiting for a call to end, delayed focus or explicit resume is unbounded.
-            using var playbackWatchdogCts = _isMainAudioSoftMuted
-                ? new CancellationTokenSource(TimeSpan.FromSeconds(playbackLimitSeconds))
-                : new CancellationTokenSource();
+            using var playbackWatchdogCts = new CancellationTokenSource();
 #else
             using var playbackWatchdogCts = new CancellationTokenSource(TimeSpan.FromSeconds(playbackLimitSeconds));
 #endif
@@ -2883,29 +3137,13 @@ private static string SpeedStepToLabel(double step)
                     AppLog.Add(() => $"QueueTiming: selected backendId={item.BackendId ?? "(none)"} gapSincePriorFinishMs={gapMs:0}");
                 }
 
-                if (_isMainAudioSoftMuted)
-                {
-                    // Soft mute: consume the call silently while preserving queue pacing.
-                    var seconds = item.CallDurationSeconds > 0
-                        ? (item.CallDurationSeconds / Math.Max(rate, 0.1))
-                        : 0.25;
-
-                    seconds = Math.Clamp(seconds, 0.15, 10800);
-                    await Task.Delay(TimeSpan.FromSeconds(seconds), playbackToken);
-                    return;
-                }
-
                 var acquisitionStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
                 // IMPORTANT: Do not use the playback watchdog here.
                 // Backgrounded Android downloads can be slower and would trip the playback watchdog incorrectly.
                 acquiringAudio = true;
-                var playbackUrl = await TryTakePrefetchedPlayableUrlAsync(item, downloadToken);
-                var usedPrefetchedPlayableUrl = !string.IsNullOrWhiteSpace(playbackUrl);
-                if (request.CanContinue && !downloadToken.IsCancellationRequested && string.IsNullOrWhiteSpace(playbackUrl))
-                {
-                    playbackUrl = await GetPlayableAudioUrlAsync(item.AudioUrl, downloadToken);
-                }
+                userToken.ThrowIfCancellationRequested();
+                var playbackUrl = await AcquireRecordingAudioAsync(item, downloadToken, allowPrefetch: true);
 
                 acquisitionStopwatch.Stop();
                 acquiringAudio = false;
@@ -2931,7 +3169,7 @@ private static string SpeedStepToLabel(double step)
                 {
                 }
 
-                AppLog.Add(() => $"QueueTiming: backendId={item.BackendId ?? "(none)"} acquisitionMs={acquisitionStopwatch.Elapsed.TotalMilliseconds:0} prefetched={usedPrefetchedPlayableUrl} rate={rate:0.###}");
+                AppLog.Add(() => $"QueueTiming: backendId={item.BackendId ?? "(none)"} acquisitionMs={acquisitionStopwatch.Elapsed.TotalMilliseconds:0} rate={rate:0.###}");
 
                 if (gapMs > 0)
                 {
@@ -2940,15 +3178,12 @@ private static string SpeedStepToLabel(double step)
                 }
 
                 var playbackStopwatch = System.Diagnostics.Stopwatch.StartNew();
-                await PlayOnDeviceAsync(playbackUrl, rate, request, playbackToken);
+                await PlayOnDeviceAsync(item, playbackUrl, rate, request, playbackToken, completion);
                 if (!request.CanContinue)
                     return;
 
-                if (playbackWatchdogCts.IsCancellationRequested)
-                {
-                    await _audioPlaybackService.StopAsync();
+                if (playbackWatchdogCts.IsCancellationRequested && !completion.Confirmed)
                     throw new TimeoutException("Call playback watchdog timeout");
-                }
                 playbackStopwatch.Stop();
 
                 AppLog.Add(() => $"QueueTiming: backendId={item.BackendId ?? "(none)"} playbackMs={playbackStopwatch.Elapsed.TotalMilliseconds:0} totalCallSeconds={item.CallDurationSeconds:0.###}");
@@ -2964,8 +3199,6 @@ private static string SpeedStepToLabel(double step)
                 !userToken.IsCancellationRequested &&
                 LivePlaybackRequests.IsExpectedCancellation(ex, playbackWatchdogCts.Token))
             {
-                if (request.CanContinue)
-                    await _audioPlaybackService.StopAsync();
                 throw new TimeoutException("Call playback watchdog timeout", ex);
             }
             finally
@@ -2984,24 +3217,6 @@ private static string SpeedStepToLabel(double step)
             }
         }
 
-
-        private async Task PlayOnDeviceAsync(string url, double rate,
-            LivePlaybackRequests.Request request, CancellationToken cancellationToken)
-        {
-            if (!request.CanContinue || cancellationToken.IsCancellationRequested)
-                return;
-
-            await _nativePlaybackGate.WaitAsync(cancellationToken);
-            try
-            {
-                if (request.CanContinue && !cancellationToken.IsCancellationRequested)
-                    await _audioPlaybackService.PlayAsync(url, rate, cancellationToken);
-            }
-            finally
-            {
-                _nativePlaybackGate.Release();
-            }
-        }
 
         private static bool IsDownloadedAudioTempFile(string? path)
         {
@@ -3041,7 +3256,7 @@ private static string SpeedStepToLabel(double step)
             }
         }
 
-        private async Task<string?> GetPlayableAudioUrlAsync(string audioUrl, CancellationToken cancellationToken)
+        private async Task<string?> GetPlayableAudioUrlAsync(string audioUrl, CancellationToken cancellationToken, bool forceDownload = false)
         {
             if (string.IsNullOrWhiteSpace(audioUrl))
                 return null;
@@ -3053,7 +3268,7 @@ private static string SpeedStepToLabel(double step)
                 audioUri = new UriBuilder(audioUri) { UserName = string.Empty, Password = string.Empty }.Uri;
 
             var authentication = ServerAuthentication.For(_settingsService);
-            if (!authentication.RequiresFirewall(audioUri) && authentication.GetCustomAuthorization(audioUri) == null)
+            if (!forceDownload && !authentication.RequiresFirewall(audioUri) && authentication.GetCustomAuthorization(audioUri) == null)
                 return audioUri.AbsoluteUri;
 
             using var request = new HttpRequestMessage(HttpMethod.Get, audioUri);
@@ -3084,6 +3299,81 @@ private static string SpeedStepToLabel(double step)
             }
         }
 
+        private async Task<string> AcquireRecordingAudioAsync(CallItem item, CancellationToken token, bool allowPrefetch = false)
+        {
+            var access = await AuthorizeRecordingAsync(item, token);
+            if (allowPrefetch && !access.Protected && await TryTakePrefetchedPlayableUrlAsync(item, token) is { Length: > 0 } prefetched)
+                return prefetched;
+
+            var lastUrl = item.AudioUrl;
+            return await RecordingAudioRecovery.AcquireAsync(lastUrl, async refreshToken =>
+            {
+                if (!string.IsNullOrWhiteSpace(item.AudioUrl) && item.AudioUrl != lastUrl)
+                {
+                    if (access.Protected)
+                        await AuthorizeRecordingAsync(item, refreshToken);
+                    return lastUrl = item.AudioUrl;
+                }
+
+                var scope = _durableRun;
+                var refreshed = await _callStreamService.RefreshRecordingAudioAsync(item, access.Server, access.RecordedAt, refreshToken);
+                if (item.LiveState is { } state && scope is { } durable && _durableRun == durable && IsCurrentLiveScope(durable) &&
+                    TryGetDurableRecording(item, durable, out _, out _))
+                    await _durableQueue.ObserveAsync(durable, state.Id, null, state.Read(), refreshToken, existingOnly: true);
+                refreshToken.ThrowIfCancellationRequested();
+                RequireCurrentRecordingAccount(item);
+                if (refreshed != null)
+                    item.AudioUrl = lastUrl = refreshed;
+                return refreshed;
+            }, (url, acquireToken) =>
+            {
+                RequireCurrentRecordingAccount(item);
+                return GetPlayableAudioUrlAsync(url, acquireToken, forceDownload: true);
+            }, token);
+        }
+
+        private async Task<(string Server, bool Protected, DateTimeOffset? RecordedAt)> AuthorizeRecordingAsync(
+            CallItem item, CancellationToken token)
+        {
+            var server = item.RecordingServer ?? item.LiveState?.ServerUrl ?? _settingsService.ServerUrl ?? "";
+            var key = DurableLiveQueue.ServerKey(server);
+            var context = item.RecordingAccess ?? new RecordingAccessContext(RecordingOrigin.Unknown, false);
+            var protectedSource = context.Protected || HostedServerRules.RequiresApiFirewallCredentials(_settingsService, server);
+            var account = protectedSource ? RequireCurrentRecordingAccount(item) : null;
+            var owner = item.LivePlaybackOwner;
+            var recordedAt = item.RecordingTimeUtc;
+            if (key != null && !string.IsNullOrWhiteSpace(item.BackendId) && (_durableRun != null || protectedSource))
+            {
+                var persisted = await _durableQueue.GetAccessAsync(key, item.BackendId, account, token);
+                if (persisted is { } record)
+                {
+                    context = record.Access with { Protected = record.Access.Protected || protectedSource };
+                    owner = record.Owner;
+                    recordedAt = record.RecordedAt;
+                }
+            }
+            protectedSource |= context.Protected;
+            if (protectedSource && key != DurableLiveQueue.ServerKey(_settingsService.ServerUrl ?? ""))
+                throw new RecordingAccessException("Select this recording's server before playing hosted audio.");
+            var currentLive = _monitoring.CanRecover(_monitoring.Current) && _monitoring.Current?.Id == owner &&
+                (!protectedSource || context.Account != null);
+            await RecordingPlaybackAccess.VerifyAsync(_settingsService, _subscriptionService, server,
+                recordedAt, context, currentLive, requireAccount: protectedSource, token);
+            return (server, protectedSource, recordedAt);
+        }
+
+        private string? RequireCurrentRecordingAccount(CallItem item)
+        {
+            var server = item.RecordingServer ?? item.LiveState?.ServerUrl ?? _settingsService.ServerUrl ?? "";
+            if (item.RecordingAccess?.Protected != true && !HostedServerRules.RequiresApiFirewallCredentials(_settingsService, server))
+                return null;
+            var account = RecordingPlaybackAccess.AccountKey(_settingsService, server);
+            if (_changingHostedAccount || account == null || item.RecordingAccess?.Account != account ||
+                !RecordingPlaybackAccess.IsSelected(_settingsService, server))
+                throw new RecordingAccessException("This recording belongs to a different hosted account or server.");
+            return account;
+        }
+
         private async Task OpenDonateAsync()
         {
             try
@@ -3095,35 +3385,62 @@ private static string SpeedStepToLabel(double step)
             }
         }
 
-        public async Task TryAutoReconnectAsync()
-        {
-#if ANDROID || IOS
-            if (AppStateStore.GetBool(MobileMonitoringExplicitlyStoppedKey, false))
-                return;
-#endif
-            if (IsRunning)
-                return;
+        public Task TryAutoReconnectAsync() => RestoreMonitoringAsync(driveQueue: false);
 
-            var shouldReconnect = await Task.Run(() => AppStateStore.GetBool("last_connected_on_exit", false));
-            if (!shouldReconnect || IsRunning)
-                return;
+        private Task RestoreMonitoringAsync(bool driveQueue) =>
+            MainThread.InvokeOnMainThreadAsync(async () =>
+            {
+                if (_monitoring.Current != null || _monitoring.ExplicitlyStopped)
+                    return;
 
-            await StartMonitoringAsync();
-        }
+                var revision = _monitoring.StopRevision;
+                var scope = CurrentMonitoringScope();
+                if (!await Task.Run(() => _monitoringIntent.CanRestore(scope.Server, scope.Account)) ||
+                    scope != CurrentMonitoringScope())
+                    return;
+
+                var run = await StartMonitoringCoreAsync(driveQueue, automaticStopRevision: revision);
+                if (driveQueue && _monitoring.CanRecover(run) && AudioEnabled && _settingsService.AutoPlay)
+                    await RequestQueuePlaybackAsync("ConnectAutoplay", false);
+            });
 
         private List<CallItem> SnapshotLiveCalls()
         {
             var calls = Calls.ToList();
             lock (_pendingCallsLock)
                 calls.AddRange(_pendingCalls);
+            if (_durableRun is { } run)
+                calls.RemoveAll(item => !run.Owns(item.RecordingAccess));
             return calls;
         }
 
-        private void ApplyLiveUpdate(LiveCallState state, CallItem? update = null)
+        private CallItem? FindLiveCard(LiveCallState state)
         {
+            var run = _durableRun;
             var existing = state.FindCard(Calls, _pendingCalls, _pendingCallsLock);
+            if (existing != null && (run == null || run.Owns(existing.RecordingAccess)))
+                return existing;
+
+            // A restored card can own a different in-memory state from the
+            // stream's copy. Its server and backend identity are unchanged.
+            var server = DurableLiveQueue.ServerKey(state.ServerUrl);
+            bool Matches(CallItem item) => item.LiveState is { } restored &&
+                restored.Id == state.Id && DurableLiveQueue.ServerKey(restored.ServerUrl) == server &&
+                (run == null || run.Owns(item.RecordingAccess));
+            existing = Calls.FirstOrDefault(Matches);
+            if (existing != null)
+                return existing;
+            lock (_pendingCallsLock)
+                return _pendingCalls.Find(item => Matches(item));
+        }
+
+        private void ApplyLiveUpdate(LiveCallState state, CallItem? update = null, CallItem? existing = null)
+        {
+            existing ??= FindLiveCard(state);
             if (existing == null)
                 return;
+            if (existing.LiveState is { } restored && !ReferenceEquals(restored, state))
+                restored.Observe(state.Read(), LiveCallState.NextVersion());
             var alreadyPlayable = !string.IsNullOrWhiteSpace(existing.AudioUrl);
             var transcriptionChanged = existing.ApplyLiveUpdate();
             if (!alreadyPlayable && !string.IsNullOrWhiteSpace(existing.AudioUrl))
@@ -3161,6 +3478,16 @@ private static string SpeedStepToLabel(double step)
         {
             if (!AudioEnabled)
                 return;
+            if (_playbackOwnership.Live == null)
+            {
+                _resumeAfterHistory |= IsRunning && (_settingsService.AutoPlay || _userRunShouldDriveQueue || CallsWaiting > 0);
+                return;
+            }
+            if (_isQueuePlaybackRunning)
+            {
+                _queueWake.Signal();
+                return;
+            }
             if (_settingsService.AutoPlay || _userRunShouldDriveQueue)
                 _ = RequestQueuePlaybackAsync(reason, _userRunShouldDriveQueue);
             else if (IsRunning && _currentPlayingCall == null && !_isQueuePlaybackRunning && CallsWaiting > 0)
@@ -3174,16 +3501,21 @@ private static string SpeedStepToLabel(double step)
 
             try
             {
-                var candidates = await MainThread.InvokeOnMainThreadAsync(() => SnapshotLiveCalls()
-                    .Where(call => call.LiveState?.NeedsNotificationLookup() == true)
-                    .Take(maxToRefresh).ToArray());
+                var (run, durable, candidates) = await MainThread.InvokeOnMainThreadAsync(() =>
+                    (_monitoring.Current, _durableRun, SnapshotLiveCalls()
+                        .Where(call => call.LiveState?.NeedsNotificationLookup() == true)
+                        .Take(maxToRefresh).ToArray()));
                 if (candidates.Length == 0)
                     return;
 
-                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(run?.Token ?? CancellationToken.None);
+                timeout.CancelAfter(TimeSpan.FromSeconds(12));
                 await _callStreamService.RefreshCallMetadataAsync(candidates, timeout.Token).ConfigureAwait(false);
                 await MainThread.InvokeOnMainThreadAsync(() =>
                 {
+                    if (timeout.IsCancellationRequested || _changingHostedAccount ||
+                        run != _monitoring.Current || durable != null && !IsCurrentLiveScope(durable))
+                        return;
                     foreach (var candidate in candidates)
                     {
                         if (candidate.LiveState is { } state)
@@ -3400,13 +3732,7 @@ public void DismissAddressAlert(CallItem call)
 
         private async Task ToggleConnectionAsync()
         {
-            if (IsMonitoringTransitionInProgress)
-            {
-                AppLog.Add(() => "Toggle ignored: monitoring transition already in progress.");
-                return;
-            }
-
-            if (IsRunning)
+            if (_monitoring.Current != null)
             {
                 await StopMonitoringAsync();
             }
@@ -3416,18 +3742,20 @@ public void DismissAddressAlert(CallItem call)
             }
         }
 
-        private LivePlaybackRequests.Request BeginManualPlayback()
+        private LivePlaybackRequests.Request BeginManualPlayback(PlaybackOwnership.Lease live)
         {
             // Retire an automatic loop immediately. Its canceled I/O may still be unwinding
             // when the newer manual selection finishes and requests queue playback again.
             ++_queuePlaybackVersion;
             _isQueuePlaybackRunning = false;
-            var request = _playbackRequests.Begin(manual: true);
+            _transportLookups.RetireCurrent();
+            _manualPlaybackTarget = null;
+            var request = _playbackRequests.Begin(manual: true, live.Token);
             SetPlaybackRetry(null);
 #if ANDROID
             AndroidAudioEnvironment.RequestPlay();
             if (IsRunning)
-                SystemMediaService.PrepareAndroidMonitoringService();
+                SystemMediaService.PrepareAndroidPlaybackService();
 #elif IOS
             IosAudioEnvironment.RequestPlay();
 #endif
@@ -3440,19 +3768,23 @@ public void DismissAddressAlert(CallItem call)
             if (ReferenceEquals(_retryPlaybackCall, item))
                 return;
             _retryPlaybackCall = item;
+            _unavailableRecording = false;
+            _awaitingAutomaticAudio = null;
             OnPropertyChanged(nameof(CanResumePlayback));
+            OnPropertyChanged(nameof(CanSkipUnavailableRecording));
         }
 
         private void CompleteQueuedCall(CallItem item)
         {
             var wasLate = item.ConsumeLateAudio();
-            var anchorIndex = _lastPlayedCall == null ? -1 : Calls.IndexOf(_lastPlayedCall);
-            if (!wasLate || anchorIndex < 0 || Calls.IndexOf(item) < anchorIndex)
+            if (!wasLate || _lastPlayedCall == null || CompareCardOrder(item, _lastPlayedCall) > 0)
                 _lastPlayedCall = item;
         }
 
         private void ClearPlayingSelection()
         {
+            if (_currentPlayingCall is { } active)
+                active.IsPlaying = false;
             foreach (var call in Calls)
             {
                 if (call.IsPlaying)
@@ -3473,6 +3805,8 @@ public void DismissAddressAlert(CallItem call)
             UpdateQueueDerivedState();
             LastQueueEvent = ex switch
             {
+                RecordingAudioUnavailableException unavailable => unavailable.Message,
+                RecordingAccessException access => access.Message,
                 FirewallAuthenticationException firewall => firewall.Message,
                 TimeoutException watchdog => watchdog.Message,
                 OperationCanceledException canceled when LivePlaybackRequests.IsTimeout(canceled) => "Audio request timed out",
@@ -3514,37 +3848,83 @@ public void DismissAddressAlert(CallItem call)
 
         private async Task NavigateToAdjacentCallAsync(int direction)
         {
-            if (Calls == null || Calls.Count == 0)
+            if (_playbackOwnership.Live is not { } live || (direction != 1 && direction != -1))
                 return;
 
-            if (direction != 1 && direction != -1)
-                return;
-
-            bool IsPlayable(CallItem c) =>
-                c != null &&
-                !string.IsNullOrWhiteSpace(c.AudioUrl) &&
-                !_filterService.ShouldHide(c) &&
-                !_filterService.ShouldMute(c);
-
-            var anchor = _currentPlayingCall ?? _lastPlayedCall;
-            var anchorIndex = anchor != null ? Calls.IndexOf(anchor) : -1;
-
-            if (anchorIndex < 0)
-                anchorIndex = 0;
-
-            var startIndex = anchorIndex + direction;
-
-            for (var i = startIndex; i >= 0 && i < Calls.Count; i += direction)
+            var anchor = (_playbackRequests.HasManualSelection ? _manualPlaybackTarget : null) ??
+                _currentPlayingCall ?? _retryPlaybackCall ?? _lastPlayedCall;
+            var run = _monitoring.Current;
+            var older = direction == 1;
+            using var lookup = _transportLookups.Begin(manual: true, live.Token);
+            if (_durableRun is { } durable && _monitoring.CanRecover(run) &&
+                (anchor == null || TryGetDurableRecording(anchor, durable, out _, out _)))
             {
-                var candidate = Calls[i];
-                if (!IsPlayable(candidate))
-                    continue;
+                var token = lookup.Token;
+                try
+                {
+                    DurableLiveQueue.Position? position = null;
+                    if (anchor != null && TryGetDurableRecording(anchor, durable, out var id, out var time))
+                        position = new(id, time.UtcTicks);
+                    else if (older)
+                        position = (await _durableQueue.FindTransportTargetAsync(durable, LocalRecoveryFloor(durable),
+                            anchor: null, older: true, token))?.Order;
 
-                await OnCallTappedAsync(candidate);
-                return;
+                    while (position != null && lookup.CanContinue && _monitoring.CanRecover(run))
+                    {
+                        var row = await _durableQueue.FindTransportTargetAsync(durable, LocalRecoveryFloor(durable),
+                            position, older, token);
+                        if (row == null || !lookup.CanContinue || !_monitoring.CanRecover(run))
+                            break;
+                        position = row.Order;
+                        var candidate = ResolveDurableCard(durable, row);
+                        if (row.Snapshot == null)
+                            await RefreshTransportCardAsync(candidate, token);
+                        if (!lookup.CanContinue || !_monitoring.CanRecover(run))
+                            return;
+                        if (_filterService.ShouldHide(candidate) || _filterService.ShouldMute(candidate))
+                            continue;
+                        // Autoplay can reach the requested item while SQLite
+                        // resolves the command. Let that attempt finish.
+                        if (!_playbackRequests.HasManualSelection && ReferenceEquals(candidate, _currentPlayingCall))
+                            return;
+                        ShowDurableCard(candidate);
+                        await OnCallTappedAsync(candidate);
+                        return;
+                    }
+                }
+                catch (OperationCanceledException ex) when (LivePlaybackRequests.IsExpectedCancellation(ex, token)) { }
+                catch (Exception ex)
+                {
+                    ReportPlaybackFailure(ex, lookup);
+                    return;
+                }
+            }
+            else
+            {
+                var index = anchor == null ? 0 : Calls.IndexOf(anchor);
+                for (var i = index + direction; index >= 0 && i >= 0 && i < Calls.Count; i += direction)
+                {
+                    if (!IsPlayableForQueue(Calls[i]))
+                        continue;
+                    await OnCallTappedAsync(Calls[i]);
+                    return;
+                }
             }
 
-            LastQueueEvent = direction == 1 ? "No previous call available" : "No next call available";
+            if (lookup.CanContinue)
+                LastQueueEvent = older ? "No previous call available" : "No next call available";
+        }
+
+        private async Task RefreshTransportCardAsync(CallItem item, CancellationToken token)
+        {
+            if (!string.IsNullOrWhiteSpace(item.AudioUrl))
+                return;
+            // Terminal rows keep their identity and authorization context. A replay
+            // can use the same scoped lookup as recovery when the payload was cleared.
+            var access = await AuthorizeRecordingAsync(item, token);
+            await _callStreamService.RefreshRecordingAudioAsync(item, access.Server, access.RecordedAt, token);
+            token.ThrowIfCancellationRequested();
+            item.ApplyLiveUpdate();
         }
 
         private static void ApplyTheme(string? mode)

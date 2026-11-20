@@ -13,7 +13,8 @@ namespace JoesScanner
         private readonly ISubscriptionService _subscriptionService;
         private readonly ICommsBadgeService _commsBadgeService;
 
-        public App(IServiceProvider services, ISettingsService settings, ITelemetryService telemetryService, ISubscriptionService subscriptionService, ICommsBadgeService commsBadgeService)
+        public App(IServiceProvider services, ISettingsService settings, ITelemetryService telemetryService, ISubscriptionService subscriptionService,
+            ICommsBadgeService commsBadgeService, IDbMaintenanceService dbMaintenance)
         {
             _services = services ?? throw new ArgumentNullException(nameof(services));
             _settings = settings ?? throw new ArgumentNullException(nameof(settings));
@@ -43,6 +44,7 @@ namespace JoesScanner
             // Start the communications badge poller so the tab can show unread state.
             // The poller is best effort and will no-op until credentials are configured and the session is associated.
             try { _commsBadgeService.Start(); } catch { }
+            dbMaintenance.Start();
 
 
             AppDomain.CurrentDomain.ProcessExit += (_, _) =>

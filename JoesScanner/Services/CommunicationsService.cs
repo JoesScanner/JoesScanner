@@ -38,9 +38,7 @@ namespace JoesScanner.Services
                 // Do not mutate HttpClient properties (BaseAddress, DefaultRequestHeaders, Timeout) after the
                 // first request. The communications page polls repeatedly, and changing BaseAddress on a
                 // reused HttpClient will throw: "This instance has already started one or more requests".
-                var endpoint = new Uri(
-                    new Uri(authServerBaseUrl, UriKind.Absolute),
-                    "wp-json/joes-scanner/v1/comms/changes");
+                var endpoint = SavedConnectionUrl.AccountEndpoint(authServerBaseUrl.TrimEnd('/'), "comms/changes");
 
                 var payload = new
                 {
@@ -61,7 +59,7 @@ namespace JoesScanner.Services
                     return new CommsSyncResult
                     {
                         Ok = false,
-                        Message = $"HTTP {(int)response.StatusCode} {response.ReasonPhrase}"
+                        Message = $"HTTP {(int)response.StatusCode}"
                     };
                 }
 
@@ -81,7 +79,7 @@ namespace JoesScanner.Services
                 var result = new CommsSyncResult
                 {
                     Ok = ok,
-                    Message = msg ?? string.Empty,
+                    Message = DiagnosticRedaction.SanitizeAuthenticationMessage(msg, sessionToken),
                     NextSeq = TryGetLong(root, "next_seq")
                 };
 
@@ -139,9 +137,9 @@ namespace JoesScanner.Services
             {
                 return new CommsSyncResult { Ok = false, Message = "Canceled." };
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                return new CommsSyncResult { Ok = false, Message = ex.Message };
+                return new CommsSyncResult { Ok = false, Message = "Unable to load messages." };
             }
         }
 

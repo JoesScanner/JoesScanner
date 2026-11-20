@@ -24,7 +24,6 @@ namespace JoesScanner;
         | ConfigChanges.Density)]
 public class MainActivity : MauiAppCompatActivity
 {
-    internal static bool IsAudioActivityVisible { get; private set; }
     // Handles the Android back button without using the deprecated OnBackPressed override.
     // If audio is enabled, the task is moved to the background so audio can continue.
     // If audio is disabled, normal back behavior runs (closes the activity and app).
@@ -71,13 +70,21 @@ public class MainActivity : MauiAppCompatActivity
 
     protected override void OnStart()
     {
-        IsAudioActivityVisible = true;
+        SystemMediaService.AndroidForeground.SetActivityVisible(true);
         base.OnStart();
+        SystemMediaService.PrepareAndroidPlaybackService();
+    }
+
+    [System.Runtime.Versioning.SupportedOSPlatform("android29.0")]
+    public override void OnTopResumedActivityChanged(bool isTopResumedActivity)
+    {
+        base.OnTopResumedActivityChanged(isTopResumedActivity);
+        SystemMediaService.AndroidForeground.SetTopActivity(isTopResumedActivity);
     }
 
     protected override void OnStop()
     {
-        IsAudioActivityVisible = false;
+        SystemMediaService.AndroidForeground.SetActivityVisible(false);
         base.OnStop();
     }
 

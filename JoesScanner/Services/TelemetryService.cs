@@ -35,7 +35,7 @@ namespace JoesScanner.Services
 
             CleanupLegacyTelemetryQueueFile();
 
-            _httpClient = new HttpClient
+            _httpClient = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
             {
                 Timeout = TimeSpan.FromSeconds(3)
             };
@@ -84,7 +84,7 @@ namespace JoesScanner.Services
 
         public void TrackAppStopping()
         {
-            var token = _settings.AuthSessionToken;
+            var session = _settings.ReadAccountSession();
             StopHeartbeat();
 
             if (!ShouldSendTelemetry())
@@ -93,7 +93,7 @@ namespace JoesScanner.Services
             EnqueueDispatch(async ct =>
             {
                 await SendAppEventAsync("app_stopping", null, ct).ConfigureAwait(false);
-                await SendAppEventAsync("session_end", BuildSessionEndPayload(token), ct).ConfigureAwait(false);
+                await SendAppEventAsync("session_end", BuildSessionEndPayload(session.Token), ct, session.Version).ConfigureAwait(false);
                 await TryFlushQueueAsync(ct).ConfigureAwait(false);
             });
         }
@@ -112,7 +112,7 @@ namespace JoesScanner.Services
                 EventType = "stream_connect_attempt",
                 Data = new Dictionary<string, string>
                 {
-                    ["stream_server_url"] = streamServerUrl ?? string.Empty,
+                    ["stream_server_url"] = RecordingStorageReference.ServerKey(streamServerUrl) ?? string.Empty,
                     ["stream_server_is_hosted"] = isHostedServer ? "true" : "false"
                 }
             }, CancellationToken.None);
@@ -135,11 +135,11 @@ namespace JoesScanner.Services
             var data = new Dictionary<string, string>
             {
                 ["connection_status"] = status ?? string.Empty,
-                ["stream_server_url"] = streamServerUrl ?? string.Empty
+                ["stream_server_url"] = RecordingStorageReference.ServerKey(streamServerUrl) ?? string.Empty
             };
 
             if (!string.IsNullOrWhiteSpace(detailMessage))
-                data["detail"] = detailMessage;
+                data["detail"] = DiagnosticRedaction.Sanitize(detailMessage);
 
             _ = EnqueueEventAsync(new TelemetryEvent
             {
@@ -182,11 +182,11 @@ namespace JoesScanner.Services
 
         public void StopMonitoringHeartbeat(string reason)
         {
-            var token = _settings.AuthSessionToken;
+            var session = _settings.ReadAccountSession();
 
             EnqueueDispatch(async ct =>
             {
-                await SendPingAsync(token, "monitoring_stop", ct).ConfigureAwait(false);
+                await SendPingAsync(session.Token, "monitoring_stop", ct).ConfigureAwait(false);
             });
 
             StopHeartbeat();
@@ -200,7 +200,7 @@ namespace JoesScanner.Services
                 {
                     reason = reason ?? string.Empty
                 }, ct).ConfigureAwait(false);
-                await SendAppEventAsync("session_end", BuildSessionEndPayload(token), ct).ConfigureAwait(false);
+                await SendAppEventAsync("session_end", BuildSessionEndPayload(session.Token), ct, session.Version).ConfigureAwait(false);
                 await TryFlushQueueAsync(ct).ConfigureAwait(false);
             });
         }
@@ -216,15 +216,21 @@ namespace JoesScanner.Services
             await AdoptSessionTokenAsync(newToken, reason ?? "reset", cancellationToken).ConfigureAwait(false);
         }
 
-        public async Task AdoptSessionTokenAsync(string newSessionToken, string reason, CancellationToken cancellationToken)
+        public async Task AdoptSessionTokenAsync(string newSessionToken, string reason, CancellationToken cancellationToken,
+            long? expectedVersion = null)
         {
-            EnsureAppStartSessionInitialized();
+            if (expectedVersion.HasValue)
+                Interlocked.Exchange(ref _appStartInitialized, 1);
+            else
+                EnsureAppStartSessionInitialized();
 
             newSessionToken = (newSessionToken ?? string.Empty).Trim();
             if (string.IsNullOrWhiteSpace(newSessionToken))
                 return;
 
-            var oldToken = (_settings.AuthSessionToken ?? string.Empty).Trim();
+            var (_, oldToken, version, _) = _settings.ReadAccountSession();
+            if (expectedVersion.HasValue && expectedVersion.Value != version)
+                return;
             if (string.Equals(oldToken, newSessionToken, StringComparison.Ordinal))
                 return;
 
@@ -232,15 +238,15 @@ namespace JoesScanner.Services
             {
                 try
                 {
-                    await SendAppEventAsync("session_end", BuildSessionEndPayload(oldToken), cancellationToken).ConfigureAwait(false);
+                    await SendAppEventAsync("session_end", BuildSessionEndPayload(oldToken), cancellationToken, version).ConfigureAwait(false);
                 }
                 catch
                 {
                 }
             }
 
-            _settings.AuthSessionToken = newSessionToken;
-            AppStateStore.SetString("telemetry_last_session_token", newSessionToken);
+            if (!_settings.TryReplaceAccountSession(version, newSessionToken))
+                return;
             AppStateStore.SetString("telemetry_session_start_utc", DateTime.UtcNow.ToString("o"));
 
             if (!ShouldSendTelemetry())
@@ -249,7 +255,7 @@ namespace JoesScanner.Services
             try
             {
                 await SendPingAsync(newSessionToken, "session_start_" + (reason ?? string.Empty), cancellationToken).ConfigureAwait(false);
-                await SendAppEventAsync("session_start", BuildSessionStartPayload(reason), cancellationToken).ConfigureAwait(false);
+                await SendAppEventAsync("session_start", BuildSessionStartPayload(reason), cancellationToken, version + 1).ConfigureAwait(false);
             }
             catch
             {
@@ -367,9 +373,9 @@ namespace JoesScanner.Services
 
         private void BeginNewAppStartSessionToken()
         {
-            var newToken = Guid.NewGuid().ToString();
-            _settings.AuthSessionToken = newToken;
-            AppStateStore.SetString("telemetry_last_session_token", newToken);
+            var (_, token, version, _) = _settings.ReadAccountSession();
+            if (token.Length == 0)
+                _settings.TryReplaceAccountSession(version, Guid.NewGuid().ToString());
             AppStateStore.SetString("telemetry_session_start_utc", DateTime.UtcNow.ToString("o"));
         }
 
@@ -384,8 +390,7 @@ namespace JoesScanner.Services
 
         private void UpdateLastStreamServer(string? streamServerUrl, bool isHosted)
         {
-            var url = (streamServerUrl ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(url))
+            if (RecordingStorageReference.ServerKey(streamServerUrl) is not { } url)
                 return;
 
             lock (_serverStateLock)
@@ -416,8 +421,9 @@ namespace JoesScanner.Services
         {
             try
             {
-                var endpoint = BuildAuthServerUri("/wp-json/joes-scanner/v1/app-event");
-                var payload = BuildAppEventPayload(ev.EventType, ev.Data, ev.CreatedUtc);
+                var session = _settings.ReadAccountSession();
+                var endpoint = SavedConnectionUrl.AccountEndpoint(session.BaseUrl, "app-event");
+                var payload = BuildAppEventPayload(ev.EventType, ev.Data, ev.CreatedUtc, session.Token);
                 var json = JsonSerializer.Serialize(payload);
                 using var content = new StringContent(json, Encoding.UTF8, "application/json");
                 using var response = await _httpClient.PostAsync(endpoint, content, cancellationToken).ConfigureAwait(false);
@@ -433,10 +439,14 @@ namespace JoesScanner.Services
             }
         }
 
-        private async Task SendAppEventAsync(string eventType, object? payload, CancellationToken cancellationToken)
+        private async Task SendAppEventAsync(string eventType, object? payload, CancellationToken cancellationToken,
+            long? requiredSessionVersion = null)
         {
-            var endpoint = BuildAuthServerUri("/wp-json/joes-scanner/v1/app-event");
-            var body = BuildAppEventPayload(eventType, payload, DateTime.UtcNow);
+            var session = _settings.ReadAccountSession();
+            if (requiredSessionVersion.HasValue && requiredSessionVersion.Value != session.Version)
+                return;
+            var endpoint = SavedConnectionUrl.AccountEndpoint(session.BaseUrl, "app-event");
+            var body = BuildAppEventPayload(eventType, payload, DateTime.UtcNow, session.Token);
             var json = JsonSerializer.Serialize(body);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
             using var response = await _httpClient.PostAsync(endpoint, content, cancellationToken).ConfigureAwait(false);
@@ -445,10 +455,11 @@ namespace JoesScanner.Services
         private async Task SendPingAsync(string? sessionToken, string reason, CancellationToken cancellationToken)
         {
             var token = (sessionToken ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(token))
+            var session = _settings.ReadAccountSession();
+            if (string.IsNullOrWhiteSpace(token) || token != session.Token)
                 return;
 
-            var endpoint = BuildAuthServerUri("/wp-json/joes-scanner/v1/ping");
+            var endpoint = SavedConnectionUrl.AccountEndpoint(session.BaseUrl, "ping");
             var body = BuildPingPayload(token, reason);
             var json = JsonSerializer.Serialize(body);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
@@ -460,7 +471,7 @@ namespace JoesScanner.Services
             var (serverUrl, isHosted) = GetLastStreamServer();
             if (string.IsNullOrWhiteSpace(serverUrl))
             {
-                serverUrl = (_settings.ServerUrl ?? string.Empty).Trim();
+                serverUrl = RecordingStorageReference.ServerKey(_settings.ServerUrl) ?? string.Empty;
                 isHosted = HostedServerRules.IsHostedStreamServerUrl(serverUrl);
                 if (!string.IsNullOrWhiteSpace(serverUrl))
                     UpdateLastStreamServer(serverUrl, isHosted);
@@ -484,12 +495,12 @@ namespace JoesScanner.Services
             };
         }
 
-        private object BuildAppEventPayload(string eventType, object? payload, DateTime createdUtc)
+        private object BuildAppEventPayload(string eventType, object? payload, DateTime createdUtc, string sessionToken)
         {
             return new
             {
                 device_id = _settings.DeviceInstallId,
-                session_token = _settings.AuthSessionToken,
+                session_token = sessionToken,
                 device_platform = DeviceInfo.Platform.ToString(),
                 device_type = DeviceInfo.Idiom.ToString(),
                 device_model = DeviceInfoHelper.CombineManufacturerAndModel(DeviceInfo.Manufacturer, DeviceInfo.Model),
@@ -518,20 +529,6 @@ namespace JoesScanner.Services
                 session_token = sessionToken,
                 started_utc = started
             };
-        }
-
-        private Uri BuildAuthServerUri(string path)
-        {
-            var baseUrl = (_settings.AuthServerBaseUrl ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(baseUrl))
-                baseUrl = "https://joesscanner.com";
-
-            baseUrl = baseUrl.TrimEnd('/');
-            path = (path ?? string.Empty).Trim();
-            if (!path.StartsWith("/", StringComparison.Ordinal))
-                path = "/" + path;
-
-            return new Uri(baseUrl + path);
         }
 
         private async Task EnqueueEventAsync(TelemetryEvent ev, CancellationToken cancellationToken)
@@ -610,7 +607,20 @@ ORDER BY created_utc ASC, id ASC;";
                     {
                         var ev = JsonSerializer.Deserialize<TelemetryEvent>(json);
                         if (ev != null)
+                        {
+                            if (ev.Data is JsonElement { ValueKind: JsonValueKind.Object } fields)
+                            {
+                                // Legacy events can be sent before the startup maintenance sweep reaches them.
+                                var cleaned = fields.EnumerateObject().ToDictionary(field => field.Name,
+                                    field => (object?)field.Value);
+                                if (fields.TryGetProperty("stream_server_url", out var server) && server.ValueKind == JsonValueKind.String)
+                                    cleaned["stream_server_url"] = RecordingStorageReference.ServerKey(server.GetString()) ?? string.Empty;
+                                if (fields.TryGetProperty("detail", out var detail) && detail.ValueKind == JsonValueKind.String)
+                                    cleaned["detail"] = DiagnosticRedaction.Sanitize(detail.GetString());
+                                ev.Data = cleaned;
+                            }
                             list.Add(new TelemetryQueueRow(id, ev));
+                        }
                     }
                     catch
                     {

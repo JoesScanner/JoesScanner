@@ -11,8 +11,9 @@ namespace JoesScanner.Services
         // Base URL for the scanner server.
         string ServerUrl { get; set; }
 
-        string BasicAuthUsername { get; set; }
-        string BasicAuthPassword { get; set; }
+        string BasicAuthUsername { get; }
+        string BasicAuthPassword { get; }
+        string? SavedCredentialWarning => null;
 
 
         // Per-server stored credentials (used for custom servers and Joe's hosted server account creds).
@@ -21,10 +22,6 @@ namespace JoesScanner.Services
         void SetServerCredentials(string serverUrl, string username, string password);
         void ClearServerCredentials(string serverUrl);
 
-
-        // Last non-empty username used for Auth API checks. Helps features that need to know
-        // which account was used even when the scanner stream itself uses a service account.
-        string LastAuthUsername { get; set; }
 
         bool AutoPlay { get; set; }
 
@@ -73,6 +70,12 @@ namespace JoesScanner.Services
 
         string DeviceInstallId { get; set; }
         string AuthSessionToken { get; set; }
+        (string BaseUrl, string Token, long Version, long AccountVersion) ReadAccountSession();
+        bool TryReplaceAccountSession(long expectedVersion, string token);
+        bool TryApplyAccountSession(long expectedVersion, Action apply);
+        bool TryApplyAccountIdentity(long expectedVersion, Action apply);
+        HostedSubscriptionSnapshot ReadHostedSubscription();
+        void SaveHostedSubscription(HostedSubscriptionSnapshot snapshot);
 
         // Bluetooth and lock screen label mapping
         // Values are tokens: AppName, Transcription, Talkgroup, Site, Receiver
@@ -136,4 +139,7 @@ namespace JoesScanner.Services
 
 
     }
+
+    public sealed record HostedSubscriptionSnapshot(bool IsAllowed, bool VerifiedOnline, int Tier, DateTime? CheckedUtc,
+        DateTime? ExpiresUtc, DateTime? RenewalUtc, string Level, string PriceId, string Message);
 }

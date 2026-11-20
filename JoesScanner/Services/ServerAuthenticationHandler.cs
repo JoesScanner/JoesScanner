@@ -40,7 +40,7 @@ internal sealed class ServerAuthenticationHandler(ServerAuthentication authentic
                 var status = response.StatusCode;
                 response.Dispose();
                 await authentication.MarkRejectedAsync(destination, updated, cancellationToken).ConfigureAwait(false);
-                throw new FirewallAuthenticationException($"The scanner server rejected its refreshed firewall credentials (HTTP {(int)status}).");
+                throw new FirewallAuthenticationException($"The scanner server rejected its refreshed firewall credentials (HTTP {(int)status}).", status);
             }
         }
 

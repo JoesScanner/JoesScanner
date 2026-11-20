@@ -9,7 +9,7 @@ namespace JoesScanner.Services
 {
     // Concrete implementation of ISettingsService backed by the local SQLite database.
     // The DB is the single source of truth.
-    public sealed class SettingsService : ISettingsService
+    public sealed partial class SettingsService : ISettingsService
     {
 
         // DB tables.
@@ -35,7 +35,6 @@ namespace JoesScanner.Services
         private const string KeyDescriptionFilter = "description_filter";
         private const string KeyThemeMode = "theme_mode";
         private const string KeyDeviceInstallId = "device_install_id";
-        private const string KeyAuthSessionToken = "auth_session_token";
         private const string KeyBluetoothArtist = "bt_label_artist";
         private const string KeyBluetoothTitle = "bt_label_title";
         private const string KeyBluetoothAlbum = "bt_label_album";
@@ -75,8 +74,9 @@ namespace JoesScanner.Services
         private readonly object _mobileAudioGate = new();
         private MobileAudioPreferences? _mobileAudio;
 
-        public SettingsService(IDatabasePathProvider dbPathProvider)
+        internal SettingsService(IDatabasePathProvider dbPathProvider, IProtectedCredentialStorage protectedStorage)
         {
+            _protectedCredentials = new(protectedStorage);
             // Prefer the injected provider (single source of truth).
             // Provider should already be using AppPaths for packaged/unpackaged safety.
             _dbPath = (dbPathProvider ?? throw new ArgumentNullException(nameof(dbPathProvider))).DbPath;
@@ -118,7 +118,22 @@ namespace JoesScanner.Services
         public string AuthServerBaseUrl
         {
             get => GetString(KeyAuthServerBaseUrl, string.Empty);
-            set => SetString(KeyAuthServerBaseUrl, (value ?? string.Empty).Trim());
+            set
+            {
+                _ = SavedConnectionUrl.AccountEndpoint(value);
+                EnsureInitialized();
+                lock (_gate)
+                {
+                    var safe = SavedConnectionUrl.SafeDisplay(value);
+                    var previous = AuthServerBaseUrl;
+                    if (previous == safe)
+                        return;
+                    RequireMigratedCredentials();
+                    WriteConnectionSetting(KeyAuthServerBaseUrl, safe);
+                    if (SafeAccountBaseChanged(previous, safe))
+                        RetireAccountIdentity();
+                }
+            }
         }
 
         public string ServerUrl
@@ -131,145 +146,28 @@ namespace JoesScanner.Services
             set
             {
                 var cleaned = (value ?? string.Empty).Trim();
-                // Allow an empty value. This represents "no active connection".
-                SetString(KeyServerUrl, cleaned);
+                if (cleaned.Length != 0)
+                {
+                    if (!SavedConnectionUrl.TryParse(cleaned, out var uri, out cleaned, out var embedded))
+                        throw new ArgumentException("Enter a valid HTTP or HTTPS scanner server address.");
+                    if (embedded is { } pair)
+                    {
+                        if (HostedServerRules.RequiresApiFirewallCredentials(this, uri!))
+                            throw new ArgumentException("Hosted recorder URLs must not contain embedded credentials.");
+                        SetServerCredentials(cleaned, pair.Username, pair.Password);
+                    }
+                }
 
-                // Keep servers table current for Joe/custom without changing UI behavior.
                 EnsureInitialized();
-                EnsureBuiltinServersSeeded();
-                TouchSelectedServerUrl(cleaned);
-            }
-        }
-
-        public string BasicAuthUsername
-        {
-            get => GetString(KeyBasicAuthUser, string.Empty);
-            set => SetString(KeyBasicAuthUser, (value ?? string.Empty).Trim());
-        }
-
-        public string BasicAuthPassword
-        {
-            get => GetString(KeyBasicAuthPass, string.Empty);
-            set => SetString(KeyBasicAuthPass, (value ?? string.Empty).Trim());
-        }
-
-
-        // Per-server credential cache. These are stored only after a successful Validate
-        // and are keyed by the normalized server base URL.
-        public bool TryGetServerCredentials(string serverUrl, out string username, out string password)
-        {
-            var key = ServerKeyHelper.Normalize(serverUrl);
-            if (string.IsNullOrWhiteSpace(key))
-            {
-                username = string.Empty;
-                password = string.Empty;
-                return false;
-            }
-
-            username = GetString(GetServerCredUserKey(key), string.Empty).Trim();
-            password = GetString(GetServerCredPassKey(key), string.Empty).Trim();
-
-            if (!string.IsNullOrWhiteSpace(username) && !string.IsNullOrWhiteSpace(password))
-                return true;
-
-            // Back-compat: try legacy keying (raw URL without path normalization) and migrate forward if found.
-            var legacyKey = ServerKeyHelper.NormalizeLegacy(serverUrl);
-            if (!string.IsNullOrWhiteSpace(legacyKey) && !string.Equals(legacyKey, key, StringComparison.Ordinal))
-            {
-                var legacyUser = GetString(GetServerCredUserKey(legacyKey), string.Empty).Trim();
-                var legacyPass = GetString(GetServerCredPassKey(legacyKey), string.Empty).Trim();
-                if (!string.IsNullOrWhiteSpace(legacyUser) && !string.IsNullOrWhiteSpace(legacyPass))
+                lock (_gate)
                 {
-                    // Migrate to normalized key.
-                    SetString(GetServerCredUserKey(key), legacyUser);
-                    SetString(GetServerCredPassKey(key), legacyPass);
-                    Remove(GetServerCredUserKey(legacyKey));
-                    Remove(GetServerCredPassKey(legacyKey));
-
-                    username = legacyUser;
-                    password = legacyPass;
-                    return true;
+                    if (ServerUrl == cleaned)
+                        return;
+                    RequireMigratedCredentials();
+                    WriteConnectionSetting(KeyServerUrl, cleaned);
+                    TouchSelectedServerUrl(cleaned);
                 }
             }
-
-            username = string.Empty;
-            password = string.Empty;
-            return false;
-        }
-
-        public void SetServerCredentials(string serverUrl, string username, string password)
-        {
-            var key = ServerKeyHelper.Normalize(serverUrl);
-            if (string.IsNullOrWhiteSpace(key))
-                return;
-
-            var u = (username ?? string.Empty).Trim();
-            var p = (password ?? string.Empty).Trim();
-
-            // If either is missing, treat as a clear.
-            if (string.IsNullOrWhiteSpace(u) || string.IsNullOrWhiteSpace(p))
-            {
-                ClearServerCredentials(key);
-                return;
-            }
-
-            SetString(GetServerCredUserKey(key), u);
-            SetString(GetServerCredPassKey(key), p);
-
-            // Also clear any legacy-stored creds for the same raw URL to avoid stale mismatches.
-            try
-            {
-                var legacyKey = ServerKeyHelper.NormalizeLegacy(serverUrl);
-                if (!string.IsNullOrWhiteSpace(legacyKey) && !string.Equals(legacyKey, key, StringComparison.Ordinal))
-                {
-                    Remove(GetServerCredUserKey(legacyKey));
-                    Remove(GetServerCredPassKey(legacyKey));
-                }
-            }
-            catch
-            {
-            }
-        }
-
-        public void ClearServerCredentials(string serverUrl)
-        {
-            var key = ServerKeyHelper.Normalize(serverUrl);
-            if (string.IsNullOrWhiteSpace(key))
-                return;
-
-            Remove(GetServerCredUserKey(key));
-            Remove(GetServerCredPassKey(key));
-
-            // Back-compat: also clear legacy keyed values.
-            try
-            {
-                var legacyKey = ServerKeyHelper.NormalizeLegacy(serverUrl);
-                if (!string.IsNullOrWhiteSpace(legacyKey) && !string.Equals(legacyKey, key, StringComparison.Ordinal))
-                {
-                    Remove(GetServerCredUserKey(legacyKey));
-                    Remove(GetServerCredPassKey(legacyKey));
-                }
-            }
-            catch
-            {
-            }
-        }
-
-        private static string GetServerCredUserKey(string normalizedServerUrl)
-        {
-            return $"server_cred_user::{ServerKeyHelper.Normalize(normalizedServerUrl)}";
-        }
-
-        private static string GetServerCredPassKey(string normalizedServerUrl)
-        {
-            return $"server_cred_pass::{ServerKeyHelper.Normalize(normalizedServerUrl)}";
-        }
-
-
-        public string LastAuthUsername
-        {
-            get => GetString(KeyLastAuthUser, string.Empty);
-            set => SetString(KeyLastAuthUser, (value ?? string.Empty).Trim());
         }
 
         public bool AutoPlay
@@ -328,8 +226,8 @@ namespace JoesScanner.Services
 
         public bool HasActiveHostedSubscription()
         {
-            var state = ReadServerAuthState(HostedServerRules.DefaultServerUrl);
-            return state.IsValidated && state.TierLevel >= 1 && ParseUtc(state.ExpiresUtc) > DateTime.UtcNow;
+            var state = ReadHostedSubscription();
+            return state.IsAllowed && state.Tier >= 1 && state.ExpiresUtc > DateTime.UtcNow;
         }
 
         // WordPress account state is shared by the protected scanner servers.
@@ -509,10 +407,67 @@ namespace JoesScanner.Services
             }
         }
 
+        private string _authSessionToken = string.Empty;
+        private long _authSessionVersion;
+        private long _accountIdentityVersion;
+
+        private void RetireAccountIdentity()
+        {
+            _accountIdentityVersion++;
+            AuthSessionToken = string.Empty;
+        }
+
         public string AuthSessionToken
         {
-            get => GetString(KeyAuthSessionToken, string.Empty);
-            set => SetString(KeyAuthSessionToken, (value ?? string.Empty).Trim());
+            get => Volatile.Read(ref _authSessionToken);
+            set
+            {
+                lock (_gate)
+                {
+                    Volatile.Write(ref _authSessionToken, (value ?? string.Empty).Trim());
+                    _authSessionVersion++;
+                }
+            }
+        }
+
+        public (string BaseUrl, string Token, long Version, long AccountVersion) ReadAccountSession()
+        {
+            EnsureInitialized();
+            lock (_gate)
+                return (AuthServerBaseUrl, _authSessionToken, _authSessionVersion, _accountIdentityVersion);
+        }
+
+        public bool TryReplaceAccountSession(long expectedVersion, string token)
+        {
+            lock (_gate)
+            {
+                if (_authSessionVersion != expectedVersion)
+                    return false;
+                AuthSessionToken = token;
+                return true;
+            }
+        }
+
+        public bool TryApplyAccountSession(long expectedVersion, Action apply)
+        {
+            lock (_gate)
+            {
+                if (_authSessionVersion != expectedVersion)
+                    return false;
+                apply();
+                return true;
+            }
+        }
+
+        public bool TryApplyAccountIdentity(long expectedVersion, Action apply)
+        {
+            lock (_gate)
+            {
+                if (_accountIdentityVersion != expectedVersion)
+                    return false;
+                apply();
+                return true;
+            }
         }
 
         public string BluetoothLabelArtist
@@ -581,12 +536,6 @@ namespace JoesScanner.Services
         {
             get => GetBool(KeyWhat3WordsLinksEnabled, true);
             set => SetBool(KeyWhat3WordsLinksEnabled, value);
-        }
-
-        public string What3WordsApiKey
-        {
-            get => GetString(KeyWhat3WordsApiKey, string.Empty);
-            set => SetString(KeyWhat3WordsApiKey, (value ?? string.Empty).Trim());
         }
 
         public bool AddressDetectionEnabled
@@ -678,8 +627,13 @@ namespace JoesScanner.Services
                     return;
 
                 EnsureSchema();
-                EnsureBuiltinServersSeeded();
                 LoadCache();
+                if (!_cache.ContainsKey(CredentialInstallationKey))
+                    WriteSettingRaw(CredentialInstallationKey, Guid.NewGuid().ToString("N"), DateTimeOffset.UtcNow.ToString("O"));
+                _credentialMigrationPending = true;
+                TryMigrateLegacyCredentials();
+                if (!_credentialMigrationPending)
+                    EnsureBuiltinServersSeeded();
                 EnsureDefaults();
 
                 _initialized = true;
@@ -800,7 +754,11 @@ CREATE INDEX IF NOT EXISTS idx_servers_enabled_sort ON servers(enabled, sort_ord
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
-                _cache[reader.GetString(0)] = reader.GetString(1);
+                var key = reader.GetString(0);
+                if (IsLegacySecret(key))
+                    continue;
+                var value = reader.GetString(1);
+                _cache[key] = key is KeyServerUrl or KeyAuthServerBaseUrl ? SavedConnectionUrl.SafeDisplay(value) : value;
             }
         }
 
@@ -810,14 +768,7 @@ CREATE INDEX IF NOT EXISTS idx_servers_enabled_sort ON servers(enabled, sort_ord
             // Do NOT call GetString/SetString here, because those call EnsureInitialized() and would recurse.
             // Read from the cache loaded by LoadCache() and write via a raw DB upsert if needed.
 
-            var currentServer = string.Empty;
-            lock (_gate)
-            {
-                if (_cache.TryGetValue(KeyServerUrl, out var v))
-                    currentServer = v;
-            }
-
-            if (string.IsNullOrWhiteSpace(currentServer))
+            if (!_cache.ContainsKey(KeyServerUrl))
             {
                 // Leave server_url empty by default.
                 // The user must explicitly configure/validate a connection before the app
@@ -829,11 +780,6 @@ CREATE INDEX IF NOT EXISTS idx_servers_enabled_sort ON servers(enabled, sort_ord
 
         private void WriteSettingRaw(string key, string value, string nowUtc)
         {
-            lock (_gate)
-            {
-                _cache[key] = value ?? string.Empty;
-            }
-
             using var conn = OpenConnection();
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
@@ -846,6 +792,7 @@ ON CONFLICT(setting_key) DO UPDATE SET
             cmd.Parameters.AddWithValue("$v", value ?? string.Empty);
             cmd.Parameters.AddWithValue("$u", nowUtc);
             cmd.ExecuteNonQuery();
+            _cache[key] = value ?? string.Empty;
         }
 
         private void EnsureBuiltinServersSeeded()
@@ -936,8 +883,8 @@ ORDER BY is_official DESC, sort_order ASC, display_name ASC;";
                 {
                     DirectoryId = SafeGetInt(reader, 0),
                     Name = SafeGetString(reader, 1),
-                    Url = SafeGetString(reader, 2),
-                    InfoUrl = SafeGetString(reader, 3),
+                    Url = SavedConnectionUrl.SafeDisplay(SafeGetString(reader, 2)),
+                    InfoUrl = SavedConnectionUrl.SafeInfoUrl(SafeGetString(reader, 3)),
                     AreaLabel = SafeGetString(reader, 4),
                     MapAnchor = SafeGetString(reader, 5),
                     IsOfficial = SafeGetInt(reader, 6) != 0,
@@ -959,6 +906,8 @@ ORDER BY is_official DESC, sort_order ASC, display_name ASC;";
         public void UpsertCachedDirectoryServers(IEnumerable<ServerDirectoryEntry> servers)
         {
             EnsureInitialized();
+            lock (_gate)
+                RequireMigratedCredentials();
 
             var incoming = (servers ?? Array.Empty<ServerDirectoryEntry>()).ToList();
 
@@ -1006,7 +955,7 @@ VALUES (
 )
 ON CONFLICT(server_key) DO UPDATE SET
   display_name = excluded.display_name,
-  base_url = excluded.base_url,
+  base_url = CASE WHEN excluded.base_url = '' THEN servers.base_url ELSE excluded.base_url END,
   enabled = excluded.enabled,
   sort_order = excluded.sort_order,
   updated_utc = excluded.updated_utc,
@@ -1017,6 +966,7 @@ ON CONFLICT(server_key) DO UPDATE SET
   directory_id = excluded.directory_id,
   badge = excluded.badge,
   badge_label = excluded.badge_label,
+  uses_api_firewall_credentials = excluded.uses_api_firewall_credentials,
   source = excluded.source;";
 
                 cmd.Parameters.AddWithValue("$k", serverKey);
@@ -1025,10 +975,11 @@ ON CONFLICT(server_key) DO UPDATE SET
                 cmd.Parameters.AddWithValue("$s", 100 + i);
                 cmd.Parameters.AddWithValue("$c", now);
                 cmd.Parameters.AddWithValue("$m", now);
-                cmd.Parameters.AddWithValue("$info", (entry.InfoUrl ?? string.Empty).Trim());
+                cmd.Parameters.AddWithValue("$info", SavedConnectionUrl.SafeInfoUrl(entry.InfoUrl));
                 cmd.Parameters.AddWithValue("$area", (entry.AreaLabel ?? string.Empty).Trim());
                 cmd.Parameters.AddWithValue("$anchor", (entry.MapAnchor ?? string.Empty).Trim());
                 cmd.Parameters.AddWithValue("$official", entry.IsOfficial ? 1 : 0);
+                cmd.Parameters.AddWithValue("$usesApiFw", entry.UsesApiFirewallCredentials ? 1 : 0);
                 cmd.Parameters.AddWithValue("$dirId", entry.DirectoryId);
                 cmd.Parameters.AddWithValue("$badge", (entry.Badge ?? string.Empty).Trim());
                 cmd.Parameters.AddWithValue("$badgeLabel", (entry.BadgeLabel ?? string.Empty).Trim());
@@ -1101,7 +1052,7 @@ LIMIT 1;";
                 return string.Empty;
 
             // Keep scheme and host exactly as provided, but remove trailing slashes.
-            return s.TrimEnd('/');
+            return SavedConnectionUrl.SafeDisplay(s);
         }
 
         private static string SafeGetString(SqliteDataReader reader, int ordinal)
@@ -1234,7 +1185,51 @@ ON CONFLICT(setting_key) DO UPDATE SET
             cmd.ExecuteNonQuery();
         }
 
-        private static string GetAuthContextKey() => HostedServerRules.DefaultServerUrl;
+        private string GetAuthContextKey()
+        {
+            try
+            {
+                return TryGetServerCredentials(HostedServerRules.DefaultServerUrl, out var user, out _) &&
+                    RecordingPlaybackAccess.AccountKeyForUsername(user) is { } account
+                    ? "hosted-account-" + ProtectedCredentials.Key(account, SavedConnectionUrl.AccountEndpoint(AuthServerBaseUrl).AbsoluteUri)
+                    : string.Empty;
+            }
+            catch (CredentialStorageException)
+            {
+                return string.Empty;
+            }
+        }
+
+        public HostedSubscriptionSnapshot ReadHostedSubscription()
+        {
+            lock (_gate)
+            {
+                var row = ReadServerAuthState(GetAuthContextKey());
+                return new(row.IsValidated, row.ValidatedOnline, row.TierLevel, ParseUtc(row.LastCheckUtc),
+                    ParseUtc(row.ExpiresUtc), ParseUtc(row.RenewalUtc), row.LastLevel ?? "", row.PriceId ?? "", row.LastMessage ?? "");
+            }
+        }
+
+        public void SaveHostedSubscription(HostedSubscriptionSnapshot snapshot)
+        {
+            static string? Utc(DateTime? value) => value?.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+            lock (_gate)
+            {
+                WriteServerAuthState(GetAuthContextKey(), new ServerAuthStateRow
+                {
+                    IsValidated = snapshot.IsAllowed,
+                    ValidatedOnline = snapshot.VerifiedOnline,
+                    ValidatedUtc = snapshot.VerifiedOnline ? Utc(snapshot.CheckedUtc) : null,
+                    TierLevel = snapshot.Tier,
+                    LastCheckUtc = Utc(snapshot.CheckedUtc),
+                    ExpiresUtc = Utc(snapshot.ExpiresUtc),
+                    RenewalUtc = Utc(snapshot.RenewalUtc),
+                    LastLevel = snapshot.Level,
+                    PriceId = snapshot.PriceId,
+                    LastMessage = snapshot.Message
+                });
+            }
+        }
 
         private void DeleteServerAuthStateRow(string normalizedServerKey)
         {

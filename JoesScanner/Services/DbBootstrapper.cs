@@ -17,7 +17,7 @@ namespace JoesScanner.Services;
 // must be handled via EnsureColumnExists.
 public static class DbBootstrapper
 {
-    private const int CurrentSchemaVersion = 1;
+    private const int CurrentSchemaVersion = 4;
     private static readonly SemaphoreSlim InitializationGate = new(1, 1);
     private static readonly ConcurrentDictionary<string, byte> InitializedDataSources = new(StringComparer.OrdinalIgnoreCase);
 
@@ -42,22 +42,9 @@ public static class DbBootstrapper
             if (version > CurrentSchemaVersion)
                 throw new InvalidOperationException($"Database schema version {version} is newer than this app supports ({CurrentSchemaVersion}).");
 
-            if (version < 0)
-                version = 0;
-
-            if (version < 1)
-            {
-                await EnsureSchemaV1Async(connection, cancellationToken).ConfigureAwait(false);
-                await SetUserVersionAsync(connection, CurrentSchemaVersion, cancellationToken).ConfigureAwait(false);
-            }
-            else
-            {
-                // Even when the version looks current, still ensure missing objects.
-                await EnsureSchemaV1Async(connection, cancellationToken).ConfigureAwait(false);
-
-                if (version != CurrentSchemaVersion)
-                    await SetUserVersionAsync(connection, CurrentSchemaVersion, cancellationToken).ConfigureAwait(false);
-            }
+            await EnsureSchemaV1Async(connection, cancellationToken).ConfigureAwait(false);
+            if (version < CurrentSchemaVersion)
+                await MigrateLiveQueueAsync(connection, cancellationToken).ConfigureAwait(false);
 
             if (!string.IsNullOrWhiteSpace(dataSource))
                 InitializedDataSources[dataSource] = 0;
@@ -68,51 +55,8 @@ public static class DbBootstrapper
         }
     }
 
-    public static void EnsureInitialized(SqliteConnection connection)
-    {
-        if (connection == null)
-            throw new ArgumentNullException(nameof(connection));
-
-        ApplyPragmasAsync(connection, CancellationToken.None).GetAwaiter().GetResult();
-
-        var dataSource = GetInitializationKey(connection);
-        if (!string.IsNullOrWhiteSpace(dataSource) && InitializedDataSources.ContainsKey(dataSource))
-            return;
-
-        InitializationGate.Wait();
-        try
-        {
-            if (!string.IsNullOrWhiteSpace(dataSource) && InitializedDataSources.ContainsKey(dataSource))
-                return;
-
-            var version = GetUserVersionAsync(connection, CancellationToken.None).GetAwaiter().GetResult();
-            if (version > CurrentSchemaVersion)
-                throw new InvalidOperationException($"Database schema version {version} is newer than this app supports ({CurrentSchemaVersion}).");
-
-            if (version < 0)
-                version = 0;
-
-            if (version < 1)
-            {
-                EnsureSchemaV1Async(connection, CancellationToken.None).GetAwaiter().GetResult();
-                SetUserVersionAsync(connection, CurrentSchemaVersion, CancellationToken.None).GetAwaiter().GetResult();
-            }
-            else
-            {
-                EnsureSchemaV1Async(connection, CancellationToken.None).GetAwaiter().GetResult();
-
-                if (version != CurrentSchemaVersion)
-                    SetUserVersionAsync(connection, CurrentSchemaVersion, CancellationToken.None).GetAwaiter().GetResult();
-            }
-
-            if (!string.IsNullOrWhiteSpace(dataSource))
-                InitializedDataSources[dataSource] = 0;
-        }
-        finally
-        {
-            InitializationGate.Release();
-        }
-    }
+    public static void EnsureInitialized(SqliteConnection connection) =>
+        EnsureInitializedAsync(connection).GetAwaiter().GetResult();
 
     public static async Task ApplyPragmasAsync(SqliteConnection connection, CancellationToken cancellationToken = default)
     {
@@ -282,6 +226,7 @@ CREATE INDEX IF NOT EXISTS idx_unregistered_queue_created ON unregistered_sessio
         await EnsureColumnExistsAsync(connection, "servers", "created_utc", "TEXT NOT NULL DEFAULT ''", cancellationToken).ConfigureAwait(false);
         await EnsureColumnExistsAsync(connection, "servers", "updated_utc", "TEXT NOT NULL DEFAULT ''", cancellationToken).ConfigureAwait(false);
         await EnsureColumnExistsAsync(connection, "servers", "last_used_utc", "TEXT NULL", cancellationToken).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "servers", "uses_api_firewall_credentials", "INTEGER NOT NULL DEFAULT 0", cancellationToken).ConfigureAwait(false);
 
         // Auth state columns have grown over time; older installs may not have these.
         await EnsureColumnExistsAsync(connection, "server_auth_state", "subscription_amount_usd", "REAL NULL", cancellationToken).ConfigureAwait(false);
@@ -290,31 +235,149 @@ CREATE INDEX IF NOT EXISTS idx_unregistered_queue_created ON unregistered_sessio
 
         await EnsureColumnExistsAsync(connection, "calls", "transcript_available", "INTEGER NOT NULL DEFAULT 0", cancellationToken).ConfigureAwait(false);
         await EnsureFilterProfileSchemaAsync(connection, cancellationToken).ConfigureAwait(false);
-    
-        // Meta table to make schema state explicit and queryable (in addition to PRAGMA user_version).
-        await using (var meta = connection.CreateCommand())
-        {
-            meta.CommandText = @"
-CREATE TABLE IF NOT EXISTS schema_meta (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    schema_version INTEGER NOT NULL,
-    updated_utc TEXT NOT NULL
-);";
-            await meta.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
+    }
 
-        await using (var upsert = connection.CreateCommand())
-        {
-            upsert.CommandText = @"
-INSERT INTO schema_meta (id, schema_version, updated_utc)
-VALUES (1, $v, $u)
-ON CONFLICT(id) DO UPDATE SET schema_version = excluded.schema_version, updated_utc = excluded.updated_utc;";
-            upsert.Parameters.AddWithValue("$v", CurrentSchemaVersion);
-            upsert.Parameters.AddWithValue("$u", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
-            await upsert.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        }
+    private static async Task MigrateLiveQueueAsync(SqliteConnection connection, CancellationToken token)
+    {
+        await using var transaction = connection.BeginTransaction();
+        // Another process can finish the migration while this connection is
+        // waiting for the write lock.
+        var version = await GetUserVersionAsync(connection, token, transaction).ConfigureAwait(false);
+        if (version == CurrentSchemaVersion)
+            return;
+        if (version > CurrentSchemaVersion)
+            throw new InvalidOperationException($"Database schema version {version} is newer than this app supports ({CurrentSchemaVersion}).");
 
-}
+        await using var queue = connection.CreateCommand();
+        queue.Transaction = transaction;
+
+        // Older installations can predate the Live journal entirely.
+        queue.CommandText = """
+                CREATE TABLE IF NOT EXISTS live_queue_servers (
+                    server TEXT PRIMARY KEY,
+                    owner INTEGER NOT NULL,
+                    stopped INTEGER NOT NULL DEFAULT 0,
+                    accept_after INTEGER NOT NULL DEFAULT 0,
+                    resume_id TEXT,
+                    jump_utc INTEGER,
+                    jump_id TEXT
+                );
+                CREATE TABLE IF NOT EXISTS live_queue_recordings (
+                    server TEXT NOT NULL REFERENCES live_queue_servers(server),
+                    recording_id TEXT NOT NULL,
+                    recorded_utc INTEGER NOT NULL,
+                    first_owner INTEGER NOT NULL,
+                    payload TEXT,
+                    audio_ready INTEGER NOT NULL,
+                    disposition INTEGER NOT NULL DEFAULT 0 CHECK(disposition IN (0, 1, 2)),
+                    PRIMARY KEY(server, recording_id)
+                );
+            """;
+        await queue.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "live_queue_recordings", "origin", "INTEGER NOT NULL DEFAULT 0", token, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "live_queue_recordings", "protected", "INTEGER NOT NULL DEFAULT 0", token, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "live_queue_recordings", "account_scope", "TEXT NULL", token, transaction).ConfigureAwait(false);
+
+        connection.CreateFunction("live_migration_hosted", (string? url) =>
+            Uri.TryCreate(url, UriKind.Absolute, out var uri) &&
+            uri.IdnHost.TrimEnd('.').Equals("app.joesscanner.com", StringComparison.OrdinalIgnoreCase), isDeterministic: true);
+        connection.CreateFunction("live_migration_origin", (string? url) =>
+            Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.GetLeftPart(UriPartial.Authority) : null, isDeterministic: true);
+        connection.CreateFunction("live_migration_recorder", (string? url) =>
+            Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.GetLeftPart(UriPartial.Path).TrimEnd('/') : null, isDeterministic: true);
+
+        // Never use the currently signed-in account to infer ownership. Legacy
+        // monitoring state for hosted servers was shared and stays archived.
+        queue.CommandText = """
+            INSERT OR IGNORE INTO live_queue_servers (server, owner)
+            SELECT DISTINCT server, 0 FROM live_queue_recordings;
+            CREATE TABLE live_queue_servers_v4 (
+                server TEXT NOT NULL,
+                account_scope TEXT NOT NULL DEFAULT '',
+                owner INTEGER NOT NULL,
+                stopped INTEGER NOT NULL DEFAULT 0,
+                accept_after INTEGER NOT NULL DEFAULT 0,
+                resume_id TEXT,
+                jump_utc INTEGER,
+                jump_id TEXT,
+                PRIMARY KEY(server, account_scope)
+            );
+            CREATE TABLE live_queue_recordings_v4 (
+                server TEXT NOT NULL,
+                account_scope TEXT NOT NULL DEFAULT '',
+                recording_id TEXT NOT NULL,
+                recorded_utc INTEGER NOT NULL,
+                first_owner INTEGER NOT NULL,
+                payload TEXT,
+                audio_ready INTEGER NOT NULL,
+                disposition INTEGER NOT NULL DEFAULT 0 CHECK(disposition IN (0, 1, 2)),
+                origin INTEGER NOT NULL DEFAULT 0,
+                protected INTEGER NOT NULL DEFAULT 0 CHECK(protected = (account_scope <> '')),
+                PRIMARY KEY(server, account_scope, recording_id),
+                FOREIGN KEY(server, account_scope) REFERENCES live_queue_servers_v4(server, account_scope)
+            );
+            CREATE TEMP TABLE live_queue_legacy_scope AS
+            SELECT s.server, CASE
+                WHEN live_migration_hosted(s.server)
+                  OR EXISTS (SELECT 1 FROM servers WHERE uses_api_firewall_credentials = 1
+                      AND live_migration_origin(base_url) = live_migration_origin(s.server))
+                  OR EXISTS (SELECT 1 FROM live_queue_recordings q WHERE q.server = s.server AND q.protected <> 0)
+                    THEN ':legacy'
+                WHEN EXISTS (SELECT 1 FROM servers WHERE uses_api_firewall_credentials = 0
+                      AND live_migration_recorder(base_url) = live_migration_recorder(s.server))
+                  OR EXISTS (SELECT 1 FROM live_queue_recordings q WHERE q.server = s.server AND q.origin IN (1, 2))
+                    THEN ''
+                ELSE ':legacy'
+            END AS scope FROM live_queue_servers s;
+            CREATE UNIQUE INDEX temp.live_queue_legacy_scope_server ON live_queue_legacy_scope(server);
+
+            INSERT INTO live_queue_servers_v4
+                (server, account_scope, owner, stopped, accept_after, resume_id, jump_utc, jump_id)
+            SELECT s.server, l.scope, s.owner, s.stopped, s.accept_after, s.resume_id, s.jump_utc, s.jump_id
+            FROM live_queue_servers s JOIN live_queue_legacy_scope l USING (server);
+
+            INSERT INTO live_queue_servers_v4 (server, account_scope, owner)
+            SELECT DISTINCT server, upper(account_scope), 0 FROM live_queue_recordings
+            WHERE protected <> 0 AND length(account_scope) = 64 AND upper(account_scope) NOT GLOB '*[^0-9A-F]*';
+
+            -- Retain rowids so the existing bounded maintenance cursor remains valid.
+            INSERT INTO live_queue_recordings_v4
+                (rowid, server, account_scope, recording_id, recorded_utc, first_owner, payload, audio_ready, disposition, origin, protected)
+            SELECT rowid, server, scope, recording_id, recorded_utc, first_owner, payload, audio_ready, disposition, origin, scope <> ''
+            FROM (
+                SELECT q.rowid, q.server, q.recording_id, q.recorded_utc, q.first_owner, q.payload, q.audio_ready, q.disposition, q.origin,
+                    CASE WHEN q.protected <> 0 AND length(q.account_scope) = 64
+                              AND upper(q.account_scope) NOT GLOB '*[^0-9A-F]*'
+                         THEN upper(q.account_scope) ELSE l.scope END AS scope
+                FROM live_queue_recordings q JOIN live_queue_legacy_scope l USING (server)
+            );
+            DROP TABLE live_queue_legacy_scope;
+            DROP TABLE live_queue_recordings;
+            DROP TABLE live_queue_servers;
+            ALTER TABLE live_queue_servers_v4 RENAME TO live_queue_servers;
+            ALTER TABLE live_queue_recordings_v4 RENAME TO live_queue_recordings;
+            CREATE INDEX live_queue_pending_order
+                ON live_queue_recordings(server, account_scope, recorded_utc, recording_id)
+                WHERE disposition = 0 AND audio_ready = 1;
+            CREATE INDEX live_queue_pending_chronological
+                ON live_queue_recordings(server, account_scope, recorded_utc, recording_id) WHERE disposition = 0;
+            CREATE INDEX live_queue_transport_order
+                ON live_queue_recordings(server, account_scope, recorded_utc, recording_id);
+            CREATE TABLE IF NOT EXISTS schema_meta (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                schema_version INTEGER NOT NULL,
+                updated_utc TEXT NOT NULL
+            );
+            INSERT INTO schema_meta (id, schema_version, updated_utc)
+            VALUES (1, $v, $u)
+            ON CONFLICT(id) DO UPDATE SET schema_version = excluded.schema_version, updated_utc = excluded.updated_utc;
+            """ + $"\nPRAGMA user_version={CurrentSchemaVersion};";
+        queue.Parameters.AddWithValue("$v", CurrentSchemaVersion);
+        queue.Parameters.AddWithValue("$u", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+        await queue.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        await transaction.CommitAsync(token).ConfigureAwait(false);
+    }
 
 
     private static string GetInitializationKey(SqliteConnection connection)
@@ -329,9 +392,11 @@ ON CONFLICT(id) DO UPDATE SET schema_version = excluded.schema_version, updated_
         }
     }
 
-    private static async Task<int> GetUserVersionAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    private static async Task<int> GetUserVersionAsync(SqliteConnection connection, CancellationToken cancellationToken,
+        SqliteTransaction? transaction = null)
     {
         using var cmd = connection.CreateCommand();
+        cmd.Transaction = transaction;
         cmd.CommandText = "PRAGMA user_version;";
         var result = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
         if (result == null)
@@ -345,13 +410,6 @@ ON CONFLICT(id) DO UPDATE SET schema_version = excluded.schema_version, updated_
         {
             return 0;
         }
-    }
-
-    private static async Task SetUserVersionAsync(SqliteConnection connection, int version, CancellationToken cancellationToken)
-    {
-        using var cmd = connection.CreateCommand();
-        cmd.CommandText = $"PRAGMA user_version={version};";
-        await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task EnsureFilterProfileSchemaAsync(SqliteConnection connection, CancellationToken cancellationToken)

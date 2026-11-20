@@ -180,12 +180,25 @@
                                 TextColor="White" />
                         </Grid>
 
-                        <Button Grid.Row="1" Grid.ColumnSpan="2"
-                                IsVisible="{Binding CanResumePlayback}"
-                                Command="{Binding ResumeMobilePlaybackCommand}"
-                                Text="Resume audio"
-                                HorizontalOptions="Center"
-                                Margin="0,0,0,4" />
+                        <VerticalStackLayout Grid.Row="1" Grid.ColumnSpan="2" Spacing="4"
+                                             IsVisible="{Binding CanResumePlayback}">
+                            <Label IsVisible="{Binding CanSkipUnavailableRecording}"
+                                   Text="Recording audio unavailable"
+                                   TextColor="White"
+                                   HorizontalTextAlignment="Center" />
+                            <HorizontalStackLayout HorizontalOptions="Center" Spacing="8" Margin="0,0,0,4">
+                                <Button Command="{Binding ResumeMobilePlaybackCommand}" Text="Resume audio">
+                                    <Button.Triggers>
+                                        <DataTrigger TargetType="Button" Binding="{Binding CanSkipUnavailableRecording}" Value="True">
+                                            <Setter Property="Text" Value="Retry audio" />
+                                        </DataTrigger>
+                                    </Button.Triggers>
+                                </Button>
+                                <Button IsVisible="{Binding CanSkipUnavailableRecording}"
+                                        Command="{Binding SkipUnavailableRecordingCommand}"
+                                        Text="Skip recording" />
+                            </HorizontalStackLayout>
+                        </VerticalStackLayout>
                     </Grid>
                 </Border>
 

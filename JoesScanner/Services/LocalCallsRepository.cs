@@ -1,9 +1,7 @@
-using System.Collections.Concurrent;
 using System.Globalization;
 using System.Threading.Channels;
 using JoesScanner.Data;
 using Microsoft.Data.Sqlite;
-using JoesScanner.Helpers;
 
 namespace JoesScanner.Services;
 
@@ -15,7 +13,6 @@ public sealed class LocalCallsRepository : ILocalCallsRepository, IDisposable
     private readonly Channel<DbWorkItem> _queue;
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _worker;
-    private readonly ConcurrentDictionary<string, bool> _initByDbPath = new();
 
     private volatile bool _disposed;
 
@@ -32,35 +29,20 @@ public sealed class LocalCallsRepository : ILocalCallsRepository, IDisposable
         _worker = Task.Run(WorkerLoopAsync);
     }
 
-    public async Task InitializeAsync(CancellationToken cancellationToken = default)
-    {
-        ThrowIfDisposed();
-
-        // Ensure init runs at least once per db path.
-        if (_initByDbPath.TryAdd(_dbPath, true))
-        {
-            await EnqueueAsync(async (conn, ct) =>
-            {
-                await InitializeSchemaAsync(conn, ct);
-                return 0;
-            }, cancellationToken).ConfigureAwait(false);
-        }
-    }
+    public Task InitializeAsync(CancellationToken cancellationToken = default) =>
+        EnqueueAsync((_, _) => Task.FromResult(0), cancellationToken);
 
     public Task UpsertCallsAsync(string serverKey, IReadOnlyList<DbCallRecord> calls, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
 
-        if (string.IsNullOrWhiteSpace(serverKey))
+        if (RecordingStorageReference.ServerKey(serverKey) is not { } normalizedServerKey)
             return Task.CompletedTask;
         if (calls == null || calls.Count == 0)
             return Task.CompletedTask;
 
-        var normalizedServerKey = ServerKeyHelper.Normalize(serverKey);
-
         return EnqueueAsync(async (conn, ct) =>
         {
-            await InitializeSchemaAsync(conn, ct);
             await UpsertCallsInternalAsync(conn, normalizedServerKey, calls, ct);
             await EnforceRetentionAsync(conn, normalizedServerKey, MaxCallsPerServer, ct);
             return 0;
@@ -71,16 +53,13 @@ public sealed class LocalCallsRepository : ILocalCallsRepository, IDisposable
     {
         ThrowIfDisposed();
 
-        if (string.IsNullOrWhiteSpace(serverKey) || string.IsNullOrWhiteSpace(backendId))
+        if (RecordingStorageReference.ServerKey(serverKey) is not { } normalizedServerKey || string.IsNullOrWhiteSpace(backendId))
             return Task.CompletedTask;
 
-        var normalizedServerKey = ServerKeyHelper.Normalize(serverKey);
         var id = backendId.Trim();
 
         return EnqueueAsync(async (conn, ct) =>
         {
-            await InitializeSchemaAsync(conn, ct);
-
             var now = DateTimeOffset.UtcNow;
 
             using var cmd = conn.CreateCommand();
@@ -106,10 +85,11 @@ WHERE server_key = $server_key AND backend_id = $backend_id;";
 
         try
         {
-            conn = new SqliteConnection($"Data Source={_dbPath}");
+            conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _dbPath }.ToString());
             await conn.OpenAsync(_cts.Token).ConfigureAwait(false);
 
-            await ApplyPragmasAsync(conn, _cts.Token).ConfigureAwait(false);
+            conn.CreateFunction<string?, string?>("storable_recording_path", RecordingStorageReference.ForCache, isDeterministic: true);
+            var initialized = false;
 
             while (await _queue.Reader.WaitToReadAsync(_cts.Token).ConfigureAwait(false))
             {
@@ -117,6 +97,11 @@ WHERE server_key = $server_key AND backend_id = $backend_id;";
                 {
                     try
                     {
+                        if (!initialized)
+                        {
+                            await DbBootstrapper.EnsureInitializedAsync(conn, _cts.Token).ConfigureAwait(false);
+                            initialized = true;
+                        }
                         await item.Work(conn, _cts.Token).ConfigureAwait(false);
                         item.Tcs.TrySetResult(true);
                     }
@@ -131,11 +116,12 @@ WHERE server_key = $server_key AND backend_id = $backend_id;";
                 }
             }
         }
-        catch
+        catch (Exception ex)
         {
             // If the worker dies, unblock queued tasks.
+            _queue.Writer.TryComplete(ex);
             while (_queue.Reader.TryRead(out var item))
-                item.Tcs.TrySetCanceled();
+                item.Tcs.TrySetException(ex);
         }
         finally
         {
@@ -161,106 +147,7 @@ WHERE server_key = $server_key AND backend_id = $backend_id;";
         return tcs.Task;
     }
 
-    private static async Task ApplyPragmasAsync(SqliteConnection conn, CancellationToken ct)
-    {
-        // Safe pragmas for mobile + desktop. WAL reduces lock contention.
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"
-PRAGMA journal_mode=WAL;
-PRAGMA synchronous=NORMAL;
-PRAGMA temp_store=MEMORY;
-PRAGMA foreign_keys=ON;
-PRAGMA busy_timeout=5000;";
-        await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-
-        // Add new columns on existing installs (CREATE TABLE IF NOT EXISTS will not modify an existing schema).
-        await EnsureColumnExistsAsync(conn, "calls", "transcript_available", "INTEGER NOT NULL DEFAULT 0", ct).ConfigureAwait(false);
-    }
-
-    private static async Task InitializeSchemaAsync(SqliteConnection conn, CancellationToken ct)
-    {
-        using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"
-CREATE TABLE IF NOT EXISTS calls (
-  server_key TEXT NOT NULL,
-  backend_id TEXT NOT NULL,
-
-  start_time_utc TEXT NULL,
-  time_text TEXT NULL,
-  date_text TEXT NULL,
-
-  target_id TEXT NULL,
-  target_label TEXT NULL,
-  target_tag TEXT NULL,
-
-  source_id TEXT NULL,
-  source_label TEXT NULL,
-  source_tag TEXT NULL,
-
-  lcn INTEGER NULL,
-  frequency REAL NULL,
-  call_audio_type TEXT NULL,
-  call_type TEXT NULL,
-
-  system_id TEXT NULL,
-  system_label TEXT NULL,
-  system_type TEXT NULL,
-
-  site_id TEXT NULL,
-  site_label TEXT NULL,
-  voice_receiver TEXT NULL,
-
-  audio_filename TEXT NULL,
-  audio_start_pos REAL NULL,
-  call_duration_seconds REAL NULL,
-
-  call_text TEXT NULL,
-  transcription TEXT NULL,
-  transcript_available INTEGER NOT NULL DEFAULT 0,
-
-  received_at_utc TEXT NOT NULL,
-  updated_at_utc TEXT NOT NULL,
-  transcription_update_notified_at_utc TEXT NULL,
-
-  PRIMARY KEY (server_key, backend_id)
-);
-
-
-
-            CREATE TABLE IF NOT EXISTS lookup_cache (
-                server_key TEXT NOT NULL,
-                cache_key TEXT NOT NULL,
-                fetched_at_utc INTEGER NOT NULL,
-                json_payload TEXT NOT NULL,
-                PRIMARY KEY(server_key, cache_key)
-            );
-CREATE INDEX IF NOT EXISTS idx_calls_server_start ON calls(server_key, start_time_utc);
-CREATE INDEX IF NOT EXISTS idx_calls_server_received ON calls(server_key, received_at_utc);
-";
-        await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-    }
-
-    
-    private static async Task EnsureColumnExistsAsync(SqliteConnection conn, string tableName, string columnName, string columnDefinition, CancellationToken ct)
-    {
-        // PRAGMA table_info returns: cid, name, type, notnull, dflt_value, pk
-        using var pragma = conn.CreateCommand();
-        pragma.CommandText = $"PRAGMA table_info({tableName});";
-
-        await using var reader = await pragma.ExecuteReaderAsync(ct).ConfigureAwait(false);
-        while (await reader.ReadAsync(ct).ConfigureAwait(false))
-        {
-            var name = reader.GetString(1);
-            if (string.Equals(name, columnName, StringComparison.OrdinalIgnoreCase))
-                return;
-        }
-
-        using var alter = conn.CreateCommand();
-        alter.CommandText = $"ALTER TABLE {tableName} ADD COLUMN {columnName} {columnDefinition};";
-        await alter.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-    }
-
-private static async Task UpsertCallsInternalAsync(SqliteConnection conn, string serverKey, IReadOnlyList<DbCallRecord> calls, CancellationToken ct)
+    private static async Task UpsertCallsInternalAsync(SqliteConnection conn, string serverKey, IReadOnlyList<DbCallRecord> calls, CancellationToken ct)
     {
         var now = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
 
@@ -313,7 +200,7 @@ ON CONFLICT(server_key, backend_id) DO UPDATE SET
   site_id = COALESCE(excluded.site_id, calls.site_id),
   site_label = COALESCE(excluded.site_label, calls.site_label),
   voice_receiver = COALESCE(excluded.voice_receiver, calls.voice_receiver),
-  audio_filename = COALESCE(excluded.audio_filename, calls.audio_filename),
+  audio_filename = COALESCE(excluded.audio_filename, storable_recording_path(calls.audio_filename)),
   audio_start_pos = COALESCE(excluded.audio_start_pos, calls.audio_start_pos),
   call_duration_seconds = COALESCE(excluded.call_duration_seconds, calls.call_duration_seconds),
   call_text = COALESCE(excluded.call_text, calls.call_text),
@@ -401,7 +288,7 @@ ON CONFLICT(server_key, backend_id) DO UPDATE SET
             cmd.Parameters["$site_label"].Value = ToDbNull(call.SiteLabel);
             cmd.Parameters["$voice_receiver"].Value = ToDbNull(call.VoiceReceiver);
 
-            cmd.Parameters["$audio_filename"].Value = ToDbNull(call.AudioFilename);
+            cmd.Parameters["$audio_filename"].Value = ToDbNull(RecordingStorageReference.ForCache(call.AudioFilename));
             cmd.Parameters["$audio_start_pos"].Value = call.AudioStartPos.HasValue ? call.AudioStartPos.Value : DBNull.Value;
             cmd.Parameters["$call_duration_seconds"].Value = call.CallDurationSeconds.HasValue ? call.CallDurationSeconds.Value : DBNull.Value;
 
@@ -476,13 +363,12 @@ WHERE server_key = $server_key
         ThrowIfDisposed();
         ct.ThrowIfCancellationRequested();
 
-        if (string.IsNullOrWhiteSpace(cacheKey) || string.IsNullOrWhiteSpace(contextKey))
+        if (string.IsNullOrWhiteSpace(cacheKey) || RecordingStorageReference.ServerKey(contextKey) is not { } serverKey)
             return null;
 
         await InitializeAsync(ct).ConfigureAwait(false);
 
         var resultTcs = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var serverKey = ServerKeyHelper.Normalize(contextKey);
 
         await EnqueueAsync(async (db, token) =>
         {
@@ -510,7 +396,7 @@ WHERE server_key = $server_key
         ThrowIfDisposed();
         cancellationToken.ThrowIfCancellationRequested();
 
-        if (string.IsNullOrWhiteSpace(serverKey) || string.IsNullOrWhiteSpace(cacheKey))
+        if (RecordingStorageReference.ServerKey(serverKey) is not { } normalizedServerKey || string.IsNullOrWhiteSpace(cacheKey))
         {
             return;
         }
@@ -528,7 +414,7 @@ VALUES ($server_key, $cache_key, $fetched_at_utc, $json_payload)
 ON CONFLICT(server_key, cache_key) DO UPDATE SET
     fetched_at_utc = excluded.fetched_at_utc,
     json_payload = excluded.json_payload;";
-            cmd.Parameters.AddWithValue("$server_key", serverKey);
+            cmd.Parameters.AddWithValue("$server_key", normalizedServerKey);
             cmd.Parameters.AddWithValue("$cache_key", cacheKey);
             cmd.Parameters.AddWithValue("$fetched_at_utc", fetchedAt.UtcTicks);
             cmd.Parameters.AddWithValue("$json_payload", jsonPayload);

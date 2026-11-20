@@ -9,7 +9,7 @@ using JoesScanner.Helpers;
 using JoesScanner.Models;
 using JoesScanner.Services;
 
-internal static class MobileRecoveryTests
+internal static partial class MobileRecoveryTests
 {
     private static readonly DateTimeOffset Now = DateTimeOffset.Parse("2026-11-18T12:00:00Z");
 
@@ -62,7 +62,7 @@ internal static class MobileRecoveryTests
             var settings = Settings(origin);
             using var socket = new ScriptSocket();
             socket.Send(Row("new-live", Now.AddSeconds(10), "live.mp3"));
-            var subscription = new ScriptSubscription(allowed, tier);
+            var subscription = new ScriptSubscription(allowed, tier, settings);
             var httpRequests = 0;
             using var http = new HttpClient(new StubHandler(_ =>
             {
@@ -97,13 +97,24 @@ internal static class MobileRecoveryTests
         using var token = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         using var oldSocket = new ScriptSocket();
         var repository = new RecordedCalls();
-        using var http = new HttpClient(new StubHandler(_ => Reply(
-            Row("old", Now.AddHours(-25), "old.mp3"),
-            Row("new", Now.AddSeconds(1), "new.mp3"))));
+        var clock = new FixedClock(Now);
+        var resumedAt = Now.AddHours(2);
+        using var http = new HttpClient(new AsyncStubHandler(async (request, cancellation) =>
+        {
+            Check(await DateFilter(request, cancellation) == RecordingPlaybackAccess.DateSearch(resumedAt.AddSeconds(-30), resumedAt),
+                "An unverified account may poll only the current Live window.");
+            return Reply(Row("old", Now.AddHours(1), "old.mp3"), Row("new", resumedAt, "new.mp3"));
+        }));
         var opens = 0;
         var stream = new CallStreamService(Settings(HostedServerRules.DefaultServerUrl), repository, new AddressStub(),
             new ScriptSubscription(false, null), http,
-            (_, _, _) => Task.FromResult<WebSocket?>(++opens == 1 ? oldSocket : null), new FixedClock(Now));
+            (_, _, _) =>
+            {
+                if (++opens == 1)
+                    return Task.FromResult<WebSocket?>(oldSocket);
+                clock.UtcNow = resumedAt;
+                return Task.FromResult<WebSocket?>(null);
+            }, clock);
         var recovery = new LiveStreamRecovery();
         await using var reader = stream.GetCallStreamAsync([], token.Token, recovery).GetAsyncEnumerator(token.Token);
         Check(await reader.MoveNextAsync() && reader.Current.Talkgroup == "HEARTBEAT", "Missing initial connection.");
@@ -170,6 +181,144 @@ internal static class MobileRecoveryTests
             "A replayed row must not requeue late audio or suppress a subsequent Live call.");
     }
 
+    internal static async Task PlaybackEntitlement()
+    {
+        var server = HostedServerRules.DefaultServerUrl;
+        var settings = Settings(server);
+        var stub = (SettingsStub)(object)settings;
+        var subscription = new ScriptSubscription(true, 2, settings);
+        var account = RecordingPlaybackAccess.AccountKey(settings, server);
+        var history = new RecordingAccessContext(RecordingOrigin.History, true, account);
+        var clock = new FixedClock(Now);
+        var old = Now.AddHours(-30);
+
+        Task<DateTimeOffset?> Authorize(DateTimeOffset date, RecordingAccessContext source, bool currentLive = false) =>
+            RecordingPlaybackAccess.VerifyAsync(settings, subscription, server, date, source,
+                currentLive, requireAccount: true, CancellationToken.None, clock);
+
+        Check(await Authorize(old, history, currentLive: true) == null, "Premium history should be permitted.");
+        subscription.Tier = 1;
+        await Denied(() => Authorize(old, history, currentLive: true));
+        Check(await Authorize(Now.AddHours(-24), history) == Now.AddHours(-24),
+            "Standard must admit the exact 24-hour boundary.");
+        await Denied(() => Authorize(Now.AddHours(-24).AddTicks(-1), history));
+        subscription.Tier = null;
+        await Denied(() => Authorize(Now.AddHours(-1), history));
+        Check(await Authorize(old, history with { Origin = RecordingOrigin.Live }, currentLive: true) == null,
+            "A legitimately received current Live recording may still play.");
+        await Denied(() => Authorize(old, history with { Origin = RecordingOrigin.Live }));
+        subscription.Tier = 2;
+        stub.SubscriptionExpiry = Now.UtcDateTime;
+        await Denied(() => Authorize(Now.AddMinutes(-1), history));
+        stub.SubscriptionExpiry = null;
+        await Denied(() => Authorize(old, history with { Account = "another-account" }));
+        Check(await Authorize(old, history) == null,
+            "A denied attempt must be retryable after legitimate online verification returns.");
+        Check(await RecordingPlaybackAccess.VerifyAsync(Settings("https://custom.example"), subscription,
+            "https://custom.example", old, new(RecordingOrigin.History, false), false, false,
+            CancellationToken.None, clock) == null, "Custom history should remain unrestricted.");
+    }
+
+    private static async Task Denied(Func<Task<DateTimeOffset?>> playback)
+    {
+        try { await playback(); }
+        catch (RecordingAccessException) { return; }
+        throw new InvalidOperationException("Historical acquisition should have been denied.");
+    }
+
+    internal static async Task RecordingAudioRefresh()
+    {
+        using var token = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+        var server = "https://custom.example";
+        var settings = Settings(server);
+        using var socket = new ScriptSocket();
+        socket.Send(new { DT_RowId = "sqlite-only", Update = true });
+        socket.Send(new { DT_RowId = "sqlite-only", Update = true });
+        var lookups = 0;
+        using var http = new HttpClient(new AsyncStubHandler(async (request, cancellation) =>
+        {
+            Check(request.RequestUri == new Uri(server + "/calljson"), "Lookup must stay on the selected recorder.");
+            Check(await DateFilter(request, cancellation) == "",
+                "An ID-only custom notification uses the compatibility lookup until a timestamp is available.");
+            lookups++;
+            return Reply(Row("unrelated", Now, "other.mp3"),
+                Row("sqlite-only", Now.AddMinutes(-1), $"clip.mp3?testLease={lookups}"));
+        }));
+        var stream = new CallStreamService(settings, new RecordedCalls(), new AddressStub(), new ScriptSubscription(false, null), http,
+            (_, _, _) => Task.FromResult<WebSocket?>(socket), new FixedClock(Now));
+        await using var reader = stream.GetCallStreamAsync([], token.Token).GetAsyncEnumerator(token.Token);
+        Check(await reader.MoveNextAsync() && reader.Current.Talkgroup == "HEARTBEAT", "Missing Live handshake.");
+        Check(await reader.MoveNextAsync() && reader.Current is { IsRecordingNotification: true, BackendId: "sqlite-only" },
+            "An ID-only notification must be delivered for a record absent from the in-memory index.");
+        var item = reader.Current;
+        var cachedUrl = RecordingStorageReference.ForJournal(server + "/expired.mp3?lease=old");
+        Check(cachedUrl == null, "A restart must receive no persisted signed URL.");
+        var acquired = await RecordingAudioRecovery.AcquireAsync(cachedUrl,
+            t => stream.RefreshRecordingAudioAsync(item, server, null, t),
+            (url, _) => Task.FromResult<string?>(url.EndsWith("?testLease=1", StringComparison.Ordinal) ? "downloaded" : null),
+            token.Token);
+        Check(acquired == "downloaded" && lookups == 1, "A restored recording with no cached URL must acquire fresh audio.");
+
+        foreach (var status in new[] { HttpStatusCode.Forbidden, HttpStatusCode.NotFound })
+        {
+            var events = new List<HttpStatusCode?>();
+            var attempt = 0;
+            acquired = await RecordingAudioRecovery.AcquireAsync(server + "/expired.mp3?lease=old", t =>
+            {
+                if (attempt++ == 0)
+                    throw new HttpRequestException("Temporary network failure.");
+                return stream.RefreshRecordingAudioAsync(item, server, null, t);
+            }, (url, _) =>
+            {
+                if (url.Contains("expired.mp3"))
+                {
+                    events.Add(status);
+                    throw new HttpRequestException("Expired audio link.", null, status);
+                }
+                events.Add(null);
+                return Task.FromResult<string?>("downloaded");
+            }, token.Token);
+            Check(acquired == "downloaded" && attempt == 2 && events.SequenceEqual([status, null]),
+                "403/404 and a temporary refresh failure must reacquire once without replaying stale media.");
+        }
+        Check(await stream.RefreshRecordingAudioAsync(item, "https://second.example", null, token.Token) == null && lookups == 3,
+            "An overlapping ID on another recorder must not refresh from the current recorder.");
+        var refreshes = 0;
+        acquired = await RecordingAudioRecovery.AcquireAsync(server + "/expired.mp3?lease=old", _ =>
+        {
+            refreshes++;
+            return Task.FromResult<string?>(server + "/fresh.mp3?lease=new");
+        }, (url, _) => url.Contains("expired.mp3")
+            ? throw new FirewallAuthenticationException("Signed media denied", HttpStatusCode.Forbidden)
+            : Task.FromResult<string?>("downloaded"), token.Token);
+        Check(acquired == "downloaded" && refreshes == 1,
+            "A host-local signed 403 can refresh through metadata without changing firewall authentication.");
+        try
+        {
+            await RecordingAudioRecovery.AcquireAsync(server + "/plain.mp3",
+                _ => throw new InvalidOperationException("Genuine firewall denial must not try metadata."),
+                (_, _) => throw new FirewallAuthenticationException("Firewall denied", HttpStatusCode.Forbidden), token.Token);
+            throw new InvalidOperationException("Expected the original firewall denial.");
+        }
+        catch (FirewallAuthenticationException) { }
+        refreshes = 0;
+        try
+        {
+            await RecordingAudioRecovery.AcquireAsync(null, _ =>
+            {
+                refreshes++;
+                return Task.FromResult<string?>(null);
+            }, (_, _) => throw new InvalidOperationException("Missing audio cannot begin acquisition."), token.Token);
+            throw new InvalidOperationException("Unavailable audio must be reported to the caller.");
+        }
+        catch (RecordingAudioUnavailableException)
+        {
+            Check(refreshes == 2, "Missing recordings must use a bounded retry budget.");
+        }
+        Check(RecordingStorageReference.ForCache(server + "/clip.mp3?lease=secret") == null,
+            "A signed URL must be excluded from persisted references.");
+    }
+
     private static ISettingsService Settings(string url)
     {
         var settings = DispatchProxy.Create<ISettingsService, SettingsStub>();
@@ -191,17 +340,25 @@ internal static class MobileRecoveryTests
 
     private sealed class FixedClock(DateTimeOffset now) : TimeProvider
     {
-        public override DateTimeOffset GetUtcNow() => now;
+        internal DateTimeOffset UtcNow { get; set; } = now;
+        public override DateTimeOffset GetUtcNow() => UtcNow;
     }
 
-    private sealed class ScriptSubscription(bool allowed, int? tier) : ISubscriptionService
+    private sealed class ScriptSubscription(bool allowed, int? tier, ISettingsService? settings = null) : ISubscriptionService
     {
         internal int Checks { get; private set; }
+        internal int? Tier { get; set; } = tier;
+        internal bool Allowed { get; set; } = allowed;
 
         public Task<SubscriptionCheckResult> EnsureSubscriptionAsync(CancellationToken cancellationToken)
         {
             Checks++;
-            return Task.FromResult(new SubscriptionCheckResult(allowed) { VerifiedOnlineTier = tier });
+            if (settings is SettingsStub stub)
+            {
+                stub.SubscriptionTier = Tier ?? 0;
+                stub.VerifiedSubscription = Allowed && Tier is 1 or 2;
+            }
+            return Task.FromResult(new SubscriptionCheckResult(Allowed) { VerifiedOnlineTier = Tier });
         }
     }
 
@@ -235,6 +392,7 @@ internal static class MobileRecoveryTests
         public override WebSocketState State => WasAborted ? WebSocketState.Aborted : WebSocketState.Open;
         public override string? SubProtocol => null;
         internal void Send(object row) => _messages.Writer.TryWrite(JsonSerializer.SerializeToUtf8Bytes(row));
+        internal void SendClose() => _messages.Writer.TryWrite([]);
 
         public override async Task<WebSocketReceiveResult> ReceiveAsync(ArraySegment<byte> buffer, CancellationToken token)
         {
@@ -243,6 +401,8 @@ internal static class MobileRecoveryTests
                 IdleReceive.TrySetResult();
                 bytes = await _messages.Reader.ReadAsync(token);
             }
+            if (bytes.Length == 0)
+                return new WebSocketReceiveResult(0, WebSocketMessageType.Close, true);
             bytes.AsSpan().CopyTo(buffer.AsSpan());
             return new WebSocketReceiveResult(bytes.Length, WebSocketMessageType.Text, true);
         }

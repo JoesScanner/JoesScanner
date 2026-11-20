@@ -3,8 +3,29 @@ using JoesScanner.Models;
 using JoesScanner.Services;
 using Microsoft.Data.Sqlite;
 
-AndroidAudioTests.Run();
-IosAudioTests.Run();
+if (args.Length == 3 && args[0] == "--completion-crash-probe")
+{
+    await DurablePlaybackConcurrencyTests.RunCrashProbeAsync(args[1], args[2]);
+    return;
+}
+
+if (args.Length == 3 && args[0] == "--settings-crash-probe")
+{
+    await PersistenceSafetyTests.RunCrashProbeAsync(args[1], args[2]);
+    return;
+}
+
+await AndroidAudioTests.RunAsync();
+await IosAudioTests.RunAsync();
+await MonitoringLifecycleTests.RunAsync();
+await PersistenceSafetyTests.RunAsync();
+await DurableLiveQueueTests.RunAsync();
+await DurableAccountIsolationTests.RunAsync();
+await DurablePlaybackConcurrencyTests.RunAsync();
+await DurableLiveTransportTests.RunAsync();
+await RecordingDatabaseMaintenanceTests.RunAsync();
+await LiveHistoryHandoffTests.RunAsync();
+await HistoryPlaybackDispatcherTests.RunAsync();
 
 var defaults = CallCardLayout.Default;
 var complete = new CallCardMetadata

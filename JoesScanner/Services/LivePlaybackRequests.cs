@@ -1,22 +1,30 @@
 namespace JoesScanner.Services;
 
-// The Live view model uses this on its UI dispatcher. Each operation owns its token until it finishes.
+// Each view model uses one instance on its UI dispatcher. Requests can also
+// be retired by the page's playback ownership token.
 internal sealed class LivePlaybackRequests
 {
     private Request? _current;
 
     public bool HasManualSelection => _current?.IsManual == true;
 
-    public Request Begin(bool manual)
+    public Request Begin(bool manual, CancellationToken ownership = default)
     {
         var prior = _current;
-        var request = new Request(this, manual);
+        var request = new Request(this, manual, ownership);
         _current = request;
         prior?.Cancel();
         return request;
     }
 
     public void CancelCurrent() => _current?.Cancel();
+
+    public void RetireCurrent()
+    {
+        var prior = _current;
+        _current = null;
+        prior?.Cancel();
+    }
 
     public static bool IsExpectedCancellation(OperationCanceledException exception, CancellationToken token) =>
         token.IsCancellationRequested && !IsTimeout(exception) &&
@@ -25,9 +33,11 @@ internal sealed class LivePlaybackRequests
     public static bool IsTimeout(OperationCanceledException exception) =>
         exception.InnerException is TimeoutException;
 
-    internal sealed class Request(LivePlaybackRequests owner, bool manual) : IDisposable
+    internal sealed class Request(LivePlaybackRequests owner, bool manual, CancellationToken ownership) : IDisposable
     {
-        private readonly CancellationTokenSource _source = new();
+        private readonly CancellationTokenSource _source = ownership.CanBeCanceled
+            ? CancellationTokenSource.CreateLinkedTokenSource(ownership)
+            : new();
         private bool _disposed;
 
         public CancellationToken Token => _source.Token;

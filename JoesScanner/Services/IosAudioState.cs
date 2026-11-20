@@ -11,10 +11,14 @@ internal enum IosAudioOptions
 }
 
 // The main dispatcher owns this lease. Media callbacks can only release their own segment.
-internal sealed class IosClipSession(Func<IosAudioOptions, bool> activate, Action deactivate)
+internal sealed class IosClipSession(Func<IosAudioOptions, bool> activate, Func<bool> deactivate,
+    Func<bool>? releasePriority = null)
 {
-    private long _nextLease;
+    private static readonly int[] ReleaseDelaysMs = [100, 250, 500, 1000];
+    private long _signalGeneration;
     private long _activeLease;
+    private long _pendingRelease;
+    private int _releaseRetries;
 
     internal static IosAudioOptions OptionsFor(MobileAudioMode mode) => mode switch
     {
@@ -25,30 +29,68 @@ internal sealed class IosClipSession(Func<IosAudioOptions, bool> activate, Actio
     };
 
     internal MobileAudioMode? ActiveMode { get; private set; }
+    internal long SignalGeneration => Interlocked.Read(ref _signalGeneration);
+    internal bool IsCurrentSignal(long generation) => SignalGeneration == generation;
+    internal void InvalidatePendingSignals() => Interlocked.Increment(ref _signalGeneration);
+    internal bool Owns(long lease) => lease != 0 && _activeLease == lease;
+    internal long PendingRelease => _pendingRelease;
 
     internal long TryStart(MobileAudioMode mode)
     {
         if (_activeLease != 0)
             throw new InvalidOperationException("An iOS clip already owns the audio session.");
 
-        if (!activate(OptionsFor(mode)))
+        var lease = Interlocked.Increment(ref _signalGeneration);
+        if (!FinishDeactivation() || !activate(OptionsFor(mode)))
             return 0;
 
         ActiveMode = mode;
-        return _activeLease = ++_nextLease;
+        return _activeLease = lease;
     }
 
-    internal void Release(long lease)
+    internal bool Release(long lease)
     {
-        if (lease == 0 || _activeLease != lease)
-            return;
+        if (!Owns(lease))
+            return true;
 
-        Invalidate();
-        deactivate();
+        ClearLease();
+        _pendingRelease = lease;
+        _releaseRetries = 0;
+        return FinishDeactivation();
+    }
+
+    internal bool FinishDeactivation(long lease = 0)
+    {
+        if (_pendingRelease != 0 && _activeLease == 0 && (lease == 0 || _pendingRelease == lease) && deactivate())
+            _pendingRelease = 0;
+        return _pendingRelease == 0;
+    }
+
+    internal TimeSpan? NextReleaseDelay(long lease) =>
+        lease != 0 && _pendingRelease == lease && _releaseRetries < ReleaseDelaysMs.Length
+            ? TimeSpan.FromMilliseconds(ReleaseDelaysMs[_releaseRetries]) : null;
+
+    internal void RetryRelease(long lease)
+    {
+        if (NextReleaseDelay(lease) == null || FinishDeactivation(lease))
+            return;
+        if (++_releaseRetries == ReleaseDelaysMs.Length && releasePriority?.Invoke() == true)
+        {
+            // Some failures leave the session active. A plain mixing category
+            // releases ducking or exclusive priority even in that case.
+            FinishDeactivation(lease);
+            _pendingRelease = 0;
+        }
     }
 
     // iOS has already deactivated the session on interruption or server loss.
     internal void Invalidate()
+    {
+        ClearLease();
+        _pendingRelease = 0;
+    }
+
+    private void ClearLease()
     {
         _activeLease = 0;
         ActiveMode = null;
@@ -57,58 +99,100 @@ internal sealed class IosClipSession(Func<IosAudioOptions, bool> activate, Actio
 
 internal sealed class IosAudioSuspension
 {
-    private bool _interrupted;
+    private enum Recovery { None, Interrupted, ActivationDenied, PlayerPaused }
+
+    private Recovery _recovery;
+    private bool _mayRetryActivation;
+    private bool _callActive;
     private bool _resumeRequired;
     private bool _routePaused;
     private bool _mediaUnavailable;
     private bool _mediaResetPending;
-    private bool _activationDenied;
-    private bool _nativePaused;
 
     internal bool RequiresPlay => _routePaused || _resumeRequired ||
-        ((_activationDenied || _nativePaused) && !_interrupted);
-    internal bool IsBlocked => RequiresPlay || _interrupted || _mediaUnavailable;
+        (!_callActive && !_mayRetryActivation && NeedsReconciliation);
+    internal bool IsBlocked => _routePaused || _resumeRequired || _callActive || _mediaUnavailable ||
+        (_recovery != Recovery.None && !_mayRetryActivation);
+    internal bool NeedsReconciliation => _recovery != Recovery.None;
     internal bool IsRoutePaused => _routePaused;
     internal int MediaGeneration { get; private set; }
     internal int RouteGeneration { get; private set; }
 
     internal bool BeginInterruption()
     {
-        if (_interrupted)
+        if (_recovery == Recovery.Interrupted && !_mayRetryActivation)
             return false;
 
-        _interrupted = true;
+        _recovery = Recovery.Interrupted;
+        _mayRetryActivation = false;
         return true;
     }
 
-    internal void EndInterruption(bool shouldResume)
+    internal void RecommendResume(bool shouldResume)
     {
-        if (!_interrupted && !_activationDenied && !_nativePaused)
+        if (_recovery == Recovery.None)
             return;
 
-        _interrupted = false;
-        _activationDenied = false;
-        _nativePaused = false;
-        _resumeRequired |= !shouldResume;
+        if (shouldResume)
+            _mayRetryActivation = true;
+        else
+        {
+            _resumeRequired = true;
+            ClearRecovery();
+        }
     }
 
-    internal void ActivationDenied() => _activationDenied = true;
-    internal void UnreportedPause() => _nativePaused = true;
-
-    // An end notification is not guaranteed. On return to the app iOS will
-    // arbitrate a new activation, while an explicit-resume latch stays set.
-    internal void Foreground()
+    internal void ActivationDenied()
     {
-        _interrupted = false;
-        _activationDenied = false;
-        _nativePaused = false;
+        _recovery = Recovery.ActivationDenied;
+        _mayRetryActivation = false;
+    }
+
+    internal void UnreportedPause()
+    {
+        if (_recovery == Recovery.None)
+            _recovery = Recovery.PlayerPaused;
+        _mayRetryActivation = false;
+    }
+
+    internal void SetCallActive(bool active)
+    {
+        _callActive = active;
+        if (active && _recovery == Recovery.None)
+            BeginInterruption();
+    }
+
+    // Reconciliation grants another activation attempt. The interruption is
+    // resolved only after AVAudioSession actually accepts that activation.
+    internal void Reconcile(bool canRetryActivation)
+    {
+        if (NeedsReconciliation && canRetryActivation && !_callActive)
+            _mayRetryActivation = true;
+    }
+
+    internal void ActivationSucceeded() => ClearRecovery();
+
+    private void ClearRecovery()
+    {
+        _recovery = Recovery.None;
+        _mayRetryActivation = false;
     }
 
     internal void RouteDisconnected(AudioDisconnectionBehavior preference)
     {
         ++RouteGeneration;
-        _nativePaused = false;
+        if (_recovery == Recovery.PlayerPaused)
+            ClearRecovery();
         _routePaused |= preference == AudioDisconnectionBehavior.PausePlayback;
+    }
+
+    internal void RouteDeactivated(AudioDisconnectionBehavior preference, bool hadClip)
+    {
+        // A route deactivation can follow AVPlayer's pause or the route-change
+        // callback. Continue still has to clear an unexplained player pause.
+        if (!_routePaused && (hadClip || preference == AudioDisconnectionBehavior.PausePlayback ||
+            _recovery == Recovery.PlayerPaused))
+            RouteDisconnected(preference);
     }
 
     internal void MediaServicesLost()
@@ -130,14 +214,14 @@ internal sealed class IosAudioSuspension
         _mediaUnavailable = false;
         _mediaResetPending = true;
         _resumeRequired = true;
-        _interrupted = false;
+        ClearRecovery();
     }
 
     internal void RequestPlay()
     {
         _routePaused = false;
-        _activationDenied = false;
-        _nativePaused = false;
+        if (NeedsReconciliation)
+            _mayRetryActivation = true;
         if (!_mediaUnavailable)
         {
             _resumeRequired = false;
@@ -147,11 +231,10 @@ internal sealed class IosAudioSuspension
 
     internal void Stop()
     {
-        _interrupted = false;
+        ClearRecovery();
+        _callActive = false;
         _resumeRequired = false;
         _routePaused = false;
-        _activationDenied = false;
-        _nativePaused = false;
         _mediaUnavailable = false;
         _mediaResetPending = false;
     }
@@ -162,23 +245,27 @@ internal sealed class IosPrivateAudioRoutes
     private readonly HashSet<string> _disconnected = new(StringComparer.Ordinal);
     private HashSet<string> _lastPrivateOutputs = new(StringComparer.Ordinal);
 
-    internal void AcceptCurrentRoute(IEnumerable<string> privateOutputs) =>
-        _lastPrivateOutputs = privateOutputs.ToHashSet(StringComparer.Ordinal);
+    internal void AcceptCurrentRoute(IEnumerable<string> privateOutputs)
+    {
+        var current = privateOutputs.ToHashSet(StringComparer.Ordinal);
+        _disconnected.UnionWith(_lastPrivateOutputs.Where(output => !current.Contains(output)));
+        _disconnected.ExceptWith(current);
+        _lastPrivateOutputs = current;
+    }
 
-    internal bool Reconcile(IEnumerable<string> privateOutputs, AudioDisconnectionBehavior preference)
+    internal bool Reconcile(IEnumerable<string> privateOutputs, AudioDisconnectionBehavior preference, out bool disconnected)
     {
         var current = privateOutputs.ToHashSet(StringComparer.Ordinal);
         // An empty snapshot may mean AVAudioSession has not reported the route
         // yet. Keep the last private route protected until confirmed or accepted.
-        if (preference == AudioDisconnectionBehavior.PausePlayback &&
-            _lastPrivateOutputs.Any(output => !current.Contains(output)))
+        var missing = _lastPrivateOutputs.Where(output => !current.Contains(output)).ToArray();
+        disconnected = DeviceUnavailable(missing, current);
+        if (preference == AudioDisconnectionBehavior.PausePlayback && missing.Length != 0)
             return true;
 
-        _lastPrivateOutputs = current;
+        AcceptCurrentRoute(current);
         return false;
     }
-
-    internal void DeviceAvailable() => _disconnected.Clear();
 
     internal bool DeviceUnavailable(IEnumerable<string> previousPrivateOutputs, IEnumerable<string> currentOutputs)
     {
@@ -190,5 +277,63 @@ internal sealed class IosPrivateAudioRoutes
                 disconnected |= _disconnected.Add(output);
         }
         return disconnected;
+    }
+}
+
+// Monotonic samples from one recording survive a player/session rebuild. The
+// native player can momentarily report zero after a media reset.
+internal sealed class IosRecordingState
+{
+    private double _seconds;
+    private MobileAudioMode? _mode;
+    private bool _recoveredFromStall;
+
+    internal MobileAudioMode ModeForActivation(MobileAudioMode configured) => _mode ?? configured;
+    internal void Activated(MobileAudioMode mode) => _mode ??= mode;
+
+    internal void Observe(double seconds)
+    {
+        if (double.IsFinite(seconds) && seconds > _seconds)
+            _seconds = seconds;
+    }
+
+    internal double? SeekTarget(double currentSeconds) =>
+        _seconds > 0 && (!double.IsFinite(currentSeconds) || Math.Abs(_seconds - currentSeconds) > 0.25)
+            ? _seconds
+            : null;
+
+    internal void Restart() => _seconds = 0;
+
+    internal bool TryRecoverFromStall()
+    {
+        if (_recoveredFromStall)
+            return false;
+        _recoveredFromStall = true;
+        return true;
+    }
+}
+
+// Unlike an AVPlayer media-time observer, this clock keeps advancing during a
+// buffer stall. It is reset for every audible segment, including recovery.
+internal sealed class IosPlaybackProgress(double position)
+{
+    private TimeSpan _lastProgress;
+    private TimeSpan? _waitingSince;
+
+    internal bool IsStalled(double seconds, bool waiting, TimeSpan elapsed)
+    {
+        if (double.IsFinite(seconds) && (!double.IsFinite(position) || seconds - position >= 0.025))
+        {
+            position = seconds;
+            _lastProgress = elapsed;
+        }
+
+        if (!waiting)
+            _waitingSince = null;
+        else
+            _waitingSince ??= elapsed;
+
+        return elapsed - _lastProgress >= TimeSpan.FromSeconds(5) ||
+            _waitingSince is { } since && elapsed - (since > _lastProgress ? since : _lastProgress) >= TimeSpan.FromSeconds(2);
     }
 }

@@ -12,18 +12,43 @@
     <Compile Include="../../JoesScanner/Models/MobileAudioPreferences.cs" Link="MobileAudioPreferences.cs" />
     <Compile Include="../../JoesScanner/Models/CallCardMetadata.cs" Link="CallCardMetadata.cs" />
     <Compile Include="../../JoesScanner/Models/CallItem.cs" Link="CallItem.cs" />
+    <Compile Include="../../JoesScanner/Models/RecordingAccessContext.cs" Link="RecordingAccessContext.cs" />
     <Compile Include="../../JoesScanner/Models/LiveCallState.cs" Link="LiveCallState.cs" />
     <Compile Include="../../JoesScanner/Services/AppStateStore.cs" Link="AppStateStore.cs" />
     <Compile Include="../../JoesScanner/Services/AndroidAudioInterruption.cs" Link="AndroidAudioInterruption.cs" />
+    <Compile Include="../../JoesScanner/Services/AndroidAudioRoutes.cs" Link="AndroidAudioRoutes.cs" />
     <Compile Include="../../JoesScanner/Services/AndroidClipFocusState.cs" Link="AndroidClipFocusState.cs" />
+    <Compile Include="../../JoesScanner/Services/AndroidForegroundOwnership.cs" Link="AndroidForegroundOwnership.cs" />
+    <Compile Include="../../JoesScanner/Services/AndroidPlaybackProgress.cs" Link="AndroidPlaybackProgress.cs" />
     <Compile Include="../../JoesScanner/Services/CallCardLayoutStore.cs" Link="CallCardLayoutStore.cs" />
     <Compile Include="../../JoesScanner/Services/CallCardOptionsService.cs" Link="CallCardOptionsService.cs" />
     <Compile Include="../../JoesScanner/Services/DbBootstrapper.cs" Link="DbBootstrapper.cs" />
+    <Compile Include="../../JoesScanner/Services/DbMaintenanceService.cs" Link="DbMaintenanceService.cs" />
+    <Compile Include="../../JoesScanner/Services/IDbMaintenanceService.cs" Link="IDbMaintenanceService.cs" />
+    <Compile Include="../../JoesScanner/Services/RecordingStorageReference.cs" Link="RecordingStorageReference.cs" />
+    <Compile Include="../../JoesScanner/Services/DiagnosticRedaction.cs" Link="DiagnosticRedaction.cs" />
+    <Compile Include="../../JoesScanner/Services/LocalCallsRepository.cs" Link="LocalCallsRepository.cs" />
+    <Compile Include="../../JoesScanner/Services/ILocalCallsRepository.cs" Link="ILocalCallsRepository.cs" />
+    <Compile Include="../../JoesScanner/Data/DbCallRecord.cs" Link="DbCallRecord.cs" />
+    <Compile Include="../../JoesScanner/Services/DurableLiveQueue.cs" Link="DurableLiveQueue.cs" />
+    <Compile Include="../../JoesScanner/Services/IDatabasePathProvider.cs" Link="IDatabasePathProvider.cs" />
     <Compile Include="../../JoesScanner/Services/IosAudioState.cs" Link="IosAudioState.cs" />
     <Compile Include="../../JoesScanner/Services/LiveCallIndex.cs" Link="LiveCallIndex.cs" />
     <Compile Include="../../JoesScanner/Services/LivePlaybackRequests.cs" Link="LivePlaybackRequests.cs" />
     <Compile Include="../../JoesScanner/Services/LiveStreamRecovery.cs" Link="LiveStreamRecovery.cs" />
     <Compile Include="../../JoesScanner/Services/MobileAudioPreferencesStore.cs" Link="MobileAudioPreferencesStore.cs" />
+    <Compile Include="../../JoesScanner/Services/MonitoringLifecycle.cs" Link="MonitoringLifecycle.cs" />
+    <Compile Include="../../JoesScanner/Services/MonitoringIntentStore.cs" Link="MonitoringIntentStore.cs" />
+    <Compile Include="../../JoesScanner/Services/MonitoringTransportOwnership.cs" Link="MonitoringTransportOwnership.cs" />
+    <Compile Include="../../JoesScanner/Services/PlaybackOutcome.cs" Link="PlaybackOutcome.cs" />
+    <Compile Include="../../JoesScanner/Services/PlaybackCompletion.cs" Link="PlaybackCompletion.cs" />
+    <Compile Include="../../JoesScanner/Services/DurablePlaybackCommit.cs" Link="DurablePlaybackCommit.cs" />
+    <Compile Include="../../JoesScanner/Services/LiveQueueWake.cs" Link="LiveQueueWake.cs" />
+    <Compile Include="../../JoesScanner/Services/PlaybackOwnership.cs" Link="PlaybackOwnership.cs" />
+    <Compile Include="../../JoesScanner/Services/IAudioPlaybackService.cs" Link="IAudioPlaybackService.cs" />
+    <Compile Include="../../JoesScanner/Services/ICallHistoryService.cs" Link="ICallHistoryService.cs" />
+    <Compile Include="../../JoesScanner/ViewModels/MainViewModel.PlaybackOwnership.cs" Link="MainViewModel.PlaybackOwnership.cs" />
+    <Compile Include="../../JoesScanner/ViewModels/HistoryViewModel.PlaybackOwnership.cs" Link="HistoryViewModel.PlaybackOwnership.cs" />
     <Compile Include="../../JoesScanner/Services/TrunkingRecorderCallFields.cs" Link="TrunkingRecorderCallFields.cs" />
   </ItemGroup>
 </Project>

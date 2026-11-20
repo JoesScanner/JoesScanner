@@ -11,6 +11,10 @@ public abstract class BindableObject : INotifyPropertyChanged
 
 internal static class MainThread
 {
+    public static bool IsMainThread => true;
+    public static Task InvokeOnMainThreadAsync(Func<Task> action) => action();
+    public static Task<T> InvokeOnMainThreadAsync<T>(Func<T> action) => Task.FromResult(action());
+
     public static Task InvokeOnMainThreadAsync(Action action)
     {
         action();

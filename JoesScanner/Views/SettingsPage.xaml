@@ -972,7 +972,11 @@
                                 <x:String>Continue through phone speaker</x:String>
                             </Picker.Items>
                         </Picker>
-
+                        <Label IsVisible="{Binding HasMobileAudioSaveError}" FontSize="12"
+                               Text="Audio preferences were not saved. Playback is still using the last saved options."
+                               TextColor="{AppThemeBinding Light=#b91c1c, Dark=#fca5a5}" />
+                        <Button IsVisible="{Binding HasMobileAudioSaveError}" Text="Retry save"
+                                HorizontalOptions="Start" Command="{Binding SaveCommand}" />
                     </VerticalStackLayout>
                 </DataTemplate>
             </controls:DeferredContentView.ContentTemplate>

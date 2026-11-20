@@ -20,12 +20,38 @@ internal static class AppStateStore
         return AppPaths.GetDbPath(DbFileName);
     }
 
-    private static SqliteConnection OpenConnection()
+    private static SqliteConnection OpenConnection(bool durable = false)
     {
-        var connection = new SqliteConnection($"Data Source={GetDbPath()}");
-        connection.Open();
-        DbBootstrapper.EnsureInitialized(connection);
-        return connection;
+        var options = new SqliteConnectionStringBuilder { DataSource = GetDbPath() };
+        if (durable)
+            options.DefaultTimeout = 1;
+        var connection = new SqliteConnection(options.ToString());
+        try
+        {
+            connection.Open();
+            DbBootstrapper.EnsureInitialized(connection);
+            if (durable)
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = "PRAGMA synchronous=FULL; PRAGMA busy_timeout=250;";
+                command.ExecuteNonQuery();
+            }
+            return connection;
+        }
+        catch
+        {
+            connection.Dispose();
+            throw;
+        }
+    }
+
+    internal static T InTransaction<T>(Func<SqliteTransaction, T> operation, bool durable = false)
+    {
+        using var connection = OpenConnection(durable);
+        using var transaction = connection.BeginTransaction();
+        var result = operation(transaction);
+        transaction.Commit();
+        return result;
     }
 
     private static string? TryGetRaw(string key)
@@ -33,12 +59,7 @@ internal static class AppStateStore
         lock (Gate)
         {
             using var conn = OpenConnection();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = $"SELECT setting_value FROM {TableName} WHERE setting_key = $k LIMIT 1;";
-            cmd.Parameters.AddWithValue("$k", key);
-
-            var obj = cmd.ExecuteScalar();
-            return obj == null || obj == DBNull.Value ? null : Convert.ToString(obj, CultureInfo.InvariantCulture);
+            return ReadRaw(conn, null, key);
         }
     }
 
@@ -47,18 +68,39 @@ internal static class AppStateStore
         lock (Gate)
         {
             using var conn = OpenConnection();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = $@"
+            WriteRaw(conn, null, key, value);
+        }
+    }
+
+    internal static string? Read(SqliteTransaction transaction, string key) => ReadRaw(transaction.Connection!, transaction, key);
+
+    private static string? ReadRaw(SqliteConnection connection, SqliteTransaction? transaction, string key)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.Transaction = transaction;
+        cmd.CommandText = $"SELECT setting_value FROM {TableName} WHERE setting_key = $k LIMIT 1;";
+        cmd.Parameters.AddWithValue("$k", key);
+        var value = cmd.ExecuteScalar();
+        return value == null || value == DBNull.Value ? null : Convert.ToString(value, CultureInfo.InvariantCulture);
+    }
+
+    internal static void Write(SqliteTransaction transaction, string key, string value) =>
+        WriteRaw(transaction.Connection!, transaction, key, value);
+
+    private static void WriteRaw(SqliteConnection connection, SqliteTransaction? transaction, string key, string value)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.Transaction = transaction;
+        cmd.CommandText = $@"
 INSERT INTO {TableName} (setting_key, setting_value, updated_utc)
 VALUES ($k, $v, $u)
 ON CONFLICT(setting_key) DO UPDATE SET
  setting_value = excluded.setting_value,
  updated_utc = excluded.updated_utc;";
-            cmd.Parameters.AddWithValue("$k", key);
-            cmd.Parameters.AddWithValue("$v", value ?? string.Empty);
-            cmd.Parameters.AddWithValue("$u", DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
-            cmd.ExecuteNonQuery();
-        }
+        cmd.Parameters.AddWithValue("$k", key);
+        cmd.Parameters.AddWithValue("$v", value);
+        cmd.Parameters.AddWithValue("$u", DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
+        cmd.ExecuteNonQuery();
     }
 
     public static string GetString(string key, string defaultValue = "")

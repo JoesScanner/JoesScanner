@@ -11,4 +11,5 @@ public interface ICallStreamService
         LiveStreamRecovery? recovery = null);
     // Populate the shared update state for existing cards that may have missed notifications.
     Task RefreshCallMetadataAsync(IReadOnlyList<CallItem> calls, CancellationToken cancellationToken);
+    Task<string?> RefreshRecordingAudioAsync(CallItem item, string server, DateTimeOffset? recordedAt, CancellationToken cancellationToken);
 }

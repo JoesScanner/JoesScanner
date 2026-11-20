@@ -28,7 +28,33 @@ var cases = new (string Name, Func<Task> Run)[]
     ("HTTP timeouts and unexpected cancellation remain playback failures", UnexpectedPlaybackTimeout),
     ("Only completion or deliberate skip advances playback; explicit retry retains the failed item", MobileRecoveryTests.PlaybackOutcomes),
     ("Foreground recovery verifies hosted tiers and preserves custom history", MobileRecoveryTests.Entitlement),
-    ("Foreground recovery aborts a half-open socket, merges late audio, and delivers subsequent live calls once", MobileRecoveryTests.ReconnectAndLateAudio)
+    ("Ordinary reconnect distinguishes WebSocket Live events from HTTP history", MobileRecoveryTests.ReconnectProvenance),
+    ("Protected metadata catch-up refuses older calls after a downgrade", MobileRecoveryTests.HistoricalMetadataCatchup),
+    ("Directory History search, pagination, single download, and ZIP enforce verified entitlement", MobileRecoveryTests.HistorySearchAndExport),
+    ("Live-to-History handoff rejects a recovery response revoked during an HTTP request", MobileRecoveryTests.EntitlementDuringHandoff),
+    ("Foreground recovery aborts a half-open socket, merges late audio, and delivers subsequent live calls once", MobileRecoveryTests.ReconnectAndLateAudio),
+    ("Playback authorization rechecks historical acquisition, retry, expiry, and downgrade", MobileRecoveryTests.PlaybackEntitlement),
+    ("SQLite-only identities can reacquire missing and expired audio using existing calljson lookups", MobileRecoveryTests.RecordingAudioRefresh),
+    ("Older durable recordings recover via bounded timestamp paging with account isolation", MobileRecoveryTests.OldDurableSignedAudio),
+    ("Missing custom audio remains pending through Stop and a temporary failure until Retry, Skip or Jump", MobileRecoveryTests.UnavailableDurableAudio),
+    ("Concurrent WebSocket audio updates preserve the freshest usable URL", MobileRecoveryTests.ConcurrentSignedAudioUpdates),
+    ("Legacy connection credentials migrate into verified protected storage and survive restart", SavedCredentialTests.LegacyAndRestart),
+    ("Protected storage write and read failures retain legacy data and never use plaintext", SavedCredentialTests.VaultFailures),
+    ("Interrupted database cleanup retries without replacing protected credentials", SavedCredentialTests.InterruptedCleanup),
+    ("An interrupted legacy recorder switch leaves the unscoped login inactive", SavedCredentialTests.UnscopedInterruptedSwitch),
+    ("Unscoped vault failures preserve legacy rows without blocking other connections or re-entry", SavedCredentialTests.UnscopedPreservationFailure),
+    ("Unscoped cleanup rolls back without blocking hosted credential migration and retries on restart", SavedCredentialTests.UnscopedCleanupRollback),
+    ("Custom servers, hosted accounts, and removals are isolated in protected storage", SavedCredentialTests.ScopesAndRemoval),
+    ("Credential and signed URL diagnostics redact authentication material", SavedCredentialTests.Redaction),
+    ("Diagnostic ZIP sanitizes historical files and snapshots without changing the originals", BackupAndDiagnosticTests.SanitizedZip),
+    ("Android backup and transfer exclude sensitive storage while preserving other app backups", BackupAndDiagnosticTests.AndroidBackupRules),
+    ("SQLite WAL and a failed protected migration preserve integrity and permit a normal restart", BackupAndDiagnosticTests.WalMigration),
+    ("Overlapping validation, late success and failure, and logout preserve the current account", WordPressOwnershipTests.ValidationOrdering),
+    ("Subscription verification cannot publish into a switched account", WordPressOwnershipTests.SubscriptionSwitch),
+    ("Subsequent verification after 429, 503, timeout, and connection failure preserves saved credentials", WordPressOwnershipTests.SubscriptionFailuresAndRestart),
+    ("Concurrent lookup requests keep their original authority and reject stale results", WordPressOwnershipTests.LookupSwitch),
+    ("Communications discards old-session responses and restarts the cursor for a new account", WordPressOwnershipTests.CommunicationsSwitch),
+    ("WordPress clients refuse cross-authority redirects that preserve request bodies", WordPressOwnershipTests.Redirect)
 };
 
 foreach (var (name, run) in cases)
@@ -440,6 +466,8 @@ sealed class Fixture : IDisposable
 
     internal HttpClient CreateClient(Func<HttpRequestMessage, HttpResponseMessage> send) => new(CreateHandler(send));
 
+    internal HttpClient CreateClient(HttpMessageHandler transport) => new(new ServerAuthenticationHandler(_authentication, transport));
+
     internal HttpMessageHandler CreateHandler(Func<HttpRequestMessage, HttpResponseMessage> send) =>
         new ServerAuthenticationHandler(_authentication, new StubHandler(send));
 
@@ -468,6 +496,9 @@ class SettingsStub : DispatchProxy
     internal string Password { get; } = Guid.NewGuid().ToString();
     internal string ServerUrl { get; set; } = HostedServerRules.DefaultServerUrl;
     internal bool ActiveSubscription { get; set; } = true;
+    internal DateTime? SubscriptionExpiry { get; set; }
+    internal int SubscriptionTier { get; set; }
+    internal bool VerifiedSubscription { get; set; }
 
     protected override object? Invoke(MethodInfo? method, object?[]? args) => method!.Name switch
     {
@@ -476,9 +507,13 @@ class SettingsStub : DispatchProxy
         "get_BasicAuthUsername" => Username,
         "get_BasicAuthPassword" => Password,
         "get_AuthSessionToken" => Session,
+        nameof(ISettingsService.ReadAccountSession) => ("https://wordpress.test", Session, 0L, 0L),
         "get_DeviceInstallId" => DeviceId,
+        "get_SubscriptionExpiresUtc" => SubscriptionExpiry,
+        "get_SubscriptionTierLevel" => SubscriptionTier,
+        "get_SubscriptionLastStatusOk" or "get_SubscriptionLastValidatedOnline" => VerifiedSubscription,
         nameof(ISettingsService.HasActiveHostedSubscription) => ActiveSubscription,
-        nameof(ISettingsService.TryGetServerCredentials) => false,
+        nameof(ISettingsService.TryGetServerCredentials) => ReadAccount(args!),
         nameof(ISettingsService.GetCachedDirectoryServers) => new[]
         {
             new ServerDirectoryEntry
@@ -490,6 +525,14 @@ class SettingsStub : DispatchProxy
         },
         _ => throw new NotSupportedException(method.Name)
     };
+
+    private bool ReadAccount(object?[] args)
+    {
+        args[1] = Username;
+        args[2] = Password;
+        return Equals(args[0], HostedServerRules.DefaultServerUrl) ||
+            args[0] is string candidate && ServerKeyHelper.Normalize(candidate) == ServerKeyHelper.Normalize(ServerUrl);
+    }
 }
 
 sealed class StubHandler(Func<HttpRequestMessage, HttpResponseMessage> send) : HttpMessageHandler

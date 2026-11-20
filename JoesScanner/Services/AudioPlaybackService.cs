@@ -6,6 +6,7 @@ using WinMediaPlayer = Windows.Media.Playback.MediaPlayer;
 #if ANDROID
 using Android.Content;
 using Android.Media;
+using JoesScanner.Models;
 using Microsoft.Maui.ApplicationModel;
 using JoesScanner.Platforms.Android.Services;
 using AUri = Android.Net.Uri;
@@ -81,7 +82,10 @@ namespace JoesScanner.Services
             return PlayAsync(audioUrl, 1.0, cancellationToken);
         }
 
-        public async Task PlayAsync(string audioUrl, double playbackRate, CancellationToken cancellationToken = default)
+        public Task PlayAsync(string audioUrl, double playbackRate, CancellationToken cancellationToken = default) =>
+            PlayAsync(audioUrl, playbackRate, cancellationToken, new PlaybackCompletion());
+
+        public async Task PlayAsync(string audioUrl, double playbackRate, CancellationToken cancellationToken, PlaybackCompletion completion)
         {
             if (string.IsNullOrWhiteSpace(audioUrl))
                 throw new InvalidOperationException("The recording has no audio source.");
@@ -122,6 +126,7 @@ namespace JoesScanner.Services
                 linkedToken = cancellationToken;
             }
 
+            using var endRegistration = linkedToken.Register(() => completion.Reject());
             try
             {
 #if IOS
@@ -211,20 +216,20 @@ namespace JoesScanner.Services
 
             try
             {
-                AppLog.Add(() => $"Audio: Play requested. url={preparedUrl}, rate={playbackRate:0.###}");
+                AppLog.Add(() => $"Audio: Play requested. rate={playbackRate:0.###}");
             }
             catch
             {
             }
 
 #if WINDOWS
-                await PlayOnWindowsAsync(prepared, playbackRate, linkedToken);
+                await PlayOnWindowsAsync(prepared, playbackRate, linkedToken, completion);
 #elif ANDROID
-                await PlayOnAndroidAsync(prepared, playbackRate, linkedToken);
+                await PlayOnAndroidAsync(prepared, playbackRate, linkedToken, completion);
 #elif IOS
-                await PlayOnIosAsync(prepared, playbackRate, linkedToken);
+                await PlayOnIosAsync(prepared, playbackRate, linkedToken, completion);
 #elif MACCATALYST
-                await PlayOnAppleAsync(prepared, playbackRate, linkedToken);
+                await PlayOnAppleAsync(prepared, playbackRate, linkedToken, completion);
 #else
                 throw new PlatformNotSupportedException("Audio playback is not available on this platform.");
 #endif
@@ -280,21 +285,24 @@ namespace JoesScanner.Services
         }
 
 #if WINDOWS
-        private Task PlayOnWindowsAsync(PreparedAudio prepared, double playbackRate, CancellationToken cancellationToken)
+        private Task PlayOnWindowsAsync(PreparedAudio prepared, double playbackRate, CancellationToken cancellationToken,
+            PlaybackCompletion completion)
         {
-            _windowsPlayer ??= new WinMediaPlayer();
-
+            var player = new WinMediaPlayer();
+            var previous = Interlocked.Exchange(ref _windowsPlayer, player);
+            try { previous?.Pause(); } catch { }
             var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var player = _windowsPlayer;
 
             void OnEnded(object? s, object e)
             {
-                try { tcs.TrySetResult(); } catch { }
+                if (completion.Confirm(cancellationToken))
+                    tcs.TrySetResult();
             }
 
             void OnFailed(WinMediaPlayer s, Windows.Media.Playback.MediaPlayerFailedEventArgs e)
             {
-                tcs.TrySetException(new InvalidOperationException($"Windows audio playback failed ({e.Error})."));
+                if (completion.Reject())
+                    tcs.TrySetException(new InvalidOperationException($"Windows audio playback failed ({e.Error})."));
             }
 
             try
@@ -309,50 +317,42 @@ namespace JoesScanner.Services
                 {
                     try { player.Volume = Clamp01(1.0); } catch { }
                 }
+                cancellationToken.ThrowIfCancellationRequested();
                 player.Play();
 
                 if (prepared.StaticFilterEnabled || (prepared.ToneFilterEnabled && prepared.ToneDuckSegments.Count > 0))
-                    _ = ApplyDynamicVolumeWindowsAsync(prepared, cancellationToken);
+                    _ = ApplyDynamicVolumeWindowsAsync(prepared, player, cancellationToken);
             }
             catch (Exception ex)
             {
-                tcs.TrySetException(ex);
+                if (completion.Reject())
+                    tcs.TrySetException(ex);
             }
 
             return WaitWithCleanupAsync(tcs.Task, cancellationToken, () =>
             {
-                if (player is null)
-                    return;
-
                 try { player.MediaEnded -= OnEnded; } catch { }
                 try { player.MediaFailed -= OnFailed; } catch { }
+                Interlocked.CompareExchange(ref _windowsPlayer, null, player);
+                player.Dispose();
             });
         }
 
         private Task StopOnWindowsAsync()
         {
+            var player = Interlocked.Exchange(ref _windowsPlayer, null);
             try
             {
-                _windowsPlayer?.Pause();
-                _windowsPlayer?.Dispose();
+                player?.Pause();
             }
             catch
             {
             }
-            finally
-            {
-                _windowsPlayer = null;
-            }
-
             return Task.CompletedTask;
         }
 
-        private async Task ApplyDynamicVolumeWindowsAsync(PreparedAudio prepared, CancellationToken cancellationToken)
+        private async Task ApplyDynamicVolumeWindowsAsync(PreparedAudio prepared, WinMediaPlayer player, CancellationToken cancellationToken)
         {
-            var player = _windowsPlayer;
-            if (player == null)
-                return;
-
             var durationMs = TryGetWindowsDurationMs(player);
             if (durationMs <= 0)
                 durationMs = 0;
@@ -360,7 +360,7 @@ namespace JoesScanner.Services
             // Unified volume scheduler (static fade plus tone ducking).
             while (!cancellationToken.IsCancellationRequested)
             {
-                if (_windowsPlayer == null)
+                if (!ReferenceEquals(Volatile.Read(ref _windowsPlayer), player))
                     return;
 
                 var posMs = 0;
@@ -410,7 +410,8 @@ namespace JoesScanner.Services
 #endif
 
 #if ANDROID
-        private async Task PlayOnAndroidAsync(PreparedAudio prepared, double playbackRate, CancellationToken cancellationToken)
+        private async Task PlayOnAndroidAsync(PreparedAudio prepared, double playbackRate, CancellationToken cancellationToken,
+            PlaybackCompletion completion)
         {
             await _androidClipGate.WaitAsync(cancellationToken);
             try
@@ -418,7 +419,7 @@ namespace JoesScanner.Services
                 // MediaPlayer and the interruption state have one owner, including when
                 // playback originated from a Bluetooth command or a background continuation.
                 await MainThread.InvokeOnMainThreadAsync(
-                    () => PlayAndroidClipOnMainThreadAsync(prepared, playbackRate, cancellationToken));
+                    () => PlayAndroidClipOnMainThreadAsync(prepared, playbackRate, cancellationToken, completion));
             }
             finally
             {
@@ -426,7 +427,8 @@ namespace JoesScanner.Services
             }
         }
 
-        private async Task PlayAndroidClipOnMainThreadAsync(PreparedAudio prepared, double rate, CancellationToken token)
+        private async Task PlayAndroidClipOnMainThreadAsync(PreparedAudio prepared, double rate, CancellationToken token,
+            PlaybackCompletion completion)
         {
             token.ThrowIfCancellationRequested();
             var context = Platform.AppContext;
@@ -438,7 +440,7 @@ namespace JoesScanner.Services
             try
             {
                 player.SetWakeMode(context, global::Android.OS.WakeLockFlags.Partial);
-                await PlayAndroidPlayerAsync(context, manager, player, prepared, rate, token);
+                await PlayAndroidPlayerAsync(context, manager, player, prepared, rate, token, completion);
             }
             finally
             {
@@ -447,7 +449,7 @@ namespace JoesScanner.Services
         }
 
         private async Task PlayAndroidPlayerAsync(Context context, AudioManager manager, Android.Media.MediaPlayer player,
-            PreparedAudio prepared, double rate, CancellationToken token)
+            PreparedAudio prepared, double rate, CancellationToken token, PlaybackCompletion completion)
         {
             using var builder = new AudioAttributes.Builder();
             builder.SetUsage(AudioUsageKind.Media);
@@ -458,10 +460,16 @@ namespace JoesScanner.Services
 
             player.SetAudioAttributes(attributes);
             player.Prepared += (_, _) => ready.TrySetResult();
-            player.Completion += (_, _) => finished.TrySetResult();
+            player.Completion += (_, _) =>
+            {
+                if (completion.Confirm(token))
+                    finished.TrySetResult();
+            };
             player.Error += (_, args) =>
             {
                 args.Handled = true;
+                if (!completion.Reject())
+                    return;
                 var error = new InvalidOperationException($"Android audio playback failed ({args.What}, {args.Extra}).");
                 if (!ready.TrySetException(error))
                     finished.TrySetException(error);
@@ -475,52 +483,125 @@ namespace JoesScanner.Services
             player.PrepareAsync();
             await ready.Task.WaitAsync(TimeSpan.FromSeconds(90), token);
 
+            // Snapshot the setting for this recording, including any resumed segments.
+            var mode = _settings.MobileAudio.Mode;
+            using var playerRoute = AndroidAudioEnvironment.WatchPlayer(player);
             while (true)
             {
-                await WaitUntilAndroidAudioAllowedAsync(manager, finished.Task, token);
-                if (finished.Task.IsCompleted)
-                {
-                    await finished.Task;
-                    return;
-                }
-
-                using var focus = new AndroidClipFocus(manager);
-                focus.Request(_settings.MobileAudio.Mode, attributes);
-                // A delayed request owns no focus. Cancel it if the route or call
-                // state changes while waiting, including an explicit Stop or Skip.
-                while (!focus.Granted.IsCompleted && !focus.Lost.IsCompleted &&
-                       CanEmitAndroidAudio() && !finished.Task.IsCompleted)
-                {
-                    await WaitForAndroidAudioChangeAsync(manager, token, focus.Granted, focus.Lost, finished.Task);
-                }
-
-                if (focus.Lost.IsCompleted)
-                {
-                    SuspendForAndroidFocus(manager, "Focus lost before playback");
-                    continue;
-                }
-                if (finished.Task.IsCompleted)
-                {
-                    await finished.Task;
-                    return;
-                }
-                if (!CanEmitAndroidAudio())
-                    continue;
-                if (!await focus.Granted)
-                {
-                    SuspendForAndroidFocus(manager, "Focus denied");
-                    continue;
-                }
-
                 token.ThrowIfCancellationRequested();
-                // Resume the prepared player at its paused position. If this player cannot
-                // resume, seek to the start of this same recording before trying again.
+                if (finished.Task.IsCompleted)
+                {
+                    await finished.Task;
+                    return;
+                }
+
+                if (!CanPlayAndroidAudio(mode))
+                {
+                    await WaitForAndroidAudioChangeAsync(manager, token, finished.Task);
+                    continue;
+                }
+                AndroidAudioEnvironment.RefreshExpectedRoute();
+                if (!CanPlayAndroidAudio(mode))
+                    continue;
+
+                var requestCallRevision = AndroidAudioEnvironment.CallRevision;
+                using var focus = new AndroidClipFocus(manager);
+                focus.Request(mode, attributes);
+                while (!finished.Task.IsCompleted && CanKeepAndroidFocus(mode))
+                {
+                    token.ThrowIfCancellationRequested();
+                    var action = AndroidAudioEnvironment.GetFocusAction(focus.Status, requestCallRevision);
+                    if (action == AndroidFocusAttemptAction.Block)
+                    {
+                        AndroidAudioEnvironment.ReadCallMode(manager);
+                        AndroidAudioEnvironment.BlockForFocus(requestCallRevision);
+                        AppLog.DebugWriteLine(() => $"Android audio focus: {focus.Status}. Explicit resume required={AndroidAudioEnvironment.RequiresPlay}.");
+                        break;
+                    }
+
+                    if (action == AndroidFocusAttemptAction.Renew)
+                        break;
+
+                    // Retain the listener across transient and duckable loss. Releasing
+                    // here would discard the gain callback and could strand the queue.
+                    if (action == AndroidFocusAttemptAction.Wait)
+                    {
+                        await WaitForAndroidAudioChangeAsync(manager, token, finished.Task, focus.Changed);
+                        continue;
+                    }
+
+                    await PlayAndroidSegmentAsync(manager, player, playerRoute, prepared, mode, rate, focus, finished.Task, token);
+                }
+            }
+        }
+
+        private async Task PlayAndroidSegmentAsync(AudioManager manager, Android.Media.MediaPlayer player,
+            AndroidAudioEnvironment.PlayerRouteWatch playerRoute, PreparedAudio prepared, MobileAudioMode mode, double rate,
+            AndroidClipFocus focus, Task finished, CancellationToken token)
+        {
+            var playing = false;
+            var showPlayingState = false;
+            var normalExit = false;
+            Exception? pauseFailure = null;
+            void Pause()
+            {
+                if (!playing)
+                    return;
+                playing = false;
+                try
+                {
+                    if (!finished.IsCompleted)
+                        player.Pause();
+                }
+                catch (Java.Lang.IllegalStateException ex)
+                {
+                    pauseFailure = ex;
+                }
+                finally
+                {
+                    playerRoute.SetAudible(false);
+                }
+            }
+
+            bool MayContinue() => CanPlayAndroidAudio(mode) && focus.Status == AndroidClipFocusStatus.Granted;
+            void OnEligibilityChanged()
+            {
+                if (!MayContinue())
+                    Pause();
+            }
+
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            var progress = new AndroidPlaybackProgress(player.CurrentPosition);
+            void OnInfo(object? sender, Android.Media.MediaPlayer.InfoEventArgs args)
+            {
+                if (args.What is MediaInfo.BufferingStart or MediaInfo.BufferingEnd)
+                    progress.BufferingChanged(args.What == MediaInfo.BufferingStart, elapsed.Elapsed);
+            }
+
+            using var audibleSegment = CancellationTokenSource.CreateLinkedTokenSource(token);
+            Task? volume = null;
+            player.Info += OnInfo;
+            focus.LostAudibility += Pause;
+            AndroidAudioEnvironment.PlaybackBlocked += Pause;
+            SystemMediaService.AndroidForeground.StateChanged += OnEligibilityChanged;
+            try
+            {
+                token.ThrowIfCancellationRequested();
+                AndroidAudioEnvironment.RefreshExpectedRoute();
+                if (finished.IsCompleted || !MayContinue())
+                {
+                    normalExit = true;
+                    return;
+                }
+
+                // Keep the same prepared player and resume at its paused position.
                 try { player.Start(); }
                 catch (Java.Lang.IllegalStateException)
                 {
                     player.SeekTo(0);
                     player.Start();
                 }
+                playing = true;
                 try
                 {
                     using var speed = new PlaybackParams();
@@ -532,86 +613,79 @@ namespace JoesScanner.Services
                     AppLog.DebugWriteLine(() => $"Android playback speed could not be set ({ex.GetType().Name}).");
                 }
 
-                using var audibleSegment = CancellationTokenSource.CreateLinkedTokenSource(token);
-                Task? volume = null;
-                try
+                playerRoute.SetAudible(true);
+                if (playing)
                 {
+                    showPlayingState = true;
                     await _systemMediaService.SetClipPlaybackStateAsync(true, true, "AndroidClipStarted");
                     if (prepared.StaticFilterEnabled || (prepared.ToneFilterEnabled && prepared.ToneDuckSegments.Count > 0))
                         volume = ApplyDynamicVolumeAndroidAsync(prepared, player, audibleSegment.Token);
-
-                    var seconds = Math.Clamp((player.Duration / 1000d / rate * 2) + 120, 180, 10800);
-                    var deadline = System.Diagnostics.Stopwatch.StartNew();
-                    while (!finished.Task.IsCompleted && !focus.Lost.IsCompleted && CanEmitAndroidAudio())
-                    {
-                        if (deadline.Elapsed.TotalSeconds >= seconds)
-                            throw new TimeoutException("Android audio playback timed out.");
-                        await WaitForAndroidAudioChangeAsync(manager, token, focus.Lost, finished.Task);
-                    }
-
-                    if (focus.Lost.IsCompleted)
-                        SuspendForAndroidFocus(manager, "Focus lost during playback");
-
-                    if (finished.Task.IsCompleted)
-                    {
-                        await finished.Task;
-                        return;
-                    }
                 }
-                finally
+
+                var playbackLimit = TimeSpan.FromSeconds(Math.Clamp((player.Duration / 1000d / rate * 2) + 120, 180, 10800));
+                while (playing && !finished.IsCompleted && MayContinue())
                 {
-                    try
-                    {
-                        if (!finished.Task.IsCompleted)
-                            player.Pause();
-                    }
-                    catch (Java.Lang.IllegalStateException ex)
-                    {
-                        token.ThrowIfCancellationRequested();
-                        throw new InvalidOperationException("An interrupted Android recording could not be paused.", ex);
-                    }
-                    finally
-                    {
-                        focus.Release();
-                        audibleSegment.Cancel();
-                        await _systemMediaService.SetClipPlaybackStateAsync(false, true, "AndroidClipIdle");
-                        if (volume != null)
-                            await volume;
-                    }
+                    playerRoute.ReadInitialRoute();
+                    if (!playing)
+                        break;
+                    if (progress.IsStalled(player.CurrentPosition, elapsed.Elapsed))
+                        throw new TimeoutException("Android audio stalled. Press Play to retry this recording.");
+                    if (elapsed.Elapsed >= playbackLimit)
+                        throw new TimeoutException("Android audio playback timed out.");
+                    await WaitForAndroidAudioChangeAsync(manager, token, finished, focus.Changed, observeProgress: true);
+                }
+                normalExit = true;
+            }
+            finally
+            {
+                player.Info -= OnInfo;
+                focus.LostAudibility -= Pause;
+                AndroidAudioEnvironment.PlaybackBlocked -= Pause;
+                SystemMediaService.AndroidForeground.StateChanged -= OnEligibilityChanged;
+                Pause();
+                if (!normalExit || pauseFailure != null || finished.IsCompleted ||
+                    token.IsCancellationRequested || !CanKeepAndroidFocus(mode) ||
+                    (AndroidAudioEnvironment.CallActive && focus.Status == AndroidClipFocusStatus.Granted) ||
+                    focus.Status == AndroidClipFocusStatus.PermanentLoss)
+                    focus.Release();
+                audibleSegment.Cancel();
+                if (showPlayingState)
+                    await _systemMediaService.SetClipPlaybackStateAsync(false, true, "AndroidClipIdle");
+                if (volume != null)
+                    await volume;
+                if (pauseFailure != null)
+                {
+                    token.ThrowIfCancellationRequested();
+                    throw new InvalidOperationException("An interrupted Android recording could not be paused.", pauseFailure);
                 }
             }
         }
 
-        private static void SuspendForAndroidFocus(AudioManager manager, string reason)
+        private static bool HasAndroidAudioEligibility(MobileAudioMode mode)
         {
-            AndroidAudioEnvironment.ReadCallMode(manager);
-            AndroidAudioEnvironment.BlockForFocus();
-            AppLog.DebugWriteLine(() => $"Android audio: {reason}. Explicit resume required={AndroidAudioEnvironment.RequiresPlay}.");
+            var needsFocus = OperatingSystem.IsAndroidVersionAtLeast(35) && mode != MobileAudioMode.MixNormally;
+            return SystemMediaService.AndroidForeground.CanPlay(
+                requiresForegroundService: OperatingSystem.IsAndroidVersionAtLeast(37) || needsFocus,
+                requiresTopActivity: needsFocus);
         }
 
-        private static async Task WaitUntilAndroidAudioAllowedAsync(AudioManager manager, Task finished, CancellationToken token)
+        private static bool CanPlayAndroidAudio(MobileAudioMode mode) =>
+            HasAndroidAudioEligibility(mode) && !AndroidAudioEnvironment.IsBlocked;
+
+        private static bool CanKeepAndroidFocus(MobileAudioMode mode) =>
+            HasAndroidAudioEligibility(mode) && !AndroidAudioEnvironment.RoutePaused &&
+            !AndroidAudioEnvironment.RequiresNewFocusRequest;
+
+        private static async Task WaitForAndroidAudioChangeAsync(AudioManager manager, CancellationToken token,
+            Task finished, Task? focusChanged = null, bool observeProgress = false)
         {
+            // Audio-mode listeners aren't available on every device. Reconcile
+            // mode at the same wakeups used to check for actual player progress.
+            var interval = OperatingSystem.IsAndroidVersionAtLeast(31) ? (observeProgress ? 250 : 1000) : 150;
+            await Task.WhenAny(finished, focusChanged ?? finished,
+                AndroidAudioEnvironment.Changed, SystemMediaService.AndroidForeground.Changed, Task.Delay(interval, token));
             token.ThrowIfCancellationRequested();
             AndroidAudioEnvironment.ReadCallMode(manager);
-            while (!CanEmitAndroidAudio() && !finished.IsCompleted)
-                await WaitForAndroidAudioChangeAsync(manager, token, finished);
-        }
-
-        private static bool CanEmitAndroidAudio() =>
-            !AndroidAudioEnvironment.IsBlocked &&
-            (!OperatingSystem.IsAndroidVersionAtLeast(37) || MainActivity.IsAudioActivityVisible ||
-             AudioForegroundService.IsForegroundReady);
-
-        private static async Task WaitForAndroidAudioChangeAsync(AudioManager manager, CancellationToken token, params Task[] signals)
-        {
-            // Modern Android supplies a mode listener. The periodic tick also checks
-            // the playback watchdog and whether the foreground service has promoted.
-            var legacyModePolling = !OperatingSystem.IsAndroidVersionAtLeast(31);
-            await Task.WhenAny([.. signals, AndroidAudioEnvironment.Changed,
-                Task.Delay(legacyModePolling ? 100 : 1000, token)]);
-            token.ThrowIfCancellationRequested();
-            if (legacyModePolling)
-                AndroidAudioEnvironment.ReadCallMode(manager);
         }
 
         private async Task ApplyDynamicVolumeAndroidAsync(PreparedAudio prepared, Android.Media.MediaPlayer player, CancellationToken cancellationToken)
@@ -643,7 +717,8 @@ namespace JoesScanner.Services
 #endif
 
 #if MACCATALYST
-        private async Task PlayOnAppleAsync(PreparedAudio prepared, double playbackRate, CancellationToken cancellationToken)
+        private async Task PlayOnAppleAsync(PreparedAudio prepared, double playbackRate, CancellationToken cancellationToken,
+            PlaybackCompletion completion)
         {
             await StopOnAppleAsync();
 
@@ -682,11 +757,11 @@ namespace JoesScanner.Services
 	                        _iosTempDownloadedFile = localPath;
 	                        requestedUrl = new Uri(localPath).AbsoluteUri;
 	                        nsUrl = NSUrl.FromFilename(localPath);
-	                        AppLog.Add(() => $"Audio(iOS): downloaded http audio to {localPath}");
+	                        AppLog.Add("Audio(iOS): downloaded recording for local playback.");
 	                    }
 	                    catch (Exception ex)
 	                    {
-	                        try { AppLog.Add(() => $"Audio(iOS): http download failed: {ex.Message}"); } catch { }
+	                        try { AppLog.Add(() => $"Audio(iOS): http download failed ({ex.GetType().Name})."); } catch { }
 	                        // Fall back to streaming attempt.
 	                        nsUrl = NSUrl.FromString(audioUrl);
 	                    }
@@ -719,8 +794,7 @@ namespace JoesScanner.Services
                 try
                 {
                     var scheme = nsUrl.Scheme ?? string.Empty;
-                    var abs = nsUrl.AbsoluteString ?? string.Empty;
-                    AppLog.Add(() => $"Audio(iOS): AVPlayerItem url={abs} scheme={scheme}");
+                    AppLog.Add(() => $"Audio(iOS): AVPlayerItem scheme={scheme}");
                 }
                 catch
                 {
@@ -737,7 +811,7 @@ namespace JoesScanner.Services
 
 	                _iosEndObserver = NSNotificationCenter.DefaultCenter.AddObserver(
 	                    AVPlayerItem.DidPlayToEndTimeNotification,
-                    _ => { try { tcs.TrySetResult(); } catch { } },
+	                    _ => { if (completion.Confirm(cancellationToken)) tcs.TrySetResult(); },
                     item);
 
 	                // Some notification constants are missing in certain SDK bindings; use raw names.
@@ -757,11 +831,11 @@ namespace JoesScanner.Services
                             {
 	                                var obj = n.UserInfo[failedErrorKey];
                                 if (obj is NSError nsErr)
-                                    errText = $"{nsErr.Domain} ({(int)nsErr.Code}): {nsErr.LocalizedDescription}";
+                                    errText = $"{nsErr.Domain} ({(int)nsErr.Code})";
                             }
 
                             if (string.IsNullOrWhiteSpace(errText) && item.Error != null)
-                                errText = $"{item.Error.Domain} ({(int)item.Error.Code}): {item.Error.LocalizedDescription}";
+                                errText = $"{item.Error.Domain} ({(int)item.Error.Code})";
 
                             if (string.IsNullOrWhiteSpace(errText))
                                 errText = "unknown_error";
@@ -772,7 +846,8 @@ namespace JoesScanner.Services
                         {
                         }
 
-                        tcs.TrySetException(new InvalidOperationException("The recording could not be played to completion."));
+                        if (completion.Reject())
+                            tcs.TrySetException(new InvalidOperationException("The recording could not be played to completion."));
                     },
                     item);
 
@@ -789,7 +864,7 @@ namespace JoesScanner.Services
                                 last = events[events.Length - 1];
                             if (last != null)
                             {
-                                AppLog.Add(() => $"Audio(iOS): ErrorLog: domain={last.ErrorDomain}, code={last.ErrorStatusCode}, comment={last.ErrorComment}");
+                                AppLog.Add(() => $"Audio(iOS): ErrorLog: domain={last.ErrorDomain}, code={last.ErrorStatusCode}");
                             }
                         }
                         catch
@@ -853,6 +928,8 @@ namespace JoesScanner.Services
                 _iosFailObserver = null;
                 _iosErrorLogObserver = null;
 
+                if (cancellationToken.IsCancellationRequested)
+                    await StopOnAppleAsync();
             }
         }
 

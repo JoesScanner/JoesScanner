@@ -1,21 +1,34 @@
-using JoesScanner.Helpers;
-
 namespace JoesScanner.Services;
 
 internal static class ForegroundRecoveryEntitlement
 {
-    internal static async Task<DateTimeOffset?> GetCutoffAsync(ISettingsService settings,
-        ISubscriptionService subscription, string serverUrl, DateTimeOffset since, TimeProvider clock,
-        CancellationToken token)
+    internal static async Task<RecordingPlaybackAccess.HistoryGrant?> TryVerifyAsync(ISettingsService settings,
+        ISubscriptionService subscription, string server, TimeProvider clock, CancellationToken token,
+        RecordingPlaybackAccess.HistoryGrant? previous = null)
     {
-        if (!HostedServerRules.RequiresApiFirewallCredentials(settings, serverUrl))
-            return since;
+        // Polling runs every two seconds. Reuse a recent successful check while
+        // its account, tier, and expiry remain current. Never reuse an offline result.
+        if (previous?.Server == server && clock.GetUtcNow() - previous.VerifiedAt < TimeSpan.FromSeconds(15))
+        {
+            try
+            {
+                previous.Validate(settings);
+                return previous;
+            }
+            catch (RecordingAccessException)
+            {
+                // The account changed, or a newer check revoked this grant.
+            }
+        }
 
-        var result = await subscription.EnsureSubscriptionAsync(token).ConfigureAwait(false);
-        if (!result.IsAllowed || result.VerifiedOnlineTier is not > 0)
+        try
+        {
+            return await RecordingPlaybackAccess.VerifyHistoryAsync(settings, subscription, server, token, clock)
+                .ConfigureAwait(false);
+        }
+        catch (RecordingAccessException)
+        {
             return null;
-
-        var minimum = clock.GetUtcNow().AddHours(-24);
-        return result.VerifiedOnlineTier == 1 && since < minimum ? minimum : since;
+        }
     }
 }

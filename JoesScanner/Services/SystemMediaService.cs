@@ -4,14 +4,16 @@ namespace JoesScanner.Services
     public partial class SystemMediaService : ISystemMediaService
     {
         private readonly ISettingsService _settings;
+        private readonly PlaybackOwnership _playbackOwnership;
         private Func<Task>? _onPlay;
         private Func<Task>? _onStop;
         private Func<Task>? _onNext;
         private Func<Task>? _onPrevious;
 
-        public SystemMediaService(ISettingsService settings)
+        public SystemMediaService(ISettingsService settings, PlaybackOwnership playbackOwnership)
         {
             _settings = settings;
+            _playbackOwnership = playbackOwnership;
         }
 
         public void SetHandlers(Func<Task> onPlay, Func<Task> onStop, Func<Task>? onNext = null, Func<Task>? onPrevious = null)
@@ -24,14 +26,14 @@ namespace JoesScanner.Services
             PlatformSetHandlers(onPlay, onStop, onNext, onPrevious);
         }
 
-        public Task StartSessionAsync(bool audioEnabled)
+        public Task StartSessionAsync(bool audioEnabled, long monitoringRunId)
         {
-            return PlatformStartSessionAsync(audioEnabled);
+            return PlatformStartSessionAsync(audioEnabled, monitoringRunId);
         }
 
-        public Task StopSessionAsync()
+        public Task StopSessionAsync(long monitoringRunId)
         {
-            return PlatformStopSessionAsync();
+            return PlatformStopSessionAsync(monitoringRunId);
         }
 
         public void UpdateNowPlaying(string title, string subtitle, bool audioEnabled)
@@ -57,6 +59,10 @@ namespace JoesScanner.Services
 
         public Task SetClipPlaybackStateAsync(bool isPlaying, bool audioEnabled, string reason)
         {
+            // History can play while monitoring stays connected, but it
+            // doesn't publish a clip through Live's remote command handlers.
+            if (isPlaying && !_playbackOwnership.CanPublishLivePlayback)
+                return Task.CompletedTask;
             return PlatformSetClipPlaybackStateAsync(isPlaying, audioEnabled, reason ?? string.Empty);
         }
 
@@ -127,8 +133,8 @@ namespace JoesScanner.Services
 
         // Platform hooks
         private partial void PlatformSetHandlers(Func<Task> onPlay, Func<Task> onStop, Func<Task>? onNext, Func<Task>? onPrevious);
-        private partial Task PlatformStartSessionAsync(bool audioEnabled);
-        private partial Task PlatformStopSessionAsync();
+        private partial Task PlatformStartSessionAsync(bool audioEnabled, long monitoringRunId);
+        private partial Task PlatformStopSessionAsync(long monitoringRunId);
         private partial void PlatformUpdateNowPlaying(NowPlayingMetadata metadata, bool audioEnabled);
         private partial Task PlatformRefreshAudioSessionAsync(bool audioEnabled, string reason);
         private partial Task PlatformSetClipPlaybackStateAsync(bool isPlaying, bool audioEnabled, string reason);

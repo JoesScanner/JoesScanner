@@ -40,7 +40,13 @@ internal sealed class LiveCallState(string serverUrl, string id)
     // cannot replace a field supplied by a later observation. Missing values never erase data.
     public bool Observe(LiveCallSnapshot update, long version) => Observe(update, version, out _);
 
-    public bool Observe(LiveCallSnapshot update, long version, out string? changedTranscription)
+    public bool Observe(LiveCallSnapshot update, long version, out string? changedTranscription) =>
+        Observe(update, version, out changedTranscription, recoveringAudio: false, priorUrl: null);
+
+    internal void ObserveRecoveredAudio(LiveCallSnapshot update, long version, string? priorUrl) =>
+        Observe(update, version, out _, recoveringAudio: true, priorUrl);
+
+    private bool Observe(LiveCallSnapshot update, long version, out string? changedTranscription, bool recoveringAudio, string? priorUrl)
     {
         lock (_gate)
         {
@@ -75,9 +81,12 @@ internal sealed class LiveCallState(string serverUrl, string id)
 
             changedTranscription = transcript != _snapshot.Transcription ? transcript : null;
             var audioUrl = _snapshot.AudioUrl;
-            if (!string.IsNullOrWhiteSpace(update.AudioUrl) && version >= _audioVersion)
+            // A duplicate notification carrying the same stale URL does not
+            // supersede a fresh lookup. A genuinely different later URL does.
+            if (!string.IsNullOrWhiteSpace(update.AudioUrl) &&
+                (version >= _audioVersion || recoveringAudio && audioUrl == priorUrl))
             {
-                _audioVersion = version;
+                _audioVersion = Math.Max(_audioVersion, version);
                 audioUrl = update.AudioUrl;
             }
             var changed = current != metadata || changedTranscription != null || audioUrl != _snapshot.AudioUrl;

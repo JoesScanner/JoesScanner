@@ -17,7 +17,8 @@ namespace JoesScanner.Services
 
         Task ResetSessionAsync(string reason, CancellationToken cancellationToken);
 
-        Task AdoptSessionTokenAsync(string newSessionToken, string reason, CancellationToken cancellationToken);
+        Task AdoptSessionTokenAsync(string newSessionToken, string reason, CancellationToken cancellationToken,
+            long? expectedVersion = null);
 
         Task TryFlushQueueAsync(CancellationToken cancellationToken);
     }

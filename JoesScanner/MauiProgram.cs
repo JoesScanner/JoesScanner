@@ -36,18 +36,24 @@ public static class MauiProgram
         builder.Services.AddSingleton<ISettingsService, SettingsService>();
         builder.Services.AddSingleton<CallCardOptionsService>();
         builder.Services.AddSingleton<IDatabasePathProvider, DatabasePathProvider>();
+        builder.Services.AddSingleton<IDbMaintenanceService, DbMaintenanceService>();
         builder.Services.AddSingleton<ILocalCallsRepository, LocalCallsRepository>();
+        builder.Services.AddSingleton<DurableLiveQueue>();
         builder.Services.AddSingleton<IHistoryLookupsRepository, HistoryLookupsRepository>();
         builder.Services.AddSingleton<ICallStreamService, CallStreamService>();
         builder.Services.AddSingleton<ICallHistoryService, CallHistoryService>();
         builder.Services.AddSingleton<IHistoryLookupsCacheService, HistoryLookupsCacheService>();
         builder.Services.AddSingleton<IAudioFilterService, AudioFilterService>();
         builder.Services.AddSingleton<IAudioPlaybackService, AudioPlaybackService>();
+        builder.Services.AddSingleton<PlaybackOwnership>();
         builder.Services.AddSingleton<ISystemMediaService, SystemMediaService>();
         builder.Services.AddSingleton<ISubscriptionService, SubscriptionService>();
         builder.Services.AddSingleton<ITelemetryService, TelemetryService>();
-        builder.Services.AddSingleton<IAuthLookupsSyncService, AuthLookupsSyncService>();
-        builder.Services.AddSingleton<IAuthObservedTriplesSyncService, AuthObservedTriplesSyncService>();
+        builder.Services.AddSingleton<IAuthLookupsSyncService>(sp =>
+            new AuthLookupsSyncService(sp.GetRequiredService<ISettingsService>(), WordPressSession.CreateClient()));
+        builder.Services.AddSingleton<IAuthObservedTriplesSyncService>(sp =>
+            new AuthObservedTriplesSyncService(sp.GetRequiredService<ISettingsService>(),
+                sp.GetRequiredService<IDatabasePathProvider>(), WordPressSession.CreateClient()));
         builder.Services.AddSingleton<IAddressDetectionService, AddressDetectionService>();
         builder.Services.AddSingleton<IWhat3WordsService, What3WordsService>();
         builder.Services.AddSingleton<IAppUpdateService, AppUpdateService>();
@@ -65,7 +71,7 @@ public static class MauiProgram
         // Keeping HttpClient transient here avoids shared state issues (BaseAddress, headers, timeout).
         builder.Services.AddTransient(sp => new HttpClient());
 
-        builder.Services.AddSingleton<ICommunicationsService, CommunicationsService>();
+        builder.Services.AddSingleton<ICommunicationsService>(_ => new CommunicationsService(WordPressSession.CreateClient()));
         builder.Services.AddSingleton<ICommunicationsSyncCoordinator, CommunicationsSyncCoordinator>();
         builder.Services.AddSingleton<ICommsBadgeService, CommsBadgeService>();
         builder.Services.AddSingleton<IJoesScannerApiClient, JoesScannerApiClient>();

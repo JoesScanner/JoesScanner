@@ -55,7 +55,7 @@ namespace JoesScanner.Services
             // Cache hit.
             if (_cache.TryGetValue(normalized, out var cached))
             {
-                Apply(item, normalized, cached.Lat, cached.Lng);
+                Apply(item, normalized, cached.Lat, cached.Lng, cancellationToken);
                 return;
             }
 
@@ -88,7 +88,7 @@ namespace JoesScanner.Services
                 }
 
                 _cache[normalized] = (lat, lng);
-                Apply(item, normalized, lat, lng);
+                Apply(item, normalized, lat, lng, cancellationToken);
 
                 if (AppLog.IsEnabled)
                     AppLog.Add(() => $"W3W: resolved '{normalized}' to {lat:F6},{lng:F6}");
@@ -107,10 +107,12 @@ namespace JoesScanner.Services
             }
         }
 
-        private static void Apply(CallItem item, string normalized, double lat, double lng)
+        private static void Apply(CallItem item, string normalized, double lat, double lng, CancellationToken cancellationToken)
         {
             MainThread.BeginInvokeOnMainThread(() =>
             {
+                if (cancellationToken.IsCancellationRequested)
+                    return;
                 try
                 {
                     item.What3WordsNormalized = normalized;

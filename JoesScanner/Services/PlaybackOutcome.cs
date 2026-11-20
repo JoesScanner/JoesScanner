@@ -5,7 +5,8 @@ internal enum PlaybackOutcome
     Completed,
     Skipped,
     Canceled,
-    Failed
+    Failed,
+    Withheld
 }
 
 internal static class PlaybackAttempt
@@ -14,17 +15,23 @@ internal static class PlaybackAttempt
         outcome is PlaybackOutcome.Completed or PlaybackOutcome.Skipped;
 
     internal static async Task<PlaybackOutcome> RunAsync(Func<Task> play, CancellationToken token,
-        Action<Exception> reportFailure)
+        Action<Exception> reportFailure, PlaybackCompletion? completion = null)
     {
         try
         {
             token.ThrowIfCancellationRequested();
             await play();
-            return token.IsCancellationRequested ? PlaybackOutcome.Canceled : PlaybackOutcome.Completed;
+            if (completion?.Confirmed == true)
+                return PlaybackOutcome.Completed;
+            if (token.IsCancellationRequested)
+                return PlaybackOutcome.Canceled;
+            if (completion != null)
+                throw new InvalidOperationException("The native player did not confirm the end of the recording.");
+            return PlaybackOutcome.Completed;
         }
         catch (OperationCanceledException ex) when (LivePlaybackRequests.IsExpectedCancellation(ex, token))
         {
-            return PlaybackOutcome.Canceled;
+            return completion?.Confirmed == true ? PlaybackOutcome.Completed : PlaybackOutcome.Canceled;
         }
         catch (Exception ex)
         {
