@@ -17,7 +17,7 @@ namespace JoesScanner.Services;
 // must be handled via EnsureColumnExists.
 public static class DbBootstrapper
 {
-    private const int CurrentSchemaVersion = 4;
+    private const int CurrentSchemaVersion = 5;
     private static readonly SemaphoreSlim InitializationGate = new(1, 1);
     private static readonly ConcurrentDictionary<string, byte> InitializedDataSources = new(StringComparer.OrdinalIgnoreCase);
 
@@ -45,6 +45,7 @@ public static class DbBootstrapper
             await EnsureSchemaV1Async(connection, cancellationToken).ConfigureAwait(false);
             if (version < CurrentSchemaVersion)
                 await MigrateLiveQueueAsync(connection, cancellationToken).ConfigureAwait(false);
+            await EnsureLiveRecoverySchemaAsync(connection, cancellationToken).ConfigureAwait(false);
 
             if (!string.IsNullOrWhiteSpace(dataSource))
                 InitializedDataSources[dataSource] = 0;
@@ -57,6 +58,29 @@ public static class DbBootstrapper
 
     public static void EnsureInitialized(SqliteConnection connection) =>
         EnsureInitializedAsync(connection).GetAwaiter().GetResult();
+
+    private static async Task EnsureLiveRecoverySchemaAsync(SqliteConnection connection, CancellationToken token)
+    {
+        await using var transaction = connection.BeginTransaction();
+        await EnsureColumnExistsAsync(connection, "live_queue_recordings", "recovery_backlog",
+            "INTEGER NOT NULL DEFAULT 0", token, transaction).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            CREATE TABLE IF NOT EXISTS live_queue_recovery (
+                server TEXT NOT NULL,
+                account_scope TEXT NOT NULL,
+                window_id TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                since_utc INTEGER NOT NULL,
+                skip_unseen INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (server, account_scope),
+                FOREIGN KEY (server, account_scope) REFERENCES live_queue_servers (server, account_scope)
+            );
+            """;
+        await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        await transaction.CommitAsync(token).ConfigureAwait(false);
+    }
 
     public static async Task ApplyPragmasAsync(SqliteConnection connection, CancellationToken cancellationToken = default)
     {
@@ -250,7 +274,60 @@ CREATE INDEX IF NOT EXISTS idx_unregistered_queue_created ON unregistered_sessio
 
         await using var queue = connection.CreateCommand();
         queue.Transaction = transaction;
+        if (version < 4)
+            await MigrateLiveQueueScopesAsync(connection, transaction, queue, token).ConfigureAwait(false);
 
+        // Use the old insertion rowids for a deterministic order and keep the
+        // maintenance cursor valid. The old schema did not record local acceptance order.
+        queue.CommandText = """
+            CREATE TABLE live_queue_recordings_v5 (
+                arrival_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                server TEXT NOT NULL,
+                account_scope TEXT NOT NULL DEFAULT '',
+                recording_id TEXT NOT NULL,
+                recorded_utc INTEGER,
+                first_owner INTEGER NOT NULL,
+                payload TEXT,
+                audio_ready INTEGER NOT NULL,
+                disposition INTEGER NOT NULL DEFAULT 0 CHECK(disposition IN (0, 1, 2)),
+                origin INTEGER NOT NULL DEFAULT 0,
+                protected INTEGER NOT NULL DEFAULT 0 CHECK(protected = (account_scope <> '')),
+                UNIQUE(server, account_scope, recording_id),
+                FOREIGN KEY(server, account_scope) REFERENCES live_queue_servers(server, account_scope)
+            );
+            INSERT INTO live_queue_recordings_v5
+                (arrival_sequence, server, account_scope, recording_id, recorded_utc,
+                 first_owner, payload, audio_ready, disposition, origin, protected)
+            SELECT rowid, server, account_scope, recording_id, recorded_utc,
+                   first_owner, payload, audio_ready, disposition, origin, protected
+            FROM live_queue_recordings ORDER BY rowid;
+            DROP TABLE live_queue_recordings;
+            ALTER TABLE live_queue_recordings_v5 RENAME TO live_queue_recordings;
+            ALTER TABLE live_queue_servers DROP COLUMN jump_utc;
+            ALTER TABLE live_queue_servers DROP COLUMN jump_id;
+            CREATE INDEX live_queue_pending_arrival
+                ON live_queue_recordings(server, account_scope, arrival_sequence) WHERE disposition = 0;
+            CREATE INDEX live_queue_transport_arrival
+                ON live_queue_recordings(server, account_scope, arrival_sequence);
+            CREATE TABLE IF NOT EXISTS schema_meta (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                schema_version INTEGER NOT NULL,
+                updated_utc TEXT NOT NULL
+            );
+            INSERT INTO schema_meta (id, schema_version, updated_utc)
+            VALUES (1, $v, $u)
+            ON CONFLICT(id) DO UPDATE SET schema_version = excluded.schema_version, updated_utc = excluded.updated_utc;
+            """ + $"\nPRAGMA user_version={CurrentSchemaVersion};";
+        queue.Parameters.AddWithValue("$v", CurrentSchemaVersion);
+        queue.Parameters.AddWithValue("$u", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+        await queue.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        await transaction.CommitAsync(token).ConfigureAwait(false);
+    }
+
+    private static async Task MigrateLiveQueueScopesAsync(SqliteConnection connection, SqliteTransaction transaction,
+        SqliteCommand queue, CancellationToken token)
+    {
         // Older installations can predate the Live journal entirely.
         queue.CommandText = """
                 CREATE TABLE IF NOT EXISTS live_queue_servers (
@@ -356,27 +433,8 @@ CREATE INDEX IF NOT EXISTS idx_unregistered_queue_created ON unregistered_sessio
             DROP TABLE live_queue_servers;
             ALTER TABLE live_queue_servers_v4 RENAME TO live_queue_servers;
             ALTER TABLE live_queue_recordings_v4 RENAME TO live_queue_recordings;
-            CREATE INDEX live_queue_pending_order
-                ON live_queue_recordings(server, account_scope, recorded_utc, recording_id)
-                WHERE disposition = 0 AND audio_ready = 1;
-            CREATE INDEX live_queue_pending_chronological
-                ON live_queue_recordings(server, account_scope, recorded_utc, recording_id) WHERE disposition = 0;
-            CREATE INDEX live_queue_transport_order
-                ON live_queue_recordings(server, account_scope, recorded_utc, recording_id);
-            CREATE TABLE IF NOT EXISTS schema_meta (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                schema_version INTEGER NOT NULL,
-                updated_utc TEXT NOT NULL
-            );
-            INSERT INTO schema_meta (id, schema_version, updated_utc)
-            VALUES (1, $v, $u)
-            ON CONFLICT(id) DO UPDATE SET schema_version = excluded.schema_version, updated_utc = excluded.updated_utc;
-            """ + $"\nPRAGMA user_version={CurrentSchemaVersion};";
-        queue.Parameters.AddWithValue("$v", CurrentSchemaVersion);
-        queue.Parameters.AddWithValue("$u", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            """;
         await queue.ExecuteNonQueryAsync(token).ConfigureAwait(false);
-        token.ThrowIfCancellationRequested();
-        await transaction.CommitAsync(token).ConfigureAwait(false);
     }
 
 

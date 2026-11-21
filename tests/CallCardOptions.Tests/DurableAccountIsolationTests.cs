@@ -63,9 +63,9 @@ internal static class DurableAccountIsolationTests
         var jump = await queue.JumpToLiveAsync(b, 0, skipSelected: true, default);
         Check(jump?.Target.Id == "bulk-509", "Jump to Live must find the last recording in its own backlog.");
         Check(await queue.NextAsync(b, 0, default) == null, "Jump must retire B's selected backlog.");
-        var previous = await queue.FindTransportTargetAsync(b, 0, jump!.Target.Order, older: true, default);
+        var previous = await queue.FindTransportTargetAsync(b, 0, jump!.Target.ArrivalSequence, older: true, default);
         Check(previous?.Id == "bulk-508" &&
-              (await queue.FindTransportTargetAsync(b, 0, previous.Order, older: false, default))?.Id == "bulk-509",
+              (await queue.FindTransportTargetAsync(b, 0, previous.ArrivalSequence, older: false, default))?.Id == "bulk-509",
             "Previous and Next must navigate B's scoped journal.");
         await queue.CommitCompletionAsync(a, "interrupted");
         Check(!await Observe(queue, a, "delayed", Now, "retired"), "A retired observation must not commit.");
@@ -242,12 +242,12 @@ internal static class DurableAccountIsolationTests
 
         await using var reopened = await OpenAsync(paths);
         await DbBootstrapper.EnsureInitializedAsync(reopened);
-        Check(Scalar(reopened, "PRAGMA user_version") == 4 &&
-              Scalar(reopened, "SELECT schema_version FROM schema_meta") == 4 &&
+        Check(Scalar(reopened, "PRAGMA user_version") == 5 &&
+              Scalar(reopened, "SELECT schema_version FROM schema_meta") == 5 &&
               Scalar(reopened, "SELECT count(*) FROM pragma_foreign_key_check") == 0 &&
               Scalar(reopened, "SELECT count(*) FROM live_queue_recordings WHERE rowid BETWEEN 50 AND 57") == 6 &&
               Scalar(reopened, "SELECT count(*) FROM live_queue_recordings WHERE account_scope=':legacy'") == (version == 2 ? 5 : 2) &&
-              Scalar(reopened, "SELECT count(*) FROM live_queue_servers WHERE account_scope=':legacy' AND owner=8 AND resume_id='pending' AND jump_id='skipped'") == 1 &&
+              Scalar(reopened, "SELECT count(*) FROM live_queue_servers WHERE account_scope=':legacy' AND owner=8 AND resume_id='pending'") == 1 &&
               Scalar(reopened, "SELECT count(*) FROM live_queue_servers WHERE account_scope='' AND resume_id='custom-pending'") == 1,
             "Migration must preserve rowids and archived run state with consistent keys and version metadata.");
         Console.WriteLine($"PASS Populated v{version} migration, late rollback, reopen, preserved dispositions and conservative legacy scope");

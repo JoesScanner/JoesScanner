@@ -57,12 +57,12 @@ namespace JoesScanner.ViewModels
                 // A rapidly reopened Live queue must read after a completed
                 // clip from the previous lease has saved its disposition.
                 await FlushLiveCompletionAsync(token);
-                while (OwnsSelection() && AudioEnabled)
+                while (OwnsSelection() && AudioEnabled && !IsLiveInterruptionBlockingPlayback)
                 {
                     var beforeRead = _queueWake.BeforeRead();
                     var next = durable == null ? GetNextQueuedCall() :
                         await GetNextDurableCallAsync(durable, token, version);
-                    if (!OwnsSelection() || !AudioEnabled)
+                    if (!OwnsSelection() || !AudioEnabled || IsLiveInterruptionBlockingPlayback)
                         break;
                     if (next == null)
                     {
@@ -143,7 +143,7 @@ namespace JoesScanner.ViewModels
                     AppLog.DebugWriteLine(() => $"Audio teardown after confirmed playback ({ex.GetType().Name}).");
                 }
 
-                if (completion.Confirmed && scope != null && TryGetDurableRecording(item, scope, out var id, out _))
+                if (completion.Confirmed && scope != null && TryGetDurableRecording(item, scope, out var id))
                     await _playbackCommit.ConfirmAsync(scope, id);
             }
             finally

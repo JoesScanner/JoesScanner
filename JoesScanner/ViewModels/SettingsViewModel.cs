@@ -372,7 +372,6 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
         private string _bluetoothLabelAlbumToken = BluetoothLabelMapping.TokenTalkgroup;
         private string _bluetoothLabelComposerToken = BluetoothLabelMapping.TokenSite;
         private string _bluetoothLabelGenreToken = BluetoothLabelMapping.TokenReceiver;
-        private static bool SupportsMobileAudioOptions => OperatingSystem.IsAndroid() || OperatingSystem.IsIOS();
         private MobileAudioPreferences _mobileAudio = MobileAudioPreferences.Default;
         private MobileAudioPreferences _savedMobileAudio = MobileAudioPreferences.Default;
 
@@ -1465,6 +1464,41 @@ public bool WindowsAutoConnectOnStart
             }
         }
 
+        private string _customRecoveryMinutes = "5";
+
+        public int InterruptionRecoveryIndex
+        {
+            get => (int)_mobileAudio.InterruptionRecovery.Option;
+            set
+            {
+                if (!Enum.IsDefined((InterruptionRecoveryOption)value))
+                    return;
+                var option = (InterruptionRecoveryOption)value;
+                SetMobileAudio(_mobileAudio with { InterruptionRecovery = _mobileAudio.InterruptionRecovery with { Option = option } },
+                    nameof(InterruptionRecoveryIndex));
+                CustomRecoveryMinutes = _mobileAudio.InterruptionRecovery.CustomMinutes.ToString();
+                OnPropertyChanged(nameof(ShowsCustomRecoveryMinutes));
+            }
+        }
+
+        public bool ShowsCustomRecoveryMinutes => _mobileAudio.InterruptionRecovery.Option == InterruptionRecoveryOption.Custom;
+        public bool HasInvalidCustomRecoveryMinutes => !int.TryParse(CustomRecoveryMinutes, out var minutes) ||
+            !InterruptionRecoveryPreference.AllowsCustomMinutes(minutes);
+
+        public string CustomRecoveryMinutes
+        {
+            get => _customRecoveryMinutes;
+            set
+            {
+                _customRecoveryMinutes = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(HasInvalidCustomRecoveryMinutes));
+                if (int.TryParse(value, out var minutes) && InterruptionRecoveryPreference.AllowsCustomMinutes(minutes))
+                    SetMobileAudio(_mobileAudio with { InterruptionRecovery = _mobileAudio.InterruptionRecovery with { CustomMinutes = minutes } },
+                        nameof(CustomRecoveryMinutes));
+            }
+        }
+
         private void SetMobileAudio(MobileAudioPreferences preferences, string propertyName)
         {
             if (_mobileAudio == preferences)
@@ -2046,13 +2080,15 @@ public bool WindowsStartWithWindows
             _bluetoothLabelGenreToken = BluetoothLabelMapping.NormalizeToken(_settings.BluetoothLabelGenre, BluetoothLabelMapping.TokenReceiver);
             _savedBluetoothLabelGenreToken = _bluetoothLabelGenreToken;
 
-            if (SupportsMobileAudioOptions)
-            {
-                _mobileAudio = _settings.MobileAudio;
-                _savedMobileAudio = _mobileAudio;
-                OnPropertyChanged(nameof(MobileAudioModeIndex));
-                OnPropertyChanged(nameof(AudioDisconnectionIndex));
-            }
+            _mobileAudio = _settings.MobileAudio;
+            _savedMobileAudio = _mobileAudio;
+            _customRecoveryMinutes = _mobileAudio.InterruptionRecovery.CustomMinutes.ToString();
+            OnPropertyChanged(nameof(MobileAudioModeIndex));
+            OnPropertyChanged(nameof(AudioDisconnectionIndex));
+            OnPropertyChanged(nameof(InterruptionRecoveryIndex));
+            OnPropertyChanged(nameof(ShowsCustomRecoveryMinutes));
+            OnPropertyChanged(nameof(CustomRecoveryMinutes));
+            OnPropertyChanged(nameof(HasInvalidCustomRecoveryMinutes));
 
             // Ensure the pickers show the persisted selections when the Settings page opens.
             _bluetoothLabelArtistOption = GetBluetoothOptionOrDefault(_bluetoothLabelArtistToken, BluetoothLabelMapping.TokenAppName);
@@ -2392,7 +2428,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                 }
                 catch (Exception ex)
                 {
-                    if (SupportsMobileAudioOptions && _mobileAudio != _savedMobileAudio)
+                    if (_mobileAudio != _savedMobileAudio)
                         SetMobileAudioSaveError(true);
                     if (ex is CredentialStorageException)
                     {
@@ -2486,7 +2522,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             _settings.AddressDetectionMinConfidencePercent = snapshot.AddressDetectionMinConfidencePercent;
             _settings.AddressDetectionMinAddressChars = snapshot.AddressDetectionMinAddressChars;
             _settings.AddressDetectionMaxCandidatesPerCall = snapshot.AddressDetectionMaxCandidatesPerCall;
-            if (SupportsMobileAudioOptions && snapshot.MobileAudio != _savedMobileAudio)
+            if (snapshot.MobileAudio != _savedMobileAudio)
                 _settings.MobileAudio = snapshot.MobileAudio;
         }
 

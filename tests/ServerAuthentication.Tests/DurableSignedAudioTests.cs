@@ -68,7 +68,7 @@ internal static partial class MobileRecoveryTests
             Check(acquired == "audio-A" && accountARequests.SequenceEqual([-1, 0, 2]) &&
                   cardA.LiveState!.Read().AudioUrl!.EndsWith("?lease=A%252F", StringComparison.Ordinal),
                 "A retained recording beyond the newest 1,000 must be located in its timestamp window and correctly paged.");
-            Check(restored.Order == (await queue.NextAsync(a, 0, token))!.Order, "Lookup must preserve the durable queue position.");
+            Check(restored.ArrivalSequence == (await queue.NextAsync(a, 0, token))!.ArrivalSequence, "Lookup must preserve the durable queue position.");
             await queue.ObserveAsync(a, id, null, cardA.LiveState!.Read(), token, existingOnly: true);
             Check((await queue.NextAsync(a, 0, token))?.Snapshot?.AudioUrl == null,
                 "Merging recovered metadata must never persist the signed query.");

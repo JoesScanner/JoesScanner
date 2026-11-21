@@ -67,29 +67,34 @@ internal sealed class PlatformCredentialStorage : IProtectedCredentialStorage
     {
         using var query = Record(key);
         using var result = SecKeyChain.QueryAsRecord(query, out var status);
-        return status switch
-        {
-            SecStatusCode.Success when result?.ValueData is { } value =>
-                NSString.FromData(value, NSStringEncoding.UTF8) ?? throw new CredentialStorageException(),
-            SecStatusCode.ItemNotFound => null,
-            _ => throw new CredentialStorageException()
-        };
+        if (status == SecStatusCode.ItemNotFound)
+            return null;
+        if (status != SecStatusCode.Success)
+            throw KeychainFailure(nameof(SecKeyChain.QueryAsRecord), status);
+
+        using var data = result?.ValueData;
+        return (data == null ? null : NSString.FromData(data, NSStringEncoding.UTF8))
+            ?? throw KeychainFailure(nameof(SecKeyChain.QueryAsRecord), status, "no usable UTF-8 data");
     }
 
     public void Write(string key, string value)
     {
         using var query = Record(key);
         using var data = NSData.FromString(value, NSStringEncoding.UTF8) ?? throw new CredentialStorageException();
-        using var update = new SecRecord(SecKind.GenericPassword) { ValueData = data };
+        // SecItemUpdate takes the item class in the query and only changed attributes in the update.
+        using var update = new SecRecord { ValueData = data };
         var status = SecKeyChain.Update(query, update);
-        if (status == SecStatusCode.ItemNotFound)
-        {
-            query.ValueData = data;
-            query.Accessible = SecAccessible.AfterFirstUnlockThisDeviceOnly;
-            status = SecKeyChain.Add(query);
-        }
+        if (status == SecStatusCode.Success)
+            return;
+        if (status != SecStatusCode.ItemNotFound)
+            throw KeychainFailure(nameof(SecKeyChain.Update), status);
+
+        using var item = Record(key);
+        item.ValueData = data;
+        item.Accessible = SecAccessible.AfterFirstUnlockThisDeviceOnly;
+        status = SecKeyChain.Add(item);
         if (status != SecStatusCode.Success)
-            throw new CredentialStorageException();
+            throw KeychainFailure(nameof(SecKeyChain.Add), status);
     }
 
     public void Remove(string key)
@@ -97,7 +102,14 @@ internal sealed class PlatformCredentialStorage : IProtectedCredentialStorage
         using var query = Record(key);
         var status = SecKeyChain.Remove(query);
         if (status is not (SecStatusCode.Success or SecStatusCode.ItemNotFound))
-            throw new CredentialStorageException();
+            throw KeychainFailure(nameof(SecKeyChain.Remove), status);
+    }
+
+    private static CredentialStorageException KeychainFailure(string operation, SecStatusCode status, string? reason = null)
+    {
+        var detail = reason == null ? "" : $"; {reason}";
+        AppLog.Add(FormattableString.Invariant($"Keychain {operation} failed (status {status} [{(int)status}]{detail})."));
+        return new CredentialStorageException();
     }
 #else
     // The existing settings interface is synchronous. Start the Windows asynchronous

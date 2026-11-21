@@ -16,6 +16,7 @@ internal static class DurablePlaybackConcurrencyTests
         {
             await WakeAtIdleAsync(new Paths(Path.Combine(directory.FullName, "wake.sqlite")));
             await RetriedIngestionAsync(new Paths(Path.Combine(directory.FullName, "ingestion.sqlite")));
+            await ConcurrentArrivalOrderAsync(new Paths(Path.Combine(directory.FullName, "arrival.sqlite")));
             await NativeCompletionAsync(new Paths(Path.Combine(directory.FullName, "completion.sqlite")));
             await TerminateAroundCommitAsync(new Paths(Path.Combine(directory.FullName, "crash.sqlite")));
             await BlockedOwnershipAsync(new Paths(Path.Combine(directory.FullName, "ownership.sqlite")));
@@ -25,6 +26,55 @@ internal static class DurablePlaybackConcurrencyTests
             SqliteConnection.ClearAllPools();
             directory.Delete(recursive: true);
         }
+    }
+
+    private static async Task ConcurrentArrivalOrderAsync(Paths paths)
+    {
+        var queue = new DurableLiveQueue(paths);
+        var firstServer = new DurableLiveQueue.Run(Server, 1, null);
+        var secondServer = firstServer with { Server = "https://scanner.example/two" };
+        await queue.OpenAsync(firstServer, Now, default);
+        await queue.OpenAsync(secondServer, Now, default);
+        using var locker = new SqliteConnection($"Data Source={paths.DbPath}");
+        locker.Open();
+        using var held = locker.BeginTransaction();
+        var retrying = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var token = timeout.Token;
+        Task<DurableLiveQueue.Observation> Accept(DurableLiveQueue.Run run, string id, DateTimeOffset? time) =>
+            queue.ObserveWithPositionAsync(run, id, time, new(new(), null, CallCardIdFallback.None, null), token,
+                RecordingOrigin.Live, existingOnly: false, _ => retrying.TrySetResult());
+
+        var first = Accept(firstServer, "same-id", Now.AddYears(100));
+        var second = Accept(secondServer, "same-id", Now.AddYears(-100));
+        var third = Accept(firstServer, "west", Now.ToOffset(TimeSpan.FromHours(-7)));
+        var fourth = Accept(firstServer, "east", Now.ToOffset(TimeSpan.FromHours(9)));
+        var fifth = Accept(firstServer, "missing-time", null);
+        var jump = queue.JumpToLiveAsync(secondServer, 0, skipSelected: false, token);
+        var arrivedAfterJump = Accept(secondServer, "after-jump", Now.AddYears(-90));
+        await retrying.Task.WaitAsync(token);
+        Check(!second.IsCompleted && !fifth.IsCompleted, "Later producers cannot overtake a write waiting to retry.");
+        held.Commit();
+
+        var observations = await Task.WhenAll(first, second, third, fourth, fifth).WaitAsync(token);
+        Check((await jump)?.Target.Id == "same-id" && (await arrivedAfterJump).ArrivalSequence > observations[^1].ArrivalSequence,
+            "Jump must follow already accepted observations and precede observations queued after it.");
+        var sequences = observations.Select(result => result.ArrivalSequence).ToArray();
+        Check(sequences.Zip(sequences.Skip(1)).All(pair => pair.First < pair.Second) && observations.All(result => result.Changed),
+            "Concurrent producer calls must receive one strictly increasing sequence across recorders.");
+        await queue.ObserveAsync(firstServer, "same-id", Now.AddYears(-10),
+            new(new CallCardMetadata { Talkgroup = "Enriched" }, null, CallCardIdFallback.None, Server + "/late.mp3"), token,
+            existingOnly: true);
+        Check((await queue.NextAsync(firstServer, 0, token)) is
+            { Id: "same-id", ArrivalSequence: var position, Snapshot.Metadata.Talkgroup: "Enriched" } && position == sequences[0] &&
+            (await queue.NextAsync(secondServer, 0, token))?.ArrivalSequence == sequences[1],
+            "Late metadata and URLs must keep the original sequence and recorder isolation.");
+        foreach (var id in new[] { "same-id", "west", "east", "missing-time" })
+        {
+            Check((await queue.NextAsync(firstServer, 0, token))?.Id == id, "Timezone, timestamp, and missing audio cannot reorder FIFO.");
+            await queue.MarkAsync(firstServer, id, PlaybackOutcome.Skipped, token);
+        }
+        Console.WriteLine("PASS concurrent SQLite retries preserve shared arrival order, scope and timestamp independence");
     }
 
     private static async Task WakeAtIdleAsync(Paths paths)
@@ -60,9 +110,9 @@ internal static class DurablePlaybackConcurrencyTests
         }
         emptyResult.SetResult();
         Check(await staleRead, "Three arrivals during an empty query must wake the existing worker.");
-        foreach (var id in new[] { "one", "three", "two" })
+        foreach (var id in new[] { "one", "two", "three" })
         {
-            Check((await queue.NextAsync(durable, 0, default))?.Id == id, "A wake must preserve chronological and tie-break order.");
+            Check((await queue.NextAsync(durable, 0, default))?.Id == id, "A wake must preserve local arrival order.");
             await queue.CommitCompletionAsync(durable, id);
         }
         var newRead = wake.BeforeRead();
@@ -176,9 +226,10 @@ internal static class DurablePlaybackConcurrencyTests
         var queue = new DurableLiveQueue(paths);
         var run = new DurableLiveQueue.Run(Server, CrashProbeOwner, null);
         await queue.OpenAsync(run, Now, default);
-        foreach (var stage in new[] { "before", "after" })
+        foreach (var stage in new[] { "before", "after", "arrivals" })
         {
-            await AddAsync(queue, run, stage);
+            if (stage != "arrivals")
+                await AddAsync(queue, run, stage);
             var launch = new ProcessStartInfo("dotnet") { UseShellExecute = false, RedirectStandardOutput = true };
             launch.ArgumentList.Add(typeof(DurablePlaybackConcurrencyTests).Assembly.Location);
             launch.ArgumentList.Add("--completion-crash-probe");
@@ -204,18 +255,29 @@ internal static class DurablePlaybackConcurrencyTests
         Check((await reopened.NextAsync(restarted, 0, default))?.Id == "before" &&
             !await reopened.IsPendingAsync(restarted, "after", 0, default),
             "Termination before the commit leaves a replayable recording. A committed recording stays completed.");
-        Console.WriteLine("PASS Abrupt process termination before and after a SQLite completion commit");
+        await reopened.CommitCompletionAsync(restarted, "before");
+        Check((await reopened.NextAsync(restarted, 0, default))?.Id == "arrived-first", "The first committed arrival must survive a crash.");
+        await reopened.CommitCompletionAsync(restarted, "arrived-first");
+        Check((await reopened.NextAsync(restarted, 0, default))?.Id == "arrived-second", "Recovery after termination must retain FIFO.");
+        Console.WriteLine("PASS abrupt process termination preserves committed arrival order and playback dispositions");
     }
 
     internal static async Task RunCrashProbeAsync(string path, string stage)
     {
         var completion = new PlaybackCompletion();
         Check(completion.Confirm(default), "The crash probe must simulate a confirmed native end.");
+        var queue = new DurableLiveQueue(new Paths(path));
+        var run = new DurableLiveQueue.Run(Server, CrashProbeOwner, null);
         if (stage == "after")
         {
-            var queue = new DurableLiveQueue(new Paths(path));
             var commit = new DurablePlaybackCommit(queue.CommitCompletionAsync);
-            await commit.ConfirmAsync(new DurableLiveQueue.Run(Server, CrashProbeOwner, null), stage);
+            await commit.ConfirmAsync(run, stage);
+        }
+        if (stage == "arrivals")
+        {
+            var snapshot = new LiveCallSnapshot(new(), null, CallCardIdFallback.None, null);
+            await queue.ObserveAsync(run, "arrived-first", Now.AddDays(1), snapshot, default, RecordingOrigin.Live);
+            await queue.ObserveAsync(run, "arrived-second", Now.AddDays(-1), snapshot, default, RecordingOrigin.History);
         }
         Console.WriteLine(stage);
         await Task.Delay(Timeout.InfiniteTimeSpan);

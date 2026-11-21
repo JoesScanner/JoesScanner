@@ -926,8 +926,7 @@
 
 
                     <!-- AUDIO OPTIONS CARD -->
-                    <Border Style="{StaticResource SettingsCardStyle}"
-                            IsVisible="{OnPlatform WinUI=false, Default=true}">
+                    <Border Style="{StaticResource SettingsCardStyle}">
 
     <VerticalStackLayout Style="{StaticResource SettingsCardContentStyle}">
 
@@ -950,8 +949,8 @@
         <controls:DeferredContentView x:Name="AudioBodyLayout" IsVisible="False">
             <controls:DeferredContentView.ContentTemplate>
                 <DataTemplate x:DataType="vm:SettingsViewModel">
-                    <VerticalStackLayout Spacing="8" Margin="0,0,0,4"
-                                         IsVisible="{OnPlatform Android=true, iOS=true, Default=false}">
+                    <VerticalStackLayout Spacing="8" Margin="0,0,0,4">
+                        <VerticalStackLayout Spacing="8" IsVisible="{OnPlatform Android=true, iOS=true, Default=false}">
                         <Label Text="Mobile audio mode" FontSize="12"
                                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
                         <Picker SelectedIndex="{Binding MobileAudioModeIndex, Mode=TwoWay}"
@@ -972,6 +971,31 @@
                                 <x:String>Continue through phone speaker</x:String>
                             </Picker.Items>
                         </Picker>
+                        </VerticalStackLayout>
+                        <Label Text="Return to Live after interruption" FontSize="12"
+                               TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
+                        <Picker SelectedIndex="{Binding InterruptionRecoveryIndex, Mode=TwoWay}"
+                                SemanticProperties.Description="Return to Live after interruption">
+                            <Picker.Items>
+                                <x:String>Immediately</x:String>
+                                <x:String>1 minute</x:String>
+                                <x:String>2 minutes</x:String>
+                                <x:String>5 minutes</x:String>
+                                <x:String>10 minutes</x:String>
+                                <x:String>15 minutes</x:String>
+                                <x:String>30 minutes</x:String>
+                                <x:String>60 minutes</x:String>
+                                <x:String>Custom duration</x:String>
+                                <x:String>Never (resume queued recordings)</x:String>
+                            </Picker.Items>
+                        </Picker>
+                        <VerticalStackLayout Spacing="4" IsVisible="{Binding ShowsCustomRecoveryMinutes}">
+                            <Entry Text="{Binding CustomRecoveryMinutes, Mode=TwoWay}" Keyboard="Numeric" MaxLength="4"
+                                   Placeholder="Minutes" SemanticProperties.Description="Custom interruption duration in minutes" />
+                            <Label Text="Enter a whole number from 1 to 1,440 minutes." FontSize="12"
+                                   IsVisible="{Binding HasInvalidCustomRecoveryMinutes}"
+                                   TextColor="{AppThemeBinding Light=#b91c1c, Dark=#fca5a5}" />
+                        </VerticalStackLayout>
                         <Label IsVisible="{Binding HasMobileAudioSaveError}" FontSize="12"
                                Text="Audio preferences were not saved. Playback is still using the last saved options."
                                TextColor="{AppThemeBinding Light=#b91c1c, Dark=#fca5a5}" />

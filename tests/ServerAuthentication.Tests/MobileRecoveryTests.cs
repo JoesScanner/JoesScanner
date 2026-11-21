@@ -8,6 +8,7 @@ using JoesScanner.Data;
 using JoesScanner.Helpers;
 using JoesScanner.Models;
 using JoesScanner.Services;
+using Microsoft.Data.Sqlite;
 
 internal static partial class MobileRecoveryTests
 {
@@ -49,13 +50,13 @@ internal static partial class MobileRecoveryTests
     {
         foreach (var (origin, tier, allowed, expected, checks) in new (string, int?, bool, string[], int)[]
         {
-            (HostedServerRules.DefaultServerUrl, 1, true, ["boundary", "recent"], 1),
-            (HostedServerRules.DefaultServerUrl, 2, true, ["outside", "boundary", "recent"], 1),
-            ("https://directory.test:8443/scanner", 1, true, ["boundary", "recent"], 1),
+            (HostedServerRules.DefaultServerUrl, 1, true, ["recent", "boundary"], 1),
+            (HostedServerRules.DefaultServerUrl, 2, true, ["recent", "boundary", "outside"], 1),
+            ("https://directory.test:8443/scanner", 1, true, ["recent", "boundary"], 1),
             (HostedServerRules.DefaultServerUrl, null, true, [], 1),
             (HostedServerRules.DefaultServerUrl, 0, true, [], 1),
             (HostedServerRules.DefaultServerUrl, 2, false, [], 1),
-            ("https://custom.example", null, false, ["outside", "boundary", "recent"], 0)
+            ("https://custom.example", null, false, ["recent", "boundary", "outside"], 0)
         })
         {
             using var token = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -79,11 +80,16 @@ internal static partial class MobileRecoveryTests
             recovery.Request(Now.AddDays(-2));
             await using var reader = stream.GetCallStreamAsync([], token.Token, recovery).GetAsyncEnumerator(token.Token);
             Check(await reader.MoveNextAsync() && reader.Current.Talkgroup == "HEARTBEAT", "Missing stream handshake.");
+            Check(await reader.MoveNextAsync() && reader.Current.BackendId == "new-live",
+                "An already received WebSocket row must precede the recovery response.");
             var actual = new List<string>();
-            while (await reader.MoveNextAsync() && reader.Current.BackendId != "new-live")
+            for (var i = 0; i < expected.Length; i++)
+            {
+                Check(await reader.MoveNextAsync(), "A recovery row was lost.");
                 actual.Add(reader.Current.BackendId!);
-            Check(reader.Current.BackendId == "new-live" && actual.SequenceEqual(expected) && subscription.Checks == checks,
-                "Recovery applied the wrong tier boundary or failed to deliver subsequent Live calls.");
+            }
+            Check(actual.SequenceEqual(expected) && subscription.Checks == checks,
+                "Recovery must preserve response order within the authorized window.");
             Check(httpRequests == (expected.Length == 0 ? 0 : 1) &&
                   repository.Ids.Where(id => id != "new-live").SequenceEqual(expected),
                 "Disallowed recovery rows must not be fetched or persisted beyond the account's boundary.");
@@ -180,6 +186,64 @@ internal static partial class MobileRecoveryTests
         Check(!card.ConsumeLateAudio() && await reader.MoveNextAsync() && reader.Current.BackendId == "subsequent" && opens == 2,
             "A replayed row must not requeue late audio or suppress a subsequent Live call.");
     }
+
+    internal static async Task StreamArrivalOrder()
+    {
+        const string server = "https://custom.example";
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var token = timeout.Token;
+        using var socket = new ScriptSocket();
+        var first = Row("a", Now.AddYears(30), "a.mp3");
+        socket.Send(new { data = new[]
+        {
+            first,
+            new { DT_RowId = "b", StartTimeUTC = Now.ToOffset(TimeSpan.FromHours(-7)).ToString("O"), AudioFilename = "b.mp3" },
+            new { DT_RowId = "c", StartTimeUTC = Now.ToOffset(TimeSpan.FromHours(9)).ToString("O"), AudioFilename = "c.mp3" },
+            Row("d", Now.AddYears(-30), null)
+        } });
+        using var http = new HttpClient(new StubHandler(_ => Reply(
+            Row("f", Now.AddMinutes(-1), "f.mp3"), first, Row("e", Now.AddHours(-3), "e.mp3"),
+            Row("d", Now, "d.mp3"))));
+        var stream = new CallStreamService(Settings(server), new RecordedCalls(), new AddressStub(),
+            new ScriptSubscription(false, null), http, (_, _, _) => Task.FromResult<WebSocket?>(socket), new FixedClock(Now));
+        var recovery = new LiveStreamRecovery();
+        recovery.Request(Now.AddHours(-4));
+        var directory = Directory.CreateTempSubdirectory("JoesScanner.StreamArrival-");
+        try
+        {
+            var queue = new DurableLiveQueue(new ArrivalTestPaths(Path.Combine(directory.FullName, "queue.db")));
+            var run = new DurableLiveQueue.Run(server, 1, null);
+            await queue.OpenAsync(run, Now, token);
+            await using var reader = stream.GetCallStreamAsync([], token, recovery).GetAsyncEnumerator(token);
+            Check(await reader.MoveNextAsync() && reader.Current.Talkgroup == "HEARTBEAT", "Missing stream handshake.");
+            var expected = new[] { "a", "b", "c", "d", "f", "e" };
+            foreach (var id in expected.Append("d"))
+            {
+                Check(await reader.MoveNextAsync() && reader.Current.BackendId == id,
+                    $"The production stream must emit {id} in arrival order.");
+                var call = reader.Current;
+                var observed = await queue.ObserveWithPositionAsync(run, id, call.RecordingTimeUtc, call.LiveState!.Read(), token,
+                    call.RecordingAccess?.Origin ?? RecordingOrigin.Unknown, existingOnly: call.IsLiveUpdate);
+                Check(observed.ArrivalSequence.HasValue, "The accepted identity must have a durable position.");
+            }
+
+            foreach (var id in expected)
+            {
+                var next = await queue.NextAsync(run, 0, token);
+                Check(next?.Id == id && next.Snapshot?.AudioUrl != null,
+                    "Durable playback must match stream arrival order and see the late audio update.");
+                await queue.CommitCompletionAsync(run, id);
+            }
+            Check(await queue.NextAsync(run, 0, token) == null, "Duplicate HTTP and WebSocket rows must share one position.");
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            directory.Delete(recursive: true);
+        }
+    }
+
+    private sealed record ArrivalTestPaths(string DbPath) : IDatabasePathProvider;
 
     internal static async Task PlaybackEntitlement()
     {

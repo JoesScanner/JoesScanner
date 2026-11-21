@@ -15,6 +15,16 @@ internal sealed class AndroidClipFocus(AudioManager manager) : Java.Lang.Object,
     public Task Changed => _state.Changed;
 
     public event Action? LostAudibility;
+    private bool _interruptionReported;
+
+    private void ReportInterruption(bool released = false)
+    {
+        var interrupted = !released && Status is (AndroidClipFocusStatus.Pending or AndroidClipFocusStatus.TransientLoss or AndroidClipFocusStatus.DuckableLoss);
+        if (interrupted == _interruptionReported)
+            return;
+        _interruptionReported = interrupted;
+        AndroidAudioEnvironment.ReportClipFocusInterruption(interrupted);
+    }
 
     public void Request(MobileAudioMode mode, AudioAttributes attributes)
     {
@@ -44,6 +54,7 @@ internal sealed class AndroidClipFocus(AudioManager manager) : Java.Lang.Object,
 #pragma warning restore CS0618, CA1422
             _state.Requested(result == AudioFocusRequest.Granted);
         }
+        ReportInterruption();
     }
 
     public void OnAudioFocusChange(AudioFocus focusChange)
@@ -58,6 +69,7 @@ internal sealed class AndroidClipFocus(AudioManager manager) : Java.Lang.Object,
         };
         var previous = _state.Status;
         _state.OnChange(status);
+        ReportInterruption();
         if (_state.Status != previous && _state.Status != AndroidClipFocusStatus.Granted)
             LostAudibility?.Invoke();
     }
@@ -66,6 +78,7 @@ internal sealed class AndroidClipFocus(AudioManager manager) : Java.Lang.Object,
     {
         if (_state.Release())
         {
+            ReportInterruption(released: true);
             if (OperatingSystem.IsAndroidVersionAtLeast(26) && _request is { } request)
             {
                 manager.AbandonAudioFocusRequest(request);

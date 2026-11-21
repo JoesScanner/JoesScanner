@@ -25,6 +25,10 @@ internal static class AndroidAudioEnvironment
     public static Task Changed => _changed.Task;
     public static event Action? ResumeStateChanged;
     public static event Action? PlaybackBlocked;
+    internal static event Action? InterruptionChanged;
+    internal static event Action<bool>? ClipFocusInterrupted;
+
+    internal static void ReportClipFocusInterruption(bool interrupted) => ClipFocusInterrupted?.Invoke(interrupted);
 
     public static IDisposable Watch(Context context, ISettingsService settings)
     {
@@ -103,6 +107,7 @@ internal static class AndroidAudioEnvironment
 
     private static void PublishChange(bool wasBlocked, bool requiredPlay)
     {
+        InterruptionChanged?.Invoke();
         if (wasBlocked != State.IsBlocked || requiredPlay != State.RequiresPlay)
         {
             var prior = _changed;

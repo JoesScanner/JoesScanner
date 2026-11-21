@@ -24,6 +24,7 @@ namespace JoesScanner.Models
         internal RecordingAccessContext? RecordingAccess { get; set; }
         internal bool IsRecordingNotification { get; init; }
         internal long LivePlaybackOwner { get; set; }
+        internal long? LiveArrivalSequence { get; set; }
         internal bool HasUnplayedLateAudio { get; private set; }
 
         internal bool ConsumeLateAudio()
@@ -33,6 +34,17 @@ namespace JoesScanner.Models
             return pending;
         }
         internal bool IsLiveUpdate { get; init; }
+        internal string? RecoveryWindowId { get; set; }
+        internal bool WasDurablyAdmitted { get; private set; }
+        internal Action<bool>? LiveAdmission { private get; set; }
+
+        internal void ConfirmLiveAdmission(bool accepted)
+        {
+            WasDurablyAdmitted = accepted;
+            var confirmation = LiveAdmission;
+            LiveAdmission = null;
+            confirmation?.Invoke(accepted);
+        }
         private CallCardMetadata? _cardMetadata;
 
         public CallCardMetadata? CardMetadata

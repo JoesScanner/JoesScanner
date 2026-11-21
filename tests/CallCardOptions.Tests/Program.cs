@@ -23,6 +23,7 @@ await DurableLiveQueueTests.RunAsync();
 await DurableAccountIsolationTests.RunAsync();
 await DurablePlaybackConcurrencyTests.RunAsync();
 await DurableLiveTransportTests.RunAsync();
+await LiveInterruptionTests.RunAsync();
 await RecordingDatabaseMaintenanceTests.RunAsync();
 await LiveHistoryHandoffTests.RunAsync();
 await HistoryPlaybackDispatcherTests.RunAsync();
@@ -385,6 +386,12 @@ foreach (var (ios, legacy, expected) in new (bool, string?, MobileAudioMode)[]
         }
         Check(AppStateStore.GetString(MobileAudioPreferencesStore.LegacyMixKey) == oppositeLegacy,
             "Saving the new preferences must preserve the legacy playback setting.");
+        var custom = routeChange with { InterruptionRecovery = new(InterruptionRecoveryOption.Custom, 19) };
+        MobileAudioPreferencesStore.Write(custom);
+        Check(MobileAudioPreferencesStore.Read(ios) == custom, "A custom threshold must survive rereading SQLite.");
+        AppStateStore.SetString(MobileAudioPreferencesStore.CustomRecoveryKey, "1441");
+        Check(MobileAudioPreferencesStore.Read(ios).InterruptionRecovery == new InterruptionRecoveryPreference(InterruptionRecoveryOption.Custom, 5),
+            "An out-of-range stored threshold must fall back to five minutes.");
     }
     finally
     {

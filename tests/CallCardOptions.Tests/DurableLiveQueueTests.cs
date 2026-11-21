@@ -17,12 +17,108 @@ internal static class DurableLiveQueueTests
             await RestartAndFailureAsync(database);
             await StopJumpAndEntitlementAsync(database);
             await ProtectedProvenanceAsync(database);
+            await MigrateV4Async(new Paths(Path.Combine(directory.FullName, "v4.db")));
         }
         finally
         {
             SqliteConnection.ClearAllPools();
             directory.Delete(recursive: true);
         }
+    }
+
+    private static async Task MigrateV4Async(Paths paths)
+    {
+        using var db = new SqliteConnection($"Data Source={paths.DbPath}");
+        db.Open();
+        using var sql = db.CreateCommand();
+        sql.CommandText = """
+            PRAGMA user_version=4;
+            CREATE TABLE live_queue_servers (
+                server TEXT NOT NULL, account_scope TEXT NOT NULL, owner INTEGER NOT NULL,
+                stopped INTEGER NOT NULL DEFAULT 0, accept_after INTEGER NOT NULL DEFAULT 0,
+                resume_id TEXT, jump_utc INTEGER, jump_id TEXT, PRIMARY KEY (server, account_scope));
+            CREATE TABLE live_queue_recordings (
+                server TEXT NOT NULL, account_scope TEXT NOT NULL, recording_id TEXT NOT NULL,
+                recorded_utc INTEGER NOT NULL, first_owner INTEGER NOT NULL, payload TEXT,
+                audio_ready INTEGER NOT NULL, disposition INTEGER NOT NULL, origin INTEGER NOT NULL,
+                protected INTEGER NOT NULL, PRIMARY KEY (server, account_scope, recording_id),
+                FOREIGN KEY (server, account_scope) REFERENCES live_queue_servers(server, account_scope));
+            CREATE INDEX live_queue_transport_order
+                ON live_queue_recordings(server, account_scope, recorded_utc, recording_id);
+            INSERT INTO live_queue_servers VALUES ($server, '', 6, 0, 0, 'older-stamp', 10000, 'skipped');
+            INSERT INTO live_queue_servers VALUES ($hosted, 'account-one', 7, 1, 0, NULL, NULL, NULL);
+            INSERT INTO live_queue_recordings(rowid, server, account_scope, recording_id, recorded_utc, first_owner,
+                payload, audio_ready, disposition, origin, protected) VALUES
+                (10, $server, '', 'newer-stamp', 10000, 6, NULL, 0, 0, 1, 0),
+                (20, $server, '', 'completed', 6000, 6, NULL, 0, 1, 1, 0),
+                (30, $server, '', 'skipped', 4000, 6, NULL, 0, 2, 2, 0),
+                (40, $server, '', 'older-stamp', 3000, 6, NULL, 0, 0, 1, 0),
+                (50, $hosted, 'account-one', 'older-stamp', 2000, 7, NULL, 0, 0, 2, 1);
+            WITH RECURSIVE ids(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM ids WHERE n<100001)
+            INSERT INTO live_queue_recordings(server, account_scope, recording_id, recorded_utc, first_owner,
+                payload, audio_ready, disposition, origin, protected)
+            SELECT $server, '', 'prior-' || n, n, 6, NULL, 0, 1, 1, 0 FROM ids;
+            CREATE TABLE live_queue_recordings_v5 (conflict INTEGER);
+            """;
+        const string hosted = "https://app.joesscanner.com";
+        sql.Parameters.AddWithValue("$server", Server);
+        sql.Parameters.AddWithValue("$hosted", hosted);
+        sql.ExecuteNonQuery();
+
+        try
+        {
+            await DbBootstrapper.EnsureInitializedAsync(db);
+            throw new InvalidOperationException("The injected migration error should have aborted the upgrade.");
+        }
+        catch (SqliteException ex) when (ex.Message.Contains("already exists", StringComparison.Ordinal)) { }
+        sql.CommandText = "PRAGMA user_version";
+        Check((long)sql.ExecuteScalar()! == 4, "An interrupted migration must keep the v4 version.");
+        sql.CommandText = "DROP TABLE live_queue_recordings_v5";
+        sql.ExecuteNonQuery();
+        await DbBootstrapper.EnsureInitializedAsync(db);
+
+        sql.CommandText = "PRAGMA user_version";
+        Check((long)sql.ExecuteScalar()! == 5, "The retry must install schema v5.");
+        sql.CommandText = "SELECT count(*) FROM live_queue_recordings";
+        Check((long)sql.ExecuteScalar()! == 100006, "Migration must preserve all identities.");
+        sql.CommandText = "SELECT resume_id FROM live_queue_servers WHERE server = $server";
+        Check((string?)sql.ExecuteScalar() == "older-stamp", "Migration must retain the existing resume record.");
+        sql.CommandText = "PRAGMA foreign_key_check";
+        Check(sql.ExecuteScalar() == null, "Migration must retain valid scope references.");
+
+        var queue = new DurableLiveQueue(paths);
+        var run = new DurableLiveQueue.Run(Server, 8, null);
+        await queue.OpenAsync(run, Start, default);
+        Check((await queue.NextAsync(run, 0, default)) is { Id: "newer-stamp", ArrivalSequence: 10 } &&
+              (await queue.FindTransportTargetAsync(run, 0, 10, older: false, default)) is { Id: "completed", ArrivalSequence: 20 },
+            "SQLite's legacy insertion rowids must determine migration order, including terminal rows.");
+        using (var plan = DurableLiveQueue.CreateTransportTargetCommand(db, run, 0, 50000, older: false))
+        {
+            plan.CommandText = "EXPLAIN QUERY PLAN " + plan.CommandText;
+            using var rows = plan.ExecuteReader();
+            var indexSeek = false;
+            while (rows.Read())
+            {
+                var step = rows.GetString(3);
+                indexSeek |= step.Contains("live_queue_transport_arrival", StringComparison.Ordinal) &&
+                    step.Contains("arrival_sequence", StringComparison.Ordinal);
+                Check(!step.Contains("TEMP B-TREE", StringComparison.Ordinal), "Large queues must not be re-sorted for navigation.");
+            }
+            Check(indexSeek, "The transport must seek within the scoped arrival index with 100,000+ identities.");
+        }
+        await queue.CommitCompletionAsync(run, "newer-stamp");
+        Check((await queue.NextAsync(run, 0, default)) is { Id: "older-stamp", ArrivalSequence: 40 } &&
+            !await queue.IsPendingAsync(run, "skipped", 0, default) && !await queue.IsPendingAsync(run, "completed", 0, default),
+            "V4 pending, completed and skipped dispositions must all survive migration.");
+        await Add(queue, run, "post-upgrade", Start.AddYears(-20), origin: RecordingOrigin.History);
+        Check(await queue.GetArrivalSequenceAsync(run, "post-upgrade", default) > 100051,
+            "Newly accepted recordings must follow all migrated identities even with older timestamps.");
+        var account = new DurableLiveQueue.Run(hosted, 9, null, Protected: true, Account: "account-one");
+        await queue.OpenAsync(account, Start, default);
+        Check((await queue.NextAsync(account, 0, default)) is { Id: "older-stamp", ArrivalSequence: 50 } &&
+            await queue.GetArrivalSequenceAsync(account with { Account = "other" }, "older-stamp", default) == null,
+            "Migration must keep identical IDs isolated by server and account.");
+        Console.WriteLine("PASS transactional v4 migration, legacy rowids and dispositions, scoped indexing at 100,000+ identities");
     }
 
     private static async Task MigrationAndOverflowAsync(Paths database)
@@ -54,15 +150,15 @@ internal static class DurableLiveQueueTests
             check.CommandText = "SELECT value FROM app_settings WHERE key = 'durability_test'";
             Check((string?)check.ExecuteScalar() == "keep", "Migration must preserve existing settings.");
             check.CommandText = "PRAGMA user_version";
-            Check(Convert.ToInt32(check.ExecuteScalar()) == 4, "Version 1 should migrate to version 4.");
+            Check(Convert.ToInt32(check.ExecuteScalar()) == 5, "Version 1 should migrate to version 5.");
         }
 
         // Newest first, over the old 100-row recovery and 500-row cache limits;
-        // each pair has the same timestamp and must sort deterministically by ID.
+        // each pair has the same timestamp and must retain its arrival order.
         for (var i = 509; i >= 0; i--)
             await Add(queue, run, $"{i:D4}", Start.AddSeconds(i / 2));
         await Add(queue, other, "0000", Start);
-        for (var i = 0; i < 510; i++)
+        for (var i = 509; i >= 0; i--)
         {
             var id = $"{i:D4}";
             Check((await queue.NextAsync(run, 0, default))?.Id == id, "Playback order changed or a recording was lost.");
@@ -106,8 +202,8 @@ internal static class DurableLiveQueueTests
         await Add(queue, restarted, "arrived-out-of-order", Start.AddMinutes(29));
         var secondRestart = restarted with { Owner = 7 };
         await queue.OpenAsync(secondRestart, Start.AddHours(1), default);
-        Check((await queue.NextAsync(secondRestart, 0, default))?.Id == "arrived-out-of-order",
-            "Automatic recovery must still select the oldest eligible recording.");
+        Check((await queue.NextAsync(secondRestart, 0, default))?.Id == "later",
+            "The pending recording that arrived first must resume after restart.");
         await queue.MarkAsync(secondRestart, "arrived-out-of-order", PlaybackOutcome.Skipped, default);
         await queue.ObserveAsync(secondRestart, "signed", Start.AddHours(1),
             new LiveCallSnapshot(new(), null, CallCardIdFallback.None, $"{Server}/clip.mp3?signature=test"), default);
@@ -126,10 +222,11 @@ internal static class DurableLiveQueueTests
         var imported = Start.AddHours(-30);
         await Add(queue, run, "historical", imported, origin: RecordingOrigin.History);
         await Add(queue, run, "historical", imported, origin: RecordingOrigin.Live);
+        await Add(queue, run, "future-history", Start.AddYears(2), origin: RecordingOrigin.History);
         await Add(queue, run, "live", Start, playable: false);
         var standard = Start.AddHours(-24).UtcTicks;
         Check((await queue.NextAsync(run, standard, default))?.Id == "live",
-            "A current-owner historical import must not inherit the Live exemption, even after duplicate delivery.");
+            "Historical imports outside the Standard window must not inherit the Live exemption, even after duplicate delivery.");
         Check((await queue.NextAsync(run, long.MaxValue, default))?.Id == "live", "An unverified history floor still allows verified Live provenance.");
         var next = run with { Owner = 82 };
         await queue.OpenAsync(next, Start.AddMinutes(1), default);
@@ -153,7 +250,9 @@ internal static class DurableLiveQueueTests
         Check(await queue.NextAsync(run, 0, default) == null, "Stop must immediately fence the old owner.");
         var next = run with { Owner = 6, VerifiedTier = 1 };
         await queue.OpenAsync(next, Start.AddHours(2), default);
-        await Add(queue, next, "missed-while-stopped", Start.AddHours(1));
+        await Add(queue, next, "missed-while-stopped", Start.AddHours(1), origin: RecordingOrigin.History);
+        Check(!await queue.IsPendingAsync(next, "missed-while-stopped", 0, default),
+            "HTTP backfill from the stopped interval must remain excluded.");
         await Add(queue, next, "jump-target", Start.AddHours(2));
         var now = Start.AddHours(2);
         var standard = DurableLiveQueue.HistoricalFloor(true, 2, true, 1, now);
@@ -168,9 +267,10 @@ internal static class DurableLiveQueueTests
             "Jump should resolve its own newest row.");
         await Add(queue, next, "earlier-at-jump", Start.AddHours(2), origin: RecordingOrigin.History);
         Check((await queue.NextAsync(next, 0, default))?.Id == "jump-target",
-            "Jump must fence earlier inserts and preserve its selected recording.");
+            "New recovery rows must append after the selected live edge.");
         await queue.MarkAsync(next, "jump-target", PlaybackOutcome.Completed, default);
-        Check(await queue.NextAsync(next, 0, default) == null, "Manual completion and Jump must not reorder or replay recordings.");
+        Check((await queue.NextAsync(next, 0, default))?.Id == "earlier-at-jump",
+            "An unseen recovery row arriving after Jump must still play.");
         Console.WriteLine("PASS Durable queue explicit Stop, stopped-gap exclusion, entitlement floor, manual completion, and Jump");
     }
 

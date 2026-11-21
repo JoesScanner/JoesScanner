@@ -78,6 +78,18 @@ Incoming calls are queued and played in sequence, with the ability to jump ahead
 - Jump to live  
 - Adjust playback speed for clearing backlogs  
 
+### iOS audio and background monitoring
+
+- **Mix normally** plays alongside other apps. **Mix and duck** lowers their volume for up to three seconds per recording, then continues longer recordings at normal mixing volume. Both settings leave Now Playing metadata and lock-screen commands to other apps. Podcasts and audiobooks can continue playing alongside the scanner because neither mixing mode requests a spoken-audio interruption.
+- **Exclusive** requests nonmixing playback while the recording plays. The scanner releases its audio session between recordings and asks iOS to let interrupted apps resume. iOS decides whether to grant audio priority, and each interrupted app decides whether to resume.
+- The iOS background audio capability supports audible playback while the app is in the background or the screen is locked. iOS can suspend the app during gaps, which can pause the connection and delay incoming calls until foreground recovery. The scanner plays only actual recordings.
+
+### Return to Live after interruption
+
+Set the threshold under **Settings → Audio options**. The default is five minutes. Choose Immediately, a preset, a custom whole number from 1 to 1,440 minutes, or Never. A shorter interruption preserves the queue and resumes the paused recording when the platform can still resume it. At or above the threshold, playback returns to the newest eligible recording using the same durable boundary as Jump to Live. Recordings received during that operation keep their positions after the boundary. Skipped recordings remain available in authorized History.
+
+The timer follows detected audio interruptions, unavailable connections, and interrupted background execution. Ordinary gaps between calls and missing audio do not start it. If headphones or Bluetooth disconnect with **Pause playback** selected, press Play to recover. Explicitly stopping monitoring cancels recovery. After an app restart, the device can reopen the saved queue and apply a checkpoint from the same server and account. An interrupted native audio position may be lost when the process terminates. If HTTP catch-up is still retrying after 10 seconds, Live can resume from the available queue. SQLite keeps the earliest incomplete recovery window for that server and account until its eligible results are durably reconciled. Restart repeats incomplete HTTP work, reusing the original arrival positions for duplicates.
+
 ### Connection Status  
 A badge indicates whether the app is connected, connecting, or offline.
 
@@ -87,6 +99,12 @@ The log viewer helps diagnose server or connection issues. Logs can be exported 
 ### Local recording storage
 
 The Live playback journal keeps pending recordings and their metadata regardless of age. This includes recordings that are playing, interrupted, failed, or waiting for audio. Completed and intentionally skipped recordings keep a compact identity record with their recorder, order, disposition, and authorization context. The recorder can still return old IDs during recovery, so the journal keeps these identities indefinitely to prevent replay. Journal size grows with distinct recordings and any unresolved backlog.
+
+Live playback, Previous and Next, and Jump to Live follow the order in which the app accepts recordings. SQLite stores one increasing sequence across recorder and account scopes. The player reads the currently selected scope. A duplicate or an update to an existing recording keeps its position. Unseen rows from HTTP recovery append in response order, and a recording waiting for audio keeps its place until it plays or is skipped. Recorder timestamps still drive call-card display, History, and time-based checks for access and recovery.
+
+A manual or automatic Jump leaves the HTTP recovery window open. Newly found results from that window are recorded as skipped and remain available in authorized History. Live events observed first retain their normal eligibility, even when an HTTP response later includes the same recording. If monitoring was explicitly stopped, any unfinished window waits for the next explicit Start and its unseen results are treated as skipped backlog. HTTP-only snapshots can mix backlog with new recordings and expose no reliable arrival marker. Rows first observed through recovery-owned HTTP requests use the window's disposition.
+
+Schema version 5 gives existing identities a deterministic position using their previous SQLite insertion rowids. The original arrival order cannot be reconstructed for recordings that were sorted or persisted out of order by earlier versions. The upgrade preserves pending, completed, and skipped states. A recording that reaches the app but has yet to commit when the process ends can only enter the queue if the recorder delivers it again.
 
 The separate calls cache keeps up to 500 rows per recorder on write. Background maintenance expires cache rows after 24 hours, generic lookup cache entries after 14 days, and queued telemetry after seven days. Maintenance starts after launch and processes up to 128 rows per table in each batch. It checks again after 30 seconds while cleanup is pending and every six hours otherwise. SQLite can reuse freed space for future writes.
 

@@ -22,12 +22,16 @@ internal static class IosAudioEnvironment
 
     internal static bool RequiresPlay => Suspension.RequiresPlay;
     internal static bool IsBlocked => Suspension.IsBlocked;
+    internal static bool HasRecoveryInterruption => Suspension.HasRecoveryInterruption;
+    internal static bool RoutePaused => Suspension.IsRoutePaused;
     internal static int MediaGeneration => Suspension.MediaGeneration;
     internal static int RouteGeneration => Suspension.RouteGeneration;
     internal static MobileAudioMode? ActiveMode => Session.ActiveMode;
     internal static Task Changed => _changed.Task;
     internal static event Action? ResumeStateChanged;
-    internal static event Action<DateTimeOffset>? ForegroundRecovered;
+    internal static event Action<DateTimeOffset, DateTimeOffset?>? ForegroundRecovered;
+    internal static event Action<DateTimeOffset>? BackgroundMonitoringCheckpoint;
+    internal static event Action? RecoveryInterruptionChanged;
     internal static event Action? PlaybackStateChanged;
     internal static event Action? ReconcilePlayerState;
 
@@ -42,13 +46,17 @@ internal static class IosAudioEnvironment
 
     internal static Task WaitForReleaseAsync(CancellationToken token) => _releaseRetries.WaitAsync(token);
 
-    internal static long StartClip(MobileAudioMode mode)
+    internal static Task WaitUntilPlayableAsync(CancellationToken token, Task? terminal = null) =>
+        Suspension.WaitUntilPlayableAsync(static () => Changed, token, terminal);
+
+    internal static long StartClip(MobileAudioMode selected, MobileAudioMode mode)
     {
         _observers?.RefreshCallState();
         _observers?.ReconcileCurrentRoute();
         if (IsBlocked)
             return 0;
 
+        AppLog.DebugWriteLine(() => $"iOS audio session requested (selected={selected}, effective={mode}).");
         var lease = Session.TryStart(mode);
         if (lease != 0)
         {
@@ -100,12 +108,14 @@ internal static class IosAudioEnvironment
 
     private static void OnMediaServicesLost() => Change(() =>
     {
+        AppLog.DebugWriteLine("iOS audio media services lost.");
         Session.Invalidate();
         Suspension.MediaServicesLost();
     });
 
     internal static void HandleMediaServicesReset() => Change(() =>
     {
+        AppLog.DebugWriteLine("iOS audio media services reset. Waiting for Play.");
         Session.Invalidate();
         Suspension.MediaServicesReset();
     });
@@ -114,6 +124,7 @@ internal static class IosAudioEnvironment
     {
         var requiredBefore = RequiresPlay;
         transition();
+        RecoveryInterruptionChanged?.Invoke();
         var prior = _changed;
         _changed = NewSignal();
         prior.TrySetResult();
@@ -133,7 +144,9 @@ internal static class IosAudioEnvironment
         if ((options & IosAudioOptions.Duck) != 0)
             nativeOptions |= AVAudioSessionCategoryOptions.DuckOthers;
 
-        if (session.SetCategory(AVAudioSessionCategory.Playback, nativeOptions) is { } categoryError)
+        var categoryError = session.SetCategory(AVAudioSessionCategory.Playback, nativeOptions);
+        AppLog.DebugWriteLine(() => $"iOS audio category Playback (options={nativeOptions}, error={categoryError?.Code ?? 0}).");
+        if (categoryError != null)
             return HandleActivationFailure(categoryError);
         if (OperatingSystem.IsIOSVersionAtLeast(17))
         {
@@ -143,7 +156,9 @@ internal static class IosAudioEnvironment
                 AppLog.DebugWriteLine(() => $"iOS audio route preference failed ({routeError.Code}).");
         }
 
-        if (session.SetActive(true, out var error))
+        var activated = session.SetActive(true, out var error);
+        AppLog.DebugWriteLine(() => $"iOS audio activation (succeeded={activated}, error={error?.Code ?? 0}).");
+        if (activated)
             return true;
 
         return HandleActivationFailure(error);
@@ -169,27 +184,28 @@ internal static class IosAudioEnvironment
 
     private static bool Deactivate()
     {
-        AVAudioSession.SharedInstance().SetActive(false, AVAudioSessionSetActiveOptions.NotifyOthersOnDeactivation,
-            out var error);
-        if (error != null)
-            AppLog.DebugWriteLine(() => $"iOS audio session deactivation reported ({error.Code}).");
+        var result = AVAudioSession.SharedInstance().SetActive(false,
+            AVAudioSessionSetActiveOptions.NotifyOthersOnDeactivation, out var error);
         // AVAudioSession documents IsBusy as having deactivated the session.
-        return error == null || error.Code == (long)AVAudioSessionErrorCode.IsBusy;
+        var released = error == null || error.Code == (long)AVAudioSessionErrorCode.IsBusy;
+        AppLog.DebugWriteLine(() => $"iOS audio deactivation (notify others, result={result}, released={released}, error={error?.Code ?? 0}).");
+        return released;
     }
 
     private static bool ReleasePriority()
     {
         var error = AVAudioSession.SharedInstance().SetCategory(AVAudioSessionCategory.Playback,
             AVAudioSessionCategoryOptions.MixWithOthers);
-        if (error != null)
-            AppLog.Add(() => $"iOS could not switch an unreleased session to plain mixing ({error.Code}).");
+        AppLog.DebugWriteLine(() => $"iOS audio release fallback Playback (options=MixWithOthers, error={error?.Code ?? 0}).");
         return error == null;
     }
 
     private static void SystemDeactivated(bool wasSuspended, bool routeDisconnected)
     {
+        AppLog.DebugWriteLine(() => $"iOS audio deactivated by system (wasSuspended={wasSuspended}, routeDisconnected={routeDisconnected}).");
         if (wasSuspended)
         {
+            _observers?.NoteProcessWasSuspended();
             // This notification describes a past process suspension. The route
             // and the current player state tell us whether recovery is still needed.
             _observers?.ReconcileCurrentRoute();
@@ -218,6 +234,7 @@ internal static class IosAudioEnvironment
 
     private static void ResumeRecommendation(bool shouldResume)
     {
+        AppLog.DebugWriteLine(() => $"iOS audio resumption recommendation (shouldResume={shouldResume}).");
         _observers?.ReconcileCurrentRoute();
         _observers?.RefreshCallState();
         Change(() => Suspension.RecommendResume(shouldResume));
@@ -231,6 +248,10 @@ internal static class IosAudioEnvironment
         private readonly CXCallObserver _calls = new();
         private readonly CallObserverDelegate _callDelegate;
         private DateTimeOffset? _backgroundSince;
+        private DateTimeOffset _lastBackgroundPulseUtc;
+        private DateTimeOffset? _suspendedSince;
+        private long _lastBackgroundPulse;
+        private CancellationTokenSource? _backgroundProbe;
         private bool _monitoringRecovery;
         private bool _checkForeground = true;
         private bool _callActive;
@@ -255,7 +276,7 @@ internal static class IosAudioEnvironment
                 else if (e.Reason == AVAudioSessionRouteChangeReason.OldDeviceUnavailable &&
                     e.PreviousRoute?.Outputs.Where(IsPrivateOutput).Select(port => port.UID).ToArray() is { Length: > 0 } oldOutputs)
                 {
-                    Dispatch(() =>
+                    DispatchAudio(() =>
                     {
                         var current = AVAudioSession.SharedInstance().CurrentRoute.Outputs.Select(port => port.UID);
                         if (_routes.DeviceUnavailable(oldOutputs, current))
@@ -263,8 +284,8 @@ internal static class IosAudioEnvironment
                     });
                 }
             }));
-            _tokens.Add(AVAudioSession.Notifications.ObserveMediaServicesWereLost((_, _) => DispatchAudio(OnMediaServicesLost)));
-            _tokens.Add(AVAudioSession.Notifications.ObserveMediaServicesWereReset((_, _) => DispatchAudio(HandleMediaServicesReset)));
+            _tokens.Add(AVAudioSession.Notifications.ObserveMediaServicesWereLost((_, _) => DispatchAudio(OnMediaServicesLost, sessionWide: true)));
+            _tokens.Add(AVAudioSession.Notifications.ObserveMediaServicesWereReset((_, _) => DispatchAudio(HandleMediaServicesReset, sessionWide: true)));
             var center = NSNotificationCenter.DefaultCenter;
             _tokens.Add(center.AddObserver(UIApplication.WillResignActiveNotification, _ => Dispatch(() => _checkForeground = true)));
             _tokens.Add(center.AddObserver(UIScene.WillDeactivateNotification, _ => Dispatch(() => _checkForeground = true)));
@@ -342,8 +363,50 @@ internal static class IosAudioEnvironment
         {
             _checkForeground = true;
             ReconcileCurrentRoute();
-            if (_monitoringRecovery)
-                _backgroundSince ??= DateTimeOffset.UtcNow;
+            if (!_monitoringRecovery || _backgroundSince.HasValue)
+                return;
+            _backgroundSince = _lastBackgroundPulseUtc = DateTimeOffset.UtcNow;
+            _lastBackgroundPulse = System.Diagnostics.Stopwatch.GetTimestamp();
+            BackgroundMonitoringCheckpoint?.Invoke(_lastBackgroundPulseUtc);
+            _backgroundProbe = new CancellationTokenSource();
+            _ = ProbeBackgroundExecutionAsync(_backgroundProbe);
+        }
+
+        private async Task ProbeBackgroundExecutionAsync(CancellationTokenSource probe)
+        {
+            // This timer observes whether the dispatcher is still executing. It
+            // acquires no background execution time and plays no audio.
+            using (probe)
+            {
+                try
+                {
+                    while (!probe.IsCancellationRequested)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(2), probe.Token).ConfigureAwait(false);
+                        await MainThread.InvokeOnMainThreadAsync(() =>
+                        {
+                            if (_backgroundProbe == probe)
+                                ObserveBackgroundPulse();
+                        });
+                    }
+                }
+                catch (OperationCanceledException) when (probe.IsCancellationRequested) { }
+            }
+        }
+
+        private void ObserveBackgroundPulse()
+        {
+            var next = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (System.Diagnostics.Stopwatch.GetElapsedTime(_lastBackgroundPulse, next) > TimeSpan.FromSeconds(5))
+                NoteProcessWasSuspended();
+            _lastBackgroundPulse = next;
+            _lastBackgroundPulseUtc = DateTimeOffset.UtcNow;
+        }
+
+        internal void NoteProcessWasSuspended()
+        {
+            if (_backgroundSince.HasValue)
+                _suspendedSince ??= _lastBackgroundPulseUtc;
         }
 
         internal void BeginMonitoringRecovery()
@@ -357,6 +420,15 @@ internal static class IosAudioEnvironment
         {
             _monitoringRecovery = false;
             _backgroundSince = null;
+            _suspendedSince = null;
+            StopBackgroundProbe();
+        }
+
+        private void StopBackgroundProbe()
+        {
+            var probe = _backgroundProbe;
+            _backgroundProbe = null;
+            probe?.Cancel();
         }
 
         private void Foreground()
@@ -364,15 +436,19 @@ internal static class IosAudioEnvironment
             if (!_checkForeground || UIApplication.SharedApplication.ApplicationState != UIApplicationState.Active)
                 return;
             _checkForeground = false;
+            if (_backgroundSince is { } since)
+            {
+                ObserveBackgroundPulse();
+                _backgroundSince = null;
+                StopBackgroundProbe();
+                var suspendedSince = _suspendedSince;
+                _suspendedSince = null;
+                ForegroundRecovered?.Invoke(since, suspendedSince);
+            }
             RefreshCallState();
             ReconcilePlayerState?.Invoke();
             Session.FinishDeactivation();
             ReconcileRecovery();
-            if (_backgroundSince is { } since)
-            {
-                _backgroundSince = null;
-                ForegroundRecovered?.Invoke(since);
-            }
         }
 
         private void ReconcileRecovery()
@@ -417,14 +493,14 @@ internal static class IosAudioEnvironment
                 callback();
         });
 
-        private void DispatchAudio(Action callback)
+        private void DispatchAudio(Action callback, bool sessionWide = false)
         {
             var generation = Session.SignalGeneration;
-            // Avoid reentrancy into SetActive/Release and drop work queued on
-            // behalf of an older attempt or an explicitly stopped run.
+            // Defer native callbacks past SetActive/Release. A media server
+            // event applies to every player, even if the clip changed in the meantime.
             DispatchQueue.MainQueue.DispatchAsync(() =>
             {
-                if (!_disposed && Session.IsCurrentSignal(generation))
+                if (!_disposed && Session.IsCurrentSignal(generation, sessionWide))
                     callback();
             });
         }

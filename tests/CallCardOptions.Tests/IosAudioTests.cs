@@ -6,15 +6,67 @@ internal static class IosAudioTests
     internal static async Task RunAsync()
     {
         RecordingModesAndLeaseOwnership();
+        LongRecordingStopsDucking();
         FailedDeactivation();
         BoundedReleaseRetries();
         await StalledPlaybackRecoveryAsync();
         MissingAndOutOfOrderInterruptions();
+        await ItemFailureWhileInterruptedAsync();
         await ResumeRecordingAndAdvanceAtBoundaryAsync();
         PrivateRouteRecovery();
         await StopAndReplaceAsync();
         MediaResetAndPlayerRebuild();
-        ForegroundSocketRecovery();
+        await ForegroundSocketRecoveryAsync();
+    }
+
+    private static void LongRecordingStopsDucking()
+    {
+        var calls = new List<string>();
+        var session = new IosClipSession(options => { calls.Add(options.ToString()); return true; },
+            () => { calls.Add("release"); return true; });
+        var recording = new IosRecordingState();
+        var selected = MobileAudioMode.MixAndDuck;
+        var first = session.TryStart(recording.ModeForActivation(selected));
+        recording.Activated(selected);
+        recording.Observe(1.25);
+
+        session.Release(first);
+        recording.EndDuckedSegment(TimeSpan.FromSeconds(1), windowExpired: false);
+        Check(recording.DuckingRemaining(TimeSpan.Zero) == TimeSpan.FromSeconds(2),
+            "An interruption must not reset the recording's ducking window.");
+
+        var resumed = session.TryStart(recording.ModeForActivation(selected));
+        session.Release(resumed);
+        recording.EndDuckedSegment(TimeSpan.FromSeconds(2), windowExpired: true);
+        var continuation = session.TryStart(recording.ModeForActivation(MobileAudioMode.Exclusive));
+        session.Release(resumed);
+        Check(session.Owns(continuation) && session.ActiveMode == MobileAudioMode.MixNormally &&
+              recording.SelectedMode(MobileAudioMode.Exclusive) == selected && recording.SeekTarget(0) == 1.25 &&
+              calls.SequenceEqual(["Mix, Duck", "release", "Mix, Duck", "release", "Mix"]),
+            "A long recording must release ducking and continue in plain mixing with its selected mode and position preserved.");
+
+        session.Release(continuation);
+        var next = new IosRecordingState();
+        Check(next.DuckingRemaining(TimeSpan.Zero) == TimeSpan.FromSeconds(3) &&
+              next.ModeForActivation(selected) == selected,
+            "Each new recording receives its own ducking window.");
+        Console.WriteLine("PASS iOS bounded ducking and plain-mix continuation of the same recording");
+    }
+
+    private static async Task ItemFailureWhileInterruptedAsync()
+    {
+        var state = new IosAudioSuspension();
+        state.BeginInterruption();
+        var changed = new TaskCompletionSource();
+        var finished = new TaskCompletionSource();
+        var failure = new TaskCompletionSource();
+        var wait = state.WaitUntilPlayableAsync(() => changed.Task, default, Task.WhenAny(finished.Task, failure.Task));
+        Check(!wait.IsCompleted, "An interrupted recording must wait before attempting playback.");
+        failure.SetResult();
+        await wait.WaitAsync(TimeSpan.FromSeconds(1));
+        Check(state.IsBlocked && !finished.Task.IsCompleted,
+            "A failed item must wake the wait and remain failed while the audio session is still blocked.");
+        Console.WriteLine("PASS iOS item failure wakes interruption wait without permitting playback");
     }
 
     private static void RecordingModesAndLeaseOwnership()
@@ -310,6 +362,7 @@ internal static class IosAudioTests
 
     private static void MediaResetAndPlayerRebuild()
     {
+        var session = new IosClipSession(_ => true, () => true);
         var state = new IosAudioSuspension();
         var recording = new IosRecordingState();
         recording.Observe(7.5);
@@ -319,7 +372,12 @@ internal static class IosAudioTests
         state.MediaServicesLost();
         state.RequestPlay();
         Check(state.IsBlocked, "Explicit Play cannot start while media services are unavailable.");
-        state.MediaServicesReset();
+        var queuedReset = session.SignalGeneration;
+        session.InvalidatePendingSignals();
+        Check(!session.IsCurrentSignal(queuedReset) && session.IsCurrentSignal(queuedReset, sessionWide: true),
+            "Replacing a clip fences its callbacks but cannot discard a queued media-server reset.");
+        if (session.IsCurrentSignal(queuedReset, sessionWide: true))
+            state.MediaServicesReset();
         state.MediaServicesReset();
         state.Reconcile(canRetryActivation: true);
         Check(state.RequiresPlay && state.MediaGeneration == initial + 1,
@@ -331,17 +389,26 @@ internal static class IosAudioTests
         Console.WriteLine("PASS iOS media reset, saved clip position, and replay fallback");
     }
 
-    private static void ForegroundSocketRecovery()
+    private static async Task ForegroundSocketRecoveryAsync()
     {
         var recovery = new LiveStreamRecovery();
         var since = DateTimeOffset.FromUnixTimeMilliseconds(1_700_000_000_800);
         var signal = recovery.Pending;
         recovery.Request(since.AddMinutes(1));
         recovery.Request(since);
-        Check(signal.IsCompletedSuccessfully && recovery.Take() == DateTimeOffset.FromUnixTimeSeconds(since.ToUnixTimeSeconds()),
+        var (first, isNew) = recovery.BeginAttempt();
+        Check(signal.IsCompletedSuccessfully && isNew && first?.Since == DateTimeOffset.FromUnixTimeSeconds(since.ToUnixTimeSeconds()),
             "Foreground recovery should wake the socket and keep the earliest eligible boundary.");
-        Check(!recovery.Pending.IsCompleted && recovery.Take() == null && new LiveStreamRecovery().Take() == null,
-            "A handled recovery must not repeat or carry into a new monitoring run.");
+        Check(!recovery.Pending.IsCompleted && recovery.BeginAttempt() == (first, false),
+            "Starting recovery must retain the window until all pages are consumed.");
+        recovery.Request(since.AddMinutes(2));
+        await recovery.CompleteAsync(first!, default);
+        var (overlap, overlapIsNew) = recovery.BeginAttempt();
+        Check(overlapIsNew && overlap?.Since == first!.Since && !ReferenceEquals(first, overlap),
+            "Completing an older attempt cannot acknowledge a newer overlapping request.");
+        await recovery.CompleteAsync(overlap!, default);
+        Check(!recovery.Pending.IsCompleted && recovery.BeginAttempt().Window == null && new LiveStreamRecovery().BeginAttempt().Window == null,
+            "A reconciled recovery must not repeat or carry into a new monitoring run.");
         Console.WriteLine("PASS iOS foreground socket recovery coalescing and per-run isolation");
     }
 

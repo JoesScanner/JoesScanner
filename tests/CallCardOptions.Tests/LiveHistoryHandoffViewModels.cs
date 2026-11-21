@@ -27,6 +27,7 @@ namespace JoesScanner.ViewModels
         private readonly bool _userRunShouldDriveQueue = false;
         private bool _resumeAfterHistory;
         private bool _isQueuePlaybackRunning;
+        private bool IsLiveInterruptionBlockingPlayback => false;
         private int _queuePlaybackVersion;
         private DelayedSelection? _nextSelection;
 
@@ -116,11 +117,10 @@ namespace JoesScanner.ViewModels
                 request.Token, failure => throw new InvalidOperationException("Live handoff failed.", failure), completion);
         }
 
-        private static bool TryGetDurableRecording(CallItem item, DurableLiveQueue.Run run, out string id, out DateTimeOffset time)
+        private static bool TryGetDurableRecording(CallItem item, DurableLiveQueue.Run run, out string id)
         {
             id = item.BackendId;
-            time = item.RecordingTimeUtc.GetValueOrDefault();
-            return item.RecordingServer == run.Server && item.RecordingTimeUtc.HasValue && run.Owns(item.RecordingAccess);
+            return item.RecordingServer == run.Server && id.Length != 0 && run.Owns(item.RecordingAccess);
         }
 
         private bool IsCurrentLiveScope(DurableLiveQueue.Run run) => run == _durableRun;

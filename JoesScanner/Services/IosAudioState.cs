@@ -30,7 +30,7 @@ internal sealed class IosClipSession(Func<IosAudioOptions, bool> activate, Func<
 
     internal MobileAudioMode? ActiveMode { get; private set; }
     internal long SignalGeneration => Interlocked.Read(ref _signalGeneration);
-    internal bool IsCurrentSignal(long generation) => SignalGeneration == generation;
+    internal bool IsCurrentSignal(long generation, bool sessionWide = false) => sessionWide || SignalGeneration == generation;
     internal void InvalidatePendingSignals() => Interlocked.Increment(ref _signalGeneration);
     internal bool Owns(long lease) => lease != 0 && _activeLease == lease;
     internal long PendingRelease => _pendingRelease;
@@ -115,8 +115,20 @@ internal sealed class IosAudioSuspension
         (_recovery != Recovery.None && !_mayRetryActivation);
     internal bool NeedsReconciliation => _recovery != Recovery.None;
     internal bool IsRoutePaused => _routePaused;
+    internal bool HasRecoveryInterruption => _routePaused || _callActive || _resumeRequired || _mediaUnavailable ||
+        (_recovery is Recovery.Interrupted or Recovery.PlayerPaused && !_mayRetryActivation);
     internal int MediaGeneration { get; private set; }
     internal int RouteGeneration { get; private set; }
+
+    internal async Task WaitUntilPlayableAsync(Func<Task> changed, CancellationToken token, Task? terminal)
+    {
+        token.ThrowIfCancellationRequested();
+        while (IsBlocked && terminal?.IsCompleted != true)
+        {
+            var signal = changed();
+            await (terminal == null ? signal : Task.WhenAny(signal, terminal)).WaitAsync(token);
+        }
+    }
 
     internal bool BeginInterruption()
     {
@@ -284,12 +296,27 @@ internal sealed class IosPrivateAudioRoutes
 // native player can momentarily report zero after a media reset.
 internal sealed class IosRecordingState
 {
+    private static readonly TimeSpan DuckingWindow = TimeSpan.FromSeconds(3);
     private double _seconds;
     private MobileAudioMode? _mode;
     private bool _recoveredFromStall;
+    private TimeSpan _duckingUsed;
 
-    internal MobileAudioMode ModeForActivation(MobileAudioMode configured) => _mode ?? configured;
+    internal MobileAudioMode SelectedMode(MobileAudioMode configured) => _mode ?? configured;
+    internal MobileAudioMode ModeForActivation(MobileAudioMode configured)
+    {
+        var mode = SelectedMode(configured);
+        return mode == MobileAudioMode.MixAndDuck && _duckingUsed >= DuckingWindow ? MobileAudioMode.MixNormally : mode;
+    }
+
     internal void Activated(MobileAudioMode mode) => _mode ??= mode;
+
+    internal TimeSpan DuckingRemaining(TimeSpan segmentElapsed) => DuckingWindow - _duckingUsed - segmentElapsed;
+
+    internal void EndDuckedSegment(TimeSpan elapsed, bool windowExpired)
+    {
+        _duckingUsed = windowExpired ? DuckingWindow : _duckingUsed + elapsed;
+    }
 
     internal void Observe(double seconds)
     {

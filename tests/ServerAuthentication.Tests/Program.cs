@@ -33,6 +33,18 @@ var cases = new (string Name, Func<Task> Run)[]
     ("Directory History search, pagination, single download, and ZIP enforce verified entitlement", MobileRecoveryTests.HistorySearchAndExport),
     ("Live-to-History handoff rejects a recovery response revoked during an HTTP request", MobileRecoveryTests.EntitlementDuringHandoff),
     ("Foreground recovery aborts a half-open socket, merges late audio, and delivers subsequent live calls once", MobileRecoveryTests.ReconnectAndLateAudio),
+    ("Production WebSocket and HTTP recovery feed durable arrival order", MobileRecoveryTests.StreamArrivalOrder),
+    ("Paged recovery gives first observations their position and preserves overlapping requests", MobileRecoveryTests.PagedRecoveryArrivalAndOverlap),
+    ("Partial recovery retries without blocking Live or moving admitted recordings", MobileRecoveryTests.PagedRecoveryRetriesPartialFailure),
+    ("HTTP-only fallback durably admits eligible rows during partial recovery", MobileRecoveryTests.HttpOnlyRecoveryRetriesPartialFailure),
+    ("Authorized HTTP recovery can admit a provisional row from the baseline poll", MobileRecoveryTests.RecoveryAdmitsPreviouslyProvisionalObservation),
+    ("A timed-out automatic Jump preserves the outstanding HTTP window across restart", MobileRecoveryTests.RecoverySurvivesTimedJumpAndRestart),
+    ("Manual Jump skips late recovery results and preserves overlapping live socket arrivals", MobileRecoveryTests.ManualJumpFencesOutstandingSocketRecovery),
+    ("Recovery progress requires a durable receipt and respects account scope and explicit Stop", MobileRecoveryTests.RecoveryReceiptsAndOwnership),
+    ("An evicted recording receives a full socket update while completed identities stay retired", MobileRecoveryTests.EvictedRecordingReceivesFullSocketUpdate),
+    ("Hosted socket updates honor the foreground cutoff, entitlement, and signed URL sanitization", MobileRecoveryTests.HostedSocketUpdateTargetsOnlyEligiblePendingRows),
+    ("Explicit Stop cancels paginated recovery and keeps the committed backlog", MobileRecoveryTests.StopDuringPagedRecovery),
+    ("Paginated recovery fences account changes and rechecks subscription downgrades", MobileRecoveryTests.PagedRecoveryRechecksAccountAndTier),
     ("Playback authorization rechecks historical acquisition, retry, expiry, and downgrade", MobileRecoveryTests.PlaybackEntitlement),
     ("SQLite-only identities can reacquire missing and expired audio using existing calljson lookups", MobileRecoveryTests.RecordingAudioRefresh),
     ("Older durable recordings recover via bounded timestamp paging with account isolation", MobileRecoveryTests.OldDurableSignedAudio),
@@ -492,7 +504,7 @@ class SettingsStub : DispatchProxy
 {
     internal string Session { get; set; } = Guid.NewGuid().ToString();
     internal string DeviceId { get; } = Guid.NewGuid().ToString();
-    internal string Username { get; } = Guid.NewGuid().ToString();
+    internal string Username { get; set; } = Guid.NewGuid().ToString();
     internal string Password { get; } = Guid.NewGuid().ToString();
     internal string ServerUrl { get; set; } = HostedServerRules.DefaultServerUrl;
     internal bool ActiveSubscription { get; set; } = true;

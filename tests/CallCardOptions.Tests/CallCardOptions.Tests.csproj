@@ -37,6 +37,7 @@
     <Compile Include="../../JoesScanner/Services/LivePlaybackRequests.cs" Link="LivePlaybackRequests.cs" />
     <Compile Include="../../JoesScanner/Services/LiveStreamRecovery.cs" Link="LiveStreamRecovery.cs" />
     <Compile Include="../../JoesScanner/Services/MobileAudioPreferencesStore.cs" Link="MobileAudioPreferencesStore.cs" />
+    <Compile Include="../../JoesScanner/Services/LiveInterruptionRecovery.cs" Link="LiveInterruptionRecovery.cs" />
     <Compile Include="../../JoesScanner/Services/MonitoringLifecycle.cs" Link="MonitoringLifecycle.cs" />
     <Compile Include="../../JoesScanner/Services/MonitoringIntentStore.cs" Link="MonitoringIntentStore.cs" />
     <Compile Include="../../JoesScanner/Services/MonitoringTransportOwnership.cs" Link="MonitoringTransportOwnership.cs" />

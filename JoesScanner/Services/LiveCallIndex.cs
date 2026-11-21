@@ -7,6 +7,7 @@ namespace JoesScanner.Services;
 internal sealed class LiveCallIndex
 {
     private readonly HashSet<string> _seen = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _provisional = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, WeakReference<LiveCallState>> _calls = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<LiveCallState> _notified = new();
     private int _addedSinceCleanup;
@@ -14,12 +15,27 @@ internal sealed class LiveCallIndex
 
     public bool MarkSeen(string id) => _seen.Add(id);
 
+    public bool NeedsAdmission(string id) => _provisional.Contains(id);
+
+    public void ConfirmAdmission(string id, bool accepted)
+    {
+        if (accepted)
+            _provisional.Remove(id);
+        else
+            _provisional.Add(id);
+    }
+
+    public string OriginalId(string id) => _seen.TryGetValue(id, out var original) ? original : id;
+
     public void Seed(IEnumerable<CallItem> cards, string serverUrl)
     {
         foreach (var card in cards)
         {
             if (card.LiveState is { } state && state.ServerUrl == serverUrl && MarkSeen(state.Id))
+            {
+                ConfirmAdmission(state.Id, card.LiveArrivalSequence.HasValue);
                 Track(state);
+            }
         }
     }
 

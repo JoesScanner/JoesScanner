@@ -30,21 +30,22 @@ internal static class DurableLiveTransportTests
         var other = run with { Server = "https://scanner.example/two" };
         await queue.OpenAsync(run, Now, default);
         await queue.OpenAsync(other, Now, default);
-        for (var i = 499; i >= 0; i--)
-            await Add(queue, run, $"{i:D4}", Now.AddSeconds(i / 2), audio: i != 0 && i != 100);
+        for (var i = 0; i < 500; i++)
+            await Add(queue, run, $"{i:D4}", Now.AddSeconds((499 - i) / 2), audio: i != 0 && i != 100);
         await Add(queue, other, "0099", Now.AddSeconds(49));
         await Add(queue, other, "0100", Now.AddSeconds(49));
         await Add(queue, other, "0499", Now.AddSeconds(249));
 
         // This anchor is hundreds of recordings behind the live edge. No
         // card collections or ViewModel fixtures participate in the resolution.
-        var anchor = new DurableLiveQueue.Position("0101", Now.AddSeconds(50).UtcTicks);
+        async Task<long> Sequence(string id) => (await queue.GetArrivalSequenceAsync(run, id, default))!.Value;
+        var anchor = await Sequence("0101");
         var previous = await queue.FindTransportTargetAsync(run, 0, anchor, older: true, default);
         var next = await queue.FindTransportTargetAsync(run, 0, anchor, older: false, default);
         Check(previous is { Id: "0100", Snapshot.AudioUrl: null } && next?.Id == "0102",
-            "Previous and Next must follow the durable timestamp/ID order and keep a missing-audio target.");
-        Check(await queue.FindTransportTargetAsync(run, 0, new("0000", Now.UtcTicks), older: true, default) == null &&
-            await queue.FindTransportTargetAsync(run, 0, new("0499", Now.AddSeconds(249).UtcTicks), older: false, default) == null,
+            "Previous and Next must follow arrival order and keep a missing-audio target.");
+        Check(await queue.FindTransportTargetAsync(run, 0, await Sequence("0000"), older: true, default) == null &&
+            await queue.FindTransportTargetAsync(run, 0, await Sequence("0499"), older: false, default) == null,
             "Transport must stop at the ends of the available recordings.");
         Check(await queue.HasNewerPendingAsync(run, 0, anchor, default),
             "Offscreen recovery must still see newer pending recordings for catch-up speed.");
@@ -61,20 +62,18 @@ internal static class DurableLiveTransportTests
                 var plan = new List<string>();
                 while (reader.Read())
                     plan.Add(reader.GetString(3));
-                Check(plan.Any(step => step.Contains("live_queue_transport_order", StringComparison.Ordinal) &&
-                        step.Contains("recorded_utc,recording_id", StringComparison.Ordinal)) &&
+                Check(plan.Any(step => step.Contains("live_queue_transport_arrival", StringComparison.Ordinal) &&
+                        step.Contains("arrival_sequence", StringComparison.Ordinal)) &&
                     !plan.Any(step => step.Contains("TEMP B-TREE", StringComparison.Ordinal)),
-                    "Previous and Next must seek within the scoped timestamp/ID index without temporary sorting.");
+                    "Previous and Next must seek within the scoped arrival index without temporary sorting.");
             }
         }
-        Check((await queue.FindTransportTargetAsync(run, 0, anchor with { RecordedUtc = Now.UtcTicks },
-                  older: true, default))?.Id == "0100" &&
-            (await queue.FindTransportTargetAsync(run, 0, anchor with { Id = "0100-missing" },
-                  older: false, default))?.Id == "0101",
-            "Use the persisted anchor time when present, and the supplied time and ID when the anchor is missing.");
-        Console.WriteLine("PASS Transport seeks both directions without sorting and preserves anchor timestamp fallback");
+        Check(await queue.GetArrivalSequenceAsync(run, "0100-missing", default) == null &&
+            await queue.GetArrivalSequenceAsync(other, "0100", default) != await Sequence("0100"),
+            "The transport anchor must be a known identity in its own recorder scope.");
+        Console.WriteLine("PASS Transport seeks both directions in the scoped arrival index without sorting");
 
-        var selected = await queue.FindTransportTargetAsync(run, 0, new("0400", Now.AddSeconds(200).UtcTicks), older: false, default);
+        var selected = await queue.FindTransportTargetAsync(run, 0, await Sequence("0400"), older: false, default);
         Check(selected?.Id == "0401", "Manual selection must identify the correct row before playback.");
         var completion = new PlaybackCompletion();
         var commit = new DurablePlaybackCommit(queue.CommitCompletionAsync);
@@ -84,7 +83,7 @@ internal static class DurableLiveTransportTests
             await queue.IsPendingAsync(run, "0400", 0, default) &&
             await queue.IsPendingAsync(run, "0402", 0, default),
             "A manual completion must leave the old head and its unrelated neighbors pending.");
-        var replay = await queue.FindTransportTargetAsync(run, 0, selected.Order with { Id = "0402" }, older: true, default);
+        var replay = await queue.FindTransportTargetAsync(run, 0, await Sequence("0402"), older: true, default);
         Check(replay is { Id: "0401", Snapshot: null } && replay.ToCallItem(run.Server) is { BackendId: "0401", RecordingTimeUtc: not null },
             "A completed offscreen row must remain available for deliberate, identity-based replay.");
         Console.WriteLine("PASS Manual completion during recovery preserves backlog and completed rows remain replayable");
@@ -100,16 +99,16 @@ internal static class DurableLiveTransportTests
         await queue.CommitCompletionAsync(run, "0499");
         Check(await Add(queue, run, "0498-a", Now.AddSeconds(249)),
             "A Live arrival after Jump must survive even when its ID sorts before the jumped-to ID.");
-        Check(!await Add(queue, run, "recovered-early", Now.AddSeconds(100), origin: RecordingOrigin.History) &&
+        Check(await Add(queue, run, "recovered-early", Now.AddSeconds(100), origin: RecordingOrigin.History) &&
             !await Add(queue, run, "0000", Now),
-            "Historical backfill before the boundary and duplicate skipped rows must remain excluded.");
+            "An unseen recovery with an older timestamp must append while a skipped identity remains excluded.");
         var restarted = run with { Owner = 2 };
         var reopened = new DurableLiveQueue(paths);
         await reopened.OpenAsync(restarted, Now.AddMinutes(5), default);
         Check((await reopened.NextAsync(restarted, 0, default))?.Id == "0498-a" &&
             !await reopened.IsPendingAsync(restarted, "0499", 0, default),
             "Restart must play the new Live arrival without replaying completed or skipped recordings.");
-        Check((await reopened.JumpToLiveAsync(restarted, 0, skipSelected: true, default)) is { Target.Id: "0499", PlayTarget: false } &&
+        Check((await reopened.JumpToLiveAsync(restarted, 0, skipSelected: true, default)) is { Target.Id: "recovered-early", PlayTarget: false } &&
             await reopened.NextAsync(restarted, 0, default) == null,
             "Jump with audio off drops accumulated pending work without starting playback.");
         await Add(reopened, restarted, "failed-live-edge", Now.AddMinutes(6), audio: false);
@@ -133,10 +132,10 @@ internal static class DurableLiveTransportTests
         await Add(queue, run, "live", Now);
         await Add(queue, otherAccount, "other-account", Now.AddSeconds(1));
         var standard = DurableLiveQueue.HistoricalFloor(true, 2, true, 1, Now);
-        var latest = new DurableLiveQueue.Position("live", Now.UtcTicks);
+        var latest = await queue.GetArrivalSequenceAsync(run, "live", default);
         var previous = await queue.FindTransportTargetAsync(run, standard, latest, older: true, default);
         Check(previous?.Id == "eligible-history" &&
-            await queue.FindTransportTargetAsync(run, standard, previous.Order, older: true, default) == null &&
+            await queue.FindTransportTargetAsync(run, standard, previous.ArrivalSequence, older: true, default) == null &&
             await queue.FindTransportTargetAsync(run, long.MaxValue, latest, older: true, default) == null &&
             await queue.FindTransportTargetAsync(run, standard, latest, older: false, default) == null,
             "Navigation must honor the authorized tier, fail closed for protected history and preserve account isolation.");
@@ -159,7 +158,8 @@ internal static class DurableLiveTransportTests
         await Add(queue, run, "first", Now);
         await Add(queue, run, "last", Now.AddSeconds(1));
         using var query = requests.Begin(manual: true);
-        var adjacent = await queue.FindTransportTargetAsync(run, 0, new("first", Now.UtcTicks), older: false, query.Token);
+        var adjacent = await queue.FindTransportTargetAsync(run, 0, await queue.GetArrivalSequenceAsync(run, "first", query.Token),
+            older: false, query.Token);
         using var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = paths.DbPath }.ToString());
         connection.Open();
         using var writer = connection.BeginTransaction();
