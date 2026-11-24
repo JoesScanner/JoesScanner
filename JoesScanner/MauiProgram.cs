@@ -41,6 +41,7 @@ public static class MauiProgram
         builder.Services.AddSingleton<DurableLiveQueue>();
         builder.Services.AddSingleton<IHistoryLookupsRepository, HistoryLookupsRepository>();
         builder.Services.AddSingleton<ICallStreamService, CallStreamService>();
+        builder.Services.AddSingleton<ScannerConnectionStore>();
         builder.Services.AddSingleton<ICallHistoryService, CallHistoryService>();
         builder.Services.AddSingleton<IHistoryLookupsCacheService, HistoryLookupsCacheService>();
         builder.Services.AddSingleton<IAudioFilterService, AudioFilterService>();

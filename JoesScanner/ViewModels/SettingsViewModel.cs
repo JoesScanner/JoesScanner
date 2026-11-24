@@ -741,7 +741,7 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
 
             try
             {
-                var serverKey = ServerKeyHelper.Normalize(_settings.ServerUrl);
+                var serverKey = _filterService.ScopeKey(_settings.ServerUrl);
                 await _startupData.GetOrStart(serverKey, ReadStartupDataAsync);
             }
             catch (Exception ex)
@@ -796,14 +796,14 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
             var started = Stopwatch.GetTimestamp();
             try
             {
-                var serverKey = ServerKeyHelper.Normalize(_settings.ServerUrl);
+                var serverKey = _filterService.ScopeKey(_settings.ServerUrl);
                 var localData = _startupData.GetOrStart(serverKey, ReadStartupDataAsync);
                 var wasReady = localData.IsCompletedSuccessfully;
                 var data = await localData;
                 _startupData.Release(localData);
                 var waited = Stopwatch.GetElapsedTime(started);
 
-                if (!string.Equals(serverKey, ServerKeyHelper.Normalize(_settings.ServerUrl), StringComparison.OrdinalIgnoreCase))
+                if (!string.Equals(serverKey, _filterService.ScopeKey(_settings.ServerUrl), StringComparison.OrdinalIgnoreCase))
                     await LoadSettingsFilterProfilesAsync(applySelectedProfile: true);
                 else
                     PublishFilterProfiles(data.Profiles, data.SelectedProfileId, applySelectedProfile: true);
@@ -943,7 +943,7 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
                     var localObserved = await _authObservedTriplesSyncService.GetLocalObservedAsync(serverKey, DateTime.MinValue, CancellationToken.None);
                     if (localObserved != null && localObserved.Count > 0)
                     {
-                        _filterService.SeedFromObservedTriples(localObserved, serverKey);
+                        _filterService.SeedFromObservedTriples(localObserved, serverUrl);
                     }
 
                 }
@@ -958,7 +958,7 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
                 if (triples == null || triples.Count == 0)
                     return;
 
-                accountSession.TryApply(() => _filterService.SeedFromObservedTriples(triples, serverKey));
+                accountSession.TryApply(() => _filterService.SeedFromObservedTriples(triples, serverUrl));
             }
             catch (Exception ex)
             {
@@ -981,13 +981,13 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
 
         public async Task LoadSettingsFilterProfilesAsync(bool applySelectedProfile)
         {
-            var serverKey = ServerKeyHelper.Normalize(_settings.ServerUrl);
+            var serverKey = _filterService.ScopeKey(_settings.ServerUrl);
             // The SQLite store does synchronous work even though its API returns a Task.
             var (profiles, selectedId) = await Task.Run(() => ReadFilterProfilesAsync(serverKey));
 
             await MainThread.InvokeOnMainThreadAsync(() =>
             {
-                if (string.Equals(serverKey, ServerKeyHelper.Normalize(_settings.ServerUrl), StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(serverKey, _filterService.ScopeKey(_settings.ServerUrl), StringComparison.OrdinalIgnoreCase))
                     PublishFilterProfiles(profiles, selectedId, applySelectedProfile);
             });
         }
@@ -1038,7 +1038,7 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
             {
                 Id = profileId ?? string.Empty,
                 Name = name,
-	                ServerKey = ServerKeyHelper.Normalize(_settings.ServerUrl),
+	                ServerKey = _filterService.ScopeKey(_settings.ServerUrl),
                 Filters = existingFilters,
                 Rules = records
             };
@@ -1307,7 +1307,7 @@ public bool IsDirectoryLoading
                 {
                     try
                     {
-                        if (_settings.TryGetServerCredentials(normalized, out var cachedUser, out var cachedPass))
+                        if (_mainViewModel.TryGetConfiguredRecorderCredentials(normalized, out var cachedUser, out var cachedPass))
                         {
                             _basicAuthUsername = cachedUser ?? string.Empty;
                             _basicAuthPassword = cachedPass ?? string.Empty;
@@ -2537,17 +2537,49 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
 
         private readonly ConnectionValidationRequests _connectionValidations = new();
 
+        public ObservableCollection<ScannerConnectionRow> ScannerConnections => _mainViewModel.ScannerConnections;
+
+        private bool _saveAsAnotherConnection;
+        private Guid? _editingConnectionId;
+
+        public bool SaveAsAnotherConnection
+        {
+            get => _saveAsAnotherConnection;
+            set
+            {
+                if (_saveAsAnotherConnection == value)
+                    return;
+                _saveAsAnotherConnection = value;
+                OnPropertyChanged();
+            }
+        }
+
+        internal void RefreshScannerConnectionRows() => _mainViewModel.RefreshScannerConnectionRows();
+
+        internal void EditScannerConnection(ScannerConnectionRow row)
+        {
+            ServerUrl = row.Endpoint;
+            _editingConnectionId = row.Id;
+            SaveAsAnotherConnection = false;
+        }
+
+        internal void SetScannerConnectionEnabled(ScannerConnectionRow row, bool enabled) =>
+            _mainViewModel.SetScannerConnectionEnabled(row, enabled);
+
         private async Task SaveThenValidateServerUrlAsync()
         {
-            // Validation can change connection/auth state even when the selected server URL is the same.
-            // Always stop the active connection after a successful validation so the next play/connect
-            // starts from a clean validated state.
+            _mainViewModel.RefreshScannerConnectionRows();
             var request = _connectionValidations.Begin();
-            var inputs = (ServerUrl, AuthServerBaseUrl, BasicAuthUsername, BasicAuthPassword, _selectedDirectoryServer?.Url);
+            var inputs = (ServerUrl, AuthServerBaseUrl, BasicAuthUsername, BasicAuthPassword,
+                _selectedDirectoryServer?.Url, SaveAsAnotherConnection, _editingConnectionId);
             bool IsCurrent() => _connectionValidations.IsCurrent(request);
             bool OwnsInputs() => IsCurrent() &&
-                inputs == (ServerUrl, AuthServerBaseUrl, BasicAuthUsername, BasicAuthPassword, _selectedDirectoryServer?.Url);
-            var previousServerUrlSnapshot = _savedServerUrl ?? string.Empty;
+                inputs == (ServerUrl, AuthServerBaseUrl, BasicAuthUsername, BasicAuthPassword,
+                    _selectedDirectoryServer?.Url, SaveAsAnotherConnection, _editingConnectionId);
+            var previousEndpoint = _savedServerUrl;
+            var previouslySaved = (_savedBasicAuthUsername, _savedBasicAuthPassword);
+            var directory = _selectedDirectoryServer is { IsCustom: false } entry ? entry : null;
+            (string Username, string Password)? customCredentials = null;
 
             if (!await TrySaveNonConnectionSettingsAsync() || !OwnsInputs())
             {
@@ -2556,62 +2588,36 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                 return;
             }
             if (!await ValidateServerUrlAsync(IsCurrent, OwnsInputs,
-                    (session, apply) => _connectionValidations.TryApply(request, session, OwnsInputs, apply)) || !IsCurrent())
+                    (session, apply) => _connectionValidations.TryApply(request, session, OwnsInputs, apply),
+                    (user, password) => customCredentials = (user, password)) ||
+                !IsCurrent() || ServerValidationIsError)
                 return;
 
-            if (!ServerValidationIsError)
+            try
             {
-                // IMPORTANT:
-                // After a successful validation, mark the *current* connection state as the saved baseline.
-                // The Validate button's red/blue state is driven by ConnectionNeedsValidation, which is
-                // computed from _hasUnsavedConnectionChanges. If we don't refresh the saved snapshots and
-                // recompute, custom server validations (especially no-auth ones) can leave the Validate
-                // button stuck in a "needs validation" state.
+                var savedEndpoint = _settings.ServerUrl ?? string.Empty;
+                var credentialsChanged = previouslySaved != (_settings.BasicAuthUsername, _settings.BasicAuthPassword);
+                _mainViewModel.SaveValidatedScannerConnection(previousEndpoint, savedEndpoint, directory,
+                    inputs.SaveAsAnotherConnection, inputs._editingConnectionId, customCredentials, credentialsChanged);
+                SaveAsAnotherConnection = false;
+                _editingConnectionId = null;
                 _savedAuthServerBaseUrl = _authServerBaseUrl;
-                _savedServerUrl = _settings.ServerUrl ?? string.Empty;
+                _savedServerUrl = savedEndpoint;
                 _savedUseDefaultConnection = _useDefaultConnection;
                 _savedBasicAuthUsername = _settings.BasicAuthUsername ?? string.Empty;
                 _savedBasicAuthPassword = _settings.BasicAuthPassword ?? string.Empty;
-
                 UpdateHasChanges();
-
-                try
-                {
-                    await _mainViewModel.StopMonitoringAsync();
-                }
-                catch
-                {
-                }
-
-                if (!IsCurrent())
-                    return;
-                var newServerUrl = _settings.ServerUrl ?? string.Empty;
-
-                // When switching servers, also clear any existing main queue items and address alerts so
-                // the user never falls back into calls that belong to a different server.
-                if (!string.Equals(
-                        NormalizeUrlForCompare(previousServerUrlSnapshot),
-                        NormalizeUrlForCompare(newServerUrl),
-                        StringComparison.OrdinalIgnoreCase))
-                {
-                    try
-                    {
-                        await _mainViewModel.ClearQueueForServerSwitchAsync();
-                    }
-                    catch
-                    {
-                    }
-                }
+            }
+            catch (Exception ex)
+            {
+                AppLog.Add(() => $"Could not save the scanner connection ({ex.GetType().Name}).");
+                ServerValidationIsError = true;
+                ServerValidationMessage = "The recorder responded, but its connection could not be saved.";
             }
         }
 
-        private static string NormalizeUrlForCompare(string value)
-        {
-            return (value ?? string.Empty).Trim().TrimEnd('/');
-        }
-
         private async Task<bool> ValidateServerUrlAsync(Func<bool> isCurrent, Func<bool> ownsInputs,
-            Func<WordPressSession, Action, bool> publish)
+            Func<WordPressSession, Action, bool> publish, Action<string, string> recordCustomCredentials)
         {
             var selectedDirectoryServerAtStart = _selectedDirectoryServer;
             var selectedDirectoryServerUrlAtStart = (selectedDirectoryServerAtStart?.Url ?? string.Empty).Trim().TrimEnd('/');
@@ -3046,6 +3052,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
 
                         var finalUrl = url.Trim();
                         _settings.ClearServerCredentials(finalUrl);
+                        recordCustomCredentials(string.Empty, string.Empty);
                         _settings.ServerUrl = finalUrl;
                         ServerUrl = finalUrl;
                         _mainViewModel.ServerUrl = finalUrl;
@@ -3097,6 +3104,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
 
                                 var finalUrl = url.Trim();
                                 _settings.SetServerCredentials(finalUrl, probeUsername, probePassword);
+                                recordCustomCredentials(probeUsername, probePassword);
                                 _settings.ServerUrl = finalUrl;
                                 ServerUrl = finalUrl;
                                 BasicAuthUsername = probeUsername;

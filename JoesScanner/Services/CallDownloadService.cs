@@ -204,10 +204,12 @@ namespace JoesScanner.Services
                 throw new RecordingAccessException("The recording's hosted server could not be verified.");
 
             await RecordingPlaybackAccess.VerifyAsync(_settingsService, _subscriptionService, server,
-                call.RecordingTimeUtc, access, currentLive: false, requireAccount: access.Protected, token, _clock)
+                call.RecordingTimeUtc, access, currentLive: false, requireAccount: access.Protected, token, _clock, independent: call.ServerId.HasValue)
                 .ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
             using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+            if (call.ServerId.HasValue && Uri.TryCreate(server, UriKind.Absolute, out var origin))
+                request.Options.Set(ServerAuthenticationHandler.Recorder, new RecorderRequestScope(origin, call.ServerId));
             return await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
         }
 

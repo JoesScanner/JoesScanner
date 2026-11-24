@@ -32,9 +32,14 @@ namespace JoesScanner.Services
             try { _httpClient.Dispose(); } catch { }
         }
 
-        public async Task<SubscriptionCheckResult> EnsureSubscriptionAsync(CancellationToken cancellationToken)
+        public Task<SubscriptionCheckResult> EnsureSubscriptionAsync(CancellationToken cancellationToken) =>
+            VerifyAsync(_settings.ServerUrl, requireSelection: true, cancellationToken);
+
+        public Task<SubscriptionCheckResult> EnsureSubscriptionForRecorderAsync(string server, CancellationToken cancellationToken) =>
+            VerifyAsync(server, requireSelection: false, cancellationToken);
+
+        private async Task<SubscriptionCheckResult> VerifyAsync(string server, bool requireSelection, CancellationToken cancellationToken)
         {
-            var server = _settings.ServerUrl;
             var attempt = WordPressSession.Capture(_settings);
             string user, password;
             Uri endpoint;
@@ -53,7 +58,9 @@ namespace JoesScanner.Services
                 return new(false, "missing_credentials", _settings.SavedCredentialWarning ??
                     "Enter your username and password in Settings before connecting.");
 
-            bool IsSelected() => string.Equals(server, _settings.ServerUrl, StringComparison.Ordinal);
+            bool IsSelected() => requireSelection
+                ? string.Equals(server, _settings.ServerUrl, StringComparison.Ordinal)
+                : HostedServerRules.RequiresApiFirewallCredentials(_settings, server);
             static SubscriptionCheckResult Replaced() =>
                 new(false, "account_changed", "The recorder or hosted account changed during verification.");
             var payload = new

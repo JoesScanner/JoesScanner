@@ -24,6 +24,8 @@ namespace JoesScanner.Models
         internal RecordingAccessContext? RecordingAccess { get; set; }
         internal bool IsRecordingNotification { get; init; }
         internal long LivePlaybackOwner { get; set; }
+        internal Guid? ServerId { get; set; }
+        internal bool IsConnectionActionRequired { get; init; }
         internal long? LiveArrivalSequence { get; set; }
         internal bool IsCompletedReplay { get; set; }
         internal bool HasUnplayedLateAudio { get; private set; }

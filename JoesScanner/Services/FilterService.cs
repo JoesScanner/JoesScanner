@@ -31,6 +31,9 @@ namespace JoesScanner.Services
         public static FilterService Instance => _instance.Value;
 
         private string _currentServerKey = string.Empty;
+        private Dictionary<string, string> _keysByEndpoint = new(StringComparer.Ordinal);
+        private Dictionary<Guid, string> _keysByRecorder = [];
+        private readonly Dictionary<string, FilterRuleStateRecord[]> _otherRules = new(StringComparer.OrdinalIgnoreCase);
 
         private enum DiscoveryUpdateKind
         {
@@ -117,8 +120,35 @@ namespace JoesScanner.Services
             }
         }
 
+        internal void ConfigureRecorderScopes(IEnumerable<(Guid Id, string Endpoint, string Key)> scopes, string selected)
+        {
+            var configured = scopes.ToArray();
+            lock (_gate)
+            {
+                _keysByEndpoint = configured.ToDictionary(item => item.Endpoint, item => item.Key, StringComparer.Ordinal);
+                _keysByRecorder = configured.ToDictionary(item => item.Id, item => item.Key);
+            }
+            SetServerUrl(selected);
+        }
+
+        internal string ScopeKey(string? serverUrl)
+        {
+            lock (_gate)
+                return ScopeKey_NoLock(serverUrl);
+        }
+
+        private string ScopeKey_NoLock(string? serverUrl)
+        {
+            var endpoint = Uri.TryCreate(serverUrl, UriKind.Absolute, out var uri)
+                ? uri.AbsoluteUri.TrimEnd('/') : string.Empty;
+            return _keysByEndpoint.GetValueOrDefault(endpoint) ?? ServerKeyHelper.Normalize(serverUrl);
+        }
+
         private bool IsCurrentServer_NoLock(string serverUrl) =>
-            string.Equals(_currentServerKey, ServerKeyHelper.Normalize(serverUrl), StringComparison.OrdinalIgnoreCase);
+            string.Equals(_currentServerKey, ScopeKey_NoLock(serverUrl), StringComparison.OrdinalIgnoreCase);
+
+        private string CallScope_NoLock(CallItem call) =>
+            call.ServerId is { } id ? _keysByRecorder.GetValueOrDefault(id, id.ToString("N")) : _currentServerKey;
 
         private void NotifyRulesChanged()
         {
@@ -201,7 +231,8 @@ namespace JoesScanner.Services
                     return;
 
                 CapturePendingDiscovery_NoLock();
-                _currentServerKey = ServerKeyHelper.Normalize(serverUrl);
+                _otherRules[_currentServerKey] = _state.Values.ToArray();
+                _currentServerKey = ScopeKey_NoLock(serverUrl);
                 LoadCurrentServerFromStorage();
             }
 
@@ -286,6 +317,8 @@ namespace JoesScanner.Services
             bool affectsFiltering;
             lock (_gate)
             {
+                if (CallScope_NoLock(call) != _currentServerKey)
+                    return;
                 var priorState = GetEffectiveState_NoLock(receiver, site, talkgroup);
                 change = UpsertDiscovery_NoLock(node);
                 if (change == DiscoveryUpdateKind.None)
@@ -405,9 +438,9 @@ namespace JoesScanner.Services
             }
         }
 
-        private FilterRuleStateRecord[] LoadState()
+        private FilterRuleStateRecord[] LoadState(string? scope = null)
         {
-            var key = GetStateStorageKey();
+            var key = GetStateStorageKey(scope);
             if (_pendingWrites.GetValueOrDefault(key) is FilterRuleStateRecord[] pending)
                 return pending;
 
@@ -501,9 +534,10 @@ namespace JoesScanner.Services
             return $"{FilterDiscoveryDbKey}::{k}";
         }
 
-        private string GetStateStorageKey()
+        private string GetStateStorageKey(string? scope = null)
         {
-            var k = string.IsNullOrWhiteSpace(_currentServerKey) ? "none" : _currentServerKey.Trim();
+            scope ??= _currentServerKey;
+            var k = string.IsNullOrWhiteSpace(scope) ? "none" : scope.Trim();
             return $"{FilterStateDbKey}::{k}";
         }
 
@@ -575,8 +609,24 @@ namespace JoesScanner.Services
             if (receiver.Length == 0)
                 return null;
 
+            var site = Normalize(call.SystemName);
+            var talkgroup = Normalize(call.Talkgroup);
             lock (_gate)
-                return GetEffectiveState_NoLock(receiver, Normalize(call.SystemName), Normalize(call.Talkgroup));
+            {
+                var scope = CallScope_NoLock(call);
+                if (scope == _currentServerKey)
+                    return GetEffectiveState_NoLock(receiver, site, talkgroup);
+
+                if (!_otherRules.TryGetValue(scope, out var rules))
+                    _otherRules[scope] = rules = LoadState(scope);
+                return rules.OfType<FilterRuleStateRecord>()
+                    .Where(rule => StringComparer.OrdinalIgnoreCase.Equals(Normalize(rule.Receiver), receiver) &&
+                        (rule.Level == FilterLevel.Receiver ||
+                            StringComparer.OrdinalIgnoreCase.Equals(Normalize(rule.Site), site) &&
+                            (rule.Level == FilterLevel.Site ||
+                                StringComparer.OrdinalIgnoreCase.Equals(Normalize(rule.Talkgroup), talkgroup))))
+                    .MaxBy(rule => rule.Level);
+            }
         }
 
         private FilterRuleStateRecord? GetEffectiveState_NoLock(string receiver, string site, string talkgroup)

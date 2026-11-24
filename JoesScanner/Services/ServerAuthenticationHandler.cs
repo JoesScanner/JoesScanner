@@ -3,15 +3,21 @@ using JoesScanner.Helpers;
 
 namespace JoesScanner.Services;
 
-internal sealed class ServerAuthenticationHandler(ServerAuthentication authentication, HttpMessageHandler transport)
+internal readonly record struct RecorderRequestScope(Uri Endpoint, Guid? ServerId = null);
+
+internal sealed class ServerAuthenticationHandler(ServerAuthentication authentication, HttpMessageHandler transport,
+    RecorderRequestScope? recorder = null)
     : DelegatingHandler(transport)
 {
     // Settings can probe an unsaved custom server with or without its proposed credentials.
     internal static readonly HttpRequestOptionsKey<bool> CustomProbe = new("JoesScanner.CustomServerProbe");
 
-    internal static HttpClient CreateClient(ISettingsService settings, HttpMessageHandler? transport = null) =>
+    internal static readonly HttpRequestOptionsKey<RecorderRequestScope> Recorder = new("JoesScanner.RecorderOrigin");
+
+    internal static HttpClient CreateClient(ISettingsService settings, HttpMessageHandler? transport = null,
+        RecorderRequestScope? recorder = null) =>
         new(new ServerAuthenticationHandler(ServerAuthentication.For(settings),
-            transport ?? new HttpClientHandler { AllowAutoRedirect = false }));
+            transport ?? new HttpClientHandler { AllowAutoRedirect = false }, recorder));
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
@@ -20,11 +26,17 @@ internal sealed class ServerAuthenticationHandler(ServerAuthentication authentic
             throw new HttpRequestException("Remove embedded credentials from the scanner server URL.");
 
         request.Headers.Host = null;
-        var firewall = authentication.RequiresFirewall(destination);
-        if (firewall)
+        var configured = recorder ?? (request.Options.TryGetValue(Recorder, out var origin) ? origin : null);
+        var belongsToRecorder = configured == null || HostedServerRules.SameOrigin(destination, configured.Value.Endpoint);
+        var firewall = belongsToRecorder && authentication.RequiresFirewall(destination);
+        if (!belongsToRecorder)
+            request.Headers.Authorization = null;
+        else if (firewall)
             request.Headers.Authorization = await authentication.GetFirewallAuthorizationAsync(destination, cancellationToken).ConfigureAwait(false);
         else if (!request.Options.TryGetValue(CustomProbe, out var isProbe) || !isProbe)
-            request.Headers.Authorization = authentication.GetCustomAuthorization(destination);
+            request.Headers.Authorization = configured == null
+                ? authentication.GetCustomAuthorization(destination)
+                : authentication.GetCustomAuthorization(destination, configured.Value);
 
         var response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
         if (firewall && IsAuthenticationDenied(response.StatusCode))

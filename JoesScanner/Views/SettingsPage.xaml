@@ -199,7 +199,7 @@
         <Label
             x:Name="ConnectionDescriptionLabel"
             IsVisible="False"
-            Text="Choose which server the app connects to. Not all servers require user/pass."
+            Text="Configure recorders and choose which ones to monitor."
             FontSize="12"
             TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
             LineBreakMode="WordWrap"
@@ -216,9 +216,31 @@
             <controls:DeferredContentView.ContentTemplate>
                 <DataTemplate x:DataType="vm:SettingsViewModel">
                     <Grid
-                RowDefinitions="Auto,Auto,Auto,Auto"
+                RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto"
                 ColumnDefinitions="*"
                 RowSpacing="8">
+
+            <HorizontalStackLayout Grid.Row="4" Spacing="6">
+                <CheckBox IsChecked="{Binding SaveAsAnotherConnection}" AutomationId="SaveAsAnotherConnection" />
+                <Label Text="Save as another connection" VerticalOptions="Center" FontSize="12" />
+            </HorizontalStackLayout>
+
+            <VerticalStackLayout Grid.Row="5" Spacing="8" BindableLayout.ItemsSource="{Binding ScannerConnections}">
+                <BindableLayout.ItemTemplate>
+                    <DataTemplate x:DataType="vm:ScannerConnectionRow">
+                        <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="6">
+                            <VerticalStackLayout>
+                                <Label Text="{Binding Endpoint}" FontSize="12" LineBreakMode="TailTruncation" />
+                                <Label Text="{Binding StatusText}" TextColor="{Binding StatusColor}" FontSize="11" />
+                            </VerticalStackLayout>
+                            <Button Grid.Column="1" Text="Edit" Clicked="OnScannerConnectionEdit" Style="{StaticResource PillButtonStyle}" />
+                            <Switch Grid.Column="2" IsToggled="{Binding Enabled, Mode=OneWay}" Toggled="OnScannerConnectionToggled"
+                                    SemanticProperties.Description="Monitor this recorder" />
+                        </Grid>
+                    </DataTemplate>
+                </BindableLayout.ItemTemplate>
+            </VerticalStackLayout>
+
 
             <!-- Server selection row -->
 <Grid

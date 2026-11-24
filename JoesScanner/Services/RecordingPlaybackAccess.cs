@@ -12,7 +12,7 @@ internal sealed class RecordingAccessException(string message) : InvalidOperatio
 internal static class RecordingPlaybackAccess
 {
     internal sealed record HistoryGrant(string Server, string? Account, int? Tier, DateTimeOffset VerifiedAt,
-        DateTime? ExpiresUtc, TimeProvider Clock)
+        DateTime? ExpiresUtc, TimeProvider Clock, bool Independent = false)
     {
         internal DateTimeOffset? Cutoff => Tier == 1 ? Clock.GetUtcNow().AddHours(-24) : null;
 
@@ -36,7 +36,7 @@ internal static class RecordingPlaybackAccess
                 return !HostedServerRules.RequiresApiFirewallCredentials(settings, Server);
 
             var now = Clock.GetUtcNow().UtcDateTime;
-            return IsSelected(settings, Server) && AccountKey(settings, Server) == Account &&
+            return (Independent || IsSelected(settings, Server)) && AccountKey(settings, Server, Independent) == Account &&
                 settings.SubscriptionLastStatusOk && settings.SubscriptionLastValidatedOnline &&
                 settings.SubscriptionTierLevel == Tier && !(ExpiresUtc <= now) && !(settings.SubscriptionExpiresUtc <= now);
         }
@@ -50,20 +50,21 @@ internal static class RecordingPlaybackAccess
 
     internal static async Task<HistoryGrant> VerifyHistoryAsync(ISettingsService settings,
         ISubscriptionService subscription, string server, CancellationToken token,
-        TimeProvider? clock = null, bool protectedSource = false)
+        TimeProvider? clock = null, bool protectedSource = false, bool independent = false)
     {
         clock ??= TimeProvider.System;
         if (!protectedSource && !HostedServerRules.RequiresApiFirewallCredentials(settings, server))
             return new(server, null, null, clock.GetUtcNow(), null, clock);
 
-        var account = AccountKey(settings, server);
-        if (!IsSelected(settings, server) || account == null)
+        var account = AccountKey(settings, server, independent);
+        if ((!independent && !IsSelected(settings, server)) || account == null)
             throw VerificationRequired();
 
         SubscriptionCheckResult result;
         try
         {
-            result = await subscription.EnsureSubscriptionAsync(token).ConfigureAwait(false);
+            result = await (independent ? subscription.EnsureSubscriptionForRecorderAsync(server, token)
+                : subscription.EnsureSubscriptionAsync(token)).ConfigureAwait(false);
         }
         catch (Exception) when (!token.IsCancellationRequested)
         {
@@ -75,7 +76,7 @@ internal static class RecordingPlaybackAccess
             throw VerificationRequired();
 
         var grant = new HistoryGrant(server, account, result.VerifiedOnlineTier, clock.GetUtcNow(),
-            settings.SubscriptionExpiresUtc, clock);
+            settings.SubscriptionExpiresUtc, clock, independent);
         grant.Validate(settings);
         return grant;
     }
@@ -98,10 +99,10 @@ internal static class RecordingPlaybackAccess
             to.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
     }
 
-    internal static string? AccountKey(ISettingsService settings, string server)
+    internal static string? AccountKey(ISettingsService settings, string server, bool independent = false)
     {
         string user;
-        if (HostedServerRules.IsHostedStreamServerUrl(server))
+        if (!independent && HostedServerRules.IsHostedStreamServerUrl(server))
             user = settings.BasicAuthUsername;
         else if (!settings.TryGetServerCredentials(HostedServerRules.DefaultServerUrl, out user, out _))
             return null;
@@ -112,29 +113,29 @@ internal static class RecordingPlaybackAccess
         string.IsNullOrWhiteSpace(username) ? null :
             Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(username.Trim().ToUpperInvariant())));
 
-    internal static void RequireAccount(ISettingsService settings, string server, string? account)
+    internal static void RequireAccount(ISettingsService settings, string server, string? account, bool independent = false)
     {
-        if (account == null || !IsSelected(settings, server) || AccountKey(settings, server) != account)
+        if (account == null || (!independent && !IsSelected(settings, server)) || AccountKey(settings, server, independent) != account)
             throw new RecordingAccessException("This recording could not be authorized for the current hosted account.");
     }
 
     // Returns a lower bound for a subsequent metadata lookup on Standard.
     internal static async Task<DateTimeOffset?> VerifyAsync(ISettingsService settings, ISubscriptionService subscription,
         string server, DateTimeOffset? recordedAt, RecordingAccessContext context, bool currentLive,
-        bool requireAccount, CancellationToken token, TimeProvider? clock = null, bool lookup = false)
+        bool requireAccount, CancellationToken token, TimeProvider? clock = null, bool lookup = false, bool independent = false)
     {
         if (!context.Protected && !HostedServerRules.RequiresApiFirewallCredentials(settings, server))
             return null;
 
-        var account = AccountKey(settings, server);
-        if (!IsSelected(settings, server) || account == null || requireAccount && context.Account == null ||
+        var account = AccountKey(settings, server, independent);
+        if ((!independent && !IsSelected(settings, server)) || account == null || requireAccount && context.Account == null ||
             context.Account != null && context.Account != account)
             throw new RecordingAccessException("This recording could not be authorized for the current hosted account.");
 
         if (currentLive && context.Origin == RecordingOrigin.Live && !lookup)
             return null;
 
-        var grant = await VerifyHistoryAsync(settings, subscription, server, token, clock, protectedSource: true)
+        var grant = await VerifyHistoryAsync(settings, subscription, server, token, clock, protectedSource: true, independent: independent)
             .ConfigureAwait(false);
         if (grant.Account != account)
             throw VerificationRequired();

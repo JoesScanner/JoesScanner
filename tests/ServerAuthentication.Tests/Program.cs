@@ -41,6 +41,12 @@ var cases = new (string Name, Func<Task> Run)[]
     ("A timed-out automatic Jump preserves the outstanding HTTP window across restart", MobileRecoveryTests.RecoverySurvivesTimedJumpAndRestart),
     ("Manual Jump skips late recovery results and preserves overlapping live socket arrivals", MobileRecoveryTests.ManualJumpFencesOutstandingSocketRecovery),
     ("Recovery progress requires a durable receipt and respects account scope and explicit Stop", MobileRecoveryTests.RecoveryReceiptsAndOwnership),
+    ("Saved recorder identities survive address edits and reloads", MobileRecoveryTests.SavedRecorderIdentity),
+    ("Independent connections keep monitoring during another recorder failure, retry and disable", MobileRecoveryTests.IndependentConnections),
+    ("Simultaneous scoped recorder streams keep duplicate backend IDs separate and share FIFO", MobileRecoveryTests.SimultaneousRecorderStreams),
+    ("Recorder HTTP authorization remains bound to its own configured origin", MobileRecoveryTests.ScopedRecorderAuthorization),
+    ("Recorder credential vault isolates server IDs and origins across restart", SavedCredentialTests.RecorderCredentialVault),
+    ("A recorder reenabled during Live and a History return both skip old automatic audio", MobileRecoveryTests.CombinedRecorderBoundaries),
     ("Fresh WebSocket monitoring skips the previous process backlog and plays new events in arrival order", MobileRecoveryTests.FreshSocketListening),
     ("HTTP polling baselines old snapshots while inherited recovery stays durable", MobileRecoveryTests.FreshHttpListening),
     ("An empty initial HTTP snapshot establishes the Live polling baseline", MobileRecoveryTests.EmptyHttpListeningBaseline),
@@ -510,6 +516,7 @@ class SettingsStub : DispatchProxy
     internal string Username { get; set; } = Guid.NewGuid().ToString();
     internal string Password { get; } = Guid.NewGuid().ToString();
     internal string ServerUrl { get; set; } = HostedServerRules.DefaultServerUrl;
+    internal Dictionary<(Guid Id, string Endpoint), (string Username, string Password)> RecorderCredentials { get; } = [];
     internal bool ActiveSubscription { get; set; } = true;
     internal DateTime? SubscriptionExpiry { get; set; }
     internal int SubscriptionTier { get; set; }
@@ -529,6 +536,7 @@ class SettingsStub : DispatchProxy
         "get_SubscriptionLastStatusOk" or "get_SubscriptionLastValidatedOnline" => VerifiedSubscription,
         nameof(ISettingsService.HasActiveHostedSubscription) => ActiveSubscription,
         nameof(ISettingsService.TryGetServerCredentials) => ReadAccount(args!),
+        nameof(ISettingsService.TryGetRecorderCredentials) => ReadRecorder(args!),
         nameof(ISettingsService.GetCachedDirectoryServers) => new[]
         {
             new ServerDirectoryEntry
@@ -540,6 +548,14 @@ class SettingsStub : DispatchProxy
         },
         _ => throw new NotSupportedException(method.Name)
     };
+
+    private bool ReadRecorder(object?[] args)
+    {
+        var found = RecorderCredentials.TryGetValue(((Guid)args[0]!, (string)args[1]!), out var credentials);
+        args[2] = credentials.Username ?? "";
+        args[3] = credentials.Password ?? "";
+        return found;
+    }
 
     private bool ReadAccount(object?[] args)
     {

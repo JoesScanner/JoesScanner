@@ -12,24 +12,28 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
     private readonly Dictionary<(string Server, string Account), (long Owner, bool Retired)> _ownershipRequests = [];
     private readonly object _observationOrder = new();
     private Task _lastObservation = Task.CompletedTask;
-    internal sealed record Run(string Server, long Owner, int? VerifiedTier, bool Protected = false, string? Account = null)
+    internal sealed record Run(string Server, long Owner, int? VerifiedTier, bool Protected = false, string? Account = null,
+        Guid? ServerId = null)
     {
-        internal string AccountScope => !Protected ? string.Empty : !string.IsNullOrWhiteSpace(Account) && Account != ":legacy"
-            ? Account : throw new InvalidOperationException("A protected Live queue requires a known account.");
+        internal string StorageKey => ServerId?.ToString("N") ?? Server;
 
-        internal bool Owns(RecordingAccessContext? access) => Protected
-            ? access is { Protected: true, Account: not null } && access.Account == AccountScope
-            : access?.Protected != true;
+        internal string AccountScope => !string.IsNullOrWhiteSpace(Account) && Account != ":legacy" ? Account :
+            !Protected ? string.Empty : throw new InvalidOperationException("A protected Live queue requires a known account.");
+
+        internal bool Owns(RecordingAccessContext? access) =>
+            Protected == (access?.Protected == true) && (access?.Account ?? string.Empty) == AccountScope;
     }
     internal readonly record struct Observation(long? ArrivalSequence, bool Changed, bool IsRecoveryBacklog = false);
     internal sealed record JumpResult(Recording Target, bool PlayTarget);
+    internal sealed record Selection(Run Scope, Recording Row);
+    internal sealed record CombinedJump(Selection Target, bool PlayTarget);
 
     internal sealed record Recording(string Id, long ArrivalSequence, long? RecordedUtc, LiveCallSnapshot? Snapshot,
         RecordingAccessContext Access, long Owner)
     {
         internal bool IsCompletedReplay { get; init; }
 
-        internal CallItem ToCallItem(string server)
+        internal CallItem ToCallItem(string server, Guid? serverId = null)
         {
             var state = new LiveCallState(server, Id);
             if (Snapshot is { } observed)
@@ -38,7 +42,7 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
             var metadata = state.Read().Metadata with { Timestamp = timestamp?.LocalDateTime };
             return new CallItem
             {
-                BackendId = Id, LiveState = state, RecordingTimeUtc = timestamp,
+                BackendId = Id, ServerId = serverId, LiveState = state, RecordingTimeUtc = timestamp,
                 RecordingServer = server, RecordingAccess = Access, LivePlaybackOwner = Owner, LiveArrivalSequence = ArrivalSequence,
                 Timestamp = timestamp?.LocalDateTime ?? default, CardMetadata = metadata, IsCompletedReplay = IsCompletedReplay,
                 Talkgroup = metadata.Talkgroup ?? string.Empty, Source = metadata.Radio ?? string.Empty,
@@ -62,7 +66,7 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
     private async Task OpenAsync(Run run, DateTimeOffset now, CancellationToken token, bool explicitlyStopped, bool startAtLiveEdge)
     {
         token.ThrowIfCancellationRequested();
-        var scope = (run.Server, run.AccountScope);
+        var scope = (run.StorageKey, run.AccountScope);
         lock (_ownershipRequests)
         {
             if (_ownershipRequests.TryGetValue(scope, out var latest) &&
@@ -116,7 +120,7 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
 
     internal async Task StopAsync(Run run)
     {
-        var scope = (run.Server, run.AccountScope);
+        var scope = (run.StorageKey, run.AccountScope);
         lock (_ownershipRequests)
         {
             if (!_ownershipRequests.TryGetValue(scope, out var latest) || latest.Owner <= run.Owner)
@@ -351,8 +355,16 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
 
     internal Task<Recording?> NextAsync(Run run, long historicalFloor, CancellationToken token,
         long? afterArrival = null, IReadOnlyList<long>? visibleReplays = null) =>
-        WithConnectionAsync(token, db =>
-        {
+        WithConnectionAsync(token, db => ReadNext(db, run, historicalFloor, afterArrival, visibleReplays));
+
+    internal Task<Selection?> NextAsync(IReadOnlyList<Run> runs, Func<Run, long> recoveryFloor, CancellationToken token,
+        long? afterArrival = null, IReadOnlyList<long>? visibleReplays = null) =>
+        SelectAcrossAsync(runs, token, older: false,
+            (db, tx, run) => ReadNext(db, run, recoveryFloor(run), afterArrival, visibleReplays, tx));
+
+    private static Recording? ReadNext(SqliteConnection db, Run run, long historicalFloor,
+        long? afterArrival, IReadOnlyList<long>? visibleReplays, SqliteTransaction? transaction = null)
+    {
             var pending = FindNext("q.disposition = 0");
             if (visibleReplays is not { Count: > 0 })
                 return pending;
@@ -373,19 +385,24 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
                       AND q.arrival_sequence >= s.playback_floor AND q.arrival_sequence > $after
                     ORDER BY q.arrival_sequence LIMIT 1
                     """, ("$after", afterArrival ?? 0));
+                command.Transaction = transaction;
                 if (replays != null)
                     for (var index = 0; index < replays.Count; index++)
                         command.Parameters.AddWithValue("$replay" + index, replays[index]);
                 using var reader = command.ExecuteReader();
                 return reader.Read() ? Read(reader, reader.GetString(7)) with { IsCompletedReplay = replays != null } : null;
             }
-        });
+    }
 
     internal Task<bool> SetPlaybackFloorAsync(Run run, long historicalFloor, long sequence, CancellationToken token) =>
+        SetPlaybackFloorAsync(new[] { run }, run, historicalFloor, sequence, token);
+
+    internal Task<bool> SetPlaybackFloorAsync(IReadOnlyList<Run> runs, Run selected, long historicalFloor,
+        long sequence, CancellationToken token) =>
         InArrivalOrderAsync(() => WithConnectionAsync(token, db =>
         {
             using var transaction = db.BeginTransaction();
-            using var command = EligibleCommand(db, run, historicalFloor, $"""
+            using var command = EligibleCommand(db, selected, historicalFloor, $"""
                 UPDATE live_queue_servers AS s SET playback_floor = $sequence
                 WHERE s.server = $server AND s.account_scope = $account AND s.owner = $owner AND s.stopped = 0
                   AND EXISTS (SELECT 1 FROM live_queue_recordings q
@@ -394,45 +411,92 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
             command.Transaction = transaction;
             token.ThrowIfCancellationRequested();
             var changed = command.ExecuteNonQuery() != 0;
+            if (changed)
+            {
+                foreach (var run in runs)
+                    if (run != selected)
+                        UpdatePlaybackFloor(db, transaction, run, sequence);
+            }
             token.ThrowIfCancellationRequested();
             transaction.Commit();
             return changed;
         }), token);
 
     internal Task<long> SetPlaybackFloorAtLiveEdgeAsync(Run run, CancellationToken token, bool skipOutstandingRecovery = false) =>
+        SetPlaybackFloorAtLiveEdgeAsync(new[] { run }, token, skipOutstandingRecovery);
+
+    internal Task<long> SetPlaybackFloorAtLiveEdgeAsync(IReadOnlyList<Run> runs, CancellationToken token,
+        bool skipOutstandingRecovery = false) =>
         InArrivalOrderAsync(() => WithConnectionAsync(token, db =>
         {
             using var transaction = db.BeginTransaction();
-            if (skipOutstandingRecovery)
+            using var edge = db.CreateCommand();
+            edge.Transaction = transaction;
+            edge.CommandText = "SELECT coalesce(MAX(arrival_sequence), 0) + 1 FROM live_queue_recordings;";
+            var floor = (long)edge.ExecuteScalar()!;
+            foreach (var run in runs)
             {
-                using var recovery = Command(db, run, $"""
-                    UPDATE live_queue_recovery SET skip_unseen = 1
-                    WHERE server = $server AND account_scope = $account AND {ActiveRecoveryScope}
-                    """);
-                recovery.Transaction = transaction;
-                recovery.ExecuteNonQuery();
+                if (skipOutstandingRecovery)
+                    MarkRecoveryBacklog(db, transaction, run);
+                UpdatePlaybackFloor(db, transaction, run, floor);
             }
-
-            using var command = Command(db, run, """
-                UPDATE live_queue_servers SET playback_floor = coalesce((
-                    SELECT MAX(arrival_sequence) FROM live_queue_recordings
-                    WHERE server = $server AND account_scope = $account), 0) + 1,
-                    resume_id = NULL
-                WHERE server = $server AND account_scope = $account AND owner = $owner AND stopped = 0
-                RETURNING playback_floor
-                """);
-            command.Transaction = transaction;
-            token.ThrowIfCancellationRequested();
-            var floor = command.ExecuteScalar() is long sequence ? sequence : 0;
             token.ThrowIfCancellationRequested();
             transaction.Commit();
             return floor;
         }), token);
 
+    private static void UpdatePlaybackFloor(SqliteConnection db, SqliteTransaction tx, Run run, long floor)
+    {
+        using var command = Command(db, run, """
+            UPDATE live_queue_servers SET playback_floor = $sequence, resume_id = NULL
+            WHERE server = $server AND account_scope = $account AND owner = $owner AND stopped = 0;
+            """, ("$sequence", floor));
+        command.Transaction = tx;
+        command.ExecuteNonQuery();
+    }
+
+    private static void MarkRecoveryBacklog(SqliteConnection db, SqliteTransaction tx, Run run)
+    {
+        using var command = Command(db, run, $"""
+            UPDATE live_queue_recovery SET skip_unseen = 1
+            WHERE server = $server AND account_scope = $account AND {ActiveRecoveryScope};
+            """);
+        command.Transaction = tx;
+        command.ExecuteNonQuery();
+    }
+
+    private Task<Selection?> SelectAcrossAsync(IReadOnlyList<Run> runs, CancellationToken token, bool older,
+        Func<SqliteConnection, SqliteTransaction, Run, Recording?> select) =>
+        WithConnectionAsync(token, db =>
+        {
+            // One read snapshot makes FIFO independent of the order in which recorders are inspected.
+            using var transaction = db.BeginTransaction(deferred: true);
+            var result = SelectAcross(runs, older, run => select(db, transaction, run));
+            transaction.Commit();
+            return result;
+        });
+
+    private static Selection? SelectAcross(IReadOnlyList<Run> runs, bool older, Func<Run, Recording?> select)
+    {
+        Selection? result = null;
+        foreach (var run in runs)
+        {
+            if (select(run) is { } row && (result == null ||
+                (older ? row.ArrivalSequence > result.Row.ArrivalSequence : row.ArrivalSequence < result.Row.ArrivalSequence)))
+                result = new(run, row);
+        }
+        return result;
+    }
+
     // Transport can replay completed or skipped recordings. Autoplay only reads pending rows.
     internal Task<Recording?> FindTransportTargetAsync(Run run, long historicalFloor, long? anchor,
         bool older, CancellationToken token) =>
         WithConnectionAsync(token, db => FindTransportTarget(db, run, historicalFloor, anchor, older));
+
+    internal Task<Selection?> FindTransportTargetAsync(IReadOnlyList<Run> runs, Func<Run, long> recoveryFloor, long? anchor,
+        bool older, CancellationToken token) =>
+        SelectAcrossAsync(runs, token, older,
+            (db, transaction, run) => FindTransportTarget(db, run, recoveryFloor(run), anchor, older, transaction));
 
     internal Task<bool> HasNewerPendingAsync(Run run, long historicalFloor, long anchor, CancellationToken token) =>
         WithConnectionAsync(token, db =>
@@ -538,57 +602,53 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
     internal Task CommitCompletionAsync(Run run, string id) =>
         RetryBusyWriteAsync(() => MarkAsync(run, id, PlaybackOutcome.Completed, CancellationToken.None), CancellationToken.None);
 
-    internal Task<JumpResult?> JumpToLiveAsync(Run run, long historicalFloor, bool skipSelected, CancellationToken token,
+    internal async Task<JumpResult?> JumpToLiveAsync(Run run, long historicalFloor, bool skipSelected, CancellationToken token,
         string? failedId = null, Func<Task<long>>? prepareBoundary = null,
-        Action<SqliteTransaction>? commitPlayback = null) => InArrivalOrderAsync(async () =>
+        Action<SqliteTransaction>? commitPlayback = null)
     {
-        // Reserve the FIFO boundary before waiting for native completion to commit.
-        var floor = prepareBoundary != null ? await prepareBoundary().ConfigureAwait(false) : historicalFloor;
-        return await WithConnectionAsync<JumpResult?>(token, db =>
+        var result = await JumpToLiveAsync(new[] { run }, _ => historicalFloor, skipSelected, token,
+            row => row.Row.Id == failedId,
+            prepareBoundary == null ? null : async () => { historicalFloor = await prepareBoundary().ConfigureAwait(false); },
+            commitPlayback).ConfigureAwait(false);
+        return result == null ? null : new(result.Target.Row, result.PlayTarget);
+    }
+
+    internal Task<CombinedJump?> JumpToLiveAsync(IReadOnlyList<Run> runs, Func<Run, long> recoveryFloor,
+        bool skipSelected, CancellationToken token, Func<Selection, bool>? failed = null,
+        Func<Task>? prepareBoundary = null, Action<SqliteTransaction>? commitPlayback = null) =>
+        InArrivalOrderAsync(async () =>
         {
-            // Select and skip within one writer transaction. Observations queued
-            // after this jump receive positions beyond its edge.
-            using var transaction = db.BeginTransaction();
-            token.ThrowIfCancellationRequested();
-            var newest = FindTransportTarget(db, run, floor, anchor: null, older: true, transaction, liveEdge: true);
-            // This affects the disposition of later recovery observations. The
-            // window, cutoff, and revision still belong to the HTTP reconciler.
-            using var markBacklog = Command(db, run, $"""
-                UPDATE live_queue_recovery SET skip_unseen = 1
-                WHERE server = $server AND account_scope = $account AND {ActiveRecoveryScope}
-                """);
-            markBacklog.Transaction = transaction;
-            markBacklog.ExecuteNonQuery();
-            token.ThrowIfCancellationRequested();
-            if (newest == null)
+            // Reserve the shared arrival boundary before waiting on the previous native commit.
+            if (prepareBoundary != null)
+                await prepareBoundary().ConfigureAwait(false);
+            return await WithConnectionAsync<CombinedJump?>(token, db =>
             {
+                using var transaction = db.BeginTransaction();
+                token.ThrowIfCancellationRequested();
+                var newest = SelectAcross(runs, older: true, run =>
+                    FindTransportTarget(db, run, recoveryFloor(run), anchor: null, older: true, transaction, liveEdge: true));
+                var playTarget = newest != null && !skipSelected && failed?.Invoke(newest) != true;
+                foreach (var run in runs)
+                {
+                    MarkRecoveryBacklog(db, transaction, run);
+                    if (newest == null)
+                        continue;
+                    UpdatePlaybackFloor(db, transaction, run, newest.Row.ArrivalSequence);
+                    using var skip = EligibleCommand(db, run, recoveryFloor(run), $"""
+                        UPDATE live_queue_recordings AS q SET disposition = 2, payload = NULL, audio_ready = 0
+                        FROM live_queue_servers s
+                        WHERE q.server = s.server AND q.account_scope = s.account_scope AND {EligibleRecording} AND q.disposition = 0
+                          AND q.arrival_sequence <= $lastSkipped
+                        """, ("$lastSkipped", playTarget ? newest.Row.ArrivalSequence - 1 : newest.Row.ArrivalSequence));
+                    skip.Transaction = transaction;
+                    skip.ExecuteNonQuery();
+                }
                 commitPlayback?.Invoke(transaction);
                 token.ThrowIfCancellationRequested();
                 transaction.Commit();
-                return null;
-            }
-            var playTarget = !skipSelected && newest.Id != failedId;
-            using var resetResume = Command(db, run, """
-                UPDATE live_queue_servers SET resume_id = NULL, playback_floor = $sequence
-                WHERE server = $server AND account_scope = $account AND owner = $owner AND stopped = 0
-                """, ("$sequence", newest.ArrivalSequence));
-            resetResume.Transaction = transaction;
-            token.ThrowIfCancellationRequested();
-            resetResume.ExecuteNonQuery();
-            using var skip = EligibleCommand(db, run, floor, $"""
-                UPDATE live_queue_recordings AS q SET disposition = 2, payload = NULL, audio_ready = 0
-                FROM live_queue_servers s
-                WHERE q.server = s.server AND q.account_scope = s.account_scope AND {EligibleRecording} AND q.disposition = 0
-                  AND q.arrival_sequence <= $lastSkipped
-                """, ("$lastSkipped", playTarget ? newest.ArrivalSequence - 1 : newest.ArrivalSequence));
-            skip.Transaction = transaction;
-            skip.ExecuteNonQuery();
-            commitPlayback?.Invoke(transaction);
-            token.ThrowIfCancellationRequested();
-            transaction.Commit();
-            return new JumpResult(newest, playTarget);
-        }).ConfigureAwait(false);
-    }, token);
+                return newest == null ? null : new(newest, playTarget);
+            }).ConfigureAwait(false);
+        }, token);
 
     private static Recording Read(SqliteDataReader reader, string id)
     {
@@ -603,7 +663,7 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
 
     private static RecordingAccessContext ReadAccess(SqliteDataReader reader, int offset) =>
         new((RecordingOrigin)reader.GetInt32(offset), reader.GetBoolean(offset + 1),
-            reader.GetBoolean(offset + 1) ? reader.GetString(offset + 2) : null);
+            reader.GetString(offset + 2) is { Length: > 0 } scope ? scope : null);
 
     internal static string? DurableAudioUrl(string? url) => RecordingStorageReference.ForJournal(url);
 
@@ -632,7 +692,7 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
     {
         var command = database.CreateCommand();
         command.CommandText = sql;
-        command.Parameters.AddWithValue("$server", run.Server);
+        command.Parameters.AddWithValue("$server", run.StorageKey);
         command.Parameters.AddWithValue("$owner", run.Owner);
         command.Parameters.AddWithValue("$account", run.AccountScope);
         foreach (var (name, value) in parameters)

@@ -42,6 +42,16 @@ internal sealed class ServerAuthentication(ISettingsService settings, HttpClient
         return BuildBasicAuthorization(username, password);
     }
 
+    internal AuthenticationHeaderValue? GetCustomAuthorization(Uri destination, RecorderRequestScope scope)
+    {
+        if (!HostedServerRules.SameOrigin(destination, scope.Endpoint) || RequiresFirewall(scope.Endpoint))
+            return null;
+        var found = scope.ServerId is { } id
+            ? settings.TryGetRecorderCredentials(id, scope.Endpoint.AbsoluteUri, out var username, out var password)
+            : settings.TryGetServerCredentials(scope.Endpoint.AbsoluteUri, out username, out password);
+        return found ? BuildBasicAuthorization(username, password) : null;
+    }
+
     internal async Task<AuthenticationHeaderValue> GetFirewallAuthorizationAsync(
         Uri destination, CancellationToken cancellationToken, AuthenticationHeaderValue? rejected = null)
     {

@@ -119,6 +119,17 @@ CREATE TABLE IF NOT EXISTS servers (
   uses_api_firewall_credentials INTEGER NOT NULL DEFAULT 0
 );
 
+-- Saved listening connections are distinct from cached directory and legacy URL rows.
+CREATE TABLE IF NOT EXISTS scanner_connections (
+  server_id TEXT PRIMARY KEY,
+  endpoint TEXT NOT NULL UNIQUE,
+  display_name TEXT NOT NULL,
+  directory_id INTEGER NULL UNIQUE,
+  enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+  credentials_migrated INTEGER NOT NULL DEFAULT 1,
+  legacy_filter_key TEXT NULL
+);
+
 CREATE TABLE IF NOT EXISTS server_runtime_state (
   server_key TEXT PRIMARY KEY,
   last_history_loaded_utc TEXT NULL,

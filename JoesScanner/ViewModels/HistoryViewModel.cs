@@ -1018,7 +1018,7 @@ public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
             //
             // Run the store call on a background thread, then marshal collection + selection updates back
             // to the UI thread.
-            var serverKey = ServerKeyHelper.Normalize(_settingsService.ServerUrl);
+            var serverKey = FilterService.Instance.ScopeKey(_settingsService.ServerUrl);
 
             // Ensure the in-memory rules list is scoped to the active server when History loads.
             FilterService.Instance.SetServerUrl(_settingsService.ServerUrl);
@@ -1072,7 +1072,7 @@ public async Task LoadFilterProfilesAsync(bool applySelectedProfile)
             {
                 Id = profileId ?? string.Empty,
                 Name = name,
-                ServerKey = ServerKeyHelper.Normalize(_settingsService.ServerUrl),
+                ServerKey = FilterService.Instance.ScopeKey(_settingsService.ServerUrl),
                 Filters = new FilterProfileFilters
                 {
                     ReceiverValue = SelectedReceiver?.Value,

@@ -318,6 +318,8 @@ namespace JoesScanner.Views
         {
             var started = Stopwatch.GetTimestamp();
             base.OnAppearing();
+            if (BindingContext is SettingsViewModel connections)
+                connections.RefreshScannerConnectionRows();
             var baseElapsed = Stopwatch.GetElapsedTime(started);
             if (_isTabVisible)
                 return;
@@ -756,6 +758,19 @@ namespace JoesScanner.Views
         // iOS can re-layout and flicker password entries if we push Text updates every keystroke.
         // We bind the Entry Text updates on Unfocused and force an Unfocus here so the latest
         // values commit right before we run validation.
+        private void OnScannerConnectionEdit(object? sender, EventArgs e)
+        {
+            if (sender is Button { BindingContext: ScannerConnectionRow row } && BindingContext is SettingsViewModel vm)
+                vm.EditScannerConnection(row);
+        }
+
+        private void OnScannerConnectionToggled(object? sender, ToggledEventArgs e)
+        {
+            if (sender is Microsoft.Maui.Controls.Switch { BindingContext: ScannerConnectionRow row } &&
+                BindingContext is SettingsViewModel vm && row.Enabled != e.Value)
+                vm.SetScannerConnectionEnabled(row, e.Value);
+        }
+
         private async void OnValidateClicked(object sender, EventArgs e)
         {
             try

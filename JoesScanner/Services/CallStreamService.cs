@@ -29,6 +29,24 @@ namespace JoesScanner.Services
         private readonly HttpMessageInvoker _webSocketInvoker;
         private readonly Func<string, bool, CancellationToken, Task<WebSocket?>> _openWebSocket;
         private readonly TimeProvider _clock;
+        private readonly Uri? _recorder;
+
+        private string SelectedEndpoint => (_settingsService.ServerUrl ?? string.Empty).TrimEnd('/');
+        private string Endpoint => _recorder?.AbsoluteUri.TrimEnd('/') ?? SelectedEndpoint;
+
+        private bool MatchesEndpoint(string server) =>
+            _recorder != null ? RecordingStorageReference.ServerKey(server) == Endpoint :
+                RecordingPlaybackAccess.IsSelected(_settingsService, server);
+
+        public ICallStreamService ForRecorder(string endpoint, Guid? serverId = null) =>
+            new CallStreamService(_settingsService, _localCallsRepository, _addressDetectionService, _subscriptionService,
+                null, null, _clock, new(new Uri(endpoint, UriKind.Absolute), serverId));
+
+        public void Dispose()
+        {
+            _webSocketInvoker.Dispose();
+            _httpClient.Dispose();
+        }
         private readonly JsonSerializerOptions _jsonOptions;
 
         // Mirrors DEFAULT_CONFIG["poll_batch"] from the server.
@@ -48,7 +66,7 @@ namespace JoesScanner.Services
 
         internal CallStreamService(ISettingsService settingsService, ILocalCallsRepository localCallsRepository,
             IAddressDetectionService addressDetectionService, ISubscriptionService subscriptionService, HttpClient? httpClient,
-            Func<string, bool, CancellationToken, Task<WebSocket?>>? openWebSocket, TimeProvider clock)
+            Func<string, bool, CancellationToken, Task<WebSocket?>>? openWebSocket, TimeProvider clock, RecorderRequestScope? recorder = null)
         {
             _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
             _localCallsRepository = localCallsRepository ?? throw new ArgumentNullException(nameof(localCallsRepository));
@@ -56,9 +74,10 @@ namespace JoesScanner.Services
             _subscriptionService = subscriptionService ?? throw new ArgumentNullException(nameof(subscriptionService));
             _openWebSocket = openWebSocket ?? TryOpenWebSocketAsync;
             _clock = clock;
+            _recorder = recorder?.Endpoint;
             _webSocketInvoker = new HttpMessageInvoker(new ServerAuthenticationHandler(
                 ServerAuthentication.For(_settingsService),
-                new SocketsHttpHandler { AllowAutoRedirect = false }));
+                new SocketsHttpHandler { AllowAutoRedirect = false }, recorder));
 
             // IMPORTANT (Apple platforms + HTTP custom servers)
             // iOS and MacCatalyst can still surface NSURLErrorDomain -1022 (ATS) for cleartext HTTP
@@ -73,9 +92,9 @@ namespace JoesScanner.Services
                 AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
             };
 
-            _httpClient = httpClient ?? ServerAuthenticationHandler.CreateClient(_settingsService, socketsHandler);
+            _httpClient = httpClient ?? ServerAuthenticationHandler.CreateClient(_settingsService, socketsHandler, recorder);
 #else
-            _httpClient = httpClient ?? ServerAuthenticationHandler.CreateClient(_settingsService);
+            _httpClient = httpClient ?? ServerAuthenticationHandler.CreateClient(_settingsService, recorder: recorder);
 #endif
             _httpClient.Timeout = TimeSpan.FromSeconds(15);
             _httpClient.DefaultRequestHeaders.Accept.ParseAdd("application/json, text/javascript, */*; q=0.01");
@@ -156,7 +175,7 @@ namespace JoesScanner.Services
         public IAsyncEnumerable<CallItem> GetCallStreamAsync(
             IReadOnlyList<CallItem> existingCalls, CancellationToken cancellationToken, LiveStreamRecovery? recovery = null)
         {
-            var serverUrl = (_settingsService.ServerUrl ?? string.Empty).TrimEnd('/');
+            var serverUrl = Endpoint;
             var liveCalls = new LiveCallIndex();
             liveCalls.Seed(existingCalls, serverUrl);
             return StreamCallsAsync(serverUrl, liveCalls, recovery, cancellationToken);
@@ -168,11 +187,11 @@ namespace JoesScanner.Services
         {
             var recoveryServer = currentServerUrl;
             var protectedRecovery = recovery != null && HostedServerRules.RequiresApiFirewallCredentials(_settingsService, recoveryServer);
-            var recoveryAccount = protectedRecovery ? RecordingPlaybackAccess.AccountKey(_settingsService, recoveryServer) : null;
+            var recoveryAccount = protectedRecovery ? RecordingPlaybackAccess.AccountKey(_settingsService, recoveryServer, _recorder != null) : null;
             bool InRecoveryScope() => recovery == null ||
-                RecordingPlaybackAccess.IsSelected(_settingsService, recoveryServer) &&
+                MatchesEndpoint(recoveryServer) &&
                 HostedServerRules.RequiresApiFirewallCredentials(_settingsService, recoveryServer) == protectedRecovery &&
-                (!protectedRecovery || recoveryAccount == RecordingPlaybackAccess.AccountKey(_settingsService, recoveryServer));
+                (!protectedRecovery || recoveryAccount == RecordingPlaybackAccess.AccountKey(_settingsService, recoveryServer, _recorder != null));
 
             var isAppleTestAccount = IsAppleIosTestAccount();
             AppLog.Add(() => $"AppleTest: enabled={isAppleTestAccount}");
@@ -196,6 +215,7 @@ namespace JoesScanner.Services
             // Tracks whether we have already reported a "connected but idle" heartbeat
             // for this connection lifetime.
             var hasReportedIdleConnection = false;
+            var consecutiveFailures = 0;
 
             // When WebSocket is unavailable, fall back to polling and retry WS after a short cooldown.
             var wsDisableUntilUtc = DateTime.MinValue;
@@ -205,7 +225,7 @@ namespace JoesScanner.Services
 
             while (!cancellationToken.IsCancellationRequested && InRecoveryScope())
             {
-                var baseUrl = (_settingsService.ServerUrl ?? string.Empty).TrimEnd('/');
+                var baseUrl = Endpoint;
                 if (!string.Equals(currentServerUrl, baseUrl, StringComparison.Ordinal))
                 {
                     liveCalls = new LiveCallIndex();
@@ -282,6 +302,7 @@ namespace JoesScanner.Services
                 {
                     if (window != null && pollGrant == null)
                         recovery?.AllowPlaybackWithoutHistory(window);
+                    consecutiveFailures = 0;
                     // We are live; do not skip later polling batches as "initial backlog."
                     skipInitialBatch = false;
                     if (!hasReportedIdleConnection)
@@ -333,6 +354,7 @@ namespace JoesScanner.Services
                 List<CallRow>? rows = null;
                 string? errorMessage = null;
                 var isAuthError = false;
+                var setupRequired = false;
                 var pollVersion = LiveCallState.NextVersion();
 
                 try
@@ -357,11 +379,13 @@ namespace JoesScanner.Services
                 catch (FirewallAuthenticationException ex)
                 {
                     isAuthError = true;
+                    setupRequired = ex.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden;
                     errorMessage = ex.Message;
                 }
                 catch (CallStreamAuthException ex)
                 {
                     isAuthError = true;
+                    setupRequired = true;
                     errorMessage = ex.Message;
                     AppLog.DebugWriteLine(() => $"[CallStreamService] [AuthError] {ex}");
                     AppLog.Add(() => $"CallStream: auth error. {ex.Message}");
@@ -392,11 +416,13 @@ namespace JoesScanner.Services
                     catch (FirewallAuthenticationException retryAuth)
                     {
                         isAuthError = true;
+                        setupRequired = retryAuth.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden;
                         errorMessage = retryAuth.Message;
                     }
                     catch (CallStreamAuthException retryAuth)
                     {
                         isAuthError = true;
+                        setupRequired = true;
                         errorMessage = retryAuth.Message;
                         AppLog.DebugWriteLine(() => $"[CallStreamService] [AuthError] {retryAuth}");
                         AppLog.Add(() => $"CallStream: auth error after retry. {retryAuth.Message}");
@@ -437,11 +463,17 @@ namespace JoesScanner.Services
                     {
                         Timestamp = DateTime.Now,
                         Talkgroup = talkgroup,
+                        IsConnectionActionRequired = setupRequired,
                         Transcription = transcription,
                         AudioUrl = string.Empty
                     };
 
                     var delaySeconds = isAuthError ? 15 : 5;
+                    if (_recorder != null)
+                    {
+                        delaySeconds = Math.Min(30, delaySeconds << consecutiveFailures);
+                        consecutiveFailures = Math.Min(consecutiveFailures + 1, 3);
+                    }
                     await Task.Delay(TimeSpan.FromSeconds(delaySeconds), cancellationToken);
                     continue;
                 }
@@ -460,6 +492,7 @@ namespace JoesScanner.Services
                         !(TryParseTimestampUtc(row.StartTime, row.StartTimeUTC) >= floor));
                 }
 
+                consecutiveFailures = 0;
                 // If there are no rows, we may still want to signal "connected but idle".
                 if (rows == null || rows.Count == 0)
                 {
@@ -688,7 +721,7 @@ namespace JoesScanner.Services
 
         private Task<RecordingPlaybackAccess.HistoryGrant?> GetHistoryGrantAsync(string server, CancellationToken token,
             RecordingPlaybackAccess.HistoryGrant? previous = null) =>
-            ForegroundRecoveryEntitlement.TryVerifyAsync(_settingsService, _subscriptionService, server, _clock, token, previous);
+            ForegroundRecoveryEntitlement.TryVerifyAsync(_settingsService, _subscriptionService, server, _clock, token, previous, _recorder != null);
 
         private void ValidateHistoryGrant(RecordingPlaybackAccess.HistoryGrant grant, CancellationToken token)
         {
@@ -731,7 +764,7 @@ namespace JoesScanner.Services
             void ValidateRecorder()
             {
                 token.ThrowIfCancellationRequested();
-                if (!RecordingPlaybackAccess.IsSelected(_settingsService, baseUrl))
+                if (!MatchesEndpoint(baseUrl))
                     throw RecordingPlaybackAccess.VerificationRequired();
             }
 
@@ -873,7 +906,7 @@ namespace JoesScanner.Services
             var itemServer = item.RecordingServer ?? state?.ServerUrl;
             if (key == null || !Uri.TryCreate(server, UriKind.Absolute, out var recorder) ||
                 recorder.UserInfo.Length != 0 || recorder.Query.Length != 0 || recorder.Fragment.Length != 0 ||
-                !RecordingPlaybackAccess.IsSelected(_settingsService, server) || string.IsNullOrWhiteSpace(item.BackendId) ||
+                !MatchesEndpoint(server) || string.IsNullOrWhiteSpace(item.BackendId) ||
                 itemServer != null && RecordingStorageReference.ServerKey(itemServer) != key ||
                 state != null && (state.Id != item.BackendId || RecordingStorageReference.ServerKey(state.ServerUrl) != key))
                 return null;
@@ -884,9 +917,9 @@ namespace JoesScanner.Services
             RecordingPlaybackAccess.HistoryGrant? grant = null;
             if (protectedServer)
             {
-                RecordingPlaybackAccess.RequireAccount(_settingsService, server, access?.Account);
+                RecordingPlaybackAccess.RequireAccount(_settingsService, server, access?.Account, _recorder != null);
                 grant = await RecordingPlaybackAccess.VerifyHistoryAsync(_settingsService, _subscriptionService, server,
-                    cancellationToken, _clock, protectedSource: true).ConfigureAwait(false);
+                    cancellationToken, _clock, protectedSource: true, independent: _recorder != null).ConfigureAwait(false);
                 if (grant.Account != access?.Account)
                     throw RecordingPlaybackAccess.VerificationRequired();
             }
@@ -900,7 +933,7 @@ namespace JoesScanner.Services
             void Validate()
             {
                 token.ThrowIfCancellationRequested();
-                if (!RecordingPlaybackAccess.IsSelected(_settingsService, server) || grant == null &&
+                if (!MatchesEndpoint(server) || grant == null &&
                     HostedServerRules.RequiresApiFirewallCredentials(_settingsService, server))
                     throw new RecordingAccessException("The recorder or hosted account changed during recording lookup.");
                 grant?.Validate(_settingsService);
@@ -1081,7 +1114,7 @@ namespace JoesScanner.Services
 
         public async Task RefreshCallMetadataAsync(IReadOnlyList<CallItem> calls, CancellationToken cancellationToken)
         {
-            var baseUrl = (_settingsService.ServerUrl ?? string.Empty).TrimEnd('/');
+            var baseUrl = Endpoint;
             var targets = new Dictionary<string, LiveCallState>(StringComparer.OrdinalIgnoreCase);
             foreach (var call in calls)
             {
@@ -1098,7 +1131,7 @@ namespace JoesScanner.Services
             var rows = await FetchCatchupRowsAsync(baseUrl + "/calljson", targets.Keys, false, cancellationToken, grant: grant)
                 .ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
-            if (baseUrl != (_settingsService.ServerUrl ?? string.Empty).TrimEnd('/'))
+            if (cancellationToken.IsCancellationRequested || !MatchesEndpoint(baseUrl))
                 return;
             foreach (var row in rows)
             {

@@ -4,7 +4,7 @@ internal static class ForegroundRecoveryEntitlement
 {
     internal static async Task<RecordingPlaybackAccess.HistoryGrant?> TryVerifyAsync(ISettingsService settings,
         ISubscriptionService subscription, string server, TimeProvider clock, CancellationToken token,
-        RecordingPlaybackAccess.HistoryGrant? previous = null)
+        RecordingPlaybackAccess.HistoryGrant? previous = null, bool independent = false)
     {
         // Polling runs every two seconds. Reuse a recent successful check while
         // its account, tier, and expiry remain current. Never reuse an offline result.
@@ -23,7 +23,7 @@ internal static class ForegroundRecoveryEntitlement
 
         try
         {
-            return await RecordingPlaybackAccess.VerifyHistoryAsync(settings, subscription, server, token, clock)
+            return await RecordingPlaybackAccess.VerifyHistoryAsync(settings, subscription, server, token, clock, independent: independent)
                 .ConfigureAwait(false);
         }
         catch (RecordingAccessException)

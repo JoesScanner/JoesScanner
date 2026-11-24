@@ -192,6 +192,55 @@ public sealed partial class SettingsService
         }
     }
 
+    private static string RecorderCredentialScope(Guid serverId, string endpoint) =>
+        "recorder-connection:" + serverId.ToString("N") + ":" +
+        (SavedConnectionUrl.Scope(endpoint) ?? throw new CredentialStorageException());
+
+    public bool TryGetRecorderCredentials(Guid serverId, string serverUrl, out string username, out string password)
+    {
+        EnsureInitialized();
+        username = password = string.Empty;
+        lock (_gate)
+        {
+            try
+            {
+                if (ProtectedCredentials.Decode(ReadCredential(RecorderCredentialScope(serverId, serverUrl))) is not { } pair)
+                    return false;
+
+                username = pair.Username;
+                password = pair.Password;
+                return true;
+            }
+            catch (CredentialStorageException)
+            {
+                ReportCredentialError();
+                throw;
+            }
+        }
+    }
+
+    public void SetRecorderCredentials(Guid serverId, string serverUrl, string username, string password)
+    {
+        EnsureInitialized();
+        lock (_gate)
+        {
+            try
+            {
+                RequireMigratedCredentials();
+                var scope = RecorderCredentialScope(serverId, serverUrl);
+                var encoded = string.IsNullOrWhiteSpace(username) ? null :
+                    ProtectedCredentials.Encode(new(username.Trim(), password ?? string.Empty));
+                if (_unverifiedCredentialWrites.Contains(CredentialKey(scope)) || ReadCredential(scope) != encoded)
+                    SaveCredential(scope, encoded);
+            }
+            catch (CredentialStorageException)
+            {
+                ReportCredentialError();
+                throw;
+            }
+        }
+    }
+
     public string What3WordsApiKey
     {
         get

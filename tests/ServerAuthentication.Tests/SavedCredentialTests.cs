@@ -41,6 +41,29 @@ internal static class SavedCredentialTests
         return Task.CompletedTask;
     }
 
+    internal static Task RecorderCredentialVault()
+    {
+        using var fixture = new Fixture();
+        var a = Guid.NewGuid();
+        var b = Guid.NewGuid();
+        var settings = fixture.Load();
+        settings.SetRecorderCredentials(a, First, "alpha-recorder", Password);
+        settings.SetRecorderCredentials(b, First + "/other-path", "beta-recorder", "fixture-only");
+        var restarted = fixture.Load();
+        Check(restarted.TryGetRecorderCredentials(a, First, out var alpha, out var secret) &&
+            alpha == "alpha-recorder" && secret == Password &&
+            restarted.TryGetRecorderCredentials(b, First, out var beta, out _) && beta == "beta-recorder" &&
+            !restarted.TryGetRecorderCredentials(a, Second, out _, out _) &&
+            !restarted.TryGetServerCredentials(First, out _, out _) &&
+            !fixture.HasPlaintextCredentialRows(),
+            "Recorder credentials must persist independently in the vault and be bound to their original origin.");
+        restarted.SetRecorderCredentials(a, First, "", "");
+        Check(!restarted.TryGetRecorderCredentials(a, First, out _, out _) &&
+            restarted.TryGetRecorderCredentials(b, First, out _, out _),
+            "Removing one recorder's login must preserve a different login on the same origin.");
+        return Task.CompletedTask;
+    }
+
     internal static Task VaultFailures()
     {
         using var fixture = new Fixture();

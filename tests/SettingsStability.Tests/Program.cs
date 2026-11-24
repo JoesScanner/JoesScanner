@@ -6,6 +6,7 @@ using JoesScanner.Services;
 var filters = FilterService.Instance;
 RepeatedCallsDoNotInvalidateTheCatalog();
 HierarchyAndExplicitChangesStayEffective();
+RecorderFiltersFollowIdentity();
 await DiscoveryContinuesWhileStorageIsBlocked();
 await FirstOpenReusesOnlyMatchingSuccessfulPreparation();
 await FilterProfileSchemaTests.RunAsync();
@@ -95,6 +96,32 @@ void HierarchyAndExplicitChangesStayEffective()
     filters.ClearRule(row);
     Check(!filters.ShouldHide(call) && !filters.ShouldMute(call), "Clear failed to remove inherited state.");
     Console.WriteLine("PASS Filter inheritance, overrides, rapid edits and clear");
+}
+
+void RecorderFiltersFollowIdentity()
+{
+    var a = Guid.NewGuid();
+    var b = Guid.NewGuid();
+    const string first = "https://shared-recorder.test/one";
+    const string second = "https://shared-recorder.test/two";
+    const string edited = "https://new-recorder.test/one";
+    var sharedLabels = new CallItem("Receiver", "Site", "Talkgroup");
+    var callA = sharedLabels with { ServerId = a };
+    var callB = sharedLabels with { ServerId = b };
+
+    filters.ConfigureRecorderScopes([(a, first, a.ToString("N")), (b, second, b.ToString("N"))], first);
+    filters.EnsureRulesForCall(callA);
+    filters.ApplyStateRecords([new FilterRuleStateRecord
+    {
+        Level = FilterLevel.Receiver, Receiver = callA.ReceiverName, IsMuted = true
+    }], resetOthers: true);
+    Check(filters.ShouldMute(callA) && !filters.ShouldMute(callB), "A recorder's rules crossed to another server.");
+
+    filters.SetServerUrl(second);
+    Check(filters.ShouldMute(callA) && !filters.ShouldMute(callB), "Changing the editor selection changed another recorder's filters.");
+    filters.ConfigureRecorderScopes([(a, edited, a.ToString("N")), (b, second, b.ToString("N"))], edited);
+    Check(filters.ShouldMute(callA), "Editing a recorder URL lost its filters.");
+    Console.WriteLine("PASS Combined Live applies each recorder's saved filters across selection and address changes");
 }
 
 async Task DiscoveryContinuesWhileStorageIsBlocked()

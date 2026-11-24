@@ -42,7 +42,7 @@ namespace JoesScanner.ViewModels
         private int _queuePlaybackVersion;
         private int _audioToggleSerial;
         private int _refreshingCallMetadata;
-        private bool _changingHostedAccount => false;
+        private bool HasEnabledScannerConnections() => Uri.TryCreate(_settingsService.ServerUrl, UriKind.Absolute, out _);
         private DelayedSelection? _nextSelection;
 
         internal int ResumeRequests { get; private set; }
@@ -63,7 +63,7 @@ namespace JoesScanner.ViewModels
         private bool IsRunning => _monitoring.CanRecover(_monitoring.Current);
         private bool CanResumePlayback => _retryPlaybackCall != null;
         private bool AudioEnabled { get; set; } = true;
-        internal int CallsWaiting => _durableRun is { } durable ? CountRepresentedWaitingCalls(durable) : 0;
+        internal int CallsWaiting => CountRepresentedWaitingCalls();
         private Action? RequestJumpToLiveScroll { get; set; }
         private string LastQueueEvent { get; set; } = string.Empty;
 
@@ -196,11 +196,11 @@ namespace JoesScanner.ViewModels
             return ResumedQueue = EnsureQueuePlaybackAsync(_playbackOwnership.Live!);
         }
 
-        private async Task<CallItem?> GetNextDurableCallAsync(DurableLiveQueue.Run durable, CancellationToken token,
+        private async Task<CallItem?> GetNextDurableCallAsync(CancellationToken token,
             int version, long? afterArrival, IReadOnlyList<long>? visibleReplays)
         {
             var delay = Interlocked.Exchange(ref _nextSelection, null);
-            var row = await _durableQueue.NextAsync(durable, 0, token, afterArrival, visibleReplays);
+            var next = await _durableQueue.NextAsync(LiveQueueScopes(), LocalRecoveryFloor, token, afterArrival, visibleReplays);
             if (delay != null)
             {
                 delay.Reached.TrySetResult();
@@ -208,7 +208,7 @@ namespace JoesScanner.ViewModels
                 // result hasn't reached the UI dispatcher yet.
                 await delay.Return.Task;
             }
-            return row?.ToCallItem(durable.Server);
+            return next?.Row.ToCallItem(next.Scope.Server);
         }
 
         private async Task<PlaybackOutcome> PlayAudioAsync(CallItem item, LivePlaybackRequests.Request request,
@@ -257,7 +257,11 @@ namespace JoesScanner.ViewModels
             return item.RecordingServer == run.Server && id.Length != 0 && run.Owns(item.RecordingAccess);
         }
 
-        private bool IsCurrentLiveScope(DurableLiveQueue.Run run) => run == _durableRun;
+        private DurableLiveQueue.Run[] LiveQueueScopes() =>
+            _monitoring.CanRecover(_monitoring.Current) && _durableRun is { } scope ? [scope] : [];
+        private DurableLiveQueue.Run? ScopeOf(CallItem item) => LiveQueueScopes().FirstOrDefault(scope =>
+            TryGetDurableRecording(item, scope, out _));
+        private bool IsCurrentLiveScope(DurableLiveQueue.Run run) => LiveQueueScopes().Contains(run);
         private static long LocalRecoveryFloor(DurableLiveQueue.Run run) => 0;
         private static CallItem ResolveDurableCard(DurableLiveQueue.Run run, DurableLiveQueue.Recording row) => row.ToCallItem(run.Server);
         private static Task RefreshTransportCardAsync(CallItem item, CancellationToken token) => Task.CompletedTask;
@@ -269,7 +273,13 @@ namespace JoesScanner.ViewModels
         private void DrainPendingCallsToVisible() { }
         private IReadOnlyList<CallItem> SnapshotLiveCalls() => Calls;
         private void ClearPendingCalls() { }
-        private void ApplyLiveUpdate(LiveCallState state) => MetadataUpdatesForTest++;
+        private async Task RefreshRecorderMetadataAsync(DurableLiveQueue.Run scope, CallItem[] candidates)
+        {
+            var run = _monitoring.Current!;
+            await _callStreamService.RefreshCallMetadataAsync(candidates, run.Token);
+            if (_monitoring.CanRecover(run) && IsCurrentLiveScope(scope))
+                MetadataUpdatesForTest += candidates.Length;
+        }
         private void InsertLiveCardInDisplayOrder(CallItem item) => Calls.Add(item);
         private bool IsPlayableForQueue(CallItem item) => !string.IsNullOrWhiteSpace(item.AudioUrl) && !IsFilteredForPlayback(item);
 

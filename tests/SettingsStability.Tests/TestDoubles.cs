@@ -8,7 +8,10 @@ public abstract class BindableObject
 
 namespace JoesScanner.Models
 {
-    internal sealed record CallItem(string ReceiverName, string SystemName, string Talkgroup);
+    internal sealed record CallItem(string ReceiverName, string SystemName, string Talkgroup)
+    {
+        internal Guid? ServerId { get; init; }
+    }
 }
 
 namespace JoesScanner.Services

@@ -14,7 +14,7 @@ public partial class MainViewModel
                 return;
 
             _handledMonitoringLaunch = true;
-            if (!_settingsService.AutoPlay || !Uri.TryCreate(_settingsService.ServerUrl, UriKind.Absolute, out _))
+            if (!_settingsService.AutoPlay || !HasEnabledScannerConnections())
                 return;
 
             var stopRevision = _monitoring.StopRevision;
@@ -103,43 +103,14 @@ public partial class MainViewModel
 
         try
         {
-            var (run, durable, candidates) = await MainThread.InvokeOnMainThreadAsync(() =>
-            {
-                var active = _monitoring.Current;
-                return _monitoring.CanRecover(active)
-                    ? (active, _durableRun, SnapshotLiveCalls()
-                        .Where(call => call.LiveState?.NeedsNotificationLookup() == true)
-                        .Take(maxToRefresh).ToArray())
-                    : (null, null, Array.Empty<CallItem>());
-            });
-            if (run == null || run.Token.IsCancellationRequested || candidates.Length == 0)
-                return;
-
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(run.Token);
-            timeout.CancelAfter(TimeSpan.FromSeconds(12));
-            timeout.Token.ThrowIfCancellationRequested();
-            await _callStreamService.RefreshCallMetadataAsync(candidates, timeout.Token).ConfigureAwait(false);
-            await MainThread.InvokeOnMainThreadAsync(() =>
-            {
-                if (timeout.IsCancellationRequested || _changingHostedAccount ||
-                    !_monitoring.CanRecover(run) || durable != null && !IsCurrentLiveScope(durable))
-                    return;
-
-                foreach (var candidate in candidates)
-                {
-                    if (candidate.LiveState is { } state)
-                        ApplyLiveUpdate(state);
-                }
-            });
+            var groups = await MainThread.InvokeOnMainThreadAsync(() => LiveQueueScopes()
+                .Select(scope => (Scope: scope, Calls: SnapshotLiveCalls()
+                    .Where(call => call.ServerId == scope.ServerId && call.LivePlaybackOwner == scope.Owner && call.RecordingServer == scope.Server &&
+                        call.LiveState?.NeedsNotificationLookup() == true)
+                    .Take(maxToRefresh).ToArray()))
+                .Where(group => group.Calls.Length > 0).ToArray());
+            await Task.WhenAll(groups.Select(group => RefreshRecorderMetadataAsync(group.Scope, group.Calls)));
         }
-        catch (OperationCanceledException) { }
-        catch (Exception ex)
-        {
-            AppLog.Add(() => $"Call metadata catch-up failed ({ex.GetType().Name}).");
-        }
-        finally
-        {
-            Interlocked.Exchange(ref _refreshingCallMetadata, 0);
-        }
+        finally { Interlocked.Exchange(ref _refreshingCallMetadata, 0); }
     }
 }

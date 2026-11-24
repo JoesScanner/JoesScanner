@@ -18,5 +18,7 @@ namespace JoesScanner.Services
     public interface ISubscriptionService
     {
         Task<SubscriptionCheckResult> EnsureSubscriptionAsync(CancellationToken cancellationToken);
+        Task<SubscriptionCheckResult> EnsureSubscriptionForRecorderAsync(string server, CancellationToken cancellationToken) =>
+            EnsureSubscriptionAsync(cancellationToken);
     }
 }

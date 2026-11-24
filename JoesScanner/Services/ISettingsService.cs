@@ -21,6 +21,8 @@ namespace JoesScanner.Services
         bool TryGetServerCredentials(string serverUrl, out string username, out string password);
         void SetServerCredentials(string serverUrl, string username, string password);
         void ClearServerCredentials(string serverUrl);
+        bool TryGetRecorderCredentials(Guid serverId, string serverUrl, out string username, out string password);
+        void SetRecorderCredentials(Guid serverId, string serverUrl, string username, string password);
 
 
         bool AutoPlay { get; set; }
