@@ -134,7 +134,7 @@ internal static class FreshLiveSessionContractTests
         var oldCard = live.CardForTest("first");
         await live.PressPlayStopForTestAsync();
         Handoff.Check(live.MonitoringGenerationForContractTest == null &&
-            live.VisibleCallIdsForContractTest.SequenceEqual(["first", "second"]),
+            live.VisibleCallIdsForContractTest.SequenceEqual(["second", "first"]),
             "The visible Stop handler must retain review cards.");
 
         await live.PressSystemPlayForTestAsync();
@@ -172,7 +172,7 @@ internal static class FreshLiveSessionContractTests
             await playing.WaitAsync(Watchdog);
             Handoff.Check(live.MonitoringGenerationForContractTest == null && await live.PendingHeadForTestAsync() == null,
                 "Stop must retire the listening run and leave no eligible pending playback.");
-            Handoff.Check(live.VisibleCallIdsForContractTest.SequenceEqual(["active", "review", "waiting"]),
+            Handoff.Check(live.VisibleCallIdsForContractTest.SequenceEqual(["waiting", "review", "active"]),
                 "The existing cards must remain available for review after Stop.");
 
             audio.Playing = null;
@@ -370,7 +370,7 @@ internal static class FreshLiveSessionContractTests
             await live.DeliverForTestAsync("after-history").WaitAsync(Watchdog);
 
             Handoff.Check(ownership.Live != null && live.MonitoringGenerationForContractTest == generation &&
-                  live.VisibleCallIdsForContractTest.SequenceEqual(["before-history", "during-history", "after-history"]),
+                  live.VisibleCallIdsForContractTest.SequenceEqual(["after-history", "during-history", "before-history"]),
                 "Returning to Live must preserve the listening run and available review cards.");
             Handoff.Check(audio.Started.SequenceEqual(["history", "after-history"]) &&
                   audio.Completed.SequenceEqual(["history", "after-history"]),

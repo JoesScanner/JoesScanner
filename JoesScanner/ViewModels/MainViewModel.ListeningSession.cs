@@ -38,7 +38,6 @@ public partial class MainViewModel
             return false;
 
         Interlocked.Increment(ref _audioToggleSerial);
-        ClearPendingCalls();
         Calls.Clear();
         AddressAlerts.Clear();
         _hiddenAddressAlerts.Clear();

@@ -147,8 +147,10 @@ namespace JoesScanner.Services
         private bool IsCurrentServer_NoLock(string serverUrl) =>
             string.Equals(_currentServerKey, ScopeKey_NoLock(serverUrl), StringComparison.OrdinalIgnoreCase);
 
-        private string CallScope_NoLock(CallItem call) =>
-            call.ServerId is { } id ? _keysByRecorder.GetValueOrDefault(id, id.ToString("N")) : _currentServerKey;
+        private string CallScope_NoLock(CallItem call) => CallScope_NoLock(call.ServerId);
+
+        private string CallScope_NoLock(Guid? serverId) =>
+            serverId is { } id ? _keysByRecorder.GetValueOrDefault(id, id.ToString("N")) : _currentServerKey;
 
         private void NotifyRulesChanged()
         {
@@ -359,20 +361,11 @@ namespace JoesScanner.Services
                 .ToList();
         }
 
-        public bool ShouldHide(CallItem call)
-        {
-            var rule = GetEffectiveState(call);
-            return rule != null && rule.IsDisabled;
-        }
+        public bool ShouldMute(CallItem call) =>
+            ShouldMute(call.ServerId, call.ReceiverName, call.SystemName, call.Talkgroup);
 
-        public bool ShouldMute(CallItem call)
-        {
-            var rule = GetEffectiveState(call);
-            if (rule == null)
-                return false;
-
-            return rule.IsDisabled || rule.IsMuted;
-        }
+        internal bool ShouldMute(Guid? serverId, string? receiver, string? site, string? talkgroup) =>
+            GetEffectiveState(serverId, receiver, site, talkgroup) is { IsDisabled: true } or { IsMuted: true };
 
         private void LoadCurrentServerFromStorage()
         {
@@ -600,20 +593,17 @@ namespace JoesScanner.Services
                 level == FilterLevel.Talkgroup ? node.Talkgroup : string.Empty, state?.IsMuted ?? false,
                 state?.IsDisabled ?? false, node.LastSeenUtc);
 
-        private FilterRuleStateRecord? GetEffectiveState(CallItem call)
+        private FilterRuleStateRecord? GetEffectiveState(Guid? serverId, string? receiverLabel, string? siteLabel, string? talkgroupLabel)
         {
-            if (call == null)
-                return null;
-
-            var receiver = Normalize(call.ReceiverName);
+            var receiver = Normalize(receiverLabel);
             if (receiver.Length == 0)
                 return null;
 
-            var site = Normalize(call.SystemName);
-            var talkgroup = Normalize(call.Talkgroup);
+            var site = Normalize(siteLabel);
+            var talkgroup = Normalize(talkgroupLabel);
             lock (_gate)
             {
-                var scope = CallScope_NoLock(call);
+                var scope = CallScope_NoLock(serverId);
                 if (scope == _currentServerKey)
                     return GetEffectiveState_NoLock(receiver, site, talkgroup);
 

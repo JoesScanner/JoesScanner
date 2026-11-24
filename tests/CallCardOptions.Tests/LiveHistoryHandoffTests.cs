@@ -238,14 +238,15 @@ internal static class LiveHistoryHandoffTests
         var original = live.StartQueueForTestAsync();
         await playing.Task.WaitAsync(token);
         var two = live.SelectForTestAsync("two");
-        await stopping.Task.WaitAsync(token);
         await preparingTwo.Task.WaitAsync(token);
+        Check(!stopping.Task.IsCompleted, "The existing clip must keep playing while the new card prepares.");
         var three = live.SelectForTestAsync("three");
         await preparingThree.Task.WaitAsync(token);
         var latest = live.SelectForTestAsync("latest");
+        await stopping.Task.WaitAsync(token);
         await Task.WhenAll(two, three).WaitAsync(token);
         Check(player.Started.SequenceEqual(["playing"]) && await live.IsPendingForTestAsync("playing"),
-            "A card tap must cancel native playback and start preparation without waiting for teardown or marking the clip complete.");
+            "Only the prepared replacement may retire the native clip, and the old clip stays pending.");
         releasePlayer.TrySetResult();
         await Task.WhenAll(original, latest).WaitAsync(token);
         await live.ResumedQueue.WaitAsync(token);
@@ -253,7 +254,7 @@ internal static class LiveHistoryHandoffTests
               player.Completed.SequenceEqual(["latest", "backlog"]) &&
               await live.IsPendingForTestAsync("playing") && await live.IsPendingForTestAsync("two"),
             "The latest tap must own playback and bypass older pending rows without marking them terminal.");
-        Console.WriteLine("PASS Live card taps cancel active native playback and preparation, play only the latest tap, and resume durable FIFO");
+        Console.WriteLine("PASS The latest prepared card takes the native owner and resumes durable FIFO");
     }
 
     private static async Task ManualSelectionDuringCommitAsync(string path)
@@ -304,7 +305,6 @@ internal static class LiveHistoryHandoffTests
         var live = new MainViewModel(new PlaybackOwnership(), player, path) { AutoPlayForTest = true };
         await live.StartForTestAsync();
         await live.AddForTestAsync("unavailable");
-        await live.AddForTestAsync("selected");
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         var token = timeout.Token;
         var preparing = Signal();
@@ -316,7 +316,9 @@ internal static class LiveHistoryHandoffTests
             return Task.Delay(Timeout.Infinite, cancellation);
         };
         await live.StartQueueForTestAsync().WaitAsync(token);
-        Check(live.RetryForTest == "unavailable", "Unavailable audio should leave the original recording pending for retry.");
+        Check(live.RetryForTest == null && await live.IsPendingForTestAsync("unavailable"),
+            "Unavailable audio must stay recoverable without blocking the automatic queue.");
+        await live.AddForTestAsync("selected");
         var manual = live.SelectForTestAsync("selected");
         await preparing.Task.WaitAsync(token);
         Check(live.RetryForTest == null, "The manual call must take priority over the blocked FIFO head.");
@@ -365,7 +367,7 @@ internal static class LiveHistoryHandoffTests
         var manual = live.SelectForTestAsync("middle");
         Check(await started.Reader.ReadAsync(token) == "middle", "A tap must interrupt autoplay.");
         var previous = live.NavigateForTestAsync(1);
-        Check(await started.Reader.ReadAsync(token) == "old", "Previous must bypass unavailable and muted rows.");
+        Check(await started.Reader.ReadAsync(token) == "muted", "Previous must allow an explicit selection of a muted visible recording.");
         var next = live.NavigateForTestAsync(-1);
         Check(await started.Reader.ReadAsync(token) == "middle", "Next must use the playing call's arrival anchor.");
         Check(await live.IsPendingForTestAsync("old") && await live.IsPendingForTestAsync("middle"),
@@ -482,11 +484,14 @@ internal static class LiveHistoryHandoffTests
         foreach (var id in new[] { "hidden", "muted", "playing" })
             await live.AddForTestAsync(id);
         await live.SelectForTestAsync("hidden");
+        await live.ResumedQueue.WaitAsync(TimeSpan.FromSeconds(10));
+        Check(player.Completed.SequenceEqual(["hidden", "playing"]),
+            "Explicit Disable playback must work and automatic advancement must skip the muted recording.");
         await live.SelectForTestAsync("muted");
         await live.ResumedQueue.WaitAsync(TimeSpan.FromSeconds(10));
-        Check(player.Completed.SequenceEqual(["muted", "playing"]),
-            "An explicit tap can hear muted audio, while a hidden recording cannot take native playback.");
-        Console.WriteLine("PASS Manual taps can play muted calls, hidden calls stay silent, and FIFO does not replay them");
+        Check(player.Completed.SequenceEqual(["hidden", "playing", "muted", "playing"]),
+            "The explicit Mute selection must work and its replay must continue FIFO.");
+        Console.WriteLine("PASS Mute and Disable allow explicit playback and suppress automatic advancement");
     }
 
     private static async Task ForwardManualSeekAsync(string path)
@@ -645,7 +650,7 @@ internal static class LiveHistoryHandoffTests
         await boundary;
         await live.StartQueueForTestAsync();
         Check(player.Completed.SequenceEqual(["manual", "first-catch-up", "after-audio-on", "after-audio-on-2"]) &&
-              await live.IsPendingForTestAsync("muted-period") && !live.AutoPlayForTest,
+              !await live.IsPendingForTestAsync("muted-period") && !live.AutoPlayForTest,
             "Enabling audio must reserve its FIFO boundary ahead of subsequent arrivals without changing AutoPlay.");
 
         await live.AddForTestAsync("pending-at-restart");
@@ -664,8 +669,8 @@ internal static class LiveHistoryHandoffTests
         var player = new HandoffAudio();
         var live = new MainViewModel(new PlaybackOwnership(), player, path);
         await live.StartForTestAsync();
-        foreach (var id in new[] { "A", "B", "C", "D", "E" })
-            await live.AddForTestAsync(id, visible: id != "B");
+        foreach (var id in new[] { "A", "B", "offscreen", "C", "D", "E" })
+            await live.AddForTestAsync(id, visible: id != "offscreen");
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         var token = timeout.Token;
         var c = Signal();
@@ -702,7 +707,7 @@ internal static class LiveHistoryHandoffTests
             Check(player.Started.SequenceEqual(["C", "B", "C", "D", "E", "F", "G"]) &&
                   player.Completed.SequenceEqual(["C", "E", "F", "G"]) &&
                   !await live.IsPendingForTestAsync("A") && !await live.IsPendingForTestAsync("D"),
-                "Previous must reach off-screen B, Next must continue C to D, and Jump must leave only the edge and later arrivals.");
+                "Previous must use visible B, Next must continue C to D, and Jump must leave only the edge and later arrivals.");
         }
         finally
         {
@@ -710,7 +715,7 @@ internal static class LiveHistoryHandoffTests
             await live.StopForTestAsync().WaitAsync(TimeSpan.FromSeconds(10));
             await Task.WhenAll(actions.Append(live.ResumedQueue)).WaitAsync(TimeSpan.FromSeconds(10));
         }
-        Console.WriteLine("PASS Previous and Next move the playback anchor, including off-screen calls, and Jump keeps later arrivals");
+        Console.WriteLine("PASS Previous and Next navigate visible cards and Jump keeps later arrivals");
     }
 
     private static async Task BacklogPlaybackRateAsync(string path)

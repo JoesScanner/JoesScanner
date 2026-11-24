@@ -19,7 +19,10 @@ internal sealed class LiveCallState(string serverUrl, string id)
 {
     private static long _nextVersion;
     private readonly object _gate = new();
-    private readonly long[] _fieldVersions = new long[(int)CallCardField.Lcn + 1];
+    private const int SystemIdField = (int)CallCardField.Lcn + 1;
+    private const int TalkgroupIdField = SystemIdField + 1;
+    private const int SiteIdField = TalkgroupIdField + 1;
+    private readonly long[] _fieldVersions = new long[SiteIdField + 1];
     private long _transcriptionVersion;
     private long _audioVersion;
     private LiveCallSnapshot _snapshot = new(new(), null, CallCardIdFallback.None);
@@ -56,6 +59,9 @@ internal sealed class LiveCallState(string serverUrl, string id)
             var metadata = new CallCardMetadata
             {
                 Timestamp = Newer(CallCardField.Time, current.Timestamp, incoming.Timestamp),
+                SystemId = Text((CallCardField)SystemIdField, current.SystemId, incoming.SystemId),
+                TalkgroupId = Text((CallCardField)TalkgroupIdField, current.TalkgroupId, incoming.TalkgroupId),
+                SiteId = Text((CallCardField)SiteIdField, current.SiteId, incoming.SiteId),
                 System = PreferLabel(CallCardField.System, CallCardIdFallback.System, current.System, incoming.System),
                 Talkgroup = PreferLabel(CallCardField.Talkgroup, CallCardIdFallback.Talkgroup, current.Talkgroup, incoming.Talkgroup),
                 Site = PreferLabel(CallCardField.Site, CallCardIdFallback.Site, current.Site, incoming.Site),

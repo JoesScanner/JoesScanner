@@ -64,6 +64,10 @@ public static class DbBootstrapper
         await using var transaction = connection.BeginTransaction();
         await EnsureColumnExistsAsync(connection, "live_queue_recordings", "recovery_backlog",
             "INTEGER NOT NULL DEFAULT 0", token, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "live_queue_recordings", "audio_revision",
+            "INTEGER NOT NULL DEFAULT 0", token, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "live_queue_recordings", "audio_recovered",
+            "INTEGER NOT NULL DEFAULT 0", token, transaction).ConfigureAwait(false);
         await EnsureColumnExistsAsync(connection, "live_queue_servers", "playback_floor",
             "INTEGER NOT NULL DEFAULT 0", token, transaction).ConfigureAwait(false);
         await using var command = connection.CreateCommand();

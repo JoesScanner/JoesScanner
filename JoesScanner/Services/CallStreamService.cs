@@ -1209,8 +1209,9 @@ namespace JoesScanner.Services
 
             // An evicted card can still be pending in SQLite. The caller saves
             // this as an existing-only observation in the active account scope.
-            var state = liveCalls.Find(id) ?? new LiveCallState(server, liveCalls.OriginalId(id));
-            return ObserveExistingCall(row, state, version);
+            var known = liveCalls.Find(id);
+            var state = known ?? new LiveCallState(server, liveCalls.OriginalId(id));
+            return ObserveExistingCall(row, state, version, known != null);
         }
 
         private void RequireHistoricalAdmission(CallItem item, LiveCallIndex liveCalls, string? windowId, string server)
@@ -1253,9 +1254,12 @@ namespace JoesScanner.Services
                 : null;
         }
 
-        private CallItem? ObserveExistingCall(CallRow row, LiveCallState? state, long version)
+        private CallItem? ObserveExistingCall(CallRow row, LiveCallState? state, long version, bool trackAudioChange = true)
         {
-            if (state == null || !state.Observe(ToLiveSnapshot(row, state.ServerUrl), version, out var transcript))
+            if (state == null)
+                return null;
+            var previousAudio = state.Read().AudioUrl;
+            if (!state.Observe(ToLiveSnapshot(row, state.ServerUrl), version, out var transcript))
                 return null;
 
             var item = new CallItem
@@ -1264,6 +1268,7 @@ namespace JoesScanner.Services
                 LiveState = state,
                 RecordingTimeUtc = TryParseTimestampUtc(row.StartTime, row.StartTimeUTC),
                 IsLiveUpdate = true,
+                AudioReferenceChanged = trackAudioChange && state.Read().AudioUrl != previousAudio,
                 Transcription = transcript ?? string.Empty
             };
             if (transcript != null)

@@ -22,7 +22,7 @@ namespace JoesScanner.ViewModels
     // View model for the Settings page.
     // Controls connection settings, call list behavior, theme,
     // and the unified filter list that is populated from live calls.
-    public class SettingsViewModel : BindableObject
+    public partial class SettingsViewModel : BindableObject
     {
         private readonly ISettingsService _settings;
         private readonly MainViewModel _mainViewModel;

@@ -4,6 +4,9 @@ public sealed record CallCardMetadata
 {
     public DateTime? Timestamp { get; init; }
     public string? System { get; init; }
+    public string? SystemId { get; init; }
+    public string? TalkgroupId { get; init; }
+    public string? SiteId { get; init; }
     public string? Talkgroup { get; init; }
     public string? Site { get; init; }
     public string? Radio { get; init; }

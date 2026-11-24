@@ -27,6 +27,8 @@ namespace JoesScanner.Models
         internal Guid? ServerId { get; set; }
         internal bool IsConnectionActionRequired { get; init; }
         internal long? LiveArrivalSequence { get; set; }
+        internal long LiveAudioRevision { get; set; }
+        internal bool AudioReferenceChanged { get; init; }
         internal bool IsCompletedReplay { get; set; }
         internal bool HasUnplayedLateAudio { get; private set; }
 

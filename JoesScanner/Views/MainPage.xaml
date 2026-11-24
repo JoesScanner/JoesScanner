@@ -54,7 +54,7 @@
 
 					<Grid
 						ColumnDefinitions="Auto,Auto"
-						RowDefinitions="Auto,Auto"
+						RowDefinitions="Auto,Auto,Auto"
 						ColumnSpacing="0"
 						Padding="03"
 						VerticalOptions="Center"
@@ -180,6 +180,9 @@
                                 TextColor="White" />
                         </Grid>
 
+                        <Label Grid.Row="2" Grid.ColumnSpan="2" FontSize="11" TextColor="#fde68a"
+                               IsVisible="{Binding HasBacklogWarning}" Text="{Binding BacklogWarningText}"
+                               HorizontalTextAlignment="Center" AutomationId="LiveBacklogWarning" />
                         <VerticalStackLayout Grid.Row="1" Grid.ColumnSpan="2" Spacing="4"
                                              IsVisible="{Binding CanResumePlayback}">
                             <Label IsVisible="{Binding CanSkipUnavailableRecording}"

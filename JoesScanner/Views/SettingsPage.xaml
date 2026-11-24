@@ -417,7 +417,7 @@
             <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
                 <Label
                     Grid.Column="0"
-                    Text="Mute or hide traffic by Receiver, Site, or Talkgroup."
+                    Text="Mute or disable automatic audio by Receiver, Site, or Talkgroup."
                     FontSize="12"
                     Opacity="0.8"
                     VerticalOptions="Center"
@@ -909,6 +909,46 @@
             <controls:DeferredContentView.ContentTemplate>
                 <DataTemplate x:DataType="vm:SettingsViewModel">
                     <VerticalStackLayout Spacing="8" Margin="0,0,0,4">
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <Label Text="Group calls by talkgroup" FontSize="12" VerticalOptions="Center" />
+                            <Switch Grid.Column="1" AutomationId="GroupLiveCalls" IsToggled="{Binding GroupLiveCalls, Mode=TwoWay}"
+                                    SemanticProperties.Description="Group calls by talkgroup" />
+                        </Grid>
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <Label Text="Prioritize favorite talkgroups" FontSize="12" VerticalOptions="Center" />
+                            <Switch Grid.Column="1" AutomationId="PrioritizeLiveFavorites" IsToggled="{Binding PrioritizeLiveFavorites, Mode=TwoWay}"
+                                    SemanticProperties.Description="Prioritize favorite talkgroups" />
+                        </Grid>
+                        <Label Text="Maximum consecutive calls per talkgroup" FontSize="12" />
+                        <Picker SelectedIndex="{Binding ConsecutiveLiveCallLimitIndex, Mode=TwoWay}"
+                                AutomationId="ConsecutiveLiveCallLimit" SemanticProperties.Description="Maximum consecutive calls per talkgroup">
+                            <Picker.Items>
+                                <x:String>1</x:String>
+                                <x:String>2</x:String>
+                                <x:String>3</x:String>
+                                <x:String>4</x:String>
+                                <x:String>5</x:String>
+                                <x:String>6</x:String>
+                                <x:String>7</x:String>
+                                <x:String>8</x:String>
+                                <x:String>9</x:String>
+                                <x:String>10</x:String>
+                            </Picker.Items>
+                        </Picker>
+                        <Grid ColumnDefinitions="*,105" ColumnSpacing="8">
+                            <Label Text="Backlog warning (ready calls)" FontSize="12" VerticalOptions="Center" />
+                            <Entry Grid.Column="1" Keyboard="Numeric" AutomationId="LiveBacklogWarningThreshold"
+                                   Text="{Binding LiveBacklogWarningThreshold, Mode=TwoWay, UpdateSourceEventName=Unfocused}"
+                                   SemanticProperties.Description="Backlog warning threshold in ready calls" />
+                        </Grid>
+                        <Grid ColumnDefinitions="*,105" ColumnSpacing="8">
+                            <Label Text="Automatic Jump (ready calls)" FontSize="12" VerticalOptions="Center" />
+                            <Entry Grid.Column="1" Keyboard="Numeric" AutomationId="LiveBacklogJumpThreshold"
+                                   Text="{Binding LiveBacklogJumpThreshold, Mode=TwoWay, UpdateSourceEventName=Unfocused}"
+                                   SemanticProperties.Description="Automatic Jump threshold in ready calls" />
+                        </Grid>
+                        <Label IsVisible="{Binding HasLivePlaybackSettingsError}" Text="{Binding LivePlaybackSettingsError}"
+                               FontSize="12" TextColor="{AppThemeBinding Light=#b91c1c, Dark=#fca5a5}" />
                         <VerticalStackLayout Spacing="8" IsVisible="{OnPlatform Android=true, iOS=true, Default=false}">
                         <Label Text="Mobile audio mode" FontSize="12"
                                TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />

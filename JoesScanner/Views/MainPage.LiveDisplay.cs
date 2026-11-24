@@ -111,6 +111,7 @@ public partial class MainPage
 
     private void RenderLiveDisplay()
     {
+        _viewModel.SetVisibleLiveServer(_liveDisplay.Separate ? _liveDisplay.SelectedServer : null);
         CallsView.IsVisible = !_liveDisplay.Separate;
         SeparateLiveHost.IsVisible = _liveDisplay.Separate;
         ApplyLiveButtonStyle(CombinedLiveButton, !_liveDisplay.Separate);

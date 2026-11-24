@@ -79,6 +79,16 @@ internal static partial class MobileRecoveryTests
         manager.Synchronize([a, b], token, Monitor);
         var firstA = await startedA.Reader.ReadAsync(token);
         var firstB = await startedB.Reader.ReadAsync(token);
+        var audio = new PlaybackOwnership();
+        var lease = audio.Live!;
+        var bPlaying = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var finishB = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var bClip = audio.RunNativeAsync(lease, token, async cancel =>
+        {
+            bPlaying.TrySetResult();
+            await finishB.Task.WaitAsync(cancel);
+        });
+        await bPlaying.Task.WaitAsync(token);
         failA.TrySetResult();
         await retryEntered.Task.WaitAsync(token);
         bCalls.Writer.TryWrite("during outage");
@@ -92,6 +102,10 @@ internal static partial class MobileRecoveryTests
         retry.TrySetResult();
         Check(ReferenceEquals(await startedA.Reader.ReadAsync(token), firstA) && firstA.Status == ServerConnectionStatus.Monitoring,
             "Transient recovery must reuse the connection generation and clear its outage.");
+        Check(!bClip.IsCompleted && ReferenceEquals(audio.Live, lease) && manager.IsCurrent(firstB),
+            "Recorder A must reconnect while Recorder B keeps its socket and current audio.");
+        finishB.TrySetResult();
+        await bClip.WaitAsync(token);
 
         var edited = a with { Endpoint = RecorderA + "/edited" };
         manager.Synchronize([edited, b], token, Monitor);

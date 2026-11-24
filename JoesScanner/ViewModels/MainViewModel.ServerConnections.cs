@@ -436,7 +436,18 @@ public partial class MainViewModel
         try
         {
             using var stream = _callStreamService.ForRecorder(scope.Server, scope.ServerId);
+            var previousAudio = candidates.Select(card => card.LiveState?.Read().AudioUrl).ToArray();
             await stream.RefreshCallMetadataAsync(candidates, timeout.Token);
+            for (var i = 0; i < candidates.Length; i++)
+            {
+                var card = candidates[i];
+                if (card.LiveState is not { } state || state.Read() is not { AudioUrl: { } audio } snapshot ||
+                    previousAudio[i] == audio)
+                    continue;
+                await SaveLiveObservationAsync(scope, state.Id, card.RecordingTimeUtc, snapshot, RecordingOrigin.Unknown,
+                    existingOnly: true, timeout.Token, skipAutomatic: !AudioEnabled || _filterService.ShouldMute(card),
+                    audioReferenceChanged: true);
+            }
             await MainThread.InvokeOnMainThreadAsync(() =>
             {
                 if (timeout.IsCancellationRequested || !IsCurrentLiveScope(scope))
@@ -444,6 +455,7 @@ public partial class MainViewModel
                 foreach (var card in candidates)
                     if (card.LiveState is { } state)
                         ApplyLiveUpdate(state, existing: card);
+                RequestQueueForLiveArrival("RefreshedRecorderAudio");
             });
         }
         catch (OperationCanceledException) when (timeout.IsCancellationRequested) { }

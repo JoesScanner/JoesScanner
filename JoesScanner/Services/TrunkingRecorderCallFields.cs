@@ -58,6 +58,9 @@ internal class TrunkingRecorderCallFields
         {
             Timestamp = timestamp,
             System = LabelOrId(SystemLabel, SystemID),
+            SystemId = SystemID?.Trim(),
+            TalkgroupId = TargetID?.Trim(),
+            SiteId = SiteID?.Trim(),
             Talkgroup = LabelOrId(TargetLabel, TargetID),
             Site = site,
             Radio = LabelOrId(SourceLabel, SourceID),

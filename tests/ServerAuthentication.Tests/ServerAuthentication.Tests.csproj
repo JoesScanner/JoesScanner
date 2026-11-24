@@ -10,6 +10,7 @@
     <PackageReference Include="SQLite" Version="3.54.1" />
     <Compile Include="../../JoesScanner/Services/DbBootstrapper.cs" Link="DbBootstrapper.cs" />
     <Compile Include="../../JoesScanner/Services/DurableLiveQueue.cs" Link="DurableLiveQueue.cs" />
+    <Compile Include="../../JoesScanner/Services/DurableLiveQueue.Scheduling.cs" Link="DurableLiveQueue.Scheduling.cs" />
     <Compile Include="../../JoesScanner/Services/IDatabasePathProvider.cs" Link="IDatabasePathProvider.cs" />
     <Compile Include="../../JoesScanner/Helpers/HostedServerRules.cs" Link="HostedServerRules.cs" />
     <Compile Include="../../JoesScanner/Helpers/ServerKeyHelper.cs" Link="ServerKeyHelper.cs" />

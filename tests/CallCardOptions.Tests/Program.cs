@@ -32,6 +32,7 @@ await DurableLiveTransportTests.RunAsync();
 await LiveInterruptionTests.RunAsync();
 await RecordingDatabaseMaintenanceTests.RunAsync();
 await LiveHistoryHandoffTests.RunAsync();
+await IntelligentLivePlaybackTests.RunAsync();
 await HistoryPlaybackDispatcherTests.RunAsync();
 
 var defaults = CallCardLayout.Default;
@@ -93,7 +94,8 @@ var live = ReadRow("""
      "CallDuration":8.4,"Frequency":851.125,"TargetTag":"Fire Ops","SourceTag":"Apparatus","SystemType":"P25",
      "CallType":"Group","CallAudioType":"Digital","LCN":4}
     """).ToCardMetadata(complete.Timestamp);
-Check(live == complete, "Live metadata must use the server labels, IDs and optional fields in their proper roles.");
+Check(live == complete with { SystemId = "101", TalkgroupId = "102", SiteId = "103" },
+    "Live metadata must retain raw scheduler IDs alongside the labels and optional card fields.");
 
 var history = ReadRow("""
     {"SystemID":101,"TargetID":102,"SiteID":103,"SourceID":104,"VoiceType":"Digital","CallDuration":"NaN"}
@@ -126,7 +128,7 @@ var fullRow = ReadRow("""
 Check(metadataState.Observe(fullRow, LiveCallState.NextVersion(), out var changedText) && changedText == null,
     "A full row with unchanged transcription must still publish its additional metadata.");
 call.ApplyLiveUpdate();
-Check(call.CardMetadata == complete with { DurationSeconds = null } && notifications == 2,
+Check(call.CardMetadata == complete with { DurationSeconds = null, SystemId = "101" } && notifications == 2,
     "Live cards must pick up all available fields and replace ID fallbacks with labels.");
 Check(!metadataState.Observe(fullRow, LiveCallState.NextVersion()) &&
       !metadataState.Observe(ReadRow("""{"SystemID":101,"SourceID":104,"Frequency":" ","CallDuration":0}""")

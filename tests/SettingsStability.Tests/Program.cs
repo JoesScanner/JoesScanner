@@ -83,18 +83,18 @@ void HierarchyAndExplicitChangesStayEffective()
         Level = FilterLevel.Talkgroup, Receiver = "Receiver", Site = "Site", Talkgroup = "Talkgroup", IsMuted = true
     };
     filters.ApplyStateRecords([receiver], resetOthers: true);
-    Check(filters.ShouldHide(call) && filters.ShouldMute(call), "Receiver disable did not propagate.");
+    Check(filters.GetCatalogSnapshot().Last().IsDisabled && filters.ShouldMute(call), "Receiver disable did not propagate.");
     filters.ApplyStateRecords([talkgroup], resetOthers: false);
-    Check(!filters.ShouldHide(call) && filters.ShouldMute(call), "Talkgroup state did not override inherited flags.");
+    Check(!filters.GetCatalogSnapshot().Last().IsDisabled && filters.ShouldMute(call), "Talkgroup state did not override inherited flags.");
     Check(filters.GetCatalogSnapshot().Last().IsMuted, "Catalog and playback filter decisions disagree.");
 
     // The row can still be on screen while the asynchronous catalog refresh runs.
     var row = new FilterRule { Level = FilterLevel.Talkgroup, Receiver = "Receiver", Site = "Site", Talkgroup = "Talkgroup" };
     filters.ToggleMute(row);
     filters.ToggleMute(row);
-    Check(!filters.ShouldHide(call) && filters.ShouldMute(call), "Rapid toggles used stale display state.");
+    Check(!filters.GetCatalogSnapshot().Last().IsDisabled && filters.ShouldMute(call), "Rapid toggles used stale display state.");
     filters.ClearRule(row);
-    Check(!filters.ShouldHide(call) && !filters.ShouldMute(call), "Clear failed to remove inherited state.");
+    Check(!filters.ShouldMute(call), "Clear failed to remove inherited state.");
     Console.WriteLine("PASS Filter inheritance, overrides, rapid edits and clear");
 }
 

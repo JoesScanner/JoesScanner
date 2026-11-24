@@ -6,7 +6,7 @@ namespace JoesScanner.Services;
 
 // This journal contains recordings observed by Live. Its high-water observation
 // can identify a boundary, but is not proof that a server-side gap was reconciled.
-public sealed class DurableLiveQueue(IDatabasePathProvider paths)
+public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
 {
     private readonly SemaphoreSlim _ownershipWrites = new(1);
     private readonly Dictionary<(string Server, string Account), (long Owner, bool Retired)> _ownershipRequests = [];
@@ -32,6 +32,9 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
         RecordingAccessContext Access, long Owner)
     {
         internal bool IsCompletedReplay { get; init; }
+        internal long AudioRevision { get; init; }
+        internal bool AudioRecovered { get; init; }
+        internal bool Resuming { get; init; }
 
         internal CallItem ToCallItem(string server, Guid? serverId = null)
         {
@@ -44,6 +47,7 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
             {
                 BackendId = Id, ServerId = serverId, LiveState = state, RecordingTimeUtc = timestamp,
                 RecordingServer = server, RecordingAccess = Access, LivePlaybackOwner = Owner, LiveArrivalSequence = ArrivalSequence,
+                LiveAudioRevision = AudioRevision,
                 Timestamp = timestamp?.LocalDateTime ?? default, CardMetadata = metadata, IsCompletedReplay = IsCompletedReplay,
                 Talkgroup = metadata.Talkgroup ?? string.Empty, Source = metadata.Radio ?? string.Empty,
                 Site = metadata.Site ?? string.Empty, VoiceReceiver = metadata.Receiver ?? string.Empty,
@@ -240,9 +244,11 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
 
     internal Task<Observation> ObserveWithPositionAsync(Run run, string id, DateTimeOffset? time, LiveCallSnapshot incoming,
         CancellationToken token, RecordingOrigin origin, bool existingOnly, Action<Exception>? report = null,
-        TimeProvider? clock = null, string? recoveryWindowId = null, bool historyBaseline = false) => InArrivalOrderAsync(() =>
+        TimeProvider? clock = null, string? recoveryWindowId = null, bool historyBaseline = false,
+        bool skipAutomatic = false, bool audioReferenceChanged = false) => InArrivalOrderAsync(() =>
         {
-            Task<Observation> Write() => WriteObservationAsync(run, id, time, incoming, token, origin, existingOnly, recoveryWindowId, historyBaseline);
+            Task<Observation> Write() => WriteObservationAsync(run, id, time, incoming, token, origin, existingOnly,
+                recoveryWindowId, historyBaseline, skipAutomatic, audioReferenceChanged);
             return report == null ? Write() : PersistObservationAsync(Write, report, token, clock);
         }, token);
 
@@ -269,7 +275,8 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
     }
 
     private Task<Observation> WriteObservationAsync(Run run, string id, DateTimeOffset? time, LiveCallSnapshot incoming,
-        CancellationToken token, RecordingOrigin origin, bool existingOnly, string? recoveryWindowId, bool historyBaseline)
+        CancellationToken token, RecordingOrigin origin, bool existingOnly, string? recoveryWindowId, bool historyBaseline,
+        bool skipAutomatic, bool audioReferenceChanged)
     {
         // Signed URLs may contain credentials. Keep those on the in-memory card.
         var url = DurableAudioUrl(incoming.AudioUrl);
@@ -278,13 +285,15 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
             using var transaction = db.BeginTransaction();
             using var lookup = Command(db, run, """
                 SELECT q.recorded_utc, q.payload, q.origin, q.protected, q.account_scope, q.first_owner,
-                       q.arrival_sequence, q.disposition, q.recovery_backlog
+                       q.arrival_sequence, q.disposition, q.recovery_backlog, q.audio_ready, q.audio_revision
                 FROM live_queue_recordings q JOIN live_queue_servers s USING (server, account_scope)
                 WHERE q.server = $server AND q.account_scope = $account AND q.recording_id = $id
                   AND s.owner = $owner AND s.stopped = 0
                 """, ("$id", id));
             lookup.Transaction = transaction;
             Recording? previous;
+            var wasReady = false;
+            long audioRevision = 0;
             using (var reader = lookup.ExecuteReader())
             {
                 if (!reader.Read())
@@ -292,7 +301,11 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
                 else if (reader.GetInt32(7) != 0)
                     return new(reader.GetInt64(6), false, reader.GetBoolean(8));
                 else
+                {
                     previous = Read(reader, id);
+                    wasReady = reader.GetBoolean(9);
+                    audioRevision = reader.GetInt64(10);
+                }
             }
 
             if (existingOnly && previous == null)
@@ -320,23 +333,32 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
             var snapshot = merged.Read();
             if (url == null && !string.IsNullOrWhiteSpace(incoming.AudioUrl))
                 snapshot = snapshot with { AudioUrl = null };
-            if (previous != null && previous.Snapshot == snapshot && previous.RecordedUtc == stamp)
+            var hasReference = !string.IsNullOrWhiteSpace(incoming.AudioUrl);
+            var newReference = hasReference && (previous == null || audioReferenceChanged ||
+                previous.Snapshot?.AudioUrl != url || !wasReady && audioRevision == 0);
+            var ready = !skipAutomatic && !isRecoveryBacklog && (wasReady || newReference);
+            if (previous != null && !skipAutomatic && !newReference &&
+                previous.Snapshot == snapshot && previous.RecordedUtc == stamp)
                 return new(previous.ArrivalSequence, false);
 
             using var save = Command(db, run, previous == null ? """
                 INSERT INTO live_queue_recordings(server, recording_id, recorded_utc, first_owner, payload, audio_ready,
-                    origin, protected, account_scope, disposition, recovery_backlog)
+                    origin, protected, account_scope, disposition, recovery_backlog, audio_revision)
                 SELECT $server, $id, $time, $owner, $payload, $ready, $origin, $protected, $account,
-                    CASE WHEN $backlog = 1 THEN 2 ELSE 0 END, $backlog FROM live_queue_servers
+                    CASE WHEN $skip = 1 OR $backlog = 1 THEN 2 ELSE 0 END, $backlog, $revision FROM live_queue_servers
                 WHERE server = $server AND account_scope = $account AND owner = $owner AND stopped = 0
                   AND ($backlog = 1 OR $origin = $live OR accept_after = 0 OR $time >= accept_after)
                 RETURNING arrival_sequence
                 """ : """
-                UPDATE live_queue_recordings SET payload = $payload, audio_ready = $ready, recorded_utc = $time
+                UPDATE live_queue_recordings SET payload = $payload, audio_ready = $ready, recorded_utc = $time,
+                    audio_revision = $revision, audio_recovered = CASE WHEN audio_ready = 0 AND $ready = 1 THEN 1 ELSE audio_recovered END,
+                    disposition = CASE WHEN $skip = 1 THEN 2 ELSE disposition END
                 WHERE server = $server AND account_scope = $account AND recording_id = $id
                 RETURNING arrival_sequence
-                """, ("$id", id), ("$time", (object?)stamp ?? DBNull.Value), ("$payload", JsonSerializer.Serialize(snapshot)),
-                ("$ready", isRecoveryBacklog || snapshot.AudioUrl == null ? 0 : 1), ("$backlog", isRecoveryBacklog ? 1 : 0),
+                """, ("$id", id), ("$time", (object?)stamp ?? DBNull.Value),
+                ("$payload", skipAutomatic ? DBNull.Value : JsonSerializer.Serialize(snapshot)),
+                ("$ready", ready ? 1 : 0), ("$revision", audioRevision + (newReference ? 1 : 0)),
+                ("$skip", skipAutomatic ? 1 : 0), ("$backlog", isRecoveryBacklog ? 1 : 0),
                 ("$live", (int)RecordingOrigin.Live),
                 ("$origin", (int)origin), ("$protected", run.Protected ? 1 : 0));
             save.Transaction = transaction;

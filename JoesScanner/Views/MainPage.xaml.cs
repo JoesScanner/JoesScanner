@@ -1053,6 +1053,8 @@ private void OnAlertDismissInvoked(object? sender, EventArgs e)
             {
                 if (_viewModel.PlayAudioCommand?.CanExecute(call) == true)
                 {
+                    if (_liveDisplay.Separate)
+                        _viewModel.SetVisibleLiveServer(call.ServerId);
                     _viewModel.PlayAudioCommand.Execute(call);
                 }
             }

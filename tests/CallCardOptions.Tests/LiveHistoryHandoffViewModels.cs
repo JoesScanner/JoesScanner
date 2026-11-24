@@ -21,6 +21,10 @@ namespace JoesScanner.ViewModels
         private readonly LivePlaybackRequests _playbackRequests = new();
         private readonly LivePlaybackRequests _transportLookups = new();
         private readonly LiveQueueWake _queueWake = new();
+        private readonly LivePlaybackScheduler _scheduler = new(new FavoriteTalkgroupSnapshot([]));
+        private readonly LiveBacklogGuard _backlog = new();
+        private Guid? _visibleLiveServer;
+        internal LivePlaybackPreferences PlaybackOptionsForTest { get; set; } = LivePlaybackPreferences.Default;
         private readonly DurableLiveQueue _durableQueue;
         private readonly DurablePlaybackCommit _playbackCommit;
         private readonly TestSettings _settingsService = new();
@@ -63,7 +67,8 @@ namespace JoesScanner.ViewModels
         private bool IsRunning => _monitoring.CanRecover(_monitoring.Current);
         private bool CanResumePlayback => _retryPlaybackCall != null;
         private bool AudioEnabled { get; set; } = true;
-        internal int CallsWaiting => CountRepresentedWaitingCalls();
+        internal int CallsWaiting => _durableQueue.CountReadyAsync(LiveQueueScopes(), LocalRecoveryFloor,
+            _currentPlayingCall?.LiveArrivalSequence, default).GetAwaiter().GetResult();
         private Action? RequestJumpToLiveScroll { get; set; }
         private string LastQueueEvent { get; set; } = string.Empty;
 
@@ -113,9 +118,9 @@ namespace JoesScanner.ViewModels
             var snapshot = new LiveCallSnapshot(new(), null, CallCardIdFallback.None, audio ? Server + "/" + id + ".mp3" : null);
             var run = _durableRun!;
             var observation = await _durableQueue.ObserveWithPositionAsync(run, id, later ? Recorded.AddSeconds(1) : Recorded,
-                snapshot, default, origin, existingOnly: false);
+                snapshot, default, origin, existingOnly: false, skipAutomatic: !AudioEnabled);
             if (visible && observation.ArrivalSequence is { } arrival)
-                Calls.Add(new DurableLiveQueue.Recording(id, arrival, Recorded.UtcTicks, snapshot,
+                Calls.Insert(0, new DurableLiveQueue.Recording(id, arrival, Recorded.UtcTicks, snapshot,
                     new RecordingAccessContext(origin, run.Protected, run.Account), run.Owner).ToCallItem(Server));
         }
 
@@ -134,7 +139,7 @@ namespace JoesScanner.ViewModels
         internal Task SetAudioForTestAsync(bool enabled)
         {
             if (enabled)
-                BeginAudioAtLiveEdge();
+                BeginAudioAtLiveEdge(skipOutstandingRecovery: true);
             AudioEnabled = enabled;
             if (!enabled)
             {
@@ -190,50 +195,111 @@ namespace JoesScanner.ViewModels
         private Task RequestQueuePlaybackAsync(string reason, bool userInitiated)
         {
             LiveHistoryHandoffTests.Check((reason is "HistoryReleasedAudio" or "TappedCallFinished" or "JumpToLiveFinished"
-                or "JumpToLiveResume" or "TestLiveArrival" or "UserPlay") && (userInitiated || _settingsService.AutoPlay),
+                or "JumpToLiveResume" or "TestLiveArrival" or "UserPlay" or "ManualPreparationReleased") && (userInitiated || _settingsService.AutoPlay),
                 "Only the current listening intent can drive the queue.");
             ++ResumeRequests;
             return ResumedQueue = EnsureQueuePlaybackAsync(_playbackOwnership.Live!);
         }
 
-        private async Task<CallItem?> GetNextDurableCallAsync(CancellationToken token,
-            int version, long? afterArrival, IReadOnlyList<long>? visibleReplays)
+        private async Task<(CallItem Call, LivePlaybackScheduler.Choice Choice)?> GetNextDurableCallAsync(
+            CancellationToken token, int version, ManualLiveTraversal? traversal)
         {
             var delay = Interlocked.Exchange(ref _nextSelection, null);
-            var next = await _durableQueue.NextAsync(LiveQueueScopes(), LocalRecoveryFloor, token, afterArrival, visibleReplays);
+            var scopes = LiveQueueScopes().Where(scope => traversal?.ServerId == null || traversal.ServerId == scope.ServerId).ToArray();
+            var next = await _scheduler.SelectAsync(_durableQueue, scopes, LocalRecoveryFloor, PlaybackOptionsForTest,
+                token, traversal?.Position, traversal?.ReplaysAfter(traversal.Position));
             if (delay != null)
             {
                 delay.Reached.TrySetResult();
-                // Model a query that finished just before cancellation but whose
-                // result hasn't reached the UI dispatcher yet.
+                // The journal can finish before the dispatcher receives the result.
                 await delay.Return.Task;
             }
-            return next?.Row.ToCallItem(next.Scope.Server);
+            if (next == null)
+                return null;
+            var card = ResolveDurableCard(next.Row.Scope, next.Row.Row);
+            card.IsCompletedReplay = next.Row.Row.IsCompletedReplay;
+            card.LiveAudioRevision = next.Row.Row.AudioRevision;
+            return (card, next.Choice);
         }
 
-        private async Task<PlaybackOutcome> PlayAudioAsync(CallItem item, LivePlaybackRequests.Request request,
-            bool allowMutedPlayback = false)
+        private async Task<string> PrepareManualAudioAsync(CallItem item, CancellationToken token)
         {
-            if (IsFilteredForPlayback(item, allowMutedPlayback))
+            if (PrepareForTest is { } prepare)
+                await prepare(item.BackendId, token);
+            return item.BackendId;
+        }
+
+        private static void ReleasePreparedManualAudio(string prepared) { }
+
+        private async Task<PlaybackOutcome> PlayAudioAsync(CallItem item, LivePlaybackRequests.Request request,
+            bool allowFilteredPlayback = false, string? preparedAudio = null)
+        {
+            if (IsFilteredForPlayback(item, allowFilteredPlayback))
             {
                 await _durableQueue.MarkAsync(_durableRun!, item.BackendId, PlaybackOutcome.Skipped, request.Token);
                 return PlaybackOutcome.Skipped;
             }
             _currentPlayingCall = item;
             var completion = new PlaybackCompletion();
-            var outcome = await PlaybackAttempt.RunAsync(async () =>
+            try
             {
-                if (PrepareForTest is { } prepare)
-                    await prepare(item.BackendId, request.Token);
-                var rate = await GetEffectivePlaybackRateAsync(item, request.Token);
-                await PlayOnDeviceAsync(item, item.BackendId, rate, request, request.Token, completion);
-            }, request.Token, failure => ReportPlaybackFailure(failure, request), completion);
-            if (request.CanContinue && outcome == PlaybackOutcome.Failed)
-                SetPlaybackRetry(item);
-            if (request.CanContinue && outcome == PlaybackOutcome.Completed)
-                _lastTransportCall = item;
-            return outcome;
+                var outcome = await PlaybackAttempt.RunAsync(async () =>
+                {
+                    if (preparedAudio == null && PrepareForTest is { } prepare)
+                        await prepare(item.BackendId, request.Token);
+                    var rate = await GetEffectivePlaybackRateAsync(item, request.Token);
+                    await PlayOnDeviceAsync(item, item.BackendId, rate, request, request.Token, completion);
+                }, request.Token, failure => ReportPlaybackFailure(failure, request), completion);
+                if (request.CanContinue && outcome == PlaybackOutcome.Failed && !request.IsManual)
+                {
+                    await _durableQueue.DeferAudioAsync(_durableRun!, item.BackendId, item.LiveAudioRevision, request.Token);
+                    return PlaybackOutcome.Withheld;
+                }
+                if (request.CanContinue && outcome == PlaybackOutcome.Completed)
+                    _lastTransportCall = item;
+                return outcome;
+            }
+            finally
+            {
+                if (request.IsCurrent && _currentPlayingCall == item)
+                    _currentPlayingCall = null;
+            }
         }
+
+        private Task RequestReadyCountForTestAsync() => ObserveReadyCountAsync(default);
+
+        private void RequestReadyCount() { }
+
+        private void ResetScheduler()
+        {
+            _backlog.Reset();
+            _scheduler.Reset();
+        }
+
+        private async Task ObserveReadyCountAsync(CancellationToken token)
+        {
+            var ready = await _durableQueue.CountReadyAsync(LiveQueueScopes(), LocalRecoveryFloor,
+                _currentPlayingCall?.LiveArrivalSequence, token);
+            _backlog.Observe(ready, PlaybackOptionsForTest, _manualLiveTraversal != null ||
+                _playbackRequests.HasManualSelection || _transportLookups.HasManualSelection);
+        }
+
+        private async Task<bool> TryAutomaticBacklogJumpAsync(MonitoringLifecycle.Run run, PlaybackOwnership.Lease live,
+            int version, CancellationToken token)
+        {
+            await ObserveReadyCountAsync(token);
+            if (!_backlog.JumpPending)
+                return false;
+            _livePlaybackFloor = await _durableQueue.SetPlaybackFloorAtLiveEdgeAsync(LiveQueueScopes(), token,
+                skipOutstandingRecovery: true);
+            ResetScheduler();
+            return true;
+        }
+
+        internal Task ReadBacklogForTestAsync() => RequestReadyCountForTestAsync();
+        internal bool BacklogJumpForTest => _backlog.JumpPending;
+        internal bool BacklogWarningForTest => _backlog.WarningActive;
+        internal Guid? VisibleServerForTest { set => _visibleLiveServer = value; }
 
         private LivePlaybackRequests.Request BeginManualPlayback(PlaybackOwnership.Lease live)
         {
@@ -248,8 +314,7 @@ namespace JoesScanner.ViewModels
             if (error is not IOException)
                 throw new InvalidOperationException("Live handoff failed.", error);
         }
-        private static Task PlaySingleCallWithoutQueueAsync(CallItem item, LivePlaybackRequests.Request request) =>
-            throw new InvalidOperationException("This fixture always enables audio.");
+
 
         private static bool TryGetDurableRecording(CallItem item, DurableLiveQueue.Run run, out string id)
         {
@@ -263,7 +328,9 @@ namespace JoesScanner.ViewModels
             TryGetDurableRecording(item, scope, out _));
         private bool IsCurrentLiveScope(DurableLiveQueue.Run run) => LiveQueueScopes().Contains(run);
         private static long LocalRecoveryFloor(DurableLiveQueue.Run run) => 0;
-        private static CallItem ResolveDurableCard(DurableLiveQueue.Run run, DurableLiveQueue.Recording row) => row.ToCallItem(run.Server);
+        private CallItem ResolveDurableCard(DurableLiveQueue.Run run, DurableLiveQueue.Recording row) =>
+            Calls.FirstOrDefault(card => card.BackendId == row.Id && card.LiveArrivalSequence == row.ArrivalSequence) ??
+            row.ToCallItem(run.Server, run.ServerId);
         private static Task RefreshTransportCardAsync(CallItem item, CancellationToken token) => Task.CompletedTask;
         private void ShowDurableCard(CallItem item)
         {
@@ -321,7 +388,7 @@ namespace JoesScanner.ViewModels
             internal string? Hidden { get; set; }
             internal string? Muted { get; set; }
             internal bool ShouldHide(CallItem item) => item.BackendId == Hidden;
-            internal bool ShouldMute(CallItem item) => item.BackendId == Muted;
+            internal bool ShouldMute(CallItem item) => item.BackendId == Muted || item.BackendId == Hidden;
         }
     }
 
