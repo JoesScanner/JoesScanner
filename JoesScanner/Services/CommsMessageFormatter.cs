@@ -1,3 +1,4 @@
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Maui.ApplicationModel;
 using Microsoft.Maui.Controls;
 using System.Net;
@@ -144,6 +145,10 @@ namespace JoesScanner.Services
                     return;
 
                 if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+                    return;
+
+                if (IPlatformApplication.Current?.Services.GetService<ISettingsService>() is { } settings &&
+                    !PrivacyNetworkPolicy.For(settings).Allows(uri))
                     return;
 
                 await Launcher.OpenAsync(uri);

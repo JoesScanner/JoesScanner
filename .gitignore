@@ -33,5 +33,12 @@ secrets.json
 *.pfx
 *.p12
 *.key
-/JoesScanner/API_Plugin/
+/JoesScanner/API_Plugin/*
+!/JoesScanner/API_Plugin/joes-scanner-auth/
+/JoesScanner/API_Plugin/joes-scanner-auth/*
+!/JoesScanner/API_Plugin/joes-scanner-auth/joes-scanner-auth.php
+!/JoesScanner/API_Plugin/joes-scanner-auth/UPDATE-NOTES.txt
+!/JoesScanner/API_Plugin/joes-scanner-auth/includes/
+/JoesScanner/API_Plugin/joes-scanner-auth/includes/*
+!/JoesScanner/API_Plugin/joes-scanner-auth/includes/*.php
 *.sln

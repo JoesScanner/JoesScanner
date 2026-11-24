@@ -126,12 +126,10 @@ namespace JoesScanner.Services
         int AudioToneHighlightMinutes { get; set; }
 
 
-        // Telemetry
-        // When false (and a custom server is in use), the app should not send any
-        // phone-home telemetry such as pings, heartbeats, or queued telemetry events.
-        // This setting is ignored for built-in default servers.
-        bool TelemetryEnabled { get; set; }
-
+        bool LocalOnlyMode { get; set; }
+        event EventHandler? LocalOnlyModeChanged;
+        long? VerifiedFavoritesUserId { get; set; }
+        event EventHandler? AccountIdentityChanged;
 
         // Server directory cache (fetched from the WordPress Auth plugin).
         // Used for server selection UI and per-server map anchor resolution.

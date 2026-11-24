@@ -17,7 +17,7 @@ internal sealed class ServerAuthenticationHandler(ServerAuthentication authentic
     internal static HttpClient CreateClient(ISettingsService settings, HttpMessageHandler? transport = null,
         RecorderRequestScope? recorder = null) =>
         new(new ServerAuthenticationHandler(ServerAuthentication.For(settings),
-            transport ?? new HttpClientHandler { AllowAutoRedirect = false }, recorder));
+            PrivacyNetworkPolicy.For(settings).Wrap(transport ?? new HttpClientHandler { AllowAutoRedirect = false }), recorder));
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {

@@ -86,8 +86,9 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
 
     public async Task<IReadOnlyList<ObservedTriple>?> TryFetchSeedAsync(string serverKey, CancellationToken cancellationToken)
     {
-
-        if (string.IsNullOrWhiteSpace(serverKey))
+        using var network = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, PrivacyNetworkPolicy.For(_settings).Generation);
+        cancellationToken = network.Token;
+        if (cancellationToken.IsCancellationRequested || string.IsNullOrWhiteSpace(serverKey))
             return null;
 
         try
@@ -154,9 +155,10 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
 
     public async Task TryReportAsync(string serverKey, bool force, CancellationToken cancellationToken)
     {
+        using var network = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, PrivacyNetworkPolicy.For(_settings).Generation);
+        cancellationToken = network.Token;
         var session = WordPressSession.Capture(_settings);
-
-        if (string.IsNullOrWhiteSpace(serverKey))
+        if (cancellationToken.IsCancellationRequested || string.IsNullOrWhiteSpace(serverKey))
             return;
 
         // When force is requested (manual sync), backfill the full local history so a server with
@@ -233,8 +235,10 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
 
     public async Task<IReadOnlyList<ObservedTriple>?> TrySyncExchangeAsync(string serverKey, bool force, CancellationToken cancellationToken)
     {
+        using var network = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, PrivacyNetworkPolicy.For(_settings).Generation);
+        cancellationToken = network.Token;
         var session = WordPressSession.Capture(_settings);
-        if (string.IsNullOrWhiteSpace(serverKey))
+        if (cancellationToken.IsCancellationRequested || string.IsNullOrWhiteSpace(serverKey))
             return null;
 
         var lastCutoffRaw = AppStateStore.GetString(GetLastCutoffUtcKey(serverKey), string.Empty);

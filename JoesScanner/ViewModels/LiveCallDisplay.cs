@@ -1,14 +1,18 @@
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
+using System.ComponentModel;
 using JoesScanner.Models;
 
 namespace JoesScanner.ViewModels;
 
 // Separate panes contain references to the canonical Live cards. The display
 // has no connection, playback lease, or queue state.
-internal sealed class LiveCallDisplay(ObservableCollection<CallItem> calls, bool separate = false)
+internal sealed class LiveCallDisplay(ObservableCollection<CallItem> calls, bool separate = false,
+    Func<CallItem, bool>? favorite = null)
 {
     private readonly Dictionary<Guid, ServerProjection> _projections = [];
+    private readonly ServerProjection _favorites = new([]);
+    private readonly HashSet<CallItem> _observedCards = [];
     private Guid[] _servers = [];
     private bool _observing;
 
@@ -16,6 +20,7 @@ internal sealed class LiveCallDisplay(ObservableCollection<CallItem> calls, bool
     internal const double PanelMinimumWidth = 310;
     internal const double PanelSpacing = 8;
     internal ObservableCollection<CallItem> Combined => calls;
+    internal ReadOnlyObservableCollection<CallItem> Favorites => _favorites.Cards;
     internal IReadOnlyList<Guid> Servers => _servers;
     internal bool Separate { get; private set; } = separate;
     internal Guid? SelectedServer { get; private set; }
@@ -31,6 +36,7 @@ internal sealed class LiveCallDisplay(ObservableCollection<CallItem> calls, bool
             SelectedServer = servers.Length == 0 ? null : servers[Math.Clamp(previous, 0, servers.Length - 1)];
         }
         _servers = servers;
+        RefreshFavorites();
     }
 
     internal bool Select(Guid server)
@@ -81,6 +87,8 @@ internal sealed class LiveCallDisplay(ObservableCollection<CallItem> calls, bool
         _observing = true;
         calls.CollectionChanged += OnCallsChanged;
         ReconcileProjections();
+        ObserveFavoriteCards();
+        RefreshFavorites();
     }
 
     internal void Detach()
@@ -89,6 +97,59 @@ internal sealed class LiveCallDisplay(ObservableCollection<CallItem> calls, bool
             return;
         _observing = false;
         calls.CollectionChanged -= OnCallsChanged;
+        foreach (var card in _observedCards)
+            card.PropertyChanged -= OnFavoriteMetadataChanged;
+        _observedCards.Clear();
+    }
+
+    private void ObserveFavoriteCards()
+    {
+        if (favorite == null || !_observing)
+            return;
+        foreach (var old in _observedCards.Except(calls).ToArray())
+        {
+            old.PropertyChanged -= OnFavoriteMetadataChanged;
+            _observedCards.Remove(old);
+        }
+        foreach (var added in calls)
+            if (_observedCards.Add(added))
+                added.PropertyChanged += OnFavoriteMetadataChanged;
+    }
+
+    private void OnFavoriteMetadataChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(CallItem.CardMetadata))
+            RefreshFavorites();
+    }
+
+    internal void RefreshFavorites()
+    {
+        if (favorite == null)
+            return;
+        var valid = new List<CallItem>();
+        foreach (var card in calls)
+        {
+            var saved = favorite(card);
+            card.SetFavorite(saved);
+            if (saved && card.ServerId is { } id && _servers.Contains(id))
+                valid.Add(card);
+        }
+
+        var current = _favorites.Items;
+        var members = valid.ToHashSet();
+        for (var i = current.Count - 1; i >= 0; i--)
+            if (!members.Contains(current[i]))
+                current.RemoveAt(i);
+        for (var i = 0; i < valid.Count; i++)
+        {
+            if (i < current.Count && ReferenceEquals(current[i], valid[i]))
+                continue;
+            var previous = current.IndexOf(valid[i]);
+            if (previous >= 0)
+                current.Move(previous, i);
+            else
+                current.Insert(i, valid[i]);
+        }
     }
 
     private void ReconcileProjections()
@@ -107,6 +168,8 @@ internal sealed class LiveCallDisplay(ObservableCollection<CallItem> calls, bool
 
     private void OnCallsChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
+        ObserveFavoriteCards();
+        RefreshFavorites();
         if (e.Action is NotifyCollectionChangedAction.Move or NotifyCollectionChangedAction.Reset)
         {
             ReconcileProjections();

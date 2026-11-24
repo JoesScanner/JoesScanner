@@ -220,7 +220,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             IWhat3WordsService what3WordsService,
             IToneAlertService toneAlertService,
             DurableLiveQueue durableQueue,
-            PlaybackOwnership playbackOwnership, ScannerConnectionStore connectionStore)
+            PlaybackOwnership playbackOwnership, ScannerConnectionStore connectionStore, FavoritesService favorites)
         {
             _callStreamService = callStreamService ?? throw new ArgumentNullException(nameof(callStreamService));
             _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
@@ -236,6 +236,11 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             _durableQueue = durableQueue;
             _playbackOwnership = playbackOwnership;
             _connectionStore = connectionStore;
+            Favorites = favorites;
+            _scheduler = new(favorites);
+            _privacyNetwork = PrivacyNetworkPolicy.For(settingsService);
+            _settingsService.LocalOnlyModeChanged += OnPrivacyNetworkChanged;
+            Favorites.Changed += () => MainThread.BeginInvokeOnMainThread(() => RequestQueueForLiveArrival("FavoritesChanged"));
             _connections.StatusChanged += OnRecorderStatusChanged;
             _connections.Retired += RetireRecorder;
             _playbackCommit = new DurablePlaybackCommit(durableQueue.CommitCompletionAsync);
@@ -2043,7 +2048,8 @@ private static string SpeedStepToLabel(double step)
         {
             try
             {
-                await Launcher.Default.OpenAsync(new Uri(DonateUrl));
+                if (_privacyNetwork.AllowsCloud)
+                    await Launcher.Default.OpenAsync(new Uri(DonateUrl));
             }
             catch
             {

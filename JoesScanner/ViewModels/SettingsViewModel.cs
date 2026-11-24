@@ -394,9 +394,6 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
         private int _audioToneHighlightMinutes = 5;
         private int _savedAudioToneHighlightMinutes = 5;
 
-        // Telemetry (phone-home) - only configurable for custom servers.
-        private bool _telemetryEnabled = true;
-        private bool _savedTelemetryEnabled = true;
 
         private bool _logEnabled;
 
@@ -445,7 +442,6 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
         private volatile bool _addressDetectionCardOpen;
         private volatile bool _bluetoothCardOpen;
         private volatile bool _themeCardOpen;
-        private volatile bool _telemetryCardOpen;
         private volatile bool _logCardOpen;
 
         private readonly SemaphoreSlim _settingsSaveGate = new(1);
@@ -473,8 +469,7 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
                 _bluetoothCardOpen = isOpen;
             else if (string.Equals(key, "Theme", StringComparison.OrdinalIgnoreCase))
                 _themeCardOpen = isOpen;
-            else if (string.Equals(key, "Telemetry", StringComparison.OrdinalIgnoreCase))
-                _telemetryCardOpen = isOpen;
+
             else if (string.Equals(key, "Log", StringComparison.OrdinalIgnoreCase))
                 _logCardOpen = isOpen;
         }
@@ -504,8 +499,6 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
             if (string.Equals(key, "Theme", StringComparison.OrdinalIgnoreCase))
                 return _themeCardOpen;
 
-            if (string.Equals(key, "Telemetry", StringComparison.OrdinalIgnoreCase))
-                return _telemetryCardOpen;
 
             if (string.Equals(key, "Log", StringComparison.OrdinalIgnoreCase))
                 return _logCardOpen;
@@ -579,14 +572,13 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
 
                 _isSyncingTalkgroupFilters = value;
                 OnPropertyChanged();
-                OnPropertyChanged(nameof(EffectiveTelemetryEnabled));
                 OnPropertyChanged(nameof(CanSyncTalkgroupFilters));
             }
         }
 
         // Manual sync is user-initiated and should always be allowed.
         // Telemetry settings only affect whether we can report/seed via the Auth API.
-        public bool CanSyncTalkgroupFilters => !IsSyncingTalkgroupFilters;
+        public bool CanSyncTalkgroupFilters => !LocalOnlyMode && !IsSyncingTalkgroupFilters;
 
         public SettingsViewModel(
             ISettingsService settingsService,
@@ -609,10 +601,9 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
             _callCardOptionsService = callCardOptionsService;
             _filterService.CatalogChanged += (_, _) => QueueFilterCatalogRefresh();
 
-            _httpClient = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
-            {
-                Timeout = TimeSpan.FromSeconds(3)
-            };
+            _httpClient = WordPressSession.CreateClient(_settings);
+            _httpClient.Timeout = TimeSpan.FromSeconds(3);
+            Favorites.Changed += OnFavoritesSettingsChanged;
 
             // Use managed networking for custom HTTP server validation on Apple.
             _scannerValidationClient = ServerAuthenticationHandler.CreateClient(_settings,
@@ -1295,8 +1286,6 @@ public bool IsDirectoryLoading
                     OnPropertyChanged(nameof(UseDefaultConnection));
                 }
 
-                OnPropertyChanged(nameof(ShowTelemetryCard));
-                OnPropertyChanged(nameof(EffectiveTelemetryEnabled));
                 OnPropertyChanged(nameof(CanSyncTalkgroupFilters));
                 // Changing the server URL must clear user/pass in the UI immediately.
                 // If this URL was used before, pull cached credentials for convenience.
@@ -1779,27 +1768,6 @@ public bool WindowsStartWithWindows
             }
         }
 
-        public bool ShowTelemetryCard => !HostedServerRules.IsProvidedDefaultServerUrl(_serverUrl);
-
-        public bool EffectiveTelemetryEnabled => HostedServerRules.IsProvidedDefaultServerUrl(_serverUrl) || _telemetryEnabled;
-
-        public bool TelemetryEnabled
-        {
-            get => _telemetryEnabled;
-            set
-            {
-                if (_telemetryEnabled == value)
-                    return;
-
-                _telemetryEnabled = value;
-                OnPropertyChanged();
-                OnPropertyChanged(nameof(EffectiveTelemetryEnabled));
-                OnPropertyChanged(nameof(CanSyncTalkgroupFilters));
-                UpdateHasChanges();
-                QueueAutosaveNonConnection("Telemetry");
-            }
-        }
-
         public bool LogEnabled
         {
             get => _logEnabled;
@@ -2130,8 +2098,6 @@ public bool WindowsStartWithWindows
             _audioToneHighlightMinutes = _settings.AudioToneHighlightMinutes;
             _savedAudioToneHighlightMinutes = _audioToneHighlightMinutes;
 
-            _telemetryEnabled = _settings.TelemetryEnabled;
-            _savedTelemetryEnabled = _telemetryEnabled;
 
             _logEnabled = AppLog.IsEnabled;
 
@@ -2166,10 +2132,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             OnPropertyChanged(nameof(AuthServerBaseUrl));
             OnPropertyChanged(nameof(ServerUrl));
             OnPropertyChanged(nameof(UseDefaultConnection));
-            OnPropertyChanged(nameof(ShowTelemetryCard));
-                OnPropertyChanged(nameof(EffectiveTelemetryEnabled));
                 OnPropertyChanged(nameof(CanSyncTalkgroupFilters));
-                OnPropertyChanged(nameof(TelemetryEnabled));
             OnPropertyChanged(nameof(LogEnabled));
             OnPropertyChanged(nameof(BasicAuthUsername));
             OnPropertyChanged(nameof(BasicAuthPassword));
@@ -2381,7 +2344,6 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             int AudioToneStrength,
             int AudioToneSensitivity,
             int AudioToneHighlightMinutes,
-            bool TelemetryEnabled,
             bool AddressDetectionEnabled,
             bool AddressDetectionOpenMapsOnTap,
             int AddressDetectionMinConfidencePercent,
@@ -2414,7 +2376,6 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                     _audioToneStrength,
                     _audioToneSensitivity,
                     _audioToneHighlightMinutes,
-                    _telemetryEnabled,
                     _addressDetectionEnabled,
                     _addressDetectionOpenMapsOnTap,
                     _addressDetectionMinConfidencePercent,
@@ -2476,7 +2437,6 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                 _savedAudioToneStrength = snapshot.AudioToneStrength;
                 _savedAudioToneSensitivity = snapshot.AudioToneSensitivity;
                 _savedAudioToneHighlightMinutes = snapshot.AudioToneHighlightMinutes;
-                _savedTelemetryEnabled = snapshot.TelemetryEnabled;
                 _savedAddressDetectionEnabled = snapshot.AddressDetectionEnabled;
                 _savedAddressDetectionOpenMapsOnTap = snapshot.AddressDetectionOpenMapsOnTap;
                 _savedAddressDetectionMinConfidencePercent = snapshot.AddressDetectionMinConfidencePercent;
@@ -2518,7 +2478,6 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             _settings.AudioToneStrength = snapshot.AudioToneStrength;
             _settings.AudioToneSensitivity = snapshot.AudioToneSensitivity;
             _settings.AudioToneHighlightMinutes = snapshot.AudioToneHighlightMinutes;
-            _settings.TelemetryEnabled = snapshot.TelemetryEnabled;
             _settings.AddressDetectionEnabled = snapshot.AddressDetectionEnabled;
             _settings.AddressDetectionOpenMapsOnTap = snapshot.AddressDetectionOpenMapsOnTap;
             _settings.AddressDetectionMinConfidencePercent = snapshot.AddressDetectionMinConfidencePercent;
@@ -2629,9 +2588,9 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
         internal void MoveScannerConnection(ScannerConnectionRow row, int direction) =>
             _mainViewModel.MoveScannerConnection(row, direction);
 
-        internal void RemoveScannerConnection(ScannerConnectionRow row)
+        internal void RemoveScannerConnection(ScannerConnectionRow row, string? deleteFavoritesFor = null)
         {
-            _mainViewModel.RemoveScannerConnection(row);
+            _mainViewModel.RemoveScannerConnection(row, deleteFavoritesFor);
             RecordSavedScannerSelection();
             CloseScannerEditor();
         }
@@ -2768,6 +2727,8 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                     throw new HttpRequestException("Enter a valid HTTP or HTTPS scanner server address.");
                 url = safeUrl;
                 var destination = new Uri(safeUrl);
+                if (!_mainViewModel.AllowsExternalLink(destination))
+                    throw new HttpRequestException("Turn off Local Only Mode to connect to this server.");
                 if (embedded != null && HostedServerRules.RequiresApiFirewallCredentials(_settings, destination))
                     throw new FirewallAuthenticationException("Hosted server addresses must not contain embedded credentials.");
                 var probeUsername = embedded?.Username ?? BasicAuthUsername.Trim();
@@ -3344,7 +3305,6 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                 || _audioToneStrength != _savedAudioToneStrength
                 || _audioToneSensitivity != _savedAudioToneSensitivity
                 || _audioToneHighlightMinutes != _savedAudioToneHighlightMinutes
-                || _telemetryEnabled != _savedTelemetryEnabled
                 || _addressDetectionEnabled != _savedAddressDetectionEnabled
                 || _addressDetectionOpenMapsOnTap != _savedAddressDetectionOpenMapsOnTap
                 || _addressDetectionMinConfidencePercent != _savedAddressDetectionMinConfidencePercent
@@ -3446,6 +3406,11 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
 
         private async Task RefreshDirectoryServersAsync()
         {
+            if (LocalOnlyMode)
+            {
+                DirectoryStatusText = "Directory refresh is paused in Local Only Mode.";
+                return;
+            }
             if (Interlocked.Exchange(ref _directoryRefreshInProgress, 1) == 1)
                 return;
 

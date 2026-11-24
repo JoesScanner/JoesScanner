@@ -21,7 +21,7 @@ internal sealed class WordPressSession
     internal bool TryApply(Action action) => _settings.TryApplyAccountSession(Version, action);
     internal bool TryApplyIdentity(Action action) => _settings.TryApplyAccountIdentity(AccountVersion, action);
 
-    internal static HttpClient CreateClient() => new(new HttpClientHandler { AllowAutoRedirect = false });
+    internal static HttpClient CreateClient(ISettingsService settings) => PrivacyNetworkPolicy.For(settings).CreateCloudClient();
 }
 
 internal sealed class ConnectionValidationRequests

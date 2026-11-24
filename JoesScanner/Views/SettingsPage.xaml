@@ -1393,62 +1393,76 @@
 </Border>
 
 
-                    <!-- TELEMETRY CARD (CUSTOM SERVERS ONLY) -->
-                    <Border Style="{StaticResource SettingsCardStyle}"
-                            IsVisible="{Binding ShowTelemetryCard}">
+                    <Border Style="{StaticResource SettingsCardStyle}">
+                        <VerticalStackLayout Style="{StaticResource SettingsCardContentStyle}">
+                            <Grid Style="{StaticResource SettingsCardHeaderStyle}" ColumnDefinitions="*,Auto">
+                                <Grid.GestureRecognizers>
+                                    <TapGestureRecognizer Tapped="OnPrivacyNetworkHeaderTapped" />
+                                </Grid.GestureRecognizers>
+                                <Label Text="Privacy &amp; Network" Style="{StaticResource SettingsCardTitleStyle}" />
+                                <Label x:Name="PrivacyNetworkChevron" Grid.Column="1" Text="▶"
+                                       Style="{StaticResource SettingsCardChevronStyle}" />
+                            </Grid>
+                            <controls:DeferredContentView x:Name="PrivacyNetworkBody" IsVisible="False">
+                                <controls:DeferredContentView.ContentTemplate>
+                                    <DataTemplate x:DataType="vm:SettingsViewModel">
+                                        <VerticalStackLayout Spacing="10">
+                                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                                                <Label Text="Local Only Mode" VerticalOptions="Center" />
+                                                <controls:CompactToggleSwitch Grid.Column="1" IsToggled="{Binding LocalOnlyMode, Mode=TwoWay}"
+                                                        AutomationId="LocalOnlyMode" Style="{StaticResource CompactToggleStyle}" />
+                                            </Grid>
+                                            <Label Text="Pauses Joe’s Scanner online services while independent recorders stay available."
+                                                   FontSize="12" />
+                                            <Label Text="{Binding FavoritesStatus}" FontSize="12" IsVisible="{Binding LocalOnlyMode}" />
+                                        </VerticalStackLayout>
+                                    </DataTemplate>
+                                </controls:DeferredContentView.ContentTemplate>
+                            </controls:DeferredContentView>
+                        </VerticalStackLayout>
+                    </Border>
 
-    <VerticalStackLayout Style="{StaticResource SettingsCardContentStyle}">
-
-        <!-- Header -->
-        <Grid Style="{StaticResource SettingsCardHeaderStyle}" x:Name="TelemetryHeaderGrid" ColumnDefinitions="*,Auto">
-            <Grid.GestureRecognizers>
-                <TapGestureRecognizer Tapped="OnTelemetryHeaderTapped" />
-            </Grid.GestureRecognizers>
-
-            <Label Style="{StaticResource SettingsCardTitleStyle}"
-                Grid.Column="0"
-                Text="Telemetry" />
-
-            <Label
-                x:Name="TelemetryChevronLabel"
-                Style="{StaticResource SettingsCardChevronStyle}"
-                Grid.Column="1"
-                Text="▶" />
-        </Grid>
-
-        <!-- Body -->
-        <controls:DeferredContentView x:Name="TelemetryBodyLayout" IsVisible="False">
-            <controls:DeferredContentView.ContentTemplate>
-                <DataTemplate x:DataType="vm:SettingsViewModel">
-                    <VerticalStackLayout Spacing="10">
-
-            <Label
-                Text="Disable phone home telemetry for custom servers. Default servers always send telemetry."
-                FontSize="12"
-                Opacity="0.8"
-                TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
-
-            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12" RowDefinitions="Auto">
-                <Label
-                    Grid.Column="0"
-                    Text="Phone home telemetry"
-                    FontSize="12"
-                    LineBreakMode="WordWrap"
-                    VerticalOptions="Center"
-                    HorizontalOptions="Fill" />
-
-                <controls:CompactToggleSwitch
-                    Grid.Column="1"
-                    IsToggled="{Binding TelemetryEnabled}"
-                    Style="{StaticResource CompactToggleStyle}" />
-            </Grid>
-                    </VerticalStackLayout>
-                </DataTemplate>
-            </controls:DeferredContentView.ContentTemplate>
-        </controls:DeferredContentView>
-
-    </VerticalStackLayout>
-</Border>
+                    <Border Style="{StaticResource SettingsCardStyle}">
+                        <VerticalStackLayout Style="{StaticResource SettingsCardContentStyle}">
+                            <Grid Style="{StaticResource SettingsCardHeaderStyle}" ColumnDefinitions="*,Auto">
+                                <Grid.GestureRecognizers>
+                                    <TapGestureRecognizer Tapped="OnFavoritesHeaderTapped" />
+                                </Grid.GestureRecognizers>
+                                <Label Text="Favorites" Style="{StaticResource SettingsCardTitleStyle}" />
+                                <Label x:Name="FavoritesChevron" Grid.Column="1" Text="▶"
+                                       Style="{StaticResource SettingsCardChevronStyle}" />
+                            </Grid>
+                            <controls:DeferredContentView x:Name="FavoritesBodyLayout" IsVisible="False">
+                                <controls:DeferredContentView.ContentTemplate>
+                                    <DataTemplate x:DataType="vm:SettingsViewModel">
+                                        <VerticalStackLayout Spacing="8">
+                                            <Label Text="{Binding FavoritesStatus}" FontSize="12" />
+                                            <Grid ColumnDefinitions="*,*" ColumnSpacing="6" RowDefinitions="Auto,Auto" RowSpacing="6">
+                                                <Button Text="Manage Favorites" Clicked="OnManageFavoritesClicked"
+                                                        AutomationId="ManageSavedFavorites" />
+                                                <Button Grid.Column="1" Text="Manage groups" Clicked="OnManageFavoriteGroupsClicked"
+                                                        AutomationId="ManageFavoriteGroups" />
+                                                <Button Grid.Row="1" Text="Link custom recorders" Clicked="OnLinkFavoriteRecorderClicked" />
+                                                <Button Grid.Row="1" Grid.Column="1" Text="Resolve sync conflicts"
+                                                        IsVisible="{Binding FavoritesHasConflicts}" Clicked="OnResolveFavoriteConflictClicked" />
+                                            </Grid>
+                                            <VerticalStackLayout Spacing="4" IsVisible="{Binding FavoritesCanSignIn}">
+                                                <Entry x:Name="FavoritesAccountName" Placeholder="Joe’s Scanner username or email"
+                                                       AutomationId="FavoritesAccountName" IsSpellCheckEnabled="False" />
+                                                <controls:CursorHidingEntry x:Name="FavoritesAccountPassword" Placeholder="Password"
+                                                       AutomationId="FavoritesAccountPassword" IsPassword="True" />
+                                                <Button Text="Sign in" Clicked="OnFavoritesSignInClicked" HorizontalOptions="Start" />
+                                            </VerticalStackLayout>
+                                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6" IsVisible="{Binding FavoritesCanSignOut}">
+                                                <Button Text="Import device Favorites" Clicked="OnImportDeviceFavoritesClicked" />
+                                                <Button Grid.Column="1" Text="Sign out" Clicked="OnFavoritesSignOutClicked" />
+                                            </Grid>
+                                        </VerticalStackLayout>
+                                    </DataTemplate>
+                                </controls:DeferredContentView.ContentTemplate>
+                            </controls:DeferredContentView>
+                        </VerticalStackLayout>
+                    </Border>
 
                     <!-- LOG CARD -->
                     <Border Style="{StaticResource SettingsCardStyle}">

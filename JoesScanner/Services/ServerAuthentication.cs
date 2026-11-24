@@ -10,16 +10,17 @@ namespace JoesScanner.Services;
 
 internal sealed class ServerAuthentication(ISettingsService settings, HttpClient credentialClient)
 {
-    private static readonly HttpClient CredentialClient = new(new HttpClientHandler { AllowAutoRedirect = false })
-    {
-        Timeout = TimeSpan.FromSeconds(10)
-    };
     private static readonly ConditionalWeakTable<ISettingsService, ServerAuthentication> Instances = new();
     private static readonly TimeSpan FailureCooldown = TimeSpan.FromSeconds(30);
     private readonly ConcurrentDictionary<string, CacheEntry> _cache = new(StringComparer.OrdinalIgnoreCase);
 
     internal static ServerAuthentication For(ISettingsService settings) =>
-        Instances.GetValue(settings, source => new ServerAuthentication(source, CredentialClient));
+        Instances.GetValue(settings, static source =>
+        {
+            var client = WordPressSession.CreateClient(source);
+            client.Timeout = TimeSpan.FromSeconds(10);
+            return new ServerAuthentication(source, client);
+        });
 
     internal bool RequiresFirewall(Uri uri) => HostedServerRules.RequiresApiFirewallCredentials(settings, uri);
 

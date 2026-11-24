@@ -35,10 +35,8 @@ namespace JoesScanner.Services
 
             CleanupLegacyTelemetryQueueFile();
 
-            _httpClient = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
-            {
-                Timeout = TimeSpan.FromSeconds(3)
-            };
+            _httpClient = WordPressSession.CreateClient(settings);
+            _httpClient.Timeout = TimeSpan.FromSeconds(3);
 
             _dispatchQueue = Channel.CreateUnbounded<Func<CancellationToken, Task>>(new UnboundedChannelOptions
             {
@@ -336,7 +334,13 @@ namespace JoesScanner.Services
 
             try
             {
-                _dispatchQueue.Writer.TryWrite(work);
+                var cloud = PrivacyNetworkPolicy.For(_settings).CloudToken();
+                _dispatchQueue.Writer.TryWrite(async stopping =>
+                {
+                    using var linked = CancellationTokenSource.CreateLinkedTokenSource(stopping, cloud);
+                    if (!linked.IsCancellationRequested)
+                        await work(linked.Token).ConfigureAwait(false);
+                });
             }
             catch
             {
@@ -408,14 +412,7 @@ namespace JoesScanner.Services
             }
         }
 
-        private bool ShouldSendTelemetry()
-        {
-            var selectedServer = _settings.ServerUrl;
-            if (HostedServerRules.IsProvidedDefaultServerUrl(selectedServer))
-                return true;
-
-            return _settings.TelemetryEnabled;
-        }
+        private bool ShouldSendTelemetry() => !_settings.LocalOnlyMode;
 
         private async Task<bool> TrySendEventAsync(TelemetryEvent ev, CancellationToken cancellationToken)
         {

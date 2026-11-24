@@ -211,6 +211,8 @@
                                 FontSize="12" Style="{StaticResource PillButtonStyle}" Clicked="OnCombinedLiveClicked" />
                         <Button x:Name="SeparateLiveButton" Text="Separate" AutomationId="SeparateLiveView"
                                 FontSize="12" Style="{StaticResource SecondaryPillButtonStyle}" Clicked="OnSeparateLiveClicked" />
+                        <Button x:Name="FavoritesLiveButton" Text="Favorites" AutomationId="FavoritesLiveView"
+                                FontSize="12" Style="{StaticResource SecondaryPillButtonStyle}" Clicked="OnFavoritesLiveClicked" />
                     </HorizontalStackLayout>
                     <Grid x:Name="SeparateLiveHost" Grid.Row="1" RowDefinitions="Auto,*" RowSpacing="4" IsVisible="False">
                         <ScrollView x:Name="ServerTabsScroll" Orientation="Horizontal" HorizontalScrollBarVisibility="Never">
@@ -220,6 +222,16 @@
                         <Label x:Name="NoEnabledRecorders" Grid.Row="1" Text="No enabled servers"
                                HorizontalOptions="Center" VerticalOptions="Center" IsVisible="False" />
                     </Grid>
+
+                <CollectionView x:Name="FavoritesCallsView" Grid.Row="1" AutomationId="FavoritesLiveCalls"
+                                IsVisible="False" SelectionMode="None" ItemsUpdatingScrollMode="KeepScrollOffset"
+                                ItemSizingStrategy="MeasureAllItems"
+                                HorizontalScrollBarVisibility="Never" VerticalScrollBarVisibility="Never">
+                    <CollectionView.EmptyView>
+                        <Label Text="Star a talkgroup on a Live call card to add it here."
+                               HorizontalOptions="Center" VerticalOptions="Center" Margin="12" />
+                    </CollectionView.EmptyView>
+                </CollectionView>
 
                 <CollectionView
                     Grid.Row="1"
@@ -296,6 +308,14 @@
                                         </VerticalStackLayout>
 
                                         <HorizontalStackLayout Grid.Column="1" Spacing="4" VerticalOptions="Start">
+                                            <Button Text="{Binding FavoriteGlyph}" Clicked="OnFavoriteCallClicked"
+                                                    AutomationId="ToggleCallFavorite" IsVisible="{Binding CanFavorite}"
+                                                    TextColor="{AppThemeBinding Light=#4b5563, Dark=#facc15}"
+                                                    SemanticProperties.Description="{Binding FavoriteAction}"
+                                                    ToolTipProperties.Text="{Binding FavoriteAction}"
+                                                    MinimumHeightRequest="28" MinimumWidthRequest="30"
+                                                    HeightRequest="28" WidthRequest="30" Padding="0"
+                                                    FontSize="16" BackgroundColor="Transparent" />
                                             <Label
                                                 Text="M"
                                                 FontSize="{OnPlatform WinUI=9, MacCatalyst=9, Android=8, iOS=8}"

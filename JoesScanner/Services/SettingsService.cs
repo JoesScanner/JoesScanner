@@ -61,6 +61,8 @@ namespace JoesScanner.Services
         private const string KeyAudioToneHighlightMinutes = "audio_tone_highlight_minutes";
 
         private const string KeyTelemetryEnabled = "telemetry_enabled";
+        private const string KeyLocalOnlyMode = "local_only_mode";
+        private const string KeyVerifiedFavoritesUser = "verified_favorites_user";
 // Built-in server definitions for this phase.
         private const string BuiltinJoeKey = "joe";
         private const string BuiltinCustomKey = "custom";
@@ -129,8 +131,11 @@ namespace JoesScanner.Services
                     if (previous == safe)
                         return;
                     RequireMigratedCredentials();
+                    var accountChanged = SafeAccountBaseChanged(previous, safe);
+                    if (accountChanged)
+                        VerifiedFavoritesUserId = null;
                     WriteConnectionSetting(KeyAuthServerBaseUrl, safe);
-                    if (SafeAccountBaseChanged(previous, safe))
+                    if (accountChanged)
                         RetireAccountIdentity();
                 }
             }
@@ -415,6 +420,7 @@ namespace JoesScanner.Services
         {
             _accountIdentityVersion++;
             AuthSessionToken = string.Empty;
+            AccountIdentityChanged?.Invoke(this, EventArgs.Empty);
         }
 
         public string AuthSessionToken
@@ -612,11 +618,37 @@ namespace JoesScanner.Services
             set => SetInt(KeyAudioToneHighlightMinutes, Clamp(value, 1, 99));
         }
 
-        public bool TelemetryEnabled
+        public bool LocalOnlyMode
         {
-            // Default ON to preserve existing behavior.
-            get => GetBool(KeyTelemetryEnabled, true);
-            set => SetBool(KeyTelemetryEnabled, value);
+            // No legacy preference means Normal Mode. An explicit telemetry
+            // opt-out must survive upgrades, across all configured servers.
+            get => GetBool(KeyLocalOnlyMode, !GetBool(KeyTelemetryEnabled, true));
+            set
+            {
+                EnsureInitialized();
+                lock (_gate)
+                {
+                    if (value == LocalOnlyMode)
+                        return;
+                    WriteConnectionSetting(KeyLocalOnlyMode, value ? "true" : "false");
+                }
+                LocalOnlyModeChanged?.Invoke(this, EventArgs.Empty);
+            }
+        }
+
+        public event EventHandler? LocalOnlyModeChanged;
+        public event EventHandler? AccountIdentityChanged;
+
+        public long? VerifiedFavoritesUserId
+        {
+            get => long.TryParse(GetString(KeyVerifiedFavoritesUser, string.Empty), CultureInfo.InvariantCulture,
+                out var userId) && userId > 0 ? userId : null;
+            set
+            {
+                EnsureInitialized();
+                lock (_gate)
+                    WriteConnectionSetting(KeyVerifiedFavoritesUser, value?.ToString(CultureInfo.InvariantCulture) ?? string.Empty);
+            }
         }
 
         private void EnsureInitialized()

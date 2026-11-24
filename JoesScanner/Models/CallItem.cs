@@ -1,3 +1,5 @@
+using JoesScanner.Services;
+
 namespace JoesScanner.Models
 {
     // Represents a single radio call as shown in the client UI.
@@ -51,6 +53,20 @@ namespace JoesScanner.Models
             LiveAdmission = null;
             confirmation?.Invoke(accepted);
         }
+        private bool _isFavorite;
+        public string FavoriteGlyph => _isFavorite ? "★" : "☆";
+        public string FavoriteAction => _isFavorite ? "Remove Favorite" : "Add Favorite";
+        public bool CanFavorite => ServerId.HasValue && FavoriteTalkgroupIdentity.From(CardMetadata) != null;
+
+        internal void SetFavorite(bool favorite)
+        {
+            if (_isFavorite == favorite)
+                return;
+            _isFavorite = favorite;
+            OnPropertyChanged(nameof(FavoriteGlyph));
+            OnPropertyChanged(nameof(FavoriteAction));
+        }
+
         private CallCardMetadata? _cardMetadata;
 
         public CallCardMetadata? CardMetadata
@@ -63,6 +79,7 @@ namespace JoesScanner.Models
 
                 _cardMetadata = value;
                 OnPropertyChanged();
+                OnPropertyChanged(nameof(CanFavorite));
             }
         }
 

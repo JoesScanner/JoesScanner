@@ -33,6 +33,7 @@
     <Compile Include="../../JoesScanner/Services/DurableLiveQueue.cs" Link="DurableLiveQueue.cs" />
     <Compile Include="../../JoesScanner/Services/DurableLiveQueue.Scheduling.cs" Link="DurableLiveQueue.Scheduling.cs" />
     <Compile Include="../../JoesScanner/Services/LivePlaybackScheduler.cs" Link="LivePlaybackScheduler.cs" />
+    <Compile Include="../../JoesScanner/Services/FavoriteRecords.cs" Link="FavoriteRecords.cs" />
     <Compile Include="../../JoesScanner/Services/IDatabasePathProvider.cs" Link="IDatabasePathProvider.cs" />
     <Compile Include="../../JoesScanner/Services/IosAudioState.cs" Link="IosAudioState.cs" />
     <Compile Include="../../JoesScanner/Services/LiveCallIndex.cs" Link="LiveCallIndex.cs" />

@@ -188,6 +188,7 @@ namespace JoesScanner.ViewModels
                 RecordingAccess = new RecordingAccessContext(RecordingOrigin.Live, false)
             });
         internal Task NavigateForTestAsync(int direction) => NavigateToAdjacentCallAsync(direction);
+        internal void UseFavoritesViewForTest(Func<CallItem, bool> filter) => _visibleFavoriteFilter = filter;
         internal Task JumpForTestAsync() => JumpToLiveAsync();
 
         internal Task SelectAddressForTestAsync(string id) => SelectForTestAsync(id);

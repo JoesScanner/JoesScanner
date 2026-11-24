@@ -42,6 +42,8 @@ public static class MauiProgram
         builder.Services.AddSingleton<IHistoryLookupsRepository, HistoryLookupsRepository>();
         builder.Services.AddSingleton<ICallStreamService, CallStreamService>();
         builder.Services.AddSingleton<ScannerConnectionStore>();
+        builder.Services.AddSingleton<FavoritesRepository>();
+        builder.Services.AddSingleton<FavoritesService>();
         builder.Services.AddSingleton<ICallHistoryService, CallHistoryService>();
         builder.Services.AddSingleton<IHistoryLookupsCacheService, HistoryLookupsCacheService>();
         builder.Services.AddSingleton<IAudioFilterService, AudioFilterService>();
@@ -51,10 +53,10 @@ public static class MauiProgram
         builder.Services.AddSingleton<ISubscriptionService, SubscriptionService>();
         builder.Services.AddSingleton<ITelemetryService, TelemetryService>();
         builder.Services.AddSingleton<IAuthLookupsSyncService>(sp =>
-            new AuthLookupsSyncService(sp.GetRequiredService<ISettingsService>(), WordPressSession.CreateClient()));
+            new AuthLookupsSyncService(sp.GetRequiredService<ISettingsService>(), WordPressSession.CreateClient(sp.GetRequiredService<ISettingsService>())));
         builder.Services.AddSingleton<IAuthObservedTriplesSyncService>(sp =>
             new AuthObservedTriplesSyncService(sp.GetRequiredService<ISettingsService>(),
-                sp.GetRequiredService<IDatabasePathProvider>(), WordPressSession.CreateClient()));
+                sp.GetRequiredService<IDatabasePathProvider>(), WordPressSession.CreateClient(sp.GetRequiredService<ISettingsService>())));
         builder.Services.AddSingleton<IAddressDetectionService, AddressDetectionService>();
         builder.Services.AddSingleton<IWhat3WordsService, What3WordsService>();
         builder.Services.AddSingleton<IAppUpdateService, AppUpdateService>();
@@ -70,9 +72,9 @@ public static class MauiProgram
 
         // Use separate HttpClient instances for services that need them.
         // Keeping HttpClient transient here avoids shared state issues (BaseAddress, headers, timeout).
-        builder.Services.AddTransient(sp => new HttpClient());
+        builder.Services.AddTransient(sp => WordPressSession.CreateClient(sp.GetRequiredService<ISettingsService>()));
 
-        builder.Services.AddSingleton<ICommunicationsService>(_ => new CommunicationsService(WordPressSession.CreateClient()));
+        builder.Services.AddSingleton<ICommunicationsService>(sp => new CommunicationsService(WordPressSession.CreateClient(sp.GetRequiredService<ISettingsService>())));
         builder.Services.AddSingleton<ICommunicationsSyncCoordinator, CommunicationsSyncCoordinator>();
         builder.Services.AddSingleton<ICommsBadgeService, CommsBadgeService>();
         builder.Services.AddSingleton<IJoesScannerApiClient, JoesScannerApiClient>();

@@ -14,7 +14,7 @@ namespace JoesScanner.Services
         private readonly HttpClient _httpClient;
 
         public SubscriptionService(ISettingsService settings, ITelemetryService telemetryService)
-            : this(settings, telemetryService, WordPressSession.CreateClient())
+            : this(settings, telemetryService, WordPressSession.CreateClient(settings))
         {
             _httpClient.Timeout = TimeSpan.FromSeconds(10);
         }
@@ -40,6 +40,11 @@ namespace JoesScanner.Services
 
         private async Task<SubscriptionCheckResult> VerifyAsync(string server, bool requireSelection, CancellationToken cancellationToken)
         {
+            var generation = PrivacyNetworkPolicy.For(_settings).Generation;
+            if (generation.IsCancellationRequested)
+                return new(false, "local_only", "Subscription verification is paused in Local Only Mode.");
+            using var network = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, generation);
+            cancellationToken = network.Token;
             var attempt = WordPressSession.Capture(_settings);
             string user, password;
             Uri endpoint;

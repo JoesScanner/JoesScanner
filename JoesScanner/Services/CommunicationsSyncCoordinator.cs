@@ -156,6 +156,11 @@ namespace JoesScanner.Services
 
         internal async Task SyncOnceAsync(bool forceSnapshot, bool suppressAuthErrors, CancellationToken cancellationToken)
         {
+            var generation = PrivacyNetworkPolicy.For(_settings).Generation;
+            if (generation.IsCancellationRequested)
+                return;
+            using var network = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, generation);
+            cancellationToken = network.Token;
             await _syncLock.WaitAsync(cancellationToken).ConfigureAwait(false);
             WordPressSession? session = null;
             try
@@ -181,6 +186,7 @@ namespace JoesScanner.Services
 
                 var result = await _communicationsService.SyncAsync(
                     session.BaseUrl, session.Token, sinceSeq, forceSnapshot, cancellationToken).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
                 var notify = false;
                 session.TryApply(() =>
                 {

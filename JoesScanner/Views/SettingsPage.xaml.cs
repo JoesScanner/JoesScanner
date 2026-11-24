@@ -799,10 +799,25 @@ namespace JoesScanner.Views
 
         private async void OnScannerConnectionRemove(object? sender, EventArgs e)
         {
-            if (sender is not Button { BindingContext: ScannerConnectionRow row } || BindingContext is not SettingsViewModel vm ||
-                !await UiDialogs.ConfirmAsync("Remove server?", $"Remove {row.Name} and its saved recorder login?", "Remove", "Cancel"))
+            if (sender is not Button { BindingContext: ScannerConnectionRow row } || BindingContext is not SettingsViewModel vm)
                 return;
-            try { vm.RemoveScannerConnection(row); }
+            try
+            {
+                string? deleteFavoritesFor = null;
+                var owner = vm.Favorites.OwnerKey;
+                if (vm.HasFavoritesForServer(row))
+                {
+                    var choice = await UiDialogs.ActionSheetAsync($"Remove {row.Name}?", "Cancel", null,
+                        "Keep saved Favorites", "Also delete saved Favorites");
+                    if (choice is not ("Keep saved Favorites" or "Also delete saved Favorites"))
+                        return;
+                    if (choice == "Also delete saved Favorites")
+                        deleteFavoritesFor = owner;
+                }
+                else if (!await UiDialogs.ConfirmAsync("Remove server?", $"Remove {row.Name} and its saved recorder login?", "Remove", "Cancel"))
+                    return;
+                vm.RemoveScannerConnection(row, deleteFavoritesFor);
+            }
             catch (Exception ex)
             {
                 AppLog.Add(() => $"Could not remove a saved server ({ex.GetType().Name}).");
@@ -899,7 +914,8 @@ private void CollapseAllCards()
     CollapseSection(AddressDetectionBodyLayout, AddressDetectionChevronLabel);
     CollapseSection(BluetoothBodyLayout, BluetoothChevronLabel);
     CollapseSection(ThemeBodyLayout, ThemeChevronLabel);
-    CollapseSection(TelemetryBodyLayout, TelemetryChevronLabel);
+    CollapseSection(PrivacyNetworkBody, PrivacyNetworkChevron);
+    CollapseSection(FavoritesBodyLayout, FavoritesChevron);
     CollapseSection(LogBodyLayout, LogChevronLabel);
     CollapseSection(CallCardOptionsBody, CallCardOptionsChevron);
 
@@ -912,7 +928,6 @@ private void CollapseAllCards()
         vm.SetSettingsCardOpenState("AddressDetection", false);
         vm.SetSettingsCardOpenState("Bluetooth", false);
         vm.SetSettingsCardOpenState("Theme", false);
-        vm.SetSettingsCardOpenState("Telemetry", false);
         vm.SetSettingsCardOpenState("Log", false);
     }
 }
@@ -1035,15 +1050,6 @@ private void OnThemeHeaderTapped(object sender, EventArgs e)
     if (BindingContext is SettingsViewModel vm)
     {
         vm.SetSettingsCardOpenState("Theme", ThemeBodyLayout.IsVisible);
-    }
-}
-
-private void OnTelemetryHeaderTapped(object sender, EventArgs e)
-{
-    ToggleSection(TelemetryBodyLayout, TelemetryChevronLabel);
-    if (BindingContext is SettingsViewModel vm)
-    {
-        vm.SetSettingsCardOpenState("Telemetry", TelemetryBodyLayout.IsVisible);
     }
 }
 

@@ -72,33 +72,7 @@ internal readonly record struct TalkgroupKey(Guid ServerId, string System, strin
 
 internal interface IFavoriteTalkgroupMembership
 {
-    bool Contains(TalkgroupKey key);
-}
-
-// This is an effective snapshot for the current listener. A future user-scoped
-// cache can supply it without changing the scheduler or transport.
-internal sealed class FavoriteTalkgroupSnapshot(IEnumerable<TalkgroupKey> effective) : IFavoriteTalkgroupMembership
-{
-    private readonly HashSet<TalkgroupKey> _keys = effective.ToHashSet();
-
-    public bool Contains(TalkgroupKey key) => _keys.Contains(key);
-
-    internal static FavoriteTalkgroupSnapshot Load()
-    {
-#if DEBUG
-        try
-        {
-            var raw = AppStateStore.GetString("debug_live_favorite_talkgroups");
-            if (!string.IsNullOrWhiteSpace(raw))
-                return new(JsonSerializer.Deserialize<TalkgroupKey[]>(raw) ?? []);
-        }
-        catch (Exception ex)
-        {
-            AppLog.Add(() => $"Debug Live Favorite fixture could not be read ({ex.GetType().Name}).");
-        }
-#endif
-        return new([]);
-    }
+    bool Contains(TalkgroupKey key, FavoriteTalkgroupIdentity? identity);
 }
 
 internal sealed class LivePlaybackScheduler(IFavoriteTalkgroupMembership favorites)
@@ -106,7 +80,8 @@ internal sealed class LivePlaybackScheduler(IFavoriteTalkgroupMembership favorit
     internal const int Lookahead = 20;
     internal const int FavoriteStreakLimit = 3;
 
-    internal readonly record struct Candidate(long Arrival, TalkgroupKey? Group, bool RecoveredAudio = false, bool Resuming = false);
+    internal readonly record struct Candidate(long Arrival, TalkgroupKey? Group, bool RecoveredAudio = false,
+        bool Resuming = false, FavoriteTalkgroupIdentity? Identity = null);
     internal readonly record struct Choice(Candidate Candidate, bool Favorite);
 
     internal sealed record Scheduled(DurableLiveQueue.Selection Row, Choice Choice);
@@ -118,7 +93,8 @@ internal sealed class LivePlaybackScheduler(IFavoriteTalkgroupMembership favorit
         var window = await journal.ReadReadyWindowAsync(scopes, recoveryFloor, after.HasValue || !options.GroupCalls ? 1 : Lookahead,
             token, after ?? 0, visibleReplays);
         var choice = Choose(window.Select(row => new Candidate(row.Row.ArrivalSequence,
-            TalkgroupKey.From(row.Scope.ServerId, row.Row.Snapshot?.Metadata), row.Row.AudioRecovered, row.Row.Resuming)),
+            TalkgroupKey.From(row.Scope.ServerId, row.Row.Snapshot?.Metadata), row.Row.AudioRecovered, row.Row.Resuming,
+            FavoriteTalkgroupIdentity.From(row.Row.Snapshot?.Metadata))),
             options, manualReplay: after.HasValue);
         return choice is { } selected
             ? new(window.First(row => row.Row.ArrivalSequence == selected.Candidate.Arrival), selected)
@@ -140,7 +116,7 @@ internal sealed class LivePlaybackScheduler(IFavoriteTalkgroupMembership favorit
             return new(window[0], false);
 
         var waiting = window.Select(candidate => new Choice(candidate, options.PrioritizeFavorites &&
-            candidate.Group is { } group && favorites.Contains(group))).ToArray();
+            candidate.Group is { } group && favorites.Contains(group, candidate.Identity))).ToArray();
         foreach (var choice in waiting)
             if (choice.Candidate.Resuming)
                 return choice;

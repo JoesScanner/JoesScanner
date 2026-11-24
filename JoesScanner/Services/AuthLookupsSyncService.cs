@@ -9,7 +9,7 @@ using JoesScanner.Helpers;
 namespace JoesScanner.Services
 {
     // Syncs History lookup dropdown data (receivers/sites/talkgroups) to/from the WordPress Auth API.
-    // Gated by telemetry. Default servers are always enabled; custom servers respect the user's telemetry setting.
+    // Local Only Mode keeps History lookups independent from Joe's Scanner services.
     public sealed class AuthLookupsSyncService : IAuthLookupsSyncService, IDisposable
     {
 
@@ -37,16 +37,6 @@ namespace JoesScanner.Services
             // HttpClient lifetime is managed by DI; do not dispose.
         }
 
-
-        private bool IsEnabled()
-        {
-            // User requested strict gating: when telemetry is off, this feature is off silently.
-            var selectedServer = _settings.ServerUrl;
-            if (HostedServerRules.IsProvidedDefaultServerUrl(selectedServer))
-                return true;
-
-            return _settings.TelemetryEnabled;
-}
 
         private static string HashPayload(string receiversJson, string sitesJson, string talkgroupsJson, string groupsJson)
         {
@@ -100,13 +90,9 @@ namespace JoesScanner.Services
 
         public async Task<HistoryLookupData?> TryFetchSeedAsync(string serverKey, CancellationToken cancellationToken)
         {
-            if (!IsEnabled())
-            {
-                AppLog.Add(() => "AuthLookups: seed fetch skipped (telemetry disabled).");
-                return null;
-            }
-
-            if (string.IsNullOrWhiteSpace(serverKey))
+            using var network = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, PrivacyNetworkPolicy.For(_settings).Generation);
+            cancellationToken = network.Token;
+            if (cancellationToken.IsCancellationRequested || string.IsNullOrWhiteSpace(serverKey))
                 return null;
 
             try
@@ -177,15 +163,9 @@ namespace JoesScanner.Services
 
         public async Task TryReportAsync(string serverKey, HistoryLookupData data, CancellationToken cancellationToken, bool force = false)
         {
-            // Manual sync must always be allowed when the user explicitly requests it, even if telemetry is disabled.
-            // Auto/background reporting remains telemetry-gated.
-            if (!force && !IsEnabled())
-            {
-                AppLog.Add(() => "AuthLookups: report skipped (telemetry disabled).");
-                return;
-            }
-
-            if (string.IsNullOrWhiteSpace(serverKey) || data == null)
+            using var network = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, PrivacyNetworkPolicy.For(_settings).Generation);
+            cancellationToken = network.Token;
+            if (cancellationToken.IsCancellationRequested || string.IsNullOrWhiteSpace(serverKey) || data == null)
                 return;
 
             try

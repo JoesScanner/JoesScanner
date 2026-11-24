@@ -1,0 +1,41 @@
+Joe's Scanner Auth API 2.7.4
+
+Favorites
+- POST /wp-json/joes-scanner/v1/favorites/sync returns the authenticated account's
+  paged Favorites and groups. It accepts conditional creates, changes and
+  deletions in batches of up to 50.
+- The client sends the existing Joe's Scanner login via the JoesScannerAccount
+  Authorization scheme over HTTPS. The web server must forward Authorization
+  to WordPress. The endpoint uses WordPress authentication and the plugin's
+  login throttling. It has no SureCart entitlement requirement.
+- Writes must specify the authenticated WordPress user ID and the last known
+  revision. Mutation IDs make retries safe. Deletions retain a revision and
+  record ID so old clients cannot recreate removed Favorites.
+
+Database changes
+- Schema 1.5.9 adds the account-scoped joes_scanner_favorites table to the
+  plugin's existing activation and upgrade path.
+
+Validate on a test WordPress installation with synthetic accounts. Check free
+account sign-in, account isolation, concurrent writes, retrying a lost
+response, and deletion reconciliation. This source has no deployment step.
+
+Joe's Scanner Auth API 2.7.3
+
+Changes
+- Fixes Subscription status handling checkboxes not retaining edits.
+- Accepts both checkbox arrays and stored comma-separated status strings during option sanitization.
+- Prevents SureCart auto-sync from reducing a multi-status selection such as active,trialing back to active only.
+- Preserves status selections when saving unrelated Settings or Database tabs that share the same WordPress option.
+- Adds a form-presence marker so an intentionally empty checkbox submission is handled consistently and falls back to active as documented.
+- Retains all SureCart product/price discovery and historical price compatibility improvements from version 2.7.2.
+
+Database changes
+- None.
+
+Recommended validation after installation
+1. Install and activate version 2.7.3.
+2. Open Joe's Scanner Auth > SureCart.
+3. Check two or more statuses, save, and confirm they remain checked after reload.
+4. Save another plugin settings tab, return to SureCart, and confirm the status selection is unchanged.
+5. Test an active subscriber and confirm authentication remains successful.

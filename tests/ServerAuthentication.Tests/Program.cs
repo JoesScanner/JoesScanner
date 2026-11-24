@@ -80,7 +80,15 @@ var cases = new (string Name, Func<Task> Run)[]
     ("Subsequent verification after 429, 503, timeout, and connection failure preserves saved credentials", WordPressOwnershipTests.SubscriptionFailuresAndRestart),
     ("Concurrent lookup requests keep their original authority and reject stale results", WordPressOwnershipTests.LookupSwitch),
     ("Communications discards old-session responses and restarts the cursor for a new account", WordPressOwnershipTests.CommunicationsSwitch),
-    ("WordPress clients refuse cross-authority redirects that preserve request bodies", WordPressOwnershipTests.Redirect)
+    ("WordPress clients refuse cross-authority redirects that preserve request bodies", WordPressOwnershipTests.Redirect),
+    ("Local Favorites persist, update the shared Live view and prioritize correctly across recorders", FavoritesTests.LocalMembership),
+    ("A free account shares directory Favorites across devices and links custom recorders explicitly", FavoritesTests.MatchingAcrossDevices),
+    ("Offline Favorites merge disjoint changes and retain conflicts and deletion tombstones", FavoritesTests.OfflineConflictsAndTombstones),
+    ("An uncertain sync acknowledgement cannot lose a subsequent local edit", FavoritesTests.LostResponseAndNewerDraft),
+    ("Favorites caches and pending changes stay with verified accounts and reject unauthorized requests", FavoritesTests.AccountIsolation),
+    ("Local Only migrates a telemetry opt-out, blocks cloud requests, and cancels in-flight traffic", FavoritesTests.PrivacyBlocksAndCancels),
+    ("Leaving Local Only syncs the same account's queued Favorites without data loss", FavoritesTests.PrivacyKeepsOfflineChanges),
+    ("A transient gateway denial keeps the verified Favorites cache and recovers its outbox", FavoritesTests.TransientForbiddenKeepsCache)
 };
 
 foreach (var (name, run) in cases)
@@ -530,6 +538,8 @@ class SettingsStub : DispatchProxy
     protected override object? Invoke(MethodInfo? method, object?[]? args) => method!.Name switch
     {
         "get_AuthServerBaseUrl" => "https://wordpress.test",
+        "get_LocalOnlyMode" => false,
+        "add_LocalOnlyModeChanged" or "remove_LocalOnlyModeChanged" => null,
         "get_ServerUrl" => ServerUrl,
         "get_BasicAuthUsername" => Username,
         "get_BasicAuthPassword" => Password,

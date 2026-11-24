@@ -26,7 +26,14 @@ public sealed class AppUpdateService : IAppUpdateService
     private const string AppleStoreLookupUrlConst = "https://itunes.apple.com/lookup?id=6758413482&country=us&entity=software";
     private const string AppleStoreDeepLinkUrlConst = "itms-apps://itunes.apple.com/app/id6758413482";
 
-    private static readonly HttpClient _httpClient = new();
+    private readonly PrivacyNetworkPolicy _network;
+    private readonly HttpClient _httpClient;
+
+    public AppUpdateService(ISettingsService settings)
+    {
+        _network = PrivacyNetworkPolicy.For(settings);
+        _httpClient = _network.CreateCloudClient(new HttpClientHandler());
+    }
 
     public string SupportUrl => DefaultSupportUrl;
     public string PrivacyPolicyUrl => DefaultPrivacyPolicyUrl;
@@ -37,11 +44,16 @@ public sealed class AppUpdateService : IAppUpdateService
 
     public async Task<AppUpdateCheckResult> CheckForUpdatesAsync()
     {
+        if (!_network.AllowsCloud)
+            return new AppUpdateCheckResult { Message = "Turn off Local Only Mode to check for updates." };
+#if WINDOWS
+        var requestGeneration = _network.CloudToken();
+#endif
 #if WINDOWS
         try
         {
             var context = StoreContext.GetDefault();
-            var updates = await context.GetAppAndOptionalStorePackageUpdatesAsync();
+            var updates = await context.GetAppAndOptionalStorePackageUpdatesAsync().AsTask(requestGeneration);
             if (updates == null || updates.Count == 0)
             {
                 return new AppUpdateCheckResult
@@ -51,7 +63,7 @@ public sealed class AppUpdateService : IAppUpdateService
                 };
             }
 
-            var result = await context.RequestDownloadAndInstallStorePackageUpdatesAsync(updates);
+            var result = await context.RequestDownloadAndInstallStorePackageUpdatesAsync(updates).AsTask(requestGeneration);
             var stateText = result.OverallState.ToString();
 
             return new AppUpdateCheckResult
@@ -120,16 +132,19 @@ public sealed class AppUpdateService : IAppUpdateService
 
     public async Task OpenSupportSiteAsync()
     {
+        _network.CloudToken().ThrowIfCancellationRequested();
         await Launcher.Default.OpenAsync(new Uri(SupportUrl));
     }
 
     public async Task OpenPrivacyPolicyAsync()
     {
+        _network.CloudToken().ThrowIfCancellationRequested();
         await Launcher.Default.OpenAsync(new Uri(PrivacyPolicyUrl));
     }
 
     public async Task OpenStorePageAsync()
     {
+        _network.CloudToken().ThrowIfCancellationRequested();
         var platform = DeviceInfo.Current.Platform;
 
 #if IOS
@@ -240,7 +255,7 @@ public sealed class AppUpdateService : IAppUpdateService
     }
 #endif
 
-    private static async Task<AppUpdateCheckResult> CheckAppleStoreForUpdatesAsync()
+    private async Task<AppUpdateCheckResult> CheckAppleStoreForUpdatesAsync()
     {
         try
         {
@@ -301,7 +316,7 @@ public sealed class AppUpdateService : IAppUpdateService
         }
     }
 
-    private static async Task<AppUpdateCheckResult> CheckGooglePlayForUpdatesAsync()
+    private async Task<AppUpdateCheckResult> CheckGooglePlayForUpdatesAsync()
     {
         try
         {

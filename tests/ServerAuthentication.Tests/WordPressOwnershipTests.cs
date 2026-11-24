@@ -153,7 +153,8 @@ internal static class WordPressOwnershipTests
                 $"HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:{port}/other\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
                 cancellation.Token);
         });
-        using var client = WordPressSession.CreateClient();
+        using var fixture = new SavedCredentialTests.Fixture();
+        using var client = WordPressSession.CreateClient(fixture.Load());
         using var content = new StringContent("synthetic-token");
         using var response = await client.PostAsync($"http://127.0.0.1:{((IPEndPoint)original.LocalEndpoint).Port}/auth",
             content, cancellation.Token);
@@ -261,7 +262,7 @@ namespace JoesScanner.Services
 
     internal static class AppStateStore
     {
-        internal static string GetString(string key, string fallback) => fallback;
+        internal static string GetString(string key, string fallback = "") => fallback;
         internal static void SetString(string key, string value) { }
         internal static long GetLong(string key, long fallback) => fallback;
         internal static void SetLong(string key, long value) { }

@@ -257,6 +257,12 @@ private void AttachAddressAlertHandlers()
 
         private void OnRequestJumpToLiveScroll()
         {
+            if (_favoritesLive)
+            {
+                if (_liveDisplay.Favorites.Count > 0)
+                    FavoritesCallsView.ScrollTo(_liveDisplay.Favorites[0], position: ScrollToPosition.Start, animate: false);
+                return;
+            }
             if (_liveDisplay.Separate)
             {
                 ScrollSeparatePanelsToLive();
@@ -778,7 +784,9 @@ private void AttachAddressAlertHandlers()
         {
             try
             {
-                await Launcher.Default.OpenAsync("https://www.joesscanner.com/");
+                var uri = new Uri("https://www.joesscanner.com/");
+                if (_viewModel.AllowsExternalLink(uri))
+                    await Launcher.Default.OpenAsync(uri);
             }
             catch
             {
@@ -1053,8 +1061,8 @@ private void OnAlertDismissInvoked(object? sender, EventArgs e)
             {
                 if (_viewModel.PlayAudioCommand?.CanExecute(call) == true)
                 {
-                    if (_liveDisplay.Separate)
-                        _viewModel.SetVisibleLiveServer(call.ServerId);
+                    if (!_favoritesLive && _liveDisplay.Separate)
+                        _viewModel.SetVisibleLiveView(call.ServerId);
                     _viewModel.PlayAudioCommand.Execute(call);
                 }
             }

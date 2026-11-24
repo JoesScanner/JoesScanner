@@ -23,6 +23,7 @@ internal static class IntelligentLivePlaybackTests
         {
             await LateAudioAsync(Path.Combine(directory.FullName, "late.db"));
             await ScopedManualReplayAsync(Path.Combine(directory.FullName, "scope.db"));
+            await FavoritesManualNavigationAsync(Path.Combine(directory.FullName, "favorites-navigation.db"));
             await AutomaticJumpAtBoundaryAsync(Path.Combine(directory.FullName, "boundary.db"));
             await ManualReplayExemptsJumpAsync(Path.Combine(directory.FullName, "manual.db"));
             await ManualPreparationFailureAsync(Path.Combine(directory.FullName, "failed.db"));
@@ -173,6 +174,27 @@ internal static class IntelligentLivePlaybackTests
         Console.WriteLine("PASS Durable manual replay stays in its original view and follows arrival-order FIFO");
     }
 
+    private static async Task FavoritesManualNavigationAsync(string path)
+    {
+        var player = new HandoffAudio();
+        var live = new MainViewModel(new PlaybackOwnership(), player, path);
+        await live.StartForTestAsync();
+        await live.AddForTestAsync("favorite-old");
+        await live.AddForTestAsync("ordinary");
+        await live.AddForTestAsync("favorite-new");
+        await live.PressPlayStopForTestAsync();
+        live.UseFavoritesViewForTest(card => card.BackendId.StartsWith("favorite-", StringComparison.Ordinal));
+
+        await live.PressVisibleCardForTestAsync(live.CardForTest("ordinary"));
+        await live.PressVisibleCardForTestAsync(live.CardForTest("favorite-new"));
+        await live.NavigateForTestAsync(1);
+        await live.NavigateForTestAsync(-1);
+        Check(player.Completed.SequenceEqual(["favorite-new", "favorite-old", "favorite-new"]) && live.OpenedTransportsForTest == 1,
+            "Favorites manual playback must stay inside the projection and leave monitoring stopped. Played " +
+            string.Join(", ", player.Completed));
+        Console.WriteLine("PASS Favorites manual playback and adjacent navigation stay inside the current Favorites view");
+    }
+
     private static async Task AutomaticJumpAtBoundaryAsync(string path)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
@@ -317,4 +339,11 @@ internal static class IntelligentLivePlaybackTests
     private static void Check(bool condition, string message) => LiveHistoryHandoffTests.Check(condition, message);
 
     private sealed record Paths(string DbPath) : IDatabasePathProvider;
+}
+
+internal sealed class FavoriteTalkgroupSnapshot(IEnumerable<TalkgroupKey> keys) : IFavoriteTalkgroupMembership
+{
+    private readonly HashSet<TalkgroupKey> _keys = keys.ToHashSet();
+
+    public bool Contains(TalkgroupKey key, FavoriteTalkgroupIdentity? identity) => _keys.Contains(key);
 }

@@ -174,14 +174,20 @@ public sealed partial class SettingsService
                 RequireMigratedCredentials();
                 var scope = CredentialScope(serverUrl, AuthServerBaseUrl) ?? throw new CredentialStorageException();
                 var encoded = pair is { } credentials ? ProtectedCredentials.Encode(credentials) : null;
+                var isAccount = scope.StartsWith("account:", StringComparison.Ordinal);
                 if (!_unverifiedCredentialWrites.Contains(CredentialKey(scope)) && ReadCredential(scope) == encoded)
                 {
-                    if (pair == null && scope.StartsWith("account:", StringComparison.Ordinal))
+                    if (pair == null && isAccount)
+                    {
+                        VerifiedFavoritesUserId = null;
                         RetireAccountIdentity();
+                    }
                     return;
                 }
+                if (isAccount)
+                    VerifiedFavoritesUserId = null;
                 SaveCredential(scope, encoded);
-                if (scope.StartsWith("account:", StringComparison.Ordinal))
+                if (isAccount)
                     RetireAccountIdentity();
             }
             catch (CredentialStorageException)

@@ -9,6 +9,8 @@ namespace JoesScanner.Views;
 public partial class MainPage
 {
     private const string SeparateLiveKey = "live_separate_view";
+    private const string FavoritesLiveKey = "live_favorites_view";
+    private bool _favoritesLive;
     private LiveCallDisplay _liveDisplay = null!;
     private readonly Dictionary<Guid, LivePanel> _serverPanels = [];
     private readonly Dictionary<Guid, (View Tab, Button Button)> _serverTabs = [];
@@ -22,7 +24,10 @@ public partial class MainPage
 
     private void InitializeLiveDisplay()
     {
-        _liveDisplay = new LiveCallDisplay(_viewModel.Calls, AppStateStore.GetBool(SeparateLiveKey, false));
+        _favoritesLive = AppStateStore.GetBool(FavoritesLiveKey, false);
+        _liveDisplay = new LiveCallDisplay(_viewModel.Calls, AppStateStore.GetBool(SeparateLiveKey, false), _viewModel.Favorites.IsSaved);
+        FavoritesCallsView.ItemTemplate = CallsView.ItemTemplate;
+        FavoritesCallsView.ItemsSource = _liveDisplay.Favorites;
         ServerPanels.SizeChanged += (_, _) => ShowServerPanels();
     }
 
@@ -30,6 +35,7 @@ public partial class MainPage
     {
         _liveDisplay.Observe();
         _viewModel.ScannerConnectionLayoutChanged += OnScannerConnectionLayoutChanged;
+        _viewModel.Favorites.Changed += OnFavoriteMembershipChanged;
         _viewModel.RefreshScannerConnectionRows();
         OnScannerConnectionLayoutChanged();
     }
@@ -37,14 +43,47 @@ public partial class MainPage
     private void DetachLiveDisplay()
     {
         _viewModel.ScannerConnectionLayoutChanged -= OnScannerConnectionLayoutChanged;
+        _viewModel.Favorites.Changed -= OnFavoriteMembershipChanged;
         _liveDisplay.Detach();
     }
 
     private void OnCombinedLiveClicked(object? sender, EventArgs e) => SetLiveDisplay(separate: false);
     private void OnSeparateLiveClicked(object? sender, EventArgs e) => SetLiveDisplay(separate: true);
 
+    private void OnFavoriteMembershipChanged() => MainThread.BeginInvokeOnMainThread(() =>
+    {
+        if (_handlersAttached)
+            _liveDisplay.RefreshFavorites();
+    });
+
+    private void OnFavoritesLiveClicked(object? sender, EventArgs e)
+    {
+        _favoritesLive = true;
+        AppStateStore.SetBool(FavoritesLiveKey, true);
+        RenderLiveDisplay();
+    }
+
+    private async void OnFavoriteCallClicked(object? sender, EventArgs e)
+    {
+        if (sender is not Button { BindingContext: CallItem call })
+            return;
+        try
+        {
+            var favorites = _viewModel.Favorites;
+            favorites.SetCall(favorites.OwnerKey, call, !favorites.IsSaved(call));
+        }
+        catch (Exception ex)
+        {
+            AppLog.Add(() => $"The Live Favorite could not be saved ({ex.GetType().Name}).");
+            await UiDialogs.AlertAsync("Favorites", "This Favorite could not be saved. Try again.", "Close");
+        }
+    }
+
     private void SetLiveDisplay(bool separate, bool save = true)
     {
+        if (_favoritesLive && save)
+            AppStateStore.SetBool(FavoritesLiveKey, false);
+        _favoritesLive = false;
         if (_liveDisplay.Separate != separate)
         {
             _liveDisplay.SetSeparate(separate);
@@ -111,11 +150,15 @@ public partial class MainPage
 
     private void RenderLiveDisplay()
     {
-        _viewModel.SetVisibleLiveServer(_liveDisplay.Separate ? _liveDisplay.SelectedServer : null);
-        CallsView.IsVisible = !_liveDisplay.Separate;
-        SeparateLiveHost.IsVisible = _liveDisplay.Separate;
-        ApplyLiveButtonStyle(CombinedLiveButton, !_liveDisplay.Separate);
-        ApplyLiveButtonStyle(SeparateLiveButton, _liveDisplay.Separate);
+        var separate = !_favoritesLive && _liveDisplay.Separate;
+        _viewModel.SetVisibleLiveView(separate ? _liveDisplay.SelectedServer : null,
+            _favoritesLive ? _viewModel.Favorites.Contains : null);
+        FavoritesCallsView.IsVisible = _favoritesLive;
+        CallsView.IsVisible = !_favoritesLive && !separate;
+        SeparateLiveHost.IsVisible = separate;
+        ApplyLiveButtonStyle(CombinedLiveButton, CallsView.IsVisible);
+        ApplyLiveButtonStyle(SeparateLiveButton, separate);
+        ApplyLiveButtonStyle(FavoritesLiveButton, _favoritesLive);
         foreach (var (id, tab) in _serverTabs)
             ApplyLiveButtonStyle(tab.Button, id == _liveDisplay.SelectedServer);
         ShowServerPanels();
@@ -155,7 +198,7 @@ public partial class MainPage
     {
         if (!_handlersAttached)
             return;
-        var shown = _liveDisplay.VisibleServers(SeparateLiveHost.Width, UseSideBySide);
+        var shown = _favoritesLive ? [] : _liveDisplay.VisibleServers(SeparateLiveHost.Width, UseSideBySide);
         NoEnabledRecorders.IsVisible = _liveDisplay.Separate && shown.Length == 0;
         ServerTabsScroll.IsVisible = _liveDisplay.Separate &&
             (UseSideBySide ? _liveDisplay.Servers.Count > shown.Length : _liveDisplay.Servers.Count > 1);
@@ -282,6 +325,13 @@ public partial class MainPage
 
     private void ScrollToAddressCall(CallItem call)
     {
+        if (_favoritesLive && _liveDisplay.Favorites.Contains(call))
+        {
+            FavoritesCallsView.ScrollTo(call, position: ScrollToPosition.Center, animate: true);
+            return;
+        }
+        if (_favoritesLive)
+            SetLiveDisplay(false, save: false);
         if (_liveDisplay.Separate && call.ServerId is { } id && _liveDisplay.Servers.Contains(id))
         {
             SelectLiveServer(id);

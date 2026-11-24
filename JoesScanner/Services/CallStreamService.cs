@@ -77,7 +77,7 @@ namespace JoesScanner.Services
             _recorder = recorder?.Endpoint;
             _webSocketInvoker = new HttpMessageInvoker(new ServerAuthenticationHandler(
                 ServerAuthentication.For(_settingsService),
-                new SocketsHttpHandler { AllowAutoRedirect = false }, recorder));
+                PrivacyNetworkPolicy.For(_settingsService).Wrap(new SocketsHttpHandler { AllowAutoRedirect = false }), recorder));
 
             // IMPORTANT (Apple platforms + HTTP custom servers)
             // iOS and MacCatalyst can still surface NSURLErrorDomain -1022 (ATS) for cleartext HTTP

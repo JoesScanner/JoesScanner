@@ -5,7 +5,7 @@ namespace JoesScanner.ViewModels;
 
 public partial class MainViewModel
 {
-    private readonly LivePlaybackScheduler _scheduler = new(FavoriteTalkgroupSnapshot.Load());
+    private readonly LivePlaybackScheduler _scheduler;
     private readonly LiveBacklogGuard _backlog = new();
     private LivePlaybackPreferences _livePlaybackPreferences = LivePlaybackPreferences.Read();
     private Guid? _visibleLiveServer;
@@ -20,7 +20,11 @@ public partial class MainViewModel
     public bool HasBacklogWarning => _backlog.WarningActive;
     public string BacklogWarningText => $"Playback backlog · {_readyWaiting} ready";
 
-    internal void SetVisibleLiveServer(Guid? serverId) => _visibleLiveServer = serverId;
+    internal void SetVisibleLiveView(Guid? serverId, Func<CallItem, bool>? favorites = null)
+    {
+        _visibleLiveServer = serverId;
+        _visibleFavoriteFilter = favorites;
+    }
 
     internal void ApplyLivePlaybackOptions(LivePlaybackPreferences options)
     {

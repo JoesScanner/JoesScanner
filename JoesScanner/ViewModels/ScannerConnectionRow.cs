@@ -15,6 +15,7 @@ public sealed class ScannerConnectionRow : BindableObject
         _status = status;
     }
 
+    internal SavedScannerConnection Profile => _profile;
     internal Guid Id => _profile.Id;
     internal bool Managed => _profile.Managed;
     internal int? DirectoryId => _profile.DirectoryId;

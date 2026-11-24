@@ -15,6 +15,7 @@ namespace JoesScanner.ViewModels
         }
 
         private ManualLiveTraversal? _manualLiveTraversal;
+        private Func<CallItem, bool>? _visibleFavoriteFilter;
         private Task<long?>? _liveEdgeBoundary;
         private long _livePlaybackFloor;
 
@@ -253,10 +254,15 @@ namespace JoesScanner.ViewModels
                 return;
 
             var run = _monitoring.Current;
+            var favoriteFilter = _visibleFavoriteFilter;
+            if (favoriteFilter != null && !favoriteFilter(item))
+                return;
             var server = _visibleLiveServer.HasValue ? item.ServerId ?? _visibleLiveServer : null;
-            var visibleReplays = Calls.Where(card => (server == null || card.ServerId == server) &&
-                    card.LiveArrivalSequence.HasValue && !string.IsNullOrWhiteSpace(card.AudioUrl) && !IsFilteredForPlayback(card))
-                .Select(card => card.LiveArrivalSequence!.Value).Distinct().ToArray();
+            var visibleReplays = favoriteFilter == null
+                ? Calls.Where(card => (server == null || card.ServerId == server) && card.LiveArrivalSequence.HasValue &&
+                        !string.IsNullOrWhiteSpace(card.AudioUrl) && !IsFilteredForPlayback(card))
+                    .Select(card => card.LiveArrivalSequence!.Value).Distinct().ToArray()
+                : [];
 
             _backlog.CancelPendingJump();
             using var preparation = _transportLookups.Begin(manual: true, live.Token);
@@ -265,7 +271,8 @@ namespace JoesScanner.ViewModels
             try
             {
                 prepared = await PrepareManualAudioAsync(item, token);
-                if (!preparation.CanContinue || !_playbackOwnership.IsCurrent(live) || _monitoring.Current != run)
+                if (!preparation.CanContinue || !_playbackOwnership.IsCurrent(live) || _monitoring.Current != run ||
+                    favoriteFilter != null && !favoriteFilter(item))
                     return;
 
                 // A failed or superseded preparation never cancels the current clip
@@ -283,7 +290,11 @@ namespace JoesScanner.ViewModels
                 try
                 {
                     var durable = ScopeOf(item);
-                    var seek = AudioEnabled && _monitoring.CanRecover(run)
+                    // A Favorite selection is scoped to the card. The regular
+                    // automatic queue resumes without changing any recorder's floor.
+                    if (favoriteFilter != null)
+                        _manualLiveTraversal = null;
+                    var seek = favoriteFilter == null && AudioEnabled && _monitoring.CanRecover(run)
                         ? EstablishManualTraversalAsync(run!.Id, server, durable, item, visibleReplays, request)
                         : Task.FromResult<ManualLiveTraversal?>(null);
 
@@ -497,7 +508,8 @@ namespace JoesScanner.ViewModels
             if (_playbackOwnership.Live == null || direction is not (1 or -1))
                 return Task.CompletedTask;
 
-            var visible = Calls.Where(call => _visibleLiveServer == null || call.ServerId == _visibleLiveServer).ToArray();
+            var visible = Calls.Where(call => (_visibleLiveServer == null || call.ServerId == _visibleLiveServer) &&
+                (_visibleFavoriteFilter?.Invoke(call) ?? true)).ToArray();
             var anchor = _manualPlaybackTarget ?? _currentPlayingCall ?? _lastTransportCall;
             var index = Array.FindIndex(visible, call => ReferenceEquals(call, anchor) ||
                 call.LiveArrivalSequence.HasValue && call.LiveArrivalSequence == anchor?.LiveArrivalSequence);

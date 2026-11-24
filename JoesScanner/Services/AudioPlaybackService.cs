@@ -138,7 +138,8 @@ namespace JoesScanner.Services
                         source = new UriBuilder(source) { UserName = string.Empty, Password = string.Empty }.Uri;
 
                     var authentication = ServerAuthentication.For(_settings);
-                    if (authentication.RequiresFirewall(source) || authentication.GetCustomAuthorization(source) != null)
+                    if (PrivacyNetworkPolicy.For(_settings).IsJoeManaged(source) || _settings.LocalOnlyMode ||
+                        authentication.GetCustomAuthorization(source) != null)
                     {
                         authenticatedDownload = await DownloadToTempFileAsync(source.AbsoluteUri, linkedToken);
                         source = new Uri(authenticatedDownload);

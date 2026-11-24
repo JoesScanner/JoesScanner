@@ -14,6 +14,19 @@ public partial class MainViewModel
     private readonly ServerConnectionManager _connections = new(TimeProvider.System);
     private readonly ConcurrentDictionary<long, RecorderRun> _recorderRuns = new();
     private readonly ScannerConnectionStore _connectionStore;
+    private readonly PrivacyNetworkPolicy _privacyNetwork;
+    internal FavoritesService Favorites { get; }
+
+    private bool MayUseNetwork(SavedScannerConnection profile) => _privacyNetwork.Allows(new Uri(profile.Endpoint));
+
+    private void OnPrivacyNetworkChanged(object? sender, EventArgs e)
+    {
+        if (!_privacyNetwork.AllowsCloud)
+            _connections.Retire(profile => !MayUseNetwork(profile));
+        MainThread.BeginInvokeOnMainThread(() => ReconcileScannerConnections());
+    }
+
+    internal bool AllowsExternalLink(Uri uri) => _privacyNetwork.Allows(uri);
     private volatile IReadOnlyList<SavedScannerConnection> _profiles = Array.Empty<SavedScannerConnection>();
 
     public ObservableCollection<ScannerConnectionRow> ScannerConnections { get; } = [];
@@ -53,6 +66,7 @@ public partial class MainViewModel
                     AppLog.Add(() => $"Saved recorder credentials could not be migrated ({ex.GetType().Name}).");
                 }
             }
+            Favorites.SetProfiles(_profiles);
         }
         catch (Exception ex)
         {
@@ -129,7 +143,7 @@ public partial class MainViewModel
         RefreshScannerConnectionRows();
     }
 
-    internal void RemoveScannerConnection(ScannerConnectionRow row)
+    internal void RemoveScannerConnection(ScannerConnectionRow row, string? deleteFavoritesFor = null)
     {
         var profile = _profiles.FirstOrDefault(candidate => candidate.Id == row.Id);
         if (profile == null)
@@ -143,6 +157,8 @@ public partial class MainViewModel
                 !_profiles.Any(other => other.Id != profile.Id && SavedConnectionUrl.Scope(other.Endpoint) == origin))
                 _settingsService.ClearServerCredentials(origin);
         }
+        if (deleteFavoritesFor != null)
+            Favorites.DeleteServerFavorites(deleteFavoritesFor, profile);
         _connectionStore.Remove(profile.Id);
 
         var wasSelected = ScannerConnectionStore.Normalize(_settingsService.ServerUrl) == profile.Endpoint;
@@ -178,9 +194,8 @@ public partial class MainViewModel
     {
         if (_monitoring.CanRecover(_monitoring.Current))
         {
-            var profiles = _changingHostedAccount
-                ? _profiles.Where(profile => !RequiresHostedAccount(profile.Endpoint)).ToArray()
-                : _profiles;
+            var profiles = _profiles.Where(profile => MayUseNetwork(profile) &&
+                (!_changingHostedAccount || !RequiresHostedAccount(profile.Endpoint))).ToArray();
             if (!_profiles.Any(profile => profile.Enabled))
             {
                 _ = StopMonitoringAsync();
@@ -260,6 +275,8 @@ public partial class MainViewModel
     {
         if (!profile.Enabled)
             return ServerConnectionStatus.Disabled;
+        if (!MayUseNetwork(profile))
+            return ServerConnectionStatus.Unavailable;
         if (status != ServerConnectionStatus.Stopped || !profile.Managed)
             return status;
         try

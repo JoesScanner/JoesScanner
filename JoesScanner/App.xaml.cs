@@ -35,6 +35,23 @@ namespace JoesScanner
             _ = _settings.DeviceInstallId;
 
             _telemetryService.TrackAppStarted();
+            _settings.LocalOnlyModeChanged += (_, _) =>
+            {
+                if (!_settings.LocalOnlyMode)
+                {
+                    _telemetryService.TrackAppStarted();
+                    BeginStartupAuthVerification();
+                }
+            };
+
+            var favorites = _services.GetRequiredService<FavoritesService>();
+            favorites.Start();
+            favorites.Wake();
+            Connectivity.Current.ConnectivityChanged += (_, e) =>
+            {
+                if (e.NetworkAccess == NetworkAccess.Internet)
+                    favorites.Wake(force: true);
+            };
 
             // Verify auth + subscription once per app start.
             // This keeps the local subscription cache current and ensures the server can associate
@@ -65,6 +82,8 @@ namespace JoesScanner
             {
                 try
                 {
+                    if (_settings.LocalOnlyMode)
+                        return;
                     var serverUrl = (_settings.ServerUrl ?? string.Empty).Trim();
                     if (!Uri.TryCreate(serverUrl, UriKind.Absolute, out var serverUri))
                         return;

@@ -79,7 +79,8 @@ internal static class BackupAndDiagnosticTests
             var excluded = rules.Elements("exclude").Select(rule =>
                 ((string?)rule.Attribute("domain"), (string?)rule.Attribute("path"))).ToHashSet();
             foreach (var artifact in new[] { "joesscanner.db", "joesscanner.db-wal", "joesscanner.db-shm",
-                "joesscanner.db-journal", "Logs", "telemetry-events.json", "monitoring-reconnect.v1" })
+                "joesscanner.db-journal", "favorites.db", "favorites.db-wal", "favorites.db-shm", "favorites.db-journal",
+                "Logs", "telemetry-events.json", "monitoring-reconnect.v1" })
                 Check(excluded.Contains(("file", artifact)), "The app files directory must exclude every sensitive artifact.");
             Check(excluded.Contains(("sharedpref", "joesscanner.protected-credentials.xml")),
                 "Keystore-protected ciphertext must never be transferred independently of its device.");

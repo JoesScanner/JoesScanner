@@ -21,10 +21,8 @@ namespace JoesScanner.Services
         {
             _settings = settings ?? throw new ArgumentNullException(nameof(settings));
 
-            _http = new HttpClient
-            {
-                Timeout = TimeSpan.FromSeconds(6)
-            };
+            _http = PrivacyNetworkPolicy.For(settings).CreateCloudClient();
+            _http.Timeout = TimeSpan.FromSeconds(6);
         }
 
         public async Task ResolveCoordinatesIfNeededAsync(CallItem item, CancellationToken cancellationToken)
@@ -37,7 +35,7 @@ namespace JoesScanner.Services
                 return;
 
             var apiKey = (_settings.What3WordsApiKey ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(apiKey))
+            if (string.IsNullOrWhiteSpace(apiKey) || _settings.LocalOnlyMode)
                 return;
 
             var w3w = (item.What3WordsAddress ?? string.Empty).Trim();
