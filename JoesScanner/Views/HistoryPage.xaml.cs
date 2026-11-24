@@ -13,7 +13,7 @@ using Microsoft.Maui.Controls;
 
 namespace JoesScanner.Views
 {
-    public partial class HistoryPage : ContentPage
+    public partial class HistoryPage : ContentPage, ITabShowingAware, ITabHidingAware
     {
         private readonly HistoryViewModel _viewModel;
         private readonly ICallDownloadService _downloadService;
@@ -37,9 +37,25 @@ namespace JoesScanner.Views
             BindingContext = _viewModel;
         }
 
-        protected override async void OnAppearing()
+        public void OnTabShowing() => _ = ShowHistoryAsync();
+        public void OnTabHiding() => _ = HideHistoryAsync();
+
+        protected override void OnAppearing()
         {
             base.OnAppearing();
+            OnTabShowing();
+        }
+
+        protected override void OnDisappearing()
+        {
+            OnTabHiding();
+            base.OnDisappearing();
+        }
+
+        private async Task ShowHistoryAsync()
+        {
+            if (_isAppearing)
+                return;
 
             Interlocked.Increment(ref _appearanceGeneration);
             _isAppearing = true;
@@ -55,7 +71,7 @@ namespace JoesScanner.Views
             }
             catch (Exception ex)
             {
-                AppLog.Add(() => $"HistoryPage: OnAppearing failed. ex={ex.GetType().Name}: {ex.Message}");
+                AppLog.Add(() => $"HistoryPage: Showing History failed. ex={ex.GetType().Name}: {ex.Message}");
             }
         }
 
@@ -95,21 +111,22 @@ namespace JoesScanner.Views
             }
         }
 
-        protected override void OnDisappearing()
+        private async Task HideHistoryAsync()
         {
+            if (!_isAppearing)
+                return;
+
             _isAppearing = false;
             Interlocked.Increment(ref _appearanceGeneration);
-            base.OnDisappearing();
-
             _viewModel.ScrollRequested -= OnScrollRequested;
 
             try
             {
-                _ = _viewModel.OnPageClosedAsync();
+                await _viewModel.OnPageClosedAsync();
             }
             catch (Exception ex)
             {
-                AppLog.Add(() => $"HistoryPage: OnDisappearing failed. ex={ex.GetType().Name}: {ex.Message}");
+                AppLog.Add(() => $"HistoryPage: Hiding History failed. ex={ex.GetType().Name}: {ex.Message}");
             }
         }
 

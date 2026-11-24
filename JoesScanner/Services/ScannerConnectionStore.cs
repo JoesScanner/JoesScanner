@@ -12,11 +12,11 @@ internal sealed record SavedScannerConnection(Guid Id, string Endpoint, string N
 
 public sealed class ScannerConnectionStore(IDatabasePathProvider paths)
 {
-    internal IReadOnlyList<SavedScannerConnection> Load(string? legacyEndpoint)
+    internal IReadOnlyList<SavedScannerConnection> Load(string? legacyEndpoint, int? legacyDirectoryId = null, string? legacyName = null)
     {
         using var db = Open();
         using var transaction = db.BeginTransaction();
-        ImportLegacySelection(db, transaction, legacyEndpoint);
+        ImportLegacySelection(db, transaction, legacyEndpoint, legacyDirectoryId, legacyName);
         var connections = ReadConnections(db, transaction);
         transaction.Commit();
         return connections;
@@ -34,18 +34,22 @@ public sealed class ScannerConnectionStore(IDatabasePathProvider paths)
             : null;
         var edited = editId.HasValue ? connections.FirstOrDefault(connection => connection.Id == editId) : null;
 
-        // A directory selection associates the local connection with the directory ID.
-        // A manual address edit applies only to a manual connection.
-        var editable = directoryId == null && edited?.Managed == false ? edited : null;
-        if (editable != null && byEndpoint != null && editable.Id != byEndpoint.Id)
+        if (editId.HasValue && edited == null)
+            throw new InvalidOperationException("This recorder was removed while it was being edited.");
+        if (edited?.Managed == true && edited.Endpoint != safe)
+            throw new InvalidOperationException("The directory manages this recorder's address.");
+        var existing = edited ?? byDirectory ?? byEndpoint;
+        if (byEndpoint != null && byEndpoint.Id != existing?.Id)
             throw new InvalidOperationException("This endpoint is already configured as another recorder.");
 
-        var existing = byDirectory ?? byEndpoint ?? editable;
-        var displayName = string.IsNullOrWhiteSpace(name) ? new Uri(safe).Authority : name.Trim();
+        var displayName = string.IsNullOrWhiteSpace(name) ? existing?.Name ?? new Uri(safe).Authority : name.Trim();
         var saved = new SavedScannerConnection(existing?.Id ?? Guid.NewGuid(), safe, displayName,
-            directoryId ?? existing?.DirectoryId, existing?.Enabled ?? true, LegacyFilterKey: existing?.LegacyFilterKey);
+            edited?.DirectoryId ?? directoryId ?? existing?.DirectoryId, existing?.Enabled ?? true,
+            LegacyFilterKey: existing?.LegacyFilterKey);
         saveCredentials?.Invoke(saved);
         using var transaction = db.BeginTransaction();
+        if (existing != null)
+            RememberOrigin(db, transaction, existing);
         WriteConnection(db, transaction, saved);
         transaction.Commit();
         return saved;
@@ -70,6 +74,62 @@ public sealed class ScannerConnectionStore(IDatabasePathProvider paths)
         command.ExecuteNonQuery();
     }
 
+    internal void Move(Guid id, int direction)
+    {
+        if (direction is not (-1 or 1))
+            throw new ArgumentOutOfRangeException(nameof(direction));
+
+        using var db = Open();
+        using var transaction = db.BeginTransaction();
+        var connections = ReadConnections(db, transaction);
+        var previous = connections.FindIndex(profile => profile.Id == id);
+        var next = previous + direction;
+        if (previous < 0 || next < 0 || next >= connections.Count)
+            return;
+
+        (connections[previous], connections[next]) = (connections[next], connections[previous]);
+        using var update = db.CreateCommand();
+        update.Transaction = transaction;
+        update.CommandText = "UPDATE scanner_connections SET sort_order = $order WHERE server_id = $id;";
+        var order = update.Parameters.Add("$order", SqliteType.Integer);
+        var key = update.Parameters.Add("$id", SqliteType.Text);
+        for (var i = 0; i < connections.Count; i++)
+        {
+            order.Value = i;
+            key.Value = connections[i].Id.ToString("N");
+            update.ExecuteNonQuery();
+        }
+        transaction.Commit();
+    }
+
+    internal IReadOnlyList<string> CredentialOrigins(SavedScannerConnection profile)
+    {
+        using var db = Open();
+        using var select = db.CreateCommand();
+        select.CommandText = "SELECT origin FROM scanner_connection_origins WHERE server_id = $id;";
+        select.Parameters.AddWithValue("$id", profile.Id.ToString("N"));
+        using var reader = select.ExecuteReader();
+        var origins = new HashSet<string>(StringComparer.Ordinal);
+        if (SavedConnectionUrl.Scope(profile.Endpoint) is { } current)
+            origins.Add(current);
+        while (reader.Read())
+            origins.Add(reader.GetString(0));
+        return origins.ToArray();
+    }
+
+    internal void Remove(Guid id)
+    {
+        using var db = Open();
+        using var transaction = db.BeginTransaction();
+        MarkLegacySelectionImported(db, transaction);
+        using var delete = db.CreateCommand();
+        delete.Transaction = transaction;
+        delete.CommandText = "DELETE FROM scanner_connections WHERE server_id = $id;";
+        delete.Parameters.AddWithValue("$id", id.ToString("N"));
+        delete.ExecuteNonQuery();
+        transaction.Commit();
+    }
+
     internal static string? Normalize(string? endpoint) =>
         RecordingStorageReference.ServerKey(SavedConnectionUrl.SafeDisplay(endpoint));
 
@@ -89,16 +149,59 @@ public sealed class ScannerConnectionStore(IDatabasePathProvider paths)
         }
     }
 
-    private static void ImportLegacySelection(SqliteConnection db, SqliteTransaction transaction, string? legacyEndpoint)
+    private static void ImportLegacySelection(SqliteConnection db, SqliteTransaction transaction,
+        string? legacyEndpoint, int? directoryId, string? name)
     {
-        if (Normalize(legacyEndpoint) is not { } endpoint)
-            return;
         using var command = db.CreateCommand();
         command.Transaction = transaction;
-        command.CommandText = "SELECT EXISTS (SELECT 1 FROM scanner_connections);";
-        if (command.ExecuteScalar() is 0L)
-            WriteConnection(db, transaction, new(Guid.NewGuid(), endpoint, new Uri(endpoint).Authority, null, true,
-                CredentialsMigrated: false, LegacyFilterKey: ServerKeyHelper.Normalize(endpoint)));
+        command.CommandText = """
+            SELECT EXISTS (SELECT 1 FROM app_settings WHERE setting_key = 'scanner_catalog_initialized'),
+                   EXISTS (SELECT 1 FROM scanner_connections);
+            """;
+        bool hasConnections;
+        using (var reader = command.ExecuteReader())
+        {
+            if (!reader.Read() || reader.GetBoolean(0))
+                return;
+            hasConnections = reader.GetBoolean(1);
+        }
+
+        if (Normalize(legacyEndpoint) is { } endpoint)
+        {
+            if (!hasConnections)
+            {
+                WriteConnection(db, transaction, new(Guid.NewGuid(), endpoint, name ?? new Uri(endpoint).Authority, directoryId, true,
+                    CredentialsMigrated: false, LegacyFilterKey: ServerKeyHelper.Normalize(endpoint)));
+            }
+            else if (directoryId.HasValue)
+            {
+                // A legacy selection imported before the Settings UI may only have its URL.
+                command.CommandText = """
+                    UPDATE scanner_connections SET directory_id = $directory,
+                        display_name = CASE WHEN display_name = $authority THEN $name ELSE display_name END
+                    WHERE endpoint = $endpoint AND legacy_filter_key IS NOT NULL AND directory_id IS NULL
+                        AND NOT EXISTS (SELECT 1 FROM scanner_connections WHERE directory_id = $directory);
+                    """;
+                var authority = new Uri(endpoint).Authority;
+                command.Parameters.AddWithValue("$endpoint", endpoint);
+                command.Parameters.AddWithValue("$directory", directoryId.Value);
+                command.Parameters.AddWithValue("$name", name ?? authority);
+                command.Parameters.AddWithValue("$authority", authority);
+                command.ExecuteNonQuery();
+            }
+        }
+        MarkLegacySelectionImported(db, transaction);
+    }
+
+    private static void MarkLegacySelectionImported(SqliteConnection db, SqliteTransaction transaction)
+    {
+        using var command = db.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT OR IGNORE INTO app_settings(setting_key, setting_value, updated_utc)
+            VALUES ('scanner_catalog_initialized', 'true', '');
+            """;
+        command.ExecuteNonQuery();
     }
 
     private static List<SavedScannerConnection> ReadConnections(SqliteConnection db, SqliteTransaction? transaction)
@@ -107,7 +210,7 @@ public sealed class ScannerConnectionStore(IDatabasePathProvider paths)
         command.Transaction = transaction;
         command.CommandText = """
             SELECT server_id, endpoint, display_name, directory_id, enabled, credentials_migrated, legacy_filter_key
-            FROM scanner_connections ORDER BY rowid;
+            FROM scanner_connections ORDER BY coalesce(sort_order, rowid), rowid;
             """;
         using var reader = command.ExecuteReader();
         var connections = new List<SavedScannerConnection>();
@@ -126,8 +229,9 @@ public sealed class ScannerConnectionStore(IDatabasePathProvider paths)
         using var command = db.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            INSERT INTO scanner_connections(server_id, endpoint, display_name, directory_id, enabled, credentials_migrated, legacy_filter_key)
-            VALUES ($id, $endpoint, $name, $directory, $enabled, $migrated, $filterKey)
+            INSERT INTO scanner_connections(server_id, endpoint, display_name, directory_id, enabled, credentials_migrated, legacy_filter_key, sort_order)
+            VALUES ($id, $endpoint, $name, $directory, $enabled, $migrated, $filterKey,
+                (SELECT coalesce(max(coalesce(sort_order, rowid)), 0) + 1 FROM scanner_connections))
             ON CONFLICT(server_id) DO UPDATE SET
                 endpoint = excluded.endpoint, display_name = excluded.display_name, directory_id = excluded.directory_id,
                 credentials_migrated = excluded.credentials_migrated;
@@ -139,6 +243,21 @@ public sealed class ScannerConnectionStore(IDatabasePathProvider paths)
         command.Parameters.AddWithValue("$enabled", saved.Enabled);
         command.Parameters.AddWithValue("$migrated", saved.CredentialsMigrated);
         command.Parameters.AddWithValue("$filterKey", (object?)saved.LegacyFilterKey ?? DBNull.Value);
+        command.ExecuteNonQuery();
+        RememberOrigin(db, transaction, saved);
+    }
+
+    private static void RememberOrigin(SqliteConnection db, SqliteTransaction transaction, SavedScannerConnection profile)
+    {
+        if (SavedConnectionUrl.Scope(profile.Endpoint) is not { } origin)
+            return;
+        using var command = db.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            INSERT OR IGNORE INTO scanner_connection_origins(server_id, origin) VALUES ($id, $origin);
+            """;
+        command.Parameters.AddWithValue("$id", profile.Id.ToString("N"));
+        command.Parameters.AddWithValue("$origin", origin);
         command.ExecuteNonQuery();
     }
 }

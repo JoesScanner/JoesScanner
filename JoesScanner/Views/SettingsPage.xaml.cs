@@ -754,10 +754,18 @@ namespace JoesScanner.Views
         }
 
 
-        // Validate click handler.
-        // iOS can re-layout and flicker password entries if we push Text updates every keystroke.
-        // We bind the Entry Text updates on Unfocused and force an Unfocus here so the latest
-        // values commit right before we run validation.
+        private void OnScannerConnectionAdd(object? sender, EventArgs e)
+        {
+            if (BindingContext is SettingsViewModel vm)
+                vm.OpenNewScannerConnection();
+        }
+
+        private void OnScannerConnectionCancel(object? sender, EventArgs e)
+        {
+            if (BindingContext is SettingsViewModel vm)
+                vm.CloseScannerEditor();
+        }
+
         private void OnScannerConnectionEdit(object? sender, EventArgs e)
         {
             if (sender is Button { BindingContext: ScannerConnectionRow row } && BindingContext is SettingsViewModel vm)
@@ -766,18 +774,62 @@ namespace JoesScanner.Views
 
         private void OnScannerConnectionToggled(object? sender, ToggledEventArgs e)
         {
-            if (sender is Microsoft.Maui.Controls.Switch { BindingContext: ScannerConnectionRow row } &&
+            if (sender is Microsoft.Maui.Controls.Switch { BindingContext: ScannerConnectionRow row } toggle &&
                 BindingContext is SettingsViewModel vm && row.Enabled != e.Value)
+            {
                 vm.SetScannerConnectionEnabled(row, e.Value);
+                toggle.IsToggled = row.Enabled;
+            }
         }
 
+        private void OnScannerConnectionMoveUp(object? sender, EventArgs e) => MoveScannerConnection(sender, -1);
+        private void OnScannerConnectionMoveDown(object? sender, EventArgs e) => MoveScannerConnection(sender, 1);
+
+        private async void MoveScannerConnection(object? sender, int direction)
+        {
+            if (sender is not Button { BindingContext: ScannerConnectionRow row } || BindingContext is not SettingsViewModel vm)
+                return;
+            try { vm.MoveScannerConnection(row, direction); }
+            catch (Exception ex)
+            {
+                AppLog.Add(() => $"Could not reorder saved servers ({ex.GetType().Name}).");
+                await UiDialogs.AlertAsync("Server order", "The server order could not be saved.", "Close");
+            }
+        }
+
+        private async void OnScannerConnectionRemove(object? sender, EventArgs e)
+        {
+            if (sender is not Button { BindingContext: ScannerConnectionRow row } || BindingContext is not SettingsViewModel vm ||
+                !await UiDialogs.ConfirmAsync("Remove server?", $"Remove {row.Name} and its saved recorder login?", "Remove", "Cancel"))
+                return;
+            try { vm.RemoveScannerConnection(row); }
+            catch (Exception ex)
+            {
+                AppLog.Add(() => $"Could not remove a saved server ({ex.GetType().Name}).");
+                await UiDialogs.AlertAsync("Remove server", "The server could not be removed. Try again.", "Close");
+            }
+        }
+
+        private async void OnScannerConnectionSaveDirectory(object? sender, EventArgs e)
+        {
+            if (BindingContext is not SettingsViewModel vm)
+                return;
+            try { vm.SaveDirectoryConnection(); }
+            catch (Exception ex)
+            {
+                AppLog.Add(() => $"Could not save a directory server ({ex.GetType().Name}).");
+                await UiDialogs.AlertAsync("Save server", "The server could not be saved.", "Close");
+            }
+        }
+
+        // Commit the Entry bindings that update on Unfocused before starting validation.
         private async void OnValidateClicked(object sender, EventArgs e)
         {
             try
             {
                 // Force bindings to commit their Text values.
                 // Only unfocus the custom URL entry when Custom server is actually selected.
-                if (BindingContext is SettingsViewModel urlVm && urlVm.IsCustomServerSelected)
+                if (BindingContext is SettingsViewModel urlVm && urlVm.CanEditScannerAddress)
                     ConnectionFieldsGrid.Content?.FindByName<Entry>("ServerUrlEntry")?.Unfocus();
 
                 ConnectionFieldsGrid.Content?.FindByName<Entry>("BasicAuthUsernameEntry")?.Unfocus();

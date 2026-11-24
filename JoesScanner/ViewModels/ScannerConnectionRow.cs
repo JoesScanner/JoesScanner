@@ -6,6 +6,8 @@ public sealed class ScannerConnectionRow : BindableObject
 {
     private SavedScannerConnection _profile;
     private ServerConnectionStatus _status;
+    private bool _canMoveUp;
+    private bool _canMoveDown;
 
     internal ScannerConnectionRow(SavedScannerConnection profile, ServerConnectionStatus status)
     {
@@ -14,26 +16,30 @@ public sealed class ScannerConnectionRow : BindableObject
     }
 
     internal Guid Id => _profile.Id;
+    internal bool Managed => _profile.Managed;
+    internal int? DirectoryId => _profile.DirectoryId;
+    public bool CanMoveUp => _canMoveUp;
+    public bool CanMoveDown => _canMoveDown;
     public string Name => _profile.Name;
     public string Endpoint => _profile.Endpoint;
     public bool Enabled => _profile.Enabled;
 
-    public string StatusText => _status switch
-    {
-        ServerConnectionStatus.Monitoring => "Connected",
-        ServerConnectionStatus.Reconnecting => "Reconnecting",
-        ServerConnectionStatus.Unavailable => "Unavailable",
-        ServerConnectionStatus.SetupRequired => "Setup required",
-        _ => _status.ToString()
-    };
+    public string StatusText => ServerConnectionPresentation.Text(_status);
+    public Color StatusColor => Color.FromArgb(ServerConnectionPresentation.Color(_status));
 
-    public Color StatusColor => _status switch
+    internal void UpdateOrder(bool canMoveUp, bool canMoveDown)
     {
-        ServerConnectionStatus.Monitoring => Color.FromArgb("#15803d"),
-        ServerConnectionStatus.Connecting or ServerConnectionStatus.Reconnecting => Colors.Goldenrod,
-        ServerConnectionStatus.Unavailable or ServerConnectionStatus.SetupRequired => Colors.Red,
-        _ => Color.FromArgb("#6b7280")
-    };
+        if (_canMoveUp != canMoveUp)
+        {
+            _canMoveUp = canMoveUp;
+            OnPropertyChanged(nameof(CanMoveUp));
+        }
+        if (_canMoveDown != canMoveDown)
+        {
+            _canMoveDown = canMoveDown;
+            OnPropertyChanged(nameof(CanMoveDown));
+        }
+    }
 
     internal void Update(SavedScannerConnection profile, ServerConnectionStatus status)
     {

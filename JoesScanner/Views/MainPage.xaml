@@ -202,7 +202,22 @@
                     </Grid>
                 </Border>
 
-                <!-- CALL LIST -->
+                <Grid Grid.Row="1" RowDefinitions="Auto,*" RowSpacing="4">
+                    <HorizontalStackLayout Grid.Row="0" Spacing="5" Margin="4,2">
+                        <Button x:Name="CombinedLiveButton" Text="Combined" AutomationId="CombinedLiveView"
+                                FontSize="12" Style="{StaticResource PillButtonStyle}" Clicked="OnCombinedLiveClicked" />
+                        <Button x:Name="SeparateLiveButton" Text="Separate" AutomationId="SeparateLiveView"
+                                FontSize="12" Style="{StaticResource SecondaryPillButtonStyle}" Clicked="OnSeparateLiveClicked" />
+                    </HorizontalStackLayout>
+                    <Grid x:Name="SeparateLiveHost" Grid.Row="1" RowDefinitions="Auto,*" RowSpacing="4" IsVisible="False">
+                        <ScrollView x:Name="ServerTabsScroll" Orientation="Horizontal" HorizontalScrollBarVisibility="Never">
+                            <HorizontalStackLayout x:Name="ServerTabs" Spacing="5" Margin="4,0" />
+                        </ScrollView>
+                        <Grid x:Name="ServerPanels" Grid.Row="1" ColumnSpacing="8" />
+                        <Label x:Name="NoEnabledRecorders" Grid.Row="1" Text="No enabled servers"
+                               HorizontalOptions="Center" VerticalOptions="Center" IsVisible="False" />
+                    </Grid>
+
                 <CollectionView
                     Grid.Row="1"
                     x:Name="CallsView"
@@ -439,6 +454,7 @@
                         </DataTemplate>
                     </CollectionView.ItemTemplate>
                 </CollectionView>
+                </Grid>
 
                 <!-- FOOTER: client info and donate button -->
                 <Grid

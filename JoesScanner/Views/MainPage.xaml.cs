@@ -15,7 +15,7 @@ using Foundation;
 
 namespace JoesScanner.Views
 {
-    public partial class MainPage : ContentPage
+    public partial class MainPage : ContentPage, ITabShowingAware, ITabHidingAware
     {
         private readonly MainViewModel _viewModel = null!;
 
@@ -42,6 +42,7 @@ namespace JoesScanner.Views
 
             _viewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
             BindingContext = _viewModel;
+            InitializeLiveDisplay();
 
             try
             {
@@ -79,15 +80,6 @@ namespace JoesScanner.Views
             }
 
 
-            try
-            {
-                _viewModel?.RequestJumpToLiveScroll += OnRequestJumpToLiveScroll;
-            }
-            catch
-            {
-            }
-
-            AttachAutoFollowHandlers();
 
             AttachAddressAlertHandlers();
         }
@@ -265,6 +257,11 @@ private void AttachAddressAlertHandlers()
 
         private void OnRequestJumpToLiveScroll()
         {
+            if (_liveDisplay.Separate)
+            {
+                ScrollSeparatePanelsToLive();
+                return;
+            }
             try
             {
                 // This is a deliberate override of the user's scroll position.
@@ -295,6 +292,8 @@ private void AttachAddressAlertHandlers()
                 return;
 
             _handlersAttached = true;
+            _viewModel.RequestJumpToLiveScroll += OnRequestJumpToLiveScroll;
+            AttachLiveDisplay();
 
             try
             {
@@ -322,6 +321,7 @@ private void AttachAddressAlertHandlers()
                 return;
 
             _handlersAttached = false;
+            DetachLiveDisplay();
 
             try
             {
@@ -970,6 +970,9 @@ private static async Task OpenWhat3WordsForCallAsync(JoesScanner.Models.CallItem
             }
         }
 
+        public void OnTabShowing() => AttachAutoFollowHandlers();
+        public void OnTabHiding() => DetachAutoFollowHandlers();
+
         protected override async void OnAppearing()
         {
             base.OnAppearing();
@@ -1007,7 +1010,7 @@ private void OnAlertTapped(object? sender, TappedEventArgs e)
         }
 
         // Scroll to the call so the user can see it in context.
-        try { CallsView?.ScrollTo(resolved, position: ScrollToPosition.Center, animate: true); } catch { }
+        try { ScrollToAddressCall(resolved); } catch { }
 
 	        // Address alert taps should not derail the live queue anchor.
 	        // Play the selected call, then let the queue continue from where it was.

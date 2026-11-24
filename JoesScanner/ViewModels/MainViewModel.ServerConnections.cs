@@ -17,6 +17,7 @@ public partial class MainViewModel
     private volatile IReadOnlyList<SavedScannerConnection> _profiles = Array.Empty<SavedScannerConnection>();
 
     public ObservableCollection<ScannerConnectionRow> ScannerConnections { get; } = [];
+    internal event Action? ScannerConnectionLayoutChanged;
 
     private bool HasEnabledScannerConnections() => LoadScannerConnections().Any(profile => profile.Enabled);
 
@@ -24,7 +25,18 @@ public partial class MainViewModel
     {
         try
         {
-            _profiles = _connectionStore.Load(legacyEndpoint ?? _settingsService.ServerUrl);
+            var selected = ScannerConnectionStore.Normalize(legacyEndpoint ?? _settingsService.ServerUrl);
+            ServerDirectoryEntry? listed = null;
+            if (selected != null)
+            {
+                try
+                {
+                    listed = _settingsService.GetCachedDirectoryServers()
+                        .FirstOrDefault(entry => entry.DirectoryId > 0 && ScannerConnectionStore.Normalize(entry.Url) == selected);
+                }
+                catch (Exception ex) { AppLog.Add(() => $"Cached directory could not be read ({ex.GetType().Name})."); }
+            }
+            _profiles = _connectionStore.Load(selected, listed?.DirectoryId, listed?.Name);
             _filterService.ConfigureRecorderScopes(_profiles.Select(profile => (profile.Id, profile.Endpoint, profile.FilterKey)),
                 _settingsService.ServerUrl);
             foreach (var profile in _profiles.Where(profile => !profile.CredentialsMigrated))
@@ -55,14 +67,10 @@ public partial class MainViewModel
         PublishScannerConnectionRows();
     }
 
-    internal void SaveValidatedScannerConnection(string previousEndpoint, string endpoint, ServerDirectoryEntry? directory,
-        bool addAnother, Guid? editId, (string Username, string Password)? customCredentials, bool credentialsChanged)
+    internal void SaveScannerConnection(string endpoint, string? name, int? directoryId, Guid? editId,
+        (string Username, string Password)? customCredentials = null, bool credentialsChanged = false)
     {
-        var previous = LoadScannerConnections(previousEndpoint)
-            .FirstOrDefault(profile => profile.Endpoint == ScannerConnectionStore.Normalize(previousEndpoint));
-        var saved = _connectionStore.Save(endpoint, directory?.Name,
-            directory is { DirectoryId: > 0 } ? directory.DirectoryId : null,
-            addAnother ? null : editId ?? previous?.Id, profile =>
+        var saved = _connectionStore.Save(endpoint, name, directoryId, editId, profile =>
             {
                 if (customCredentials is { } credentials)
                 {
@@ -72,7 +80,8 @@ public partial class MainViewModel
                 }
             });
         LoadScannerConnections();
-        ReconcileScannerConnections(credentialsChanged ? saved.Id : null);
+        try { SelectScannerForLegacyViews(saved); }
+        finally { ReconcileScannerConnections(credentialsChanged ? saved.Id : null); }
     }
 
     internal bool TryGetConfiguredRecorderCredentials(string endpoint, out string username, out string password)
@@ -98,6 +107,71 @@ public partial class MainViewModel
             AppLog.Add(() => $"Could not save recorder connection settings ({ex.GetType().Name}).");
         }
         finally { PublishScannerConnectionRows(); }
+    }
+
+    internal string? ScannerConnectionEditError(ScannerConnectionRow? row, string endpoint)
+    {
+        if (row == null)
+            return null;
+        var proposed = ScannerConnectionStore.Normalize(endpoint);
+        var existing = _profiles.FirstOrDefault(profile => profile.Id == row.Id);
+        if (existing == null)
+            return "This server has already been removed.";
+        if (existing.Managed && existing.Endpoint != proposed)
+            return "The directory manages this server's address.";
+        return _profiles.Any(profile => profile.Id != row.Id && profile.Endpoint == proposed)
+            ? "This address is already configured as another server." : null;
+    }
+
+    internal void MoveScannerConnection(ScannerConnectionRow row, int direction)
+    {
+        _connectionStore.Move(row.Id, direction);
+        RefreshScannerConnectionRows();
+    }
+
+    internal void RemoveScannerConnection(ScannerConnectionRow row)
+    {
+        var profile = _profiles.FirstOrDefault(candidate => candidate.Id == row.Id);
+        if (profile == null)
+            return;
+
+        // Joe's account is shared by the directory and other recorders. Remove only this recorder's logins.
+        foreach (var origin in _connectionStore.CredentialOrigins(profile))
+        {
+            _settingsService.SetRecorderCredentials(profile.Id, origin, string.Empty, string.Empty);
+            if (!HostedServerRules.IsHostedStreamServerUrl(origin) &&
+                !_profiles.Any(other => other.Id != profile.Id && SavedConnectionUrl.Scope(other.Endpoint) == origin))
+                _settingsService.ClearServerCredentials(origin);
+        }
+        _connectionStore.Remove(profile.Id);
+
+        var wasSelected = ScannerConnectionStore.Normalize(_settingsService.ServerUrl) == profile.Endpoint;
+        LoadScannerConnections();
+        try
+        {
+            if (wasSelected)
+            {
+                var replacement = _profiles.FirstOrDefault(candidate => candidate.Enabled) ?? _profiles.FirstOrDefault();
+                SelectScannerForLegacyViews(replacement);
+            }
+        }
+        catch (CredentialStorageException)
+        {
+            ServerUrl = string.Empty;
+        }
+        finally { ReconcileScannerConnections(); }
+    }
+
+    private void SelectScannerForLegacyViews(SavedScannerConnection? selected)
+    {
+        // History still reads the selected endpoint's legacy credentials. Copy only the
+        // selected profile's own pair, including clearing that slot for a public recorder.
+        if (selected != null && !RequiresHostedAccount(selected.Endpoint))
+        {
+            _settingsService.TryGetRecorderCredentials(selected.Id, selected.Endpoint, out var username, out var password);
+            _settingsService.SetServerCredentials(selected.Endpoint, username, password);
+        }
+        ServerUrl = selected?.Endpoint ?? string.Empty;
     }
 
     private void ReconcileScannerConnections(Guid? restart = null)
@@ -142,15 +216,35 @@ public partial class MainViewModel
     private void PublishScannerConnectionRows()
     {
         var statuses = _connections.Snapshot().ToDictionary(connection => connection.Profile.Id, connection => connection.Status);
-        foreach (var profile in _profiles)
+        var current = ScannerConnections.Select(row => (row.Id, row.Enabled)).ToArray();
+        var saved = _profiles;
+        var ids = saved.Select(profile => profile.Id).ToHashSet();
+        for (var i = ScannerConnections.Count - 1; i >= 0; i--)
+            if (!ids.Contains(ScannerConnections[i].Id))
+                ScannerConnections.RemoveAt(i);
+
+        for (var i = 0; i < saved.Count; i++)
         {
-            var status = profile.Enabled ? statuses.GetValueOrDefault(profile.Id) : ServerConnectionStatus.Disabled;
+            var profile = saved[i];
+            var status = GetScannerRowStatus(profile, statuses.GetValueOrDefault(profile.Id));
             var row = ScannerConnections.FirstOrDefault(candidate => candidate.Id == profile.Id);
             if (row == null)
-                ScannerConnections.Add(new ScannerConnectionRow(profile, status));
+            {
+                row = new ScannerConnectionRow(profile, status);
+                ScannerConnections.Insert(i, row);
+            }
             else
+            {
                 row.Update(profile, status);
+                var oldIndex = ScannerConnections.IndexOf(row);
+                if (oldIndex != i)
+                    ScannerConnections.Move(oldIndex, i);
+            }
+            row.UpdateOrder(i > 0, i < saved.Count - 1);
         }
+
+        if (!current.SequenceEqual(saved.Select(profile => (profile.Id, profile.Enabled))))
+            ScannerConnectionLayoutChanged?.Invoke();
 
         if (!_monitoring.CanRecover(_monitoring.Current))
             return;
@@ -160,6 +254,23 @@ public partial class MainViewModel
             statuses.Values.Contains(ServerConnectionStatus.SetupRequired) ? ConnectionStatus.AuthFailed :
                 ConnectionStatus.ServerUnreachable;
         SetConnectionStatus(aggregate);
+    }
+
+    private ServerConnectionStatus GetScannerRowStatus(SavedScannerConnection profile, ServerConnectionStatus status)
+    {
+        if (!profile.Enabled)
+            return ServerConnectionStatus.Disabled;
+        if (status != ServerConnectionStatus.Stopped || !profile.Managed)
+            return status;
+        try
+        {
+            if (RequiresHostedAccount(profile.Endpoint) &&
+                (!_settingsService.TryGetServerCredentials(HostedServerRules.DefaultServerUrl, out var user, out var password) ||
+                 string.IsNullOrWhiteSpace(user) || string.IsNullOrWhiteSpace(password)))
+                return ServerConnectionStatus.SetupRequired;
+        }
+        catch (CredentialStorageException) { return ServerConnectionStatus.SetupRequired; }
+        return status;
     }
 
     private void RetireRecorder(ServerConnectionManager.Connection connection)

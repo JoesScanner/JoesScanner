@@ -127,7 +127,14 @@ CREATE TABLE IF NOT EXISTS scanner_connections (
   directory_id INTEGER NULL UNIQUE,
   enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
   credentials_migrated INTEGER NOT NULL DEFAULT 1,
-  legacy_filter_key TEXT NULL
+  legacy_filter_key TEXT NULL,
+  sort_order INTEGER NULL
+);
+
+CREATE TABLE IF NOT EXISTS scanner_connection_origins (
+  server_id TEXT NOT NULL REFERENCES scanner_connections(server_id) ON DELETE CASCADE,
+  origin TEXT NOT NULL,
+  PRIMARY KEY (server_id, origin)
 );
 
 CREATE TABLE IF NOT EXISTS server_runtime_state (
@@ -256,6 +263,7 @@ CREATE INDEX IF NOT EXISTS idx_unregistered_queue_created ON unregistered_sessio
 ";
         await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 
+        await EnsureColumnExistsAsync(connection, "scanner_connections", "sort_order", "INTEGER NULL", cancellationToken).ConfigureAwait(false);
         await EnsureColumnExistsAsync(connection, "servers", "display_name", "TEXT NOT NULL DEFAULT ''", cancellationToken).ConfigureAwait(false);
         await EnsureColumnExistsAsync(connection, "servers", "enabled", "INTEGER NOT NULL DEFAULT 1", cancellationToken).ConfigureAwait(false);
         await EnsureColumnExistsAsync(connection, "servers", "sort_order", "INTEGER NOT NULL DEFAULT 0", cancellationToken).ConfigureAwait(false);

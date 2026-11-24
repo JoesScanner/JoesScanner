@@ -54,7 +54,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
         private string _serverUrl = string.Empty;
         private bool _autoPlay;
         private bool _what3WordsLinksEnabled = true;
-        private const int MaxCallsToKeep = 100;
+        private const int MaxCallsToKeep = LiveCallDisplay.CardLimit;
         private bool _audioEnabled;
         private int _totalCallsReceived;
         private int _totalCallsInserted;
@@ -1773,6 +1773,12 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                 if (!IsCurrentLiveScope(durable) || saved.IsRecoveryBacklog)
                     return;
 
+                var existing = FindLiveCard(incoming, durable.ServerId);
+                // The first HTTP snapshot is already in History. It can update a
+                // card still on screen when that recorder was disabled and re-enabled.
+                if (call.IsListeningBaseline && existing == null)
+                    return;
+
                 call.LiveArrivalSequence = saved.ArrivalSequence;
                 call.LivePlaybackOwner = durable.Owner;
                 if (call.RecordingAccess is { } access)
@@ -1783,9 +1789,9 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                 if (!call.IsLiveUpdate || !string.IsNullOrEmpty(call.Transcription))
                     TotalCallsReceived++;
 
-                if (call.IsLiveUpdate || FindLiveCard(incoming, durable.ServerId) is { })
+                if (call.IsLiveUpdate || existing != null)
                 {
-                    ApplyLiveUpdate(incoming, call);
+                    ApplyLiveUpdate(incoming, call, existing);
                     RequestQueueForLiveArrival("UpdatedLiveRecording");
                     return;
                 }
@@ -2098,11 +2104,12 @@ private static string SpeedStepToLabel(double step)
             var index = 0;
             while (index < Calls.Count && CompareCardOrder(Calls[index], card) >= 0)
                 index++;
-            if (index < MaxCallsToKeep)
-            {
-                Calls.Insert(index, card);
-                EnforceMaxCalls();
-            }
+            var shouldPrune = Calls.Count == MaxCallsToKeep;
+            if (!LiveCallDisplay.InsertCard(Calls, card, index, _currentPlayingCall))
+                return;
+            if (shouldPrune)
+                PurgeStaleAddressAlerts();
+            UpdateQueueDerivedState();
         }
 
         private static int CompareCardOrder(CallItem left, CallItem right)
@@ -2161,29 +2168,6 @@ private static string SpeedStepToLabel(double step)
 
             count += GetPendingPlayableCount();
             return count;
-        }
-
-        private void EnforceMaxCalls()
-        {
-			var max = MaxCallsToKeep;
-			List<CallItem>? removed = null;
-			while (Calls.Count > max)
-			{
-				var lastIndex = Calls.Count - 1;
-				if (lastIndex < 0)
-					break;
-
-				removed ??= new List<CallItem>();
-				removed.Add(Calls[lastIndex]);
-				Calls.RemoveAt(lastIndex);
-			}
-
-			if (removed != null && removed.Count > 0)
-			{
-				PurgeStaleAddressAlerts();
-			}
-
-            UpdateQueueDerivedState();
         }
 
 		private void PurgeStaleAddressAlerts()

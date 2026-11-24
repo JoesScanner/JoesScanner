@@ -1226,6 +1226,8 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
 
             if (selectionChanged || customVisibilityChanged)
                 OnPropertyChanged(nameof(IsCustomServerSelected));
+            OnPropertyChanged(nameof(CanEditScannerAddress));
+            OnPropertyChanged(nameof(CanSaveDirectoryConnection));
 
             if (!syncServerUrl || value == null)
                 return;
@@ -2539,47 +2541,143 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
 
         public ObservableCollection<ScannerConnectionRow> ScannerConnections => _mainViewModel.ScannerConnections;
 
-        private bool _saveAsAnotherConnection;
-        private Guid? _editingConnectionId;
+        private bool _scannerEditorOpen;
+        private ScannerConnectionRow? _editingScannerConnection;
+        private string _scannerName = string.Empty;
 
-        public bool SaveAsAnotherConnection
+        public bool ScannerEditorOpen => _scannerEditorOpen;
+        public bool CanChooseScannerSource => _editingScannerConnection == null;
+        public bool CanEditScannerAddress => _editingScannerConnection is { } row ? !row.Managed : IsCustomServerSelected;
+        public bool CanSaveDirectoryConnection => CanChooseScannerSource &&
+            _selectedDirectoryServer is { IsCustom: false, Url.Length: > 0 };
+        public string ScannerEditorTitle => _editingScannerConnection == null ? "Add server" : "Edit " + _editingScannerConnection.Name;
+        public string ScannerName
         {
-            get => _saveAsAnotherConnection;
+            get => _scannerName;
             set
             {
-                if (_saveAsAnotherConnection == value)
-                    return;
-                _saveAsAnotherConnection = value;
-                OnPropertyChanged();
+                if (_scannerName != value)
+                {
+                    _scannerName = value ?? string.Empty;
+                    OnPropertyChanged();
+                }
             }
         }
 
         internal void RefreshScannerConnectionRows() => _mainViewModel.RefreshScannerConnectionRows();
 
+        internal void OpenNewScannerConnection()
+        {
+            BeginScannerEditor(null);
+            ApplySelectedDirectoryServer(CustomServerDirectoryEntry, syncServerUrl: false);
+            ServerUrl = string.Empty;
+            BasicAuthUsername = string.Empty;
+            BasicAuthPassword = string.Empty;
+        }
+
         internal void EditScannerConnection(ScannerConnectionRow row)
         {
+            BeginScannerEditor(row);
             ServerUrl = row.Endpoint;
-            _editingConnectionId = row.Id;
-            SaveAsAnotherConnection = false;
+            BasicAuthUsername = BasicAuthPassword = string.Empty;
+            try
+            {
+                if (_mainViewModel.TryGetConfiguredRecorderCredentials(row.Endpoint, out var username, out var password))
+                {
+                    BasicAuthUsername = username;
+                    BasicAuthPassword = password;
+                }
+            }
+            catch (CredentialStorageException) { }
+        }
+
+        private void BeginScannerEditor(ScannerConnectionRow? row)
+        {
+            _connectionValidations.Begin();
+            _editingScannerConnection = row;
+            _scannerEditorOpen = true;
+            ScannerName = row?.Name ?? string.Empty;
+            ClearValidationUiForDirtyConnection();
+            NotifyScannerEditor();
+        }
+
+        internal void CloseScannerEditor()
+        {
+            _connectionValidations.Begin();
+            _scannerEditorOpen = false;
+            _editingScannerConnection = null;
+            ServerUrl = _savedServerUrl;
+            AuthServerBaseUrl = _savedAuthServerBaseUrl;
+            BasicAuthUsername = _savedBasicAuthUsername;
+            BasicAuthPassword = _savedBasicAuthPassword;
+            IsValidatingServer = false;
+            NotifyScannerEditor();
+        }
+
+        private void NotifyScannerEditor()
+        {
+            OnPropertyChanged(nameof(ScannerEditorOpen));
+            OnPropertyChanged(nameof(CanChooseScannerSource));
+            OnPropertyChanged(nameof(CanEditScannerAddress));
+            OnPropertyChanged(nameof(CanSaveDirectoryConnection));
+            OnPropertyChanged(nameof(ScannerEditorTitle));
         }
 
         internal void SetScannerConnectionEnabled(ScannerConnectionRow row, bool enabled) =>
             _mainViewModel.SetScannerConnectionEnabled(row, enabled);
 
+        internal void MoveScannerConnection(ScannerConnectionRow row, int direction) =>
+            _mainViewModel.MoveScannerConnection(row, direction);
+
+        internal void RemoveScannerConnection(ScannerConnectionRow row)
+        {
+            _mainViewModel.RemoveScannerConnection(row);
+            RecordSavedScannerSelection();
+            CloseScannerEditor();
+        }
+
+        internal void SaveDirectoryConnection()
+        {
+            if (!CanSaveDirectoryConnection || _selectedDirectoryServer is not { } entry)
+                return;
+
+            _connectionValidations.Begin();
+            _mainViewModel.SaveScannerConnection(entry.Url, entry.Name, entry.DirectoryId > 0 ? entry.DirectoryId : null, null);
+            RecordSavedScannerSelection();
+            CloseScannerEditor();
+        }
+
+        private void RecordSavedScannerSelection()
+        {
+            _savedAuthServerBaseUrl = _authServerBaseUrl;
+            _savedServerUrl = _settings.ServerUrl ?? string.Empty;
+            _savedUseDefaultConnection = HostedServerRules.IsProvidedDefaultServerUrl(_savedServerUrl);
+            _savedBasicAuthUsername = _settings.BasicAuthUsername ?? string.Empty;
+            _savedBasicAuthPassword = _settings.BasicAuthPassword ?? string.Empty;
+            UpdateHasChanges();
+        }
+
         private async Task SaveThenValidateServerUrlAsync()
         {
             _mainViewModel.RefreshScannerConnectionRows();
+            var editor = _editingScannerConnection;
+            if (_mainViewModel.ScannerConnectionEditError(editor, ServerUrl) is { } error)
+            {
+                ServerValidationMessage = error;
+                ServerValidationIsError = HasServerValidationResult = true;
+                return;
+            }
+
             var request = _connectionValidations.Begin();
             var inputs = (ServerUrl, AuthServerBaseUrl, BasicAuthUsername, BasicAuthPassword,
-                _selectedDirectoryServer?.Url, SaveAsAnotherConnection, _editingConnectionId);
+                _selectedDirectoryServer?.Url, ScannerName, _editingScannerConnection);
             bool IsCurrent() => _connectionValidations.IsCurrent(request);
             bool OwnsInputs() => IsCurrent() &&
                 inputs == (ServerUrl, AuthServerBaseUrl, BasicAuthUsername, BasicAuthPassword,
-                    _selectedDirectoryServer?.Url, SaveAsAnotherConnection, _editingConnectionId);
-            var previousEndpoint = _savedServerUrl;
+                    _selectedDirectoryServer?.Url, ScannerName, _editingScannerConnection);
             var previouslySaved = (_savedBasicAuthUsername, _savedBasicAuthPassword);
-            var directory = _selectedDirectoryServer is { IsCustom: false } entry ? entry : null;
-            (string Username, string Password)? customCredentials = null;
+            var directory = editor == null && _selectedDirectoryServer is { IsCustom: false } entry ? entry : null;
+            (string Endpoint, string Username, string Password)? validatedCustom = null;
 
             if (!await TrySaveNonConnectionSettingsAsync() || !OwnsInputs())
             {
@@ -2589,24 +2687,22 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             }
             if (!await ValidateServerUrlAsync(IsCurrent, OwnsInputs,
                     (session, apply) => _connectionValidations.TryApply(request, session, OwnsInputs, apply),
-                    (user, password) => customCredentials = (user, password)) ||
+                    (endpoint, user, password) => validatedCustom = (endpoint, user, password)) ||
                 !IsCurrent() || ServerValidationIsError)
                 return;
 
             try
             {
-                var savedEndpoint = _settings.ServerUrl ?? string.Empty;
+                var savedEndpoint = validatedCustom?.Endpoint ?? _settings.ServerUrl ?? string.Empty;
+                (string Username, string Password)? customCredentials = validatedCustom is { } recorder
+                    ? (recorder.Username, recorder.Password)
+                    : null;
                 var credentialsChanged = previouslySaved != (_settings.BasicAuthUsername, _settings.BasicAuthPassword);
-                _mainViewModel.SaveValidatedScannerConnection(previousEndpoint, savedEndpoint, directory,
-                    inputs.SaveAsAnotherConnection, inputs._editingConnectionId, customCredentials, credentialsChanged);
-                SaveAsAnotherConnection = false;
-                _editingConnectionId = null;
-                _savedAuthServerBaseUrl = _authServerBaseUrl;
-                _savedServerUrl = savedEndpoint;
-                _savedUseDefaultConnection = _useDefaultConnection;
-                _savedBasicAuthUsername = _settings.BasicAuthUsername ?? string.Empty;
-                _savedBasicAuthPassword = _settings.BasicAuthPassword ?? string.Empty;
-                UpdateHasChanges();
+                _mainViewModel.SaveScannerConnection(savedEndpoint, directory?.Name ?? (editor?.Managed == true ? editor.Name : ScannerName),
+                    directory is { DirectoryId: > 0 } ? directory.DirectoryId : editor?.DirectoryId, editor?.Id,
+                    customCredentials, credentialsChanged);
+                RecordSavedScannerSelection();
+                CloseScannerEditor();
             }
             catch (Exception ex)
             {
@@ -2617,7 +2713,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
         }
 
         private async Task<bool> ValidateServerUrlAsync(Func<bool> isCurrent, Func<bool> ownsInputs,
-            Func<WordPressSession, Action, bool> publish, Action<string, string> recordCustomCredentials)
+            Func<WordPressSession, Action, bool> publish, Action<string, string, string> recordCustomCredentials)
         {
             var selectedDirectoryServerAtStart = _selectedDirectoryServer;
             var selectedDirectoryServerUrlAtStart = (selectedDirectoryServerAtStart?.Url ?? string.Empty).Trim().TrimEnd('/');
@@ -2940,7 +3036,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                     if (!HostedServerRules.RequiresApiFirewallCredentials(_settings, destination))
                         throw new FirewallAuthenticationException("Could not load the server's firewall configuration. Refresh the server directory and try again.");
 
-                    var subscription = await _subscriptionService.EnsureSubscriptionAsync(CancellationToken.None);
+                    var subscription = await _subscriptionService.EnsureSubscriptionForRecorderAsync(url, CancellationToken.None);
                     if (!ownsInputs())
                         return false;
                     if (!subscription.IsAllowed)
@@ -3030,32 +3126,17 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                                 $"Server reachable (HTTP {statusInt}).";
                         }
 
-                        // If the server is reachable without auth, clear any user-entered credentials.
                         if (userProvidedAnyAuth)
                         {
-                            BasicAuthUsername = string.Empty;
-                            BasicAuthPassword = string.Empty;
-
-                            try
-                            {
-                                await UiDialogs.AlertAsync(
-                                    "Credentials cleared",
-                                    "This server responded without requiring basic auth. Username and password were cleared.",
-                                    "OK");
-                            }
-                            catch
-                            {
-                            }
+                            await UiDialogs.AlertAsync("Credentials",
+                                "This server responded without requiring basic auth. The connection will be saved without a username or password.",
+                                "OK");
+                            if (!ownsInputs())
+                                return false;
                         }
 
                         ServerValidationIsError = false;
-
-                        var finalUrl = url.Trim();
-                        _settings.ClearServerCredentials(finalUrl);
-                        recordCustomCredentials(string.Empty, string.Empty);
-                        _settings.ServerUrl = finalUrl;
-                        ServerUrl = finalUrl;
-                        _mainViewModel.ServerUrl = finalUrl;
+                        recordCustomCredentials(url, string.Empty, string.Empty);
                     }
                     else if (statusCode == HttpStatusCode.Unauthorized || statusCode == HttpStatusCode.Forbidden)
                     {
@@ -3101,15 +3182,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                                 }
 
                                 ServerValidationIsError = false;
-
-                                var finalUrl = url.Trim();
-                                _settings.SetServerCredentials(finalUrl, probeUsername, probePassword);
-                                recordCustomCredentials(probeUsername, probePassword);
-                                _settings.ServerUrl = finalUrl;
-                                ServerUrl = finalUrl;
-                                BasicAuthUsername = probeUsername;
-                                BasicAuthPassword = probePassword;
-                                _mainViewModel.ServerUrl = finalUrl;
+                                recordCustomCredentials(url, probeUsername, probePassword);
                             }
                             else if (authStatus == HttpStatusCode.Unauthorized || authStatus == HttpStatusCode.Forbidden)
                             {
@@ -3334,7 +3407,11 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
 
                 ServerDirectoryEntry? match;
 
-                if (string.IsNullOrWhiteSpace(current))
+                if (string.IsNullOrWhiteSpace(current) && ScannerEditorOpen && CanChooseScannerSource)
+                {
+                    match = CustomServerDirectoryEntry;
+                }
+                else if (string.IsNullOrWhiteSpace(current))
                 {
                     match = _directoryServers.FirstOrDefault(s =>
                         string.Equals((s.Url ?? string.Empty).Trim().TrimEnd('/'), defaultUrl, StringComparison.OrdinalIgnoreCase));

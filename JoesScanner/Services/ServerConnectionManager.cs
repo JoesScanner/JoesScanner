@@ -2,9 +2,28 @@ namespace JoesScanner.Services;
 
 internal enum ServerConnectionStatus { Stopped, Disabled, Connecting, Monitoring, Reconnecting, Unavailable, SetupRequired }
 
+internal static class ServerConnectionPresentation
+{
+    internal static string Text(ServerConnectionStatus status) => status switch
+    {
+        ServerConnectionStatus.Monitoring => "Connected",
+        ServerConnectionStatus.SetupRequired => "Setup Required",
+        _ => status.ToString()
+    };
+
+    internal static string Color(ServerConnectionStatus status) => status switch
+    {
+        ServerConnectionStatus.Monitoring => "#15803d",
+        ServerConnectionStatus.Connecting or ServerConnectionStatus.Reconnecting => "#daa520",
+        ServerConnectionStatus.Unavailable or ServerConnectionStatus.SetupRequired => "#ff0000",
+        _ => "#6b7280"
+    };
+}
+
 internal sealed class ServerConnectionManager(TimeProvider clock,
     Func<TimeSpan, CancellationToken, Task>? delay = null)
 {
+    private static readonly TimeSpan UnavailableAfter = TimeSpan.FromMinutes(2);
     private readonly object _gate = new();
     private readonly Dictionary<Guid, Connection> _connections = [];
     private long _generation = Random.Shared.NextInt64(1, long.MaxValue / 2);
@@ -25,6 +44,8 @@ internal sealed class ServerConnectionManager(TimeProvider clock,
         }
         private int _status = (int)ServerConnectionStatus.Connecting;
         private long? _outageStarted;
+        private long _outageGeneration;
+        private ITimer? _outageTimer;
 
         internal SavedScannerConnection Profile { get; }
         internal long Generation { get; }
@@ -36,6 +57,7 @@ internal sealed class ServerConnectionManager(TimeProvider clock,
         {
             try
             {
+                StopOutageTimer();
                 await _lifetime.CancelAsync().ConfigureAwait(false);
                 await Worker.ConfigureAwait(false);
             }
@@ -48,15 +70,35 @@ internal sealed class ServerConnectionManager(TimeProvider clock,
 
         internal bool SetStatus(ServerConnectionStatus status, TimeProvider clock)
         {
-            if (status == ServerConnectionStatus.Monitoring)
-                _outageStarted = null;
             if (status == ServerConnectionStatus.Reconnecting)
             {
                 _outageStarted ??= clock.GetTimestamp();
-                if (clock.GetElapsedTime(_outageStarted.Value) >= TimeSpan.FromMinutes(2))
+                if (clock.GetElapsedTime(_outageStarted.Value) >= UnavailableAfter)
                     status = ServerConnectionStatus.Unavailable;
             }
+            else if (status != ServerConnectionStatus.Unavailable)
+            {
+                _outageStarted = null;
+            }
+
+            if (status != ServerConnectionStatus.Reconnecting)
+                StopOutageTimer();
             return Interlocked.Exchange(ref _status, (int)status) != (int)status;
+        }
+
+        internal void ScheduleOutageTimer(TimeProvider clock, Action<long> report)
+        {
+            var generation = ++_outageGeneration;
+            _outageTimer = clock.CreateTimer(_ => report(generation), null, UnavailableAfter, Timeout.InfiniteTimeSpan);
+        }
+
+        internal bool IsCurrentOutage(long generation) =>
+            Status == ServerConnectionStatus.Reconnecting && _outageGeneration == generation;
+
+        private void StopOutageTimer()
+        {
+            _outageTimer?.Dispose();
+            _outageTimer = null;
         }
     }
 
@@ -136,6 +178,19 @@ internal sealed class ServerConnectionManager(TimeProvider clock,
         {
             if (!IsCurrentLocked(connection) || !connection.SetStatus(status, clock))
                 return;
+            if (connection.Status == ServerConnectionStatus.Reconnecting)
+                connection.ScheduleOutageTimer(clock, generation => ReportOutageDeadline(connection, generation));
+        }
+        StatusChanged?.Invoke(connection);
+    }
+
+    private void ReportOutageDeadline(Connection connection, long generation)
+    {
+        lock (_gate)
+        {
+            if (!IsCurrentLocked(connection) || !connection.IsCurrentOutage(generation))
+                return;
+            connection.SetStatus(ServerConnectionStatus.Unavailable, clock);
         }
         StatusChanged?.Invoke(connection);
     }

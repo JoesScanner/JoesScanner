@@ -177,7 +177,7 @@
 
             <Label Style="{StaticResource SettingsCardTitleStyle}"
                 Grid.Column="0"
-                Text="Connection" />
+                Text="Server Connections" />
 
             <Label
                 Grid.Column="1"
@@ -215,154 +215,91 @@
             IsVisible="False">
             <controls:DeferredContentView.ContentTemplate>
                 <DataTemplate x:DataType="vm:SettingsViewModel">
-                    <Grid
-                RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto"
-                ColumnDefinitions="*"
-                RowSpacing="8">
+                    <VerticalStackLayout Spacing="8">
+                        <VerticalStackLayout Spacing="6" BindableLayout.ItemsSource="{Binding ScannerConnections}">
+                            <BindableLayout.ItemTemplate>
+                                <DataTemplate x:DataType="vm:ScannerConnectionRow">
+                                    <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="*,Auto" RowSpacing="3" ColumnSpacing="6">
+                                        <VerticalStackLayout Spacing="2" VerticalOptions="Center">
+                                            <Label Text="{Binding Name}" FontAttributes="Bold" FontSize="12"
+                                                   LineBreakMode="TailTruncation" />
+                                            <Label Text="{Binding Endpoint}" FontSize="11" LineBreakMode="TailTruncation" />
+                                            <HorizontalStackLayout Spacing="5">
+                                                <BoxView WidthRequest="8" HeightRequest="8" CornerRadius="4"
+                                                         VerticalOptions="Center" Color="{Binding StatusColor}" />
+                                                <Label Text="{Binding StatusText}" FontSize="11"
+                                                       TextColor="{AppThemeBinding Light=#374151, Dark=#e5e7eb}" />
+                                            </HorizontalStackLayout>
+                                        </VerticalStackLayout>
+                                        <Switch Grid.Column="1" IsToggled="{Binding Enabled, Mode=OneWay}"
+                                                VerticalOptions="Center" Toggled="OnScannerConnectionToggled"
+                                                SemanticProperties.Description="{Binding Name, StringFormat='Monitor {0}'}" />
+                                        <HorizontalStackLayout Grid.Row="1" Grid.ColumnSpan="2" Spacing="4">
+                                            <Button Text="↑" FontSize="12" Style="{StaticResource SecondaryPillButtonStyle}"
+                                                    IsEnabled="{Binding CanMoveUp}" Clicked="OnScannerConnectionMoveUp"
+                                                    SemanticProperties.Description="{Binding Name, StringFormat='Move {0} up'}" />
+                                            <Button Text="↓" FontSize="12" Style="{StaticResource SecondaryPillButtonStyle}"
+                                                    IsEnabled="{Binding CanMoveDown}" Clicked="OnScannerConnectionMoveDown"
+                                                    SemanticProperties.Description="{Binding Name, StringFormat='Move {0} down'}" />
+                                            <Button Text="Edit" FontSize="12" Style="{StaticResource SecondaryPillButtonStyle}"
+                                                    Clicked="OnScannerConnectionEdit" />
+                                            <Button Text="Remove" FontSize="12" Style="{StaticResource SecondaryPillButtonStyle}"
+                                                    Clicked="OnScannerConnectionRemove" />
+                                        </HorizontalStackLayout>
+                                    </Grid>
+                                </DataTemplate>
+                            </BindableLayout.ItemTemplate>
+                        </VerticalStackLayout>
 
-            <HorizontalStackLayout Grid.Row="4" Spacing="6">
-                <CheckBox IsChecked="{Binding SaveAsAnotherConnection}" AutomationId="SaveAsAnotherConnection" />
-                <Label Text="Save as another connection" VerticalOptions="Center" FontSize="12" />
-            </HorizontalStackLayout>
+                        <Button Text="Add server" AutomationId="AddScannerConnection" HorizontalOptions="Start"
+                                Clicked="OnScannerConnectionAdd" Style="{StaticResource PillButtonStyle}" />
 
-            <VerticalStackLayout Grid.Row="5" Spacing="8" BindableLayout.ItemsSource="{Binding ScannerConnections}">
-                <BindableLayout.ItemTemplate>
-                    <DataTemplate x:DataType="vm:ScannerConnectionRow">
-                        <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="6">
-                            <VerticalStackLayout>
-                                <Label Text="{Binding Endpoint}" FontSize="12" LineBreakMode="TailTruncation" />
-                                <Label Text="{Binding StatusText}" TextColor="{Binding StatusColor}" FontSize="11" />
+                        <VerticalStackLayout IsVisible="{Binding ScannerEditorOpen}" Spacing="6">
+                            <Label Text="{Binding ScannerEditorTitle}" FontSize="13" FontAttributes="Bold" />
+                            <Picker x:Name="ServerPicker" IsVisible="{Binding CanChooseScannerSource}"
+                                    ItemsSource="{Binding DirectoryServers}" SelectedItem="{Binding SelectedDirectoryServer}"
+                                    ItemDisplayBinding="{Binding DisplayName}" Focused="OnServerPickerFocused" FontSize="12" />
+                            <VerticalStackLayout IsVisible="{Binding CanEditScannerAddress}" Spacing="4">
+                                <Entry Text="{Binding ScannerName}" Placeholder="Server name" FontSize="12" />
+                                <Entry x:Name="ServerUrlEntry" Text="{Binding ServerUrl, UpdateSourceEventName=Unfocused}"
+                                       Placeholder="Recorder URL" Keyboard="Url" FontSize="12" />
                             </VerticalStackLayout>
-                            <Button Grid.Column="1" Text="Edit" Clicked="OnScannerConnectionEdit" Style="{StaticResource PillButtonStyle}" />
-                            <Switch Grid.Column="2" IsToggled="{Binding Enabled, Mode=OneWay}" Toggled="OnScannerConnectionToggled"
-                                    SemanticProperties.Description="Monitor this recorder" />
-                        </Grid>
-                    </DataTemplate>
-                </BindableLayout.ItemTemplate>
-            </VerticalStackLayout>
 
+                            <Grid ColumnDefinitions="Auto,*,Auto,*,Auto" ColumnSpacing="6">
+                                <Label Text="User" FontSize="12" VerticalOptions="Center" />
+                                <Entry x:Name="BasicAuthUsernameEntry" Grid.Column="1" Placeholder="username"
+                                       Text="{Binding BasicAuthUsername, UpdateSourceEventName=Unfocused}"
+                                       IsSpellCheckEnabled="False" IsTextPredictionEnabled="False" FontSize="12" />
+                                <Label Grid.Column="2" Text="Pass" FontSize="12" VerticalOptions="Center" />
+                                <controls:CursorHidingEntry x:Name="BasicAuthPasswordEntry" Grid.Column="3"
+                                                           Text="{Binding BasicAuthPassword, UpdateSourceEventName=Unfocused}"
+                                                           Placeholder="password" IsPassword="{Binding IsBasicAuthPasswordHidden}"
+                                                           HideCursorWhenPassword="True" IsSpellCheckEnabled="False"
+                                                           IsTextPredictionEnabled="False" FontSize="12" />
+                                <Button Grid.Column="4" Text="{Binding BasicAuthPasswordToggleText}"
+                                        Command="{Binding ToggleBasicAuthPasswordVisibilityCommand}"
+                                        Style="{StaticResource SecondaryPillButtonStyle}" />
+                            </Grid>
 
-            <!-- Server selection row -->
-<Grid
-    Grid.Row="0"
-    ColumnDefinitions="Auto,*,Auto"
-    ColumnSpacing="8"
-    VerticalOptions="Center">
-
-    <Label
-        Text="Server"
-        FontSize="12"
-        VerticalOptions="Center" />
-
-    <Picker
-        x:Name="ServerPicker"
-        Grid.Column="1"
-        ItemsSource="{Binding DirectoryServers}"
-        SelectedItem="{Binding SelectedDirectoryServer}"
-        ItemDisplayBinding="{Binding DisplayName}"
-        Focused="OnServerPickerFocused"
-        FontSize="12"
-        VerticalOptions="Center" />
-
-    <Button
-        Grid.Column="2"
-        Text="Validate"
-        Clicked="OnValidateClicked"
-        Style="{StaticResource PillButtonStyle}">
-        <Button.Triggers>
-            <DataTrigger
-                TargetType="Button"
-                Binding="{Binding ConnectionNeedsValidation}"
-                Value="True">
-                <Setter Property="BackgroundColor" Value="Red" />
-                <Setter Property="TextColor" Value="White" />
-            </DataTrigger>
-        </Button.Triggers>
-    </Button>
-
-</Grid>
-
-<!-- Custom server URL row (only when Custom server is selected) -->
-<Grid
-    Grid.Row="1"
-    ColumnDefinitions="Auto,*"
-    ColumnSpacing="8"
-    VerticalOptions="Center"
-    IsVisible="{Binding IsCustomServerSelected}">
-
-    <Label
-        Text="URL"
-        FontSize="12"
-        VerticalOptions="Center" />
-
-    <Entry
-        Grid.Column="1"
-        x:Name="ServerUrlEntry"
-        Text="{Binding ServerUrl, UpdateSourceEventName=Unfocused}"
-        Placeholder="https://app.joesscanner.com"
-        FontSize="12"
-        VerticalOptions="Center" />
-
-</Grid>
-
-
-            <Label
-                Grid.Row="3"
-                Text="{Binding DirectoryStatusText}"
-                FontSize="11"
-                TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}"
-                Margin="0,0,0,0" />
-
-            <!-- Username and password row -->
-            <Grid
-                Grid.Row="2"
-                ColumnDefinitions="Auto,*,Auto,*,Auto"
-                ColumnSpacing="6">
-
-                <Label
-                    Text="User"
-                    FontSize="12"
-                    VerticalOptions="Center"
-                    TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
-
-                <Entry
-                    x:Name="BasicAuthUsernameEntry"
-                    Grid.Column="1"
-                    Text="{Binding BasicAuthUsername, UpdateSourceEventName=Unfocused}"
-                    Placeholder="username"
-                    IsSpellCheckEnabled="False"
-                    IsTextPredictionEnabled="False"
-                    FontSize="12"
-                    HeightRequest="30" />
-
-                <Label
-                    Grid.Column="2"
-                    Text="Pass"
-                    FontSize="12"
-                    VerticalOptions="Center"
-                    TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />
-
-                <controls:CursorHidingEntry
-                    x:Name="BasicAuthPasswordEntry"
-                    Grid.Column="3"
-                    Text="{Binding BasicAuthPassword, UpdateSourceEventName=Unfocused}"
-                    Placeholder="password"
-                    IsPassword="{Binding IsBasicAuthPasswordHidden}"
-                    HideCursorWhenPassword="True"
-                    IsSpellCheckEnabled="False"
-                    IsTextPredictionEnabled="False"
-                    FontSize="12"
-                    HeightRequest="30"
-                    Margin="0,0,4,0" />
-
-                <Button
-                    Grid.Column="4"
-                    Text="{Binding BasicAuthPasswordToggleText}"
-                    Command="{Binding ToggleBasicAuthPasswordVisibilityCommand}"
-                    Style="{StaticResource SecondaryPillButtonStyle}"
-                    VerticalOptions="Center" />
-            </Grid>
-                    </Grid>
+                            <FlexLayout Wrap="Wrap" AlignItems="Center">
+                                <Button Text="Validate" Margin="0,0,5,4" Clicked="OnValidateClicked"
+                                        Style="{StaticResource PillButtonStyle}">
+                                    <Button.Triggers>
+                                        <DataTrigger TargetType="Button" Binding="{Binding ConnectionNeedsValidation}" Value="True">
+                                            <Setter Property="BackgroundColor" Value="Red" />
+                                            <Setter Property="TextColor" Value="White" />
+                                        </DataTrigger>
+                                    </Button.Triggers>
+                                </Button>
+                                <Button Text="Save directory server" Margin="0,0,5,4" IsVisible="{Binding CanSaveDirectoryConnection}"
+                                        Clicked="OnScannerConnectionSaveDirectory" Style="{StaticResource SecondaryPillButtonStyle}" />
+                                <Button Text="Cancel" Margin="0,0,0,4" Clicked="OnScannerConnectionCancel"
+                                        Style="{StaticResource SecondaryPillButtonStyle}" />
+                            </FlexLayout>
+                            <Label Text="{Binding DirectoryStatusText}" IsVisible="{Binding CanChooseScannerSource}"
+                                   TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" FontSize="11" />
+                        </VerticalStackLayout>
+                    </VerticalStackLayout>
                 </DataTemplate>
             </controls:DeferredContentView.ContentTemplate>
         </controls:DeferredContentView>
