@@ -27,6 +27,8 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
     internal sealed record Recording(string Id, long ArrivalSequence, long? RecordedUtc, LiveCallSnapshot? Snapshot,
         RecordingAccessContext Access, long Owner)
     {
+        internal bool IsCompletedReplay { get; init; }
+
         internal CallItem ToCallItem(string server)
         {
             var state = new LiveCallState(server, Id);
@@ -38,7 +40,7 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
             {
                 BackendId = Id, LiveState = state, RecordingTimeUtc = timestamp,
                 RecordingServer = server, RecordingAccess = Access, LivePlaybackOwner = Owner, LiveArrivalSequence = ArrivalSequence,
-                Timestamp = timestamp?.LocalDateTime ?? default, CardMetadata = metadata,
+                Timestamp = timestamp?.LocalDateTime ?? default, CardMetadata = metadata, IsCompletedReplay = IsCompletedReplay,
                 Talkgroup = metadata.Talkgroup ?? string.Empty, Source = metadata.Radio ?? string.Empty,
                 Site = metadata.Site ?? string.Empty, VoiceReceiver = metadata.Receiver ?? string.Empty,
                 CallDurationSeconds = metadata.DurationSeconds ?? 0,
@@ -51,7 +53,13 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
     // recorders. Query strings and embedded credentials are never stored as keys.
     internal static string? ServerKey(string url) => RecordingStorageReference.ServerKey(url);
 
-    internal async Task OpenAsync(Run run, DateTimeOffset now, CancellationToken token, bool explicitlyStopped = false)
+    internal Task StartListeningAsync(Run run, DateTimeOffset now, CancellationToken token) =>
+        OpenAsync(run, now, token, explicitlyStopped: false, startAtLiveEdge: true);
+
+    internal Task OpenAsync(Run run, DateTimeOffset now, CancellationToken token, bool explicitlyStopped = false) =>
+        OpenAsync(run, now, token, explicitlyStopped, startAtLiveEdge: false);
+
+    private async Task OpenAsync(Run run, DateTimeOffset now, CancellationToken token, bool explicitlyStopped, bool startAtLiveEdge)
     {
         token.ThrowIfCancellationRequested();
         var scope = (run.Server, run.AccountScope);
@@ -63,29 +71,47 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
             _ownershipRequests[scope] = (run.Owner, false);
         }
 
-        await _ownershipWrites.WaitAsync(token).ConfigureAwait(false);
-        try
+        if (startAtLiveEdge)
+            await InArrivalOrderAsync(OpenScopeAsync, token).ConfigureAwait(false);
+        else
+            await OpenScopeAsync().ConfigureAwait(false);
+
+        async Task<bool> OpenScopeAsync()
         {
-            await RetryBusyWriteAsync(() =>
+            await _ownershipWrites.WaitAsync(token).ConfigureAwait(false);
+            try
             {
-                token.ThrowIfCancellationRequested();
-                lock (_ownershipRequests)
+                await RetryBusyWriteAsync(() =>
                 {
-                    if (_ownershipRequests[scope] != (run.Owner, false))
-                        throw new InvalidOperationException("This Live queue run has already been replaced or retired.");
-                }
-                return ExecuteScopeTransitionAsync(run, """
+                    token.ThrowIfCancellationRequested();
+                    lock (_ownershipRequests)
+                    {
+                        if (_ownershipRequests[scope] != (run.Owner, false))
+                            throw new InvalidOperationException("This Live queue run has already been replaced or retired.");
+                    }
+                    return ExecuteScopeTransitionAsync(run, """
+            UPDATE live_queue_recovery SET skip_unseen = 1
+            WHERE server = $server AND account_scope = $account
+              AND ($stopped = 1 OR ($fresh = 1 AND EXISTS
+                  (SELECT 1 FROM live_queue_servers WHERE server = $server AND account_scope = $account AND owner <> $owner)));
             INSERT INTO live_queue_servers(server, account_scope, owner, accept_after)
             VALUES ($server, $account, $owner, CASE WHEN $stopped = 1 THEN $now ELSE 0 END)
             ON CONFLICT(server, account_scope) DO UPDATE SET owner = excluded.owner,
-                accept_after = CASE WHEN stopped = 1 OR $stopped = 1 THEN $now ELSE accept_after END,
-                resume_id = CASE WHEN stopped = 1 OR $stopped = 1 THEN NULL ELSE resume_id END, stopped = 0;
-            UPDATE live_queue_recovery SET skip_unseen = 1
-            WHERE server = $server AND account_scope = $account AND $stopped = 1;
-            """, token, ("$now", now.UtcTicks), ("$stopped", explicitlyStopped ? 1 : 0));
-            }, token).ConfigureAwait(false);
+                accept_after = CASE WHEN $fresh = 1 THEN 0 WHEN stopped = 1 OR $stopped = 1 THEN $now ELSE accept_after END,
+                resume_id = CASE WHEN ($fresh = 1 AND owner <> $owner) OR stopped = 1 OR $stopped = 1 THEN NULL ELSE resume_id END,
+                playback_floor = CASE WHEN $fresh = 1 AND owner <> $owner THEN (
+                    SELECT coalesce(MAX(arrival_sequence), 0) + 1 FROM live_queue_recordings
+                    WHERE server = $server AND account_scope = $account)
+                    ELSE playback_floor END,
+                stopped = 0;
+            UPDATE live_queue_recordings SET disposition = 2, audio_ready = 0, recovery_backlog = 1
+            WHERE $fresh = 1 AND server = $server AND account_scope = $account AND disposition = 0 AND first_owner <> $owner;
+            """, token, ("$now", now.UtcTicks), ("$stopped", explicitlyStopped ? 1 : 0), ("$fresh", startAtLiveEdge ? 1 : 0));
+                }, token).ConfigureAwait(false);
+                return true;
+            }
+            finally { _ownershipWrites.Release(); }
         }
-        finally { _ownershipWrites.Release(); }
     }
 
     internal async Task StopAsync(Run run)
@@ -210,9 +236,9 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
 
     internal Task<Observation> ObserveWithPositionAsync(Run run, string id, DateTimeOffset? time, LiveCallSnapshot incoming,
         CancellationToken token, RecordingOrigin origin, bool existingOnly, Action<Exception>? report = null,
-        TimeProvider? clock = null, string? recoveryWindowId = null) => InArrivalOrderAsync(() =>
+        TimeProvider? clock = null, string? recoveryWindowId = null, bool historyBaseline = false) => InArrivalOrderAsync(() =>
         {
-            Task<Observation> Write() => WriteObservationAsync(run, id, time, incoming, token, origin, existingOnly, recoveryWindowId);
+            Task<Observation> Write() => WriteObservationAsync(run, id, time, incoming, token, origin, existingOnly, recoveryWindowId, historyBaseline);
             return report == null ? Write() : PersistObservationAsync(Write, report, token, clock);
         }, token);
 
@@ -239,7 +265,7 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
     }
 
     private Task<Observation> WriteObservationAsync(Run run, string id, DateTimeOffset? time, LiveCallSnapshot incoming,
-        CancellationToken token, RecordingOrigin origin, bool existingOnly, string? recoveryWindowId)
+        CancellationToken token, RecordingOrigin origin, bool existingOnly, string? recoveryWindowId, bool historyBaseline)
     {
         // Signed URLs may contain credentials. Keep those on the in-memory card.
         var url = DurableAudioUrl(incoming.AudioUrl);
@@ -268,7 +294,7 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
             if (existingOnly && previous == null)
                 return default;
             var stamp = previous?.RecordedUtc ?? time?.UtcTicks;
-            var isRecoveryBacklog = false;
+            var isRecoveryBacklog = previous == null && historyBaseline;
             if (previous == null && recoveryWindowId != null)
             {
                 using var recovery = Command(db, run, """
@@ -280,7 +306,7 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
                 recovery.Transaction = transaction;
                 if (recovery.ExecuteScalar() is not long skip)
                     return default;
-                isRecoveryBacklog = skip != 0;
+                isRecoveryBacklog |= skip != 0;
             }
 
             var merged = new LiveCallState(run.Server, id);
@@ -323,19 +349,85 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
           AND ((q.first_owner = $owner AND q.origin = $live) OR $floor = 0 OR q.recorded_utc BETWEEN $floor AND $ceiling)
         """;
 
-    internal Task<Recording?> NextAsync(Run run, long historicalFloor, CancellationToken token) =>
+    internal Task<Recording?> NextAsync(Run run, long historicalFloor, CancellationToken token,
+        long? afterArrival = null, IReadOnlyList<long>? visibleReplays = null) =>
         WithConnectionAsync(token, db =>
         {
-            using var command = EligibleCommand(db, run, historicalFloor, $"""
-                SELECT q.recorded_utc, q.payload, q.origin, q.protected, q.account_scope, q.first_owner, q.arrival_sequence, q.recording_id
-                FROM live_queue_recordings q
-                JOIN live_queue_servers s USING (server, account_scope)
-                WHERE {EligibleRecording} AND q.disposition = 0
-                ORDER BY q.arrival_sequence LIMIT 1
-                """);
-            using var reader = command.ExecuteReader();
-            return reader.Read() ? Read(reader, reader.GetString(7)) : null;
+            var pending = FindNext("q.disposition = 0");
+            if (visibleReplays is not { Count: > 0 })
+                return pending;
+
+            // Keep the ordinary FIFO seek on the pending index. A manual pass
+            // separately admits only the completed recordings from its card snapshot.
+            var keys = string.Join(", ", Enumerable.Range(0, visibleReplays.Count).Select(index => "$replay" + index));
+            var replay = FindNext($"q.disposition = 1 AND q.arrival_sequence IN ({keys})", visibleReplays);
+            return replay != null && (pending == null || replay.ArrivalSequence < pending.ArrivalSequence) ? replay : pending;
+
+            Recording? FindNext(string disposition, IReadOnlyList<long>? replays = null)
+            {
+                using var command = EligibleCommand(db, run, historicalFloor, $"""
+                    SELECT q.recorded_utc, q.payload, q.origin, q.protected, q.account_scope, q.first_owner,
+                           q.arrival_sequence, q.recording_id
+                    FROM live_queue_recordings q JOIN live_queue_servers s USING (server, account_scope)
+                    WHERE {EligibleRecording} AND {disposition}
+                      AND q.arrival_sequence >= s.playback_floor AND q.arrival_sequence > $after
+                    ORDER BY q.arrival_sequence LIMIT 1
+                    """, ("$after", afterArrival ?? 0));
+                if (replays != null)
+                    for (var index = 0; index < replays.Count; index++)
+                        command.Parameters.AddWithValue("$replay" + index, replays[index]);
+                using var reader = command.ExecuteReader();
+                return reader.Read() ? Read(reader, reader.GetString(7)) with { IsCompletedReplay = replays != null } : null;
+            }
         });
+
+    internal Task<bool> SetPlaybackFloorAsync(Run run, long historicalFloor, long sequence, CancellationToken token) =>
+        InArrivalOrderAsync(() => WithConnectionAsync(token, db =>
+        {
+            using var transaction = db.BeginTransaction();
+            using var command = EligibleCommand(db, run, historicalFloor, $"""
+                UPDATE live_queue_servers AS s SET playback_floor = $sequence
+                WHERE s.server = $server AND s.account_scope = $account AND s.owner = $owner AND s.stopped = 0
+                  AND EXISTS (SELECT 1 FROM live_queue_recordings q
+                              WHERE {EligibleRecording} AND q.arrival_sequence = $sequence)
+                """, ("$sequence", sequence));
+            command.Transaction = transaction;
+            token.ThrowIfCancellationRequested();
+            var changed = command.ExecuteNonQuery() != 0;
+            token.ThrowIfCancellationRequested();
+            transaction.Commit();
+            return changed;
+        }), token);
+
+    internal Task<long> SetPlaybackFloorAtLiveEdgeAsync(Run run, CancellationToken token, bool skipOutstandingRecovery = false) =>
+        InArrivalOrderAsync(() => WithConnectionAsync(token, db =>
+        {
+            using var transaction = db.BeginTransaction();
+            if (skipOutstandingRecovery)
+            {
+                using var recovery = Command(db, run, $"""
+                    UPDATE live_queue_recovery SET skip_unseen = 1
+                    WHERE server = $server AND account_scope = $account AND {ActiveRecoveryScope}
+                    """);
+                recovery.Transaction = transaction;
+                recovery.ExecuteNonQuery();
+            }
+
+            using var command = Command(db, run, """
+                UPDATE live_queue_servers SET playback_floor = coalesce((
+                    SELECT MAX(arrival_sequence) FROM live_queue_recordings
+                    WHERE server = $server AND account_scope = $account), 0) + 1,
+                    resume_id = NULL
+                WHERE server = $server AND account_scope = $account AND owner = $owner AND stopped = 0
+                RETURNING playback_floor
+                """);
+            command.Transaction = transaction;
+            token.ThrowIfCancellationRequested();
+            var floor = command.ExecuteScalar() is long sequence ? sequence : 0;
+            token.ThrowIfCancellationRequested();
+            transaction.Commit();
+            return floor;
+        }), token);
 
     // Transport can replay completed or skipped recordings. Autoplay only reads pending rows.
     internal Task<Recording?> FindTransportTargetAsync(Run run, long historicalFloor, long? anchor,
@@ -369,12 +461,12 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
         var sort = older ? "DESC" : "ASC";
         // Keep the range predicate visible to SQLite's index planner.
         var range = anchor is null ? "" : $"AND q.arrival_sequence {comparison} $anchor";
-        var excludesRecoveryBacklog = liveEdge ? "AND q.recovery_backlog = 0" : "";
+        var liveEdgeFilter = liveEdge ? "AND q.recovery_backlog = 0 AND q.arrival_sequence >= s.playback_floor" : "";
         var sql = $"""
             SELECT q.recorded_utc, q.payload, q.origin, q.protected, q.account_scope, q.first_owner, q.arrival_sequence, q.recording_id
             FROM live_queue_recordings q
             JOIN live_queue_servers s USING (server, account_scope)
-            WHERE {EligibleRecording} {range} {excludesRecoveryBacklog}
+            WHERE {EligibleRecording} {range} {liveEdgeFilter}
             ORDER BY q.arrival_sequence {sort} LIMIT 1
             """;
         return anchor is { } position
@@ -477,9 +569,9 @@ public sealed class DurableLiveQueue(IDatabasePathProvider paths)
             }
             var playTarget = !skipSelected && newest.Id != failedId;
             using var resetResume = Command(db, run, """
-                UPDATE live_queue_servers SET resume_id = NULL
+                UPDATE live_queue_servers SET resume_id = NULL, playback_floor = $sequence
                 WHERE server = $server AND account_scope = $account AND owner = $owner AND stopped = 0
-                """);
+                """, ("$sequence", newest.ArrivalSequence));
             resetResume.Transaction = transaction;
             token.ThrowIfCancellationRequested();
             resetResume.ExecuteNonQuery();

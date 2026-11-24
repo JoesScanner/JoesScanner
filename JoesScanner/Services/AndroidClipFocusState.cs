@@ -30,10 +30,12 @@ internal sealed class AndroidClipFocusState
 
     public void ReadyWithoutFocus() => SetStatus(AndroidClipFocusStatus.Granted);
 
-    public void OnChange(AndroidClipFocusStatus status)
+    public bool OnChange(AndroidClipFocusStatus status)
     {
-        if (_registered && !_released && Status != AndroidClipFocusStatus.PermanentLoss)
-            SetStatus(status);
+        if (!_registered || _released || Status == AndroidClipFocusStatus.PermanentLoss || Status == status)
+            return false;
+        SetStatus(status);
+        return true;
     }
 
     // Android delivers focus change callbacks on the main looper. Pulse on each

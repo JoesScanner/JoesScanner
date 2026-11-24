@@ -17,6 +17,7 @@ internal static class DurableLiveQueueTests
             await RestartAndFailureAsync(database);
             await StopJumpAndEntitlementAsync(database);
             await ProtectedProvenanceAsync(database);
+            await FreshListeningBoundaryAsync(new Paths(Path.Combine(directory.FullName, "session.db")));
             await MigrateV4Async(new Paths(Path.Combine(directory.FullName, "v4.db")));
         }
         finally
@@ -24,6 +25,46 @@ internal static class DurableLiveQueueTests
             SqliteConnection.ClearAllPools();
             directory.Delete(recursive: true);
         }
+    }
+
+    private static async Task FreshListeningBoundaryAsync(Paths database)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var token = timeout.Token;
+        var queue = new DurableLiveQueue(database);
+        var first = new DurableLiveQueue.Run(Server, 1, 2, Protected: true, Account: "A");
+        var otherAccount = first with { Account = "B" };
+        var otherServer = first with { Server = "https://scanner.example/two" };
+        foreach (var scope in new[] { first, otherAccount, otherServer })
+        {
+            await queue.StartListeningAsync(scope, Start, token);
+            await Add(queue, scope, "existing", Start, origin: RecordingOrigin.Live);
+        }
+
+        var held = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var jump = queue.JumpToLiveAsync(first, 0, skipSelected: false, token, prepareBoundary: async () =>
+        {
+            held.SetResult();
+            await release.Task.WaitAsync(token);
+            return 0;
+        });
+        await held.Task.WaitAsync(token);
+        var second = first with { Owner = 2 };
+        var starting = queue.StartListeningAsync(second, Start.AddMinutes(1), token);
+        var newCall = queue.ObserveAsync(second, "new", Start.AddDays(-1), new(new(), "New", 0), token, RecordingOrigin.Live);
+        var staleCall = queue.ObserveAsync(first, "late-old", Start, new(new(), "Old", 0), token, RecordingOrigin.Live);
+        Check(!newCall.IsCompleted && !starting.IsCompleted, "The new observation must wait behind the reserved start boundary.");
+        release.TrySetResult();
+        await jump;
+        await starting;
+        Check(await newCall && !await staleCall, "A new-owner arrival survives the boundary and late old-owner work is rejected.");
+        await queue.StartListeningAsync(second, Start.AddMinutes(2), token);
+        Check((await queue.NextAsync(second, 0, token))?.Id == "new" && !await queue.IsPendingAsync(second, "existing", 0, token),
+            "Repeating the same start must keep current arrivals eligible.");
+        Check((await queue.NextAsync(otherAccount, 0, token))?.Id == "existing" &&
+              (await queue.NextAsync(otherServer, 0, token))?.Id == "existing", "The boundary must affect only the selected server and account.");
+        Console.WriteLine("PASS The fresh-session transaction fences concurrent observations and preserves other account and server queues");
     }
 
     private static async Task MigrateV4Async(Paths paths)

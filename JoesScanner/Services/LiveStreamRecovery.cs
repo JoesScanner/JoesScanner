@@ -14,6 +14,8 @@ public sealed class LiveStreamRecovery
     private TaskCompletionSource _pending = NewSignal();
     private Window? _outstanding;
     private TaskCompletionSource? _reconciled;
+    private string? _inheritedWindowId;
+    private bool _hasPollingBaseline;
 
     public LiveStreamRecovery() { }
 
@@ -32,6 +34,21 @@ public sealed class LiveStreamRecovery
             recovery.PublishRequest(saved);
         return recovery;
     }
+
+    internal static async Task<LiveStreamRecovery> StartListeningAsync(DurableLiveQueue queue, DurableLiveQueue.Run run,
+        DateTimeOffset since, CancellationToken token)
+    {
+        await queue.StartListeningAsync(run, since, token).ConfigureAwait(false);
+        var recovery = await OpenAsync(queue, run, token).ConfigureAwait(false);
+        recovery.ListeningSince = since;
+        recovery._inheritedWindowId = recovery._outstanding?.Id;
+        return recovery;
+    }
+
+    internal DateTimeOffset? ListeningSince { get; private set; }
+    internal bool NeedsPollingBaseline => ListeningSince.HasValue && !_hasPollingBaseline;
+    internal void CompletePollingBaseline() => _hasPollingBaseline = true;
+    internal bool IsInherited(Window? window) => window != null && window.Id == _inheritedWindowId;
 
     internal bool IsDurable => _queue != null;
 

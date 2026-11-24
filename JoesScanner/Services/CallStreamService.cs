@@ -183,7 +183,7 @@ namespace JoesScanner.Services
             // Apple review test account behavior.
             // For this one account only, backfill several hours of calls so playback can
             // start immediately even if there are no brand new calls arriving.
-            if (isAppleTestAccount)
+            if (isAppleTestAccount && recovery?.ListeningSince == null)
             {
                 skipInitialBatch = false;
                 if (recovery?.OutstandingWindow == null)
@@ -200,7 +200,7 @@ namespace JoesScanner.Services
             // When WebSocket is unavailable, fall back to polling and retry WS after a short cooldown.
             var wsDisableUntilUtc = DateTime.MinValue;
             DateTimeOffset? foregroundPollFloor = null;
-            var livePollSince = _clock.GetUtcNow();
+            var livePollSince = recovery?.ListeningSince ?? _clock.GetUtcNow();
             RecordingPlaybackAccess.HistoryGrant? pollGrant = null;
 
             while (!cancellationToken.IsCancellationRequested && InRecoveryScope())
@@ -271,7 +271,7 @@ namespace JoesScanner.Services
                     pollGrant = await GetHistoryGrantAsync(baseUrl, cancellationToken);
                     if (!InRecoveryScope())
                         yield break;
-                    if (newRecoveryRequest)
+                    if (newRecoveryRequest && recovery?.IsInherited(window) != true)
                     {
                         foregroundPollFloor = pollGrant != null ? window.Since : recoveryRequestedAt;
                         livePollSince = recoveryRequestedAt;
@@ -318,7 +318,8 @@ namespace JoesScanner.Services
                 if (allowWebSocket && DateTime.UtcNow >= wsDisableUntilUtc)
                     wsDisableUntilUtc = DateTime.UtcNow.AddSeconds(5);
 
-                if (window != null && pollGrant != null)
+                if (window != null && pollGrant != null &&
+                    (recovery?.NeedsPollingBaseline != true || !recovery.IsInherited(window)))
                 {
                     await foreach (var call in StreamConnectionAsync(null, baseUrl, callsUrl,
                         liveCalls, recovery, window, foregroundPollFloor, socketOpenedAfter, pollGrant, InRecoveryScope, cancellationToken))
@@ -337,7 +338,8 @@ namespace JoesScanner.Services
                 try
                 {
                     pollGrant = await GetHistoryGrantAsync(baseUrl, cancellationToken, pollGrant);
-                    rows = await PollCallsAsync(baseUrl, callsUrl, pollGrant, livePollSince, cancellationToken);
+                    rows = await PollCallsAsync(baseUrl, callsUrl, pollGrant, livePollSince, cancellationToken,
+                        requireRows: recovery?.NeedsPollingBaseline == true);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
@@ -379,7 +381,8 @@ namespace JoesScanner.Services
                     {
                         await Task.Delay(TimeSpan.FromMilliseconds(500), cancellationToken);
                         pollVersion = LiveCallState.NextVersion();
-                        rows = await PollCallsAsync(baseUrl, callsUrl, pollGrant, livePollSince, cancellationToken);
+                        rows = await PollCallsAsync(baseUrl, callsUrl, pollGrant, livePollSince, cancellationToken,
+                            requireRows: recovery?.NeedsPollingBaseline == true);
                     }
                     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                     {
@@ -449,7 +452,8 @@ namespace JoesScanner.Services
                 if (window != null && pollGrant == null)
                     recovery?.AllowPlaybackWithoutHistory(window);
 
-                if (rows != null && foregroundPollFloor is { } floor)
+                var establishingBaseline = recovery?.NeedsPollingBaseline == true && pollGrant != null;
+                if (rows != null && recovery?.ListeningSince == null && foregroundPollFloor is { } floor)
                 {
                     rows.RemoveAll(row =>
                         !(row.DT_RowId?.Trim() is { } id && liveCalls.Find(id) != null) &&
@@ -459,6 +463,8 @@ namespace JoesScanner.Services
                 // If there are no rows, we may still want to signal "connected but idle".
                 if (rows == null || rows.Count == 0)
                 {
+                    if (rows != null && establishingBaseline && pollGrant!.IsCurrent(_settingsService))
+                        recovery!.CompletePollingBaseline();
                     // First successful but empty poll after starting: tell the UI that we
                     // are connected, even though there are no calls yet.
                     if (!hasReportedIdleConnection)
@@ -506,7 +512,7 @@ namespace JoesScanner.Services
                         };
                     }
 
-                    skipYieldForThisBatch = pollGrant != null;
+                    skipYieldForThisBatch = pollGrant != null && recovery?.ListeningSince == null;
                     skipInitialBatch = false;
                 }
 
@@ -529,6 +535,7 @@ namespace JoesScanner.Services
                     // Never let local persistence break streaming.
                 }
 
+                var baselineSaved = true;
                 foreach (var r in rows)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
@@ -547,20 +554,25 @@ namespace JoesScanner.Services
                     var outstanding = recovery?.OutstandingWindow;
                     var cutoff = window?.Since;
                     var inRecoveryWindow = cutoff != null && TryParseTimestampUtc(r.StartTime, r.StartTimeUTC) >= cutoff;
-                    var recoveryId = inRecoveryWindow && pollGrant != null && recovery?.IsDurable == true && outstanding?.Id == window?.Id
+                    var recoveryId = inRecoveryWindow && pollGrant != null &&
+                        recovery?.IsDurable == true && !recovery.IsInherited(window) && outstanding?.Id == window?.Id
                         ? outstanding?.Id : null;
                     var item = BuildCallItemFromRow(r, baseUrl, liveCalls, pollVersion, skipYieldForThisBatch && !inRecoveryWindow,
                         pollGrant != null ? RecordingOrigin.History : RecordingOrigin.Live,
-                        forwardDetachedUpdate: recoveryId != null,
-                        allowProvisionalAdmission: inRecoveryWindow || pollGrant == null);
+                        forwardDetachedUpdate: establishingBaseline || recoveryId != null,
+                        allowProvisionalAdmission: establishingBaseline || inRecoveryWindow || pollGrant == null);
 
                     if (item != null)
                     {
-                        if (recoveryId != null)
-                            RequireRecoveryAdmission(item, liveCalls, recoveryId, baseUrl);
+                        item.IsListeningBaseline = establishingBaseline && recoveryId == null;
+                        if (item.IsListeningBaseline || recoveryId != null)
+                            RequireHistoricalAdmission(item, liveCalls, recoveryId, baseUrl);
                         yield return item;
+                        baselineSaved &= !establishingBaseline || item.WasDurablyAdmitted;
                     }
                 }
+                if (establishingBaseline && baselineSaved && pollGrant!.IsCurrent(_settingsService))
+                    recovery!.CompletePollingBaseline();
 
                 if (reportReconnection)
                 {
@@ -691,11 +703,11 @@ namespace JoesScanner.Services
             grant.Allows(TryParseTimestampUtc(row.StartTime, row.StartTimeUTC));
 
         private async Task<List<CallRow>> FetchHistoryRowsAsync(string callsUrl, RecordingPlaybackAccess.HistoryGrant grant,
-            CancellationToken token, int start, int length, bool filterToGrant = true)
+            CancellationToken token, int start, int length, bool filterToGrant = true, bool requireRows = false)
         {
             ValidateHistoryGrant(grant, token);
             var rows = await FetchLatestAsync(callsUrl, token, start, length, GetHistoryDateSearch(grant),
-                () => ValidateHistoryGrant(grant, token), requireRows: !filterToGrant).ConfigureAwait(false);
+                () => ValidateHistoryGrant(grant, token), requireRows: requireRows || !filterToGrant).ConfigureAwait(false);
             ValidateHistoryGrant(grant, token);
             if (filterToGrant)
                 rows.RemoveAll(row => !AllowsHistoryRow(grant, row));
@@ -703,10 +715,10 @@ namespace JoesScanner.Services
         }
 
         private async Task<List<CallRow>> PollCallsAsync(string baseUrl, string callsUrl,
-            RecordingPlaybackAccess.HistoryGrant? grant, DateTimeOffset liveSince, CancellationToken token)
+            RecordingPlaybackAccess.HistoryGrant? grant, DateTimeOffset liveSince, CancellationToken token, bool requireRows = false)
         {
             if (grant != null)
-                return await FetchHistoryRowsAsync(callsUrl, grant, token, 0, PollBatchSize).ConfigureAwait(false);
+                return await FetchHistoryRowsAsync(callsUrl, grant, token, 0, PollBatchSize, requireRows: requireRows).ConfigureAwait(false);
 
             // The firewall still authorizes ongoing Live monitoring. When History
             // cannot be verified, request only new recordings since polling began
@@ -1168,7 +1180,7 @@ namespace JoesScanner.Services
             return ObserveExistingCall(row, state, version);
         }
 
-        private void RequireRecoveryAdmission(CallItem item, LiveCallIndex liveCalls, string windowId, string server)
+        private void RequireHistoricalAdmission(CallItem item, LiveCallIndex liveCalls, string? windowId, string server)
         {
             item.RecoveryWindowId = windowId;
             item.RecordingAccess ??= new RecordingAccessContext(RecordingOrigin.History,
@@ -1561,7 +1573,7 @@ namespace JoesScanner.Services
                                 batch, window!.Since, inScope, token))
                             {
                                 if (recovery!.IsDurable)
-                                    RequireRecoveryAdmission(call, liveCalls, window.Id, baseUrl);
+                                    RequireHistoricalAdmission(call, liveCalls, window.Id, baseUrl);
                                 yield return call;
                                 reconciled &= !recovery!.IsDurable || call.WasDurablyAdmitted;
                             }
@@ -1671,6 +1683,7 @@ namespace JoesScanner.Services
                     var origin = !protectedRecorder || recordedAt >= socketOpenedAfter
                         ? RecordingOrigin.Live : RecordingOrigin.History;
                     var history = !row.IsUpdateNotification && origin == RecordingOrigin.History;
+                    var listeningBaseline = history && recovery?.ListeningSince is { } listeningSince && recordedAt < listeningSince;
                     if (history && !checkedHistory)
                     {
                         historyGrant = await GetHistoryGrantAsync(baseUrl, token, historyGrant);
@@ -1681,7 +1694,7 @@ namespace JoesScanner.Services
                     if (!Authorized())
                         continue;
 
-                    var existingOnly = history && foregroundFloor is { } floor && recordedAt < floor;
+                    var existingOnly = history && !listeningBaseline && foregroundFloor is { } floor && recordedAt < floor;
                     if (!existingOnly)
                         await PersistWebSocketRowAsync(row, baseUrl, token);
                     if (!Authorized())
@@ -1717,7 +1730,12 @@ namespace JoesScanner.Services
                     }
 
                     if (call != null)
+                    {
+                        call.IsListeningBaseline = listeningBaseline;
+                        if (listeningBaseline)
+                            RequireHistoricalAdmission(call, liveCalls, windowId: null, baseUrl);
                         yield return call;
+                    }
                 }
             }
         }

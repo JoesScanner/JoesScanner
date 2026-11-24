@@ -60,18 +60,20 @@ internal static class LiveInterruptionTests
         android.RouteDisconnected(AudioDisconnectionBehavior.PausePlayback);
         android.SetCallActive(false);
         episode.SetBlocked(LiveInterruptionSource.NativeAudio, android.RoutePaused, android.RoutePaused);
-        var restored = new LiveInterruptionRecovery(clock, value => saved = value);
-        restored.Restore(saved ?? throw new InvalidOperationException("Missing persistent Android route pause."));
         clock.Advance(TimeSpan.FromMinutes(4));
-        restored.SetBlocked(LiveInterruptionSource.Connection, false);
-        Check(restored.ShouldJump(InterruptionRecoveryPreference.Default) == null && restored.RequiresPlay,
-            "A route pause must require explicit Play across a restart.");
-        restored.AllowExplicitPlay();
-        Check(restored.ShouldJump(InterruptionRecoveryPreference.Default) == true,
-            "The original interruption duration must survive restart until explicit Play.");
-        restored.Complete();
+        Check(episode.ShouldJump(InterruptionRecoveryPreference.Default) == null && episode.RequiresPlay &&
+            saved?.RequiresPlay == true, "A route pause must wait for Play within the same session.");
+        var fresh = new LiveInterruptionRecovery(clock, _ => { });
+        Check(fresh.ShouldJump(new(InterruptionRecoveryOption.Immediately)) == null && !fresh.RequiresPlay,
+            "A fresh session cannot inherit another session's playback interruption.");
+        android.RequestPlay();
+        episode.SetBlocked(LiveInterruptionSource.NativeAudio, android.RoutePaused);
+        episode.AllowExplicitPlay();
+        Check(episode.ShouldJump(InterruptionRecoveryPreference.Default) == true,
+            "Explicit Play in the same session must apply the original interruption duration.");
+        episode.Complete();
         Check(saved == null, "A reconciled episode must clear the checkpoint.");
-        Console.WriteLine("PASS iOS and Android interruption signals compose, including a route pause across restart");
+        Console.WriteLine("PASS Interruption preferences and explicit route resume apply within a listening session");
     }
 
     private static async Task CheckBoundaryAsync()

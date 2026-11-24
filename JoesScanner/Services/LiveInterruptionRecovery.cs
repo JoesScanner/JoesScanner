@@ -27,14 +27,6 @@ internal sealed class LiveInterruptionRecovery(TimeProvider clock, Action<LiveIn
     internal bool IsInterrupted => _blocked != 0 || RequiresPlay;
     internal bool IsBlockedBy(LiveInterruptionSource source) => (_blocked & source) != 0;
 
-    internal void Restore(Checkpoint checkpoint)
-    {
-        _checkpoint = checkpoint;
-        _elapsedBeforeStart = ElapsedSince(checkpoint.Since);
-        _started = clock.GetTimestamp();
-        _blocked = LiveInterruptionSource.Connection;
-    }
-
     internal void SetBlocked(LiveInterruptionSource source, bool blocked, bool requiresPlay = false, DateTimeOffset? beganAt = null)
     {
         if (!blocked)

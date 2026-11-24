@@ -232,7 +232,9 @@ internal static class AndroidAudioTests
         var oldOutcome = PlaybackAttempt.RunAsync(() => blocked.WaitAsync(old.Token), old.Token, _ => { });
         using var next = playback.Begin(manual: true);
         Check(oldFocus.Release(), "Selecting another call must release the outgoing focus request.");
-        oldFocus.OnChange(AndroidClipFocusStatus.Granted);
+        Check(!oldFocus.OnChange(AndroidClipFocusStatus.Granted) &&
+              !oldFocus.OnChange(AndroidClipFocusStatus.DuckableLoss),
+            "A retired focus listener must not publish any new transition during a manual handoff.");
         Check(!blocked.IsCompleted && !(await oldOutcome).AdvancesQueue() && next.CanContinue,
             "Late outgoing gain must not play or advance an obsolete recording.");
 

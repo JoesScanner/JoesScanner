@@ -25,6 +25,7 @@ namespace JoesScanner.Models
         internal bool IsRecordingNotification { get; init; }
         internal long LivePlaybackOwner { get; set; }
         internal long? LiveArrivalSequence { get; set; }
+        internal bool IsCompletedReplay { get; set; }
         internal bool HasUnplayedLateAudio { get; private set; }
 
         internal bool ConsumeLateAudio()
@@ -35,6 +36,7 @@ namespace JoesScanner.Models
         }
         internal bool IsLiveUpdate { get; init; }
         internal string? RecoveryWindowId { get; set; }
+        internal bool IsListeningBaseline { get; set; }
         internal bool WasDurablyAdmitted { get; private set; }
         internal Action<bool>? LiveAdmission { private get; set; }
 

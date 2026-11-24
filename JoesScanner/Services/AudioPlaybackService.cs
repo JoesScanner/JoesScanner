@@ -459,85 +459,117 @@ namespace JoesScanner.Services
             var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
             player.SetAudioAttributes(attributes);
-            player.Prepared += (_, _) => ready.TrySetResult();
-            player.Completion += (_, _) =>
+            var released = false;
+            void OnPrepared(object? sender, EventArgs args)
             {
-                if (completion.Confirm(token))
+                if (!released && !token.IsCancellationRequested)
+                    ready.TrySetResult();
+            }
+            void OnCompletion(object? sender, EventArgs args)
+            {
+                if (!released && completion.Confirm(token))
                     finished.TrySetResult();
-            };
-            player.Error += (_, args) =>
+            }
+            void OnError(object? sender, Android.Media.MediaPlayer.ErrorEventArgs args)
             {
                 args.Handled = true;
-                if (!completion.Reject())
+                if (released || !completion.Reject())
                     return;
                 var error = new InvalidOperationException($"Android audio playback failed ({args.What}, {args.Extra}).");
                 if (!ready.TrySetException(error))
                     finished.TrySetException(error);
-            };
+            }
 
-            var src = prepared.Url.Trim();
-            if (Uri.TryCreate(src, UriKind.Absolute, out var source) && source.Scheme is "http" or "https" or "content" or "file")
-                player.SetDataSource(context, AUri.Parse(src)!);
-            else
-                player.SetDataSource(src);
-            player.PrepareAsync();
-            await ready.Task.WaitAsync(TimeSpan.FromSeconds(90), token);
-
-            // Snapshot the setting for this recording, including any resumed segments.
-            var mode = _settings.MobileAudio.Mode;
-            using var playerRoute = AndroidAudioEnvironment.WatchPlayer(player);
-            while (true)
+            player.Prepared += OnPrepared;
+            player.Completion += OnCompletion;
+            player.Error += OnError;
+            try
             {
-                token.ThrowIfCancellationRequested();
-                if (finished.Task.IsCompleted)
-                {
-                    await finished.Task;
-                    return;
-                }
+                await PlayPreparedAndroidPlayerAsync();
+            }
+            finally
+            {
+                released = true;
+                player.Prepared -= OnPrepared;
+                player.Completion -= OnCompletion;
+                player.Error -= OnError;
+            }
 
-                if (!CanPlayAndroidAudio(mode))
-                {
-                    await WaitForAndroidAudioChangeAsync(manager, token, finished.Task);
-                    continue;
-                }
-                AndroidAudioEnvironment.RefreshExpectedRoute();
-                if (!CanPlayAndroidAudio(mode))
-                    continue;
+            async Task PlayPreparedAndroidPlayerAsync()
+            {
+                var src = prepared.Url.Trim();
+                if (Uri.TryCreate(src, UriKind.Absolute, out var source) && source.Scheme is "http" or "https" or "content" or "file")
+                    player.SetDataSource(context, AUri.Parse(src)!);
+                else
+                    player.SetDataSource(src);
+                player.PrepareAsync();
+                await ready.Task.WaitAsync(TimeSpan.FromSeconds(90), token);
 
-                var requestCallRevision = AndroidAudioEnvironment.CallRevision;
-                using var focus = new AndroidClipFocus(manager);
-                focus.Request(mode, attributes);
-                while (!finished.Task.IsCompleted && CanKeepAndroidFocus(mode))
+                // Snapshot the setting for this recording, including any resumed segments.
+                var mode = _settings.MobileAudio.Mode;
+                Task? duckingDeadline = null;
+                using var playerRoute = AndroidAudioEnvironment.WatchPlayer(player);
+                while (true)
                 {
                     token.ThrowIfCancellationRequested();
-                    var action = AndroidAudioEnvironment.GetFocusAction(focus.Status, requestCallRevision);
-                    if (action == AndroidFocusAttemptAction.Block)
+                    if (finished.Task.IsCompleted)
                     {
-                        AndroidAudioEnvironment.ReadCallMode(manager);
-                        AndroidAudioEnvironment.BlockForFocus(requestCallRevision);
-                        AppLog.DebugWriteLine(() => $"Android audio focus: {focus.Status}. Explicit resume required={AndroidAudioEnvironment.RequiresPlay}.");
-                        break;
+                        await finished.Task;
+                        return;
                     }
 
-                    if (action == AndroidFocusAttemptAction.Renew)
-                        break;
-
-                    // Retain the listener across transient and duckable loss. Releasing
-                    // here would discard the gain callback and could strand the queue.
-                    if (action == AndroidFocusAttemptAction.Wait)
+                    var focusMode = duckingDeadline?.IsCompleted == true ? MobileAudioMode.MixNormally : mode;
+                    if (!CanPlayAndroidAudio(focusMode))
                     {
-                        await WaitForAndroidAudioChangeAsync(manager, token, finished.Task, focus.Changed);
+                        await WaitForAndroidAudioChangeAsync(manager, token, finished.Task);
                         continue;
                     }
+                    AndroidAudioEnvironment.RefreshExpectedRoute();
+                    if (!CanPlayAndroidAudio(focusMode))
+                        continue;
 
-                    await PlayAndroidSegmentAsync(manager, player, playerRoute, prepared, mode, rate, focus, finished.Task, token);
+                    var requestCallRevision = AndroidAudioEnvironment.CallRevision;
+                    using var focus = new AndroidClipFocus(manager);
+                    focus.Request(focusMode, attributes);
+                    while (!finished.Task.IsCompleted && CanKeepAndroidFocus(focusMode))
+                    {
+                        token.ThrowIfCancellationRequested();
+                        var action = AndroidAudioEnvironment.GetFocusAction(focus.Status, requestCallRevision);
+                        if (action == AndroidFocusAttemptAction.Block)
+                        {
+                            AndroidAudioEnvironment.ReadCallMode(manager);
+                            AndroidAudioEnvironment.BlockForFocus(requestCallRevision);
+                            AppLog.DebugWriteLine(() => $"Android audio focus: {focus.Status}. Explicit resume required={AndroidAudioEnvironment.RequiresPlay}.");
+                            break;
+                        }
+
+                        if (action == AndroidFocusAttemptAction.Renew)
+                            break;
+
+                        // Retain the listener across transient and duckable loss. Releasing
+                        // here would discard the gain callback and could strand the queue.
+                        if (action == AndroidFocusAttemptAction.Wait)
+                        {
+                            await WaitForAndroidAudioChangeAsync(manager, token, finished.Task, focus.Changed);
+                            continue;
+                        }
+
+                        if (focusMode == MobileAudioMode.MixAndDuck)
+                        {
+                            duckingDeadline ??= Task.Delay(TimeSpan.FromSeconds(3), token);
+                            if (duckingDeadline.IsCompleted)
+                                break;
+                        }
+                        await PlayAndroidSegmentAsync(manager, player, playerRoute, prepared, focusMode, rate, focus, finished.Task,
+                            focusMode == MobileAudioMode.MixAndDuck ? duckingDeadline : null, token);
+                    }
                 }
             }
         }
 
         private async Task PlayAndroidSegmentAsync(AudioManager manager, Android.Media.MediaPlayer player,
             AndroidAudioEnvironment.PlayerRouteWatch playerRoute, PreparedAudio prepared, MobileAudioMode mode, double rate,
-            AndroidClipFocus focus, Task finished, CancellationToken token)
+            AndroidClipFocus focus, Task finished, Task? duckingDeadline, CancellationToken token)
         {
             var playing = false;
             var showPlayingState = false;
@@ -551,7 +583,12 @@ namespace JoesScanner.Services
                 try
                 {
                     if (!finished.IsCompleted)
-                        player.Pause();
+                    {
+                        if (token.IsCancellationRequested)
+                            player.Stop();
+                        else
+                            player.Pause();
+                    }
                 }
                 catch (Java.Lang.IllegalStateException ex)
                 {
@@ -563,7 +600,8 @@ namespace JoesScanner.Services
                 }
             }
 
-            bool MayContinue() => CanPlayAndroidAudio(mode) && focus.Status == AndroidClipFocusStatus.Granted;
+            bool MayContinue() => !token.IsCancellationRequested && duckingDeadline?.IsCompleted != true &&
+                CanPlayAndroidAudio(mode) && focus.Status == AndroidClipFocusStatus.Granted;
             void OnEligibilityChanged()
             {
                 if (!MayContinue())
@@ -595,12 +633,8 @@ namespace JoesScanner.Services
                 }
 
                 // Keep the same prepared player and resume at its paused position.
-                try { player.Start(); }
-                catch (Java.Lang.IllegalStateException)
-                {
-                    player.SeekTo(0);
-                    player.Start();
-                }
+                var playbackLimit = TimeSpan.FromSeconds(Math.Clamp((player.Duration / 1000d / rate * 2) + 120, 180, 10800));
+                player.Start();
                 playing = true;
                 try
                 {
@@ -622,7 +656,6 @@ namespace JoesScanner.Services
                         volume = ApplyDynamicVolumeAndroidAsync(prepared, player, audibleSegment.Token);
                 }
 
-                var playbackLimit = TimeSpan.FromSeconds(Math.Clamp((player.Duration / 1000d / rate * 2) + 120, 180, 10800));
                 while (playing && !finished.IsCompleted && MayContinue())
                 {
                     playerRoute.ReadInitialRoute();
@@ -632,7 +665,8 @@ namespace JoesScanner.Services
                         throw new TimeoutException("Android audio stalled. Press Play to retry this recording.");
                     if (elapsed.Elapsed >= playbackLimit)
                         throw new TimeoutException("Android audio playback timed out.");
-                    await WaitForAndroidAudioChangeAsync(manager, token, finished, focus.Changed, observeProgress: true);
+                    await WaitForAndroidAudioChangeAsync(manager, token, finished, focus.Changed,
+                        observeProgress: true, duckingDeadline: duckingDeadline);
                 }
                 normalExit = true;
             }
@@ -644,7 +678,7 @@ namespace JoesScanner.Services
                 SystemMediaService.AndroidForeground.StateChanged -= OnEligibilityChanged;
                 Pause();
                 if (!normalExit || pauseFailure != null || finished.IsCompleted ||
-                    token.IsCancellationRequested || !CanKeepAndroidFocus(mode) ||
+                    token.IsCancellationRequested || duckingDeadline?.IsCompleted == true || !CanKeepAndroidFocus(mode) ||
                     (AndroidAudioEnvironment.CallActive && focus.Status == AndroidClipFocusStatus.Granted) ||
                     focus.Status == AndroidClipFocusStatus.PermanentLoss)
                     focus.Release();
@@ -677,12 +711,12 @@ namespace JoesScanner.Services
             !AndroidAudioEnvironment.RequiresNewFocusRequest;
 
         private static async Task WaitForAndroidAudioChangeAsync(AudioManager manager, CancellationToken token,
-            Task finished, Task? focusChanged = null, bool observeProgress = false)
+            Task finished, Task? focusChanged = null, bool observeProgress = false, Task? duckingDeadline = null)
         {
             // Audio-mode listeners aren't available on every device. Reconcile
             // mode at the same wakeups used to check for actual player progress.
             var interval = OperatingSystem.IsAndroidVersionAtLeast(31) ? (observeProgress ? 250 : 1000) : 150;
-            await Task.WhenAny(finished, focusChanged ?? finished,
+            await Task.WhenAny(finished, focusChanged ?? finished, duckingDeadline ?? finished,
                 AndroidAudioEnvironment.Changed, SystemMediaService.AndroidForeground.Changed, Task.Delay(interval, token));
             token.ThrowIfCancellationRequested();
             AndroidAudioEnvironment.ReadCallMode(manager);

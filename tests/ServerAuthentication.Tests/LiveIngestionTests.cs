@@ -447,8 +447,9 @@ internal static partial class MobileRecoveryTests
     {
         var saved = await queue.ObserveWithPositionAsync(run, item.BackendId, item.RecordingTimeUtc,
             item.LiveState!.Read(), token, item.RecordingAccess?.Origin ?? RecordingOrigin.Unknown,
-            existingOnly: (item.IsLiveUpdate || item.IsRecordingNotification) && item.RecoveryWindowId == null,
-            report: report, recoveryWindowId: item.RecoveryWindowId);
+            existingOnly: (item.IsLiveUpdate || item.IsRecordingNotification) && item.RecoveryWindowId == null &&
+                !item.IsListeningBaseline,
+            report: report, recoveryWindowId: item.RecoveryWindowId, historyBaseline: item.IsListeningBaseline);
         item.ConfirmLiveAdmission(saved.ArrivalSequence.HasValue);
         return saved;
     }

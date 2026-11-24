@@ -130,42 +130,21 @@ namespace JoesScanner
             };
 #endif
 
-            // Autoplay on app launch (all platforms).
-            // If enabled, start monitoring and ensure the playback pipeline is running.
-            // For Joe's hosted server, require user/pass (website API credentials) before starting.
+            // Let the window initialize before starting scanner monitoring.
             try
             {
-                if (_settings.AutoPlay)
+                MainThread.BeginInvokeOnMainThread(async () =>
                 {
-                    MainThread.BeginInvokeOnMainThread(async () =>
+                    try
                     {
-                        try
-                        {
-                            await Task.Delay(400);
-
-                            var serverUrl = (_settings.ServerUrl ?? string.Empty).Trim();
-                            if (!Uri.TryCreate(serverUrl, UriKind.Absolute, out var serverUri))
-                                return;
-
-                            if (string.Equals(serverUri.Host, "app.joesscanner.com", StringComparison.OrdinalIgnoreCase))
-                            {
-                                var user = (_settings.BasicAuthUsername ?? string.Empty).Trim();
-                                var pass = (_settings.BasicAuthPassword ?? string.Empty).Trim();
-                                if (string.IsNullOrWhiteSpace(user) || string.IsNullOrWhiteSpace(pass))
-                                    return;
-                            }
-
-                            var vm = _services.GetService(typeof(MainViewModel)) as MainViewModel;
-                            if (vm == null)
-                                return;
-
-                            await vm.StartMonitoringWithAutoplayAsync();
-                        }
-                        catch
-                        {
-                        }
-                    });
-                }
+                        await _services.GetRequiredService<MainViewModel>()
+                            .StartMonitoringWithAutoplayAsync(() => Task.Delay(400));
+                    }
+                    catch (Exception ex)
+                    {
+                        AppLog.Add(() => $"Could not start Live monitoring on launch ({ex.GetType().Name}).");
+                    }
+                });
             }
             catch
             {

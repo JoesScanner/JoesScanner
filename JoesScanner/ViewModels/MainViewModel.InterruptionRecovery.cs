@@ -25,8 +25,17 @@ public partial class MainViewModel
         ObserveInterruption(LiveInterruptionSource.NativeAudio, AndroidAudioEnvironment.CallActive || AndroidAudioEnvironment.RoutePaused,
             AndroidAudioEnvironment.RoutePaused);
 
-    private void OnAndroidFocusInterruption(bool blocked)
+    private void OnAndroidFocusInterruption(bool blocked, bool released)
     {
+        if (released && _playbackRequests.HasManualSelection && _interruption is { } episode &&
+            episode.IsBlockedBy(LiveInterruptionSource.AndroidFocus))
+        {
+            // Releasing the previous clip's focus is part of a manual handoff.
+            episode.SetBlocked(LiveInterruptionSource.AndroidFocus, false);
+            episode.Complete();
+            return;
+        }
+
         if (!blocked || _playbackOwnership.Live != null)
             ObserveInterruption(LiveInterruptionSource.AndroidFocus, blocked);
     }
@@ -59,37 +68,17 @@ public partial class MainViewModel
         return "live_interruption_" + Convert.ToHexString(SHA256.HashData(scopeBytes));
     }
 
-    private void StartInterruptionTracking(DurableLiveQueue.Run scope, bool restore)
+    private void StartInterruptionTracking(DurableLiveQueue.Run scope)
     {
         var key = PlaybackInterruptionKey(scope);
         _connectedThisRun = false;
         _interruption = new LiveInterruptionRecovery(TimeProvider.System, checkpoint => SaveInterruption(key, checkpoint));
-        try
-        {
-            var saved = AppStateStore.GetString(key);
-            if (restore && saved.Length != 0 &&
-                JsonSerializer.Deserialize<LiveInterruptionRecovery.Checkpoint>(saved) is { } checkpoint)
-                _interruption.Restore(checkpoint);
-            else if (saved.Length != 0)
-                SaveInterruption(key, null);
+        // Interruption policy belongs to the active listening session. The
+        // independent HTTP checkpoint has already been reattached to this run.
+        SaveInterruption(key, null);
 #if IOS
-            var backgroundKey = key + "_background";
-            var background = AppStateStore.GetString(backgroundKey);
-            if (restore && _interruption.Since == null &&
-                DateTimeOffset.TryParseExact(background, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out var since))
-            {
-                var recovered = new LiveInterruptionRecovery.Checkpoint(since, RequiresPlay: false);
-                SaveInterruption(key, recovered);
-                _interruption.Restore(recovered);
-            }
-            if (background.Length != 0)
-                SaveInterruptionValue(backgroundKey, string.Empty);
+        SaveInterruptionValue(key + "_background", string.Empty);
 #endif
-        }
-        catch (Exception ex)
-        {
-            AppLog.Add(() => $"Live interruption state could not be read ({ex.GetType().Name}).");
-        }
         OnPropertyChanged(nameof(CanResumePlayback));
     }
 
@@ -190,6 +179,8 @@ public partial class MainViewModel
         try
         {
             InvalidateLivePlayback();
+            if (!await WaitForLiveEdgeAsync(jump.Token))
+                return;
             try
             {
                 if (_liveStreamRecovery?.ReconciledForPlayback is { IsCompleted: false } catchUp)
@@ -202,7 +193,7 @@ public partial class MainViewModel
                 AppLog.Add("Live playback resumed while HTTP recovery was still pending.");
             }
 
-            await _durableQueue.JumpToLiveAsync(scope, LocalRecoveryFloor(scope), skipSelected: false, jump.Token,
+            var result = await _durableQueue.JumpToLiveAsync(scope, LocalRecoveryFloor(scope), skipSelected: false, jump.Token,
                 prepareBoundary: async () =>
                 {
                     await FlushLiveCompletionAsync(jump.Token);
@@ -213,6 +204,9 @@ public partial class MainViewModel
                 commitPlayback: transaction => AppStateStore.Write(transaction, PlaybackInterruptionKey(scope), string.Empty));
             if (!_monitoring.CanRecover(run) || !IsCurrentLiveScope(scope) || jump.IsCancellationRequested)
                 return;
+            _manualLiveTraversal = null;
+            if (result != null)
+                _livePlaybackFloor = result.Target.ArrivalSequence;
             episode.Complete(persisted: true);
             SetPlaybackRetry(null);
             _lastTransportCall = null;

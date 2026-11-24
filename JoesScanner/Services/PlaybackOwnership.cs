@@ -5,12 +5,12 @@ namespace JoesScanner.Services;
 public sealed class PlaybackOwnership
 {
     private Lease _current = new(isLive: true);
-    private Lease? _nativeOwner;
+    private NativePlayback? _nativePlayback;
     private readonly SemaphoreSlim _nativeGate = new(1);
 
     internal event Action? Changed;
     internal Lease? Live => Volatile.Read(ref _current) is { IsLive: true } lease ? lease : null;
-    internal bool CanPublishLivePlayback => Volatile.Read(ref _nativeOwner) is { IsLive: true } owner && IsCurrent(owner);
+    internal bool CanPublishLivePlayback => Volatile.Read(ref _nativePlayback)?.Owner is { IsLive: true } owner && IsCurrent(owner);
     internal bool IsCurrent(Lease lease) => ReferenceEquals(Volatile.Read(ref _current), lease);
 
     internal Lease EnterHistory()
@@ -35,24 +35,38 @@ public sealed class PlaybackOwnership
         finally { Changed?.Invoke(); }
     }
 
+    internal Task WaitForLiveReleaseAsync(CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        var active = Volatile.Read(ref _nativePlayback);
+        return active?.Owner.IsLive == true ? active.Released.Task.WaitAsync(token) : Task.CompletedTask;
+    }
+
     internal async Task RunNativeAsync(Lease lease, CancellationToken token, Func<CancellationToken, Task> play)
     {
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(lease.Token, token);
         await _nativeGate.WaitAsync(lifetime.Token);
+        var active = new NativePlayback(lease);
         try
         {
             lifetime.Token.ThrowIfCancellationRequested();
             if (!IsCurrent(lease))
                 throw new OperationCanceledException(lease.Token);
 
-            Volatile.Write(ref _nativeOwner, lease);
+            Volatile.Write(ref _nativePlayback, active);
             await play(lifetime.Token);
         }
         finally
         {
-            Volatile.Write(ref _nativeOwner, null);
+            Volatile.Write(ref _nativePlayback, null);
             _nativeGate.Release();
+            active.Released.TrySetResult();
         }
+    }
+
+    private sealed record NativePlayback(Lease Owner)
+    {
+        internal TaskCompletionSource Released { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
     internal sealed class Lease

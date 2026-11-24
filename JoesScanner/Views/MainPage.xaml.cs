@@ -978,8 +978,6 @@ private static async Task OpenWhat3WordsForCallAsync(JoesScanner.Models.CallItem
 
             if (BindingContext is MainViewModel vm)
             {
-                await vm.TryAutoReconnectAsync();
-
                 // iOS can miss WebSocket update notifications while the app is backgrounded.
                 // When the user returns to the main page, refresh calls with missing transcription or duration.
                 await vm.RefreshStaleCallMetadataAsync();

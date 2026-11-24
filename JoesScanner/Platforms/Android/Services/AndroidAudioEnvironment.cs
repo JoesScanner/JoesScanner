@@ -26,9 +26,10 @@ internal static class AndroidAudioEnvironment
     public static event Action? ResumeStateChanged;
     public static event Action? PlaybackBlocked;
     internal static event Action? InterruptionChanged;
-    internal static event Action<bool>? ClipFocusInterrupted;
+    internal static event Action<bool, bool>? ClipFocusInterrupted;
 
-    internal static void ReportClipFocusInterruption(bool interrupted) => ClipFocusInterrupted?.Invoke(interrupted);
+    internal static void ReportClipFocusInterruption(bool interrupted, bool released) =>
+        ClipFocusInterrupted?.Invoke(interrupted, released);
 
     public static IDisposable Watch(Context context, ISettingsService settings)
     {

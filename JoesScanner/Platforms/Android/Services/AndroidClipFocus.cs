@@ -23,7 +23,7 @@ internal sealed class AndroidClipFocus(AudioManager manager) : Java.Lang.Object,
         if (interrupted == _interruptionReported)
             return;
         _interruptionReported = interrupted;
-        AndroidAudioEnvironment.ReportClipFocusInterruption(interrupted);
+        AndroidAudioEnvironment.ReportClipFocusInterruption(interrupted, released);
     }
 
     public void Request(MobileAudioMode mode, AudioAttributes attributes)
@@ -67,10 +67,10 @@ internal sealed class AndroidClipFocus(AudioManager manager) : Java.Lang.Object,
             AudioFocus.LossTransientCanDuck => AndroidClipFocusStatus.DuckableLoss,
             _ => _state.Status
         };
-        var previous = _state.Status;
-        _state.OnChange(status);
+        if (!_state.OnChange(status))
+            return;
         ReportInterruption();
-        if (_state.Status != previous && _state.Status != AndroidClipFocusStatus.Granted)
+        if (_state.Status != AndroidClipFocusStatus.Granted)
             LostAudibility?.Invoke();
     }
 
@@ -78,17 +78,18 @@ internal sealed class AndroidClipFocus(AudioManager manager) : Java.Lang.Object,
     {
         if (_state.Release())
         {
-            ReportInterruption(released: true);
-            if (OperatingSystem.IsAndroidVersionAtLeast(26) && _request is { } request)
+            try
             {
-                manager.AbandonAudioFocusRequest(request);
-            }
-            else
-            {
+                if (OperatingSystem.IsAndroidVersionAtLeast(26) && _request is { } request)
+                    manager.AbandonAudioFocusRequest(request);
+                else
+                {
 #pragma warning disable CS0618, CA1422
-                manager.AbandonAudioFocus(this);
+                    manager.AbandonAudioFocus(this);
 #pragma warning restore CS0618, CA1422
+                }
             }
+            finally { ReportInterruption(released: true); }
         }
     }
 

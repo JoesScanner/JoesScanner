@@ -3,6 +3,12 @@ using JoesScanner.Models;
 using JoesScanner.Services;
 using Microsoft.Data.Sqlite;
 
+if (args is ["--fresh-live-session"])
+{
+    Environment.ExitCode = await FreshLiveSessionContractTests.RunAsync();
+    return;
+}
+
 if (args.Length == 3 && args[0] == "--completion-crash-probe")
 {
     await DurablePlaybackConcurrencyTests.RunCrashProbeAsync(args[1], args[2]);
