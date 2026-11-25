@@ -141,8 +141,9 @@ internal static class IosAudioTests
     private static void BoundedReleaseRetries()
     {
         var calls = new List<string>();
+        var canDeactivate = false;
         var session = new IosClipSession(options => { calls.Add(options.ToString()); return true; },
-            () => { calls.Add("deactivate"); return false; },
+            () => { calls.Add("deactivate"); return canDeactivate; },
             () => { calls.Add("plain mix"); return true; });
         var old = session.TryStart(MobileAudioMode.MixAndDuck);
         Check(!session.Release(old), "A deactivation failure must retain lease-owned cleanup.");
@@ -153,9 +154,12 @@ internal static class IosAudioTests
             session.RetryRelease(old);
         }
         Check(delays.Count == 4 && delays.SequenceEqual(delays.Order()) &&
-              calls.Count(call => call == "plain mix") == 1 && session.PendingRelease == 0,
-            "The bounded backoff must fall back to a non-ducking category after native release retries fail.");
+              calls.Count(call => call == "plain mix") == 1 && session.PendingRelease == old,
+            "The mixing fallback must relinquish priority without declaring an unsuccessful deactivation complete.");
+        Check(session.TryStart(MobileAudioMode.MixAndDuck) == 0,
+            "A failed deactivation is still pending after the retry budget.");
 
+        canDeactivate = true;
         var newer = session.TryStart(MobileAudioMode.MixAndDuck);
         var callsBeforeStaleRetry = calls.Count;
         session.RetryRelease(old);
@@ -230,9 +234,11 @@ internal static class IosAudioTests
         state.Reconcile(canRetryActivation: false);
         Check(state.IsBlocked, "Foregrounding alone cannot authorize audio when higher-priority audio is still possible.");
         state.Reconcile(canRetryActivation: true);
-        Check(!state.IsBlocked && state.NeedsReconciliation, "An eligible foreground grants a probe for a missing legacy end.");
+        Check(!state.IsBlocked && !state.IsRecoveryBlocked() && state.IsRecoveryBlocked(waitForActivation: true),
+            "Foreground grants an activation probe while an interrupted native clip still waits for actual activation.");
         state.ActivationDenied();
-        Check(state.IsBlocked && state.RequiresPlay, "A rejected probe leaves the recording pending without spinning.");
+        Check(state.IsBlocked && state.RequiresPlay && state.IsRecoveryBlocked(),
+            "A rejected probe leaves the recording pending and keeps automatic recovery blocked.");
 
         state.SetCallActive(true);
         state.RecommendResume(true);
@@ -241,7 +247,8 @@ internal static class IosAudioTests
         Check(!state.IsBlocked, "The same recording may try to activate after the call ends.");
         state.ActivationSucceeded();
         state.RecommendResume(false);
-        Check(!state.IsBlocked && !state.NeedsReconciliation, "A stale negative recommendation cannot pause a resumed item.");
+        Check(!state.IsBlocked && !state.IsRecoveryBlocked(waitForActivation: true),
+            "A successful activation completes recovery; a stale negative recommendation cannot pause a resumed item.");
 
         state.SetCallActive(true);
         state.SetCallActive(false);
@@ -266,18 +273,28 @@ internal static class IosAudioTests
         var position = new IosRecordingState();
         var queue = new Queue<int>([10, 11, 12]);
         var finished = new TaskCompletionSource();
-        var recording = PlaybackAttempt.RunAsync(() => finished.Task, CancellationToken.None, _ => { });
+        var completion = new PlaybackCompletion();
+        var recording = PlaybackAttempt.RunAsync(() => finished.Task, CancellationToken.None, _ => { }, completion);
+        using var first = new MobileRecordingAttempt(completion);
         var outgoing = session.TryStart(MobileAudioMode.MixAndDuck);
-        position.Observe(5.4);
+        first.Start();
+        position.Observe(12);
+        var revision = state.RecordingRestartRevision;
         state.BeginInterruption();
         session.Invalidate();
         session.Release(outgoing);
-        Check(state.IsBlocked && !recording.IsCompleted && queue.Peek() == 10, "An interrupted segment cannot complete its recording.");
+        Check(state.RecordingRestartRevision == revision + 1 && first.Interrupt() && !first.Confirm(default) &&
+              state.IsBlocked && !recording.IsCompleted && queue.Peek() == 10,
+            "The interrupted player cannot complete or advance its recording.");
         state.RecommendResume(true);
         var resumed = session.TryStart(MobileAudioMode.MixAndDuck);
         state.ActivationSucceeded();
-        Check(session.Owns(resumed) && position.SeekTarget(5.4) == null && position.SeekTarget(0) == 5.4,
-            "Resume the same prepared player or seek a rebuilt player to the saved position.");
+        position.Restart();
+        using var replacement = new MobileRecordingAttempt(completion);
+        replacement.Start();
+        Check(session.Owns(resumed) && position.SeekTarget(0) == null && !first.Confirm(default) &&
+              replacement.Confirm(default) && !replacement.Confirm(default),
+            "Only the replacement item starting at zero can confirm the recording's end once.");
 
         state.BeginInterruption();
         session.Invalidate();
@@ -287,7 +304,7 @@ internal static class IosAudioTests
         Check(queue.Peek() == 11 && state.IsBlocked, "A real end at an interruption boundary advances once while the next item waits.");
         state.RecommendResume(true);
         Check(!state.IsBlocked && queue.SequenceEqual([11, 12]), "Recovery must not replay the completed item or skip a pending one.");
-        Console.WriteLine("PASS iOS resumption retains position and only true completion advances at an interruption boundary");
+        Console.WriteLine("PASS iOS short interruption restarts at zero and only one native item advances the queue");
     }
 
     private static void PrivateRouteRecovery()

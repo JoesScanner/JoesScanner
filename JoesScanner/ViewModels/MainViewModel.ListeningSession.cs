@@ -30,7 +30,8 @@ public partial class MainViewModel
         MainThread.InvokeOnMainThreadAsync(StopMonitoringCoreAsync);
 
     private Task ToggleConnectionAsync() =>
-        _monitoring.Current == null ? StartMonitoringAsync() : StopMonitoringAsync();
+        _monitoring.Current == null ? StartMonitoringAsync() :
+        ShowPausedPlaybackActions ? SystemPlayAsync() : StopMonitoringAsync();
 
     private bool ActivateFreshListeningSession(MonitoringLifecycle.Run run)
     {

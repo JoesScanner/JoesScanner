@@ -15,6 +15,7 @@ public partial class SystemMediaService
     private long _androidSessionRunId;
     private NowPlayingMetadata? _nextClipMetadata;
     private bool _clipPlaying;
+    private bool _monitoringAudioEnabled;
 
     internal static void BeginAndroidMonitoringRun(long runId)
     {
@@ -123,6 +124,7 @@ public partial class SystemMediaService
             return Task.CompletedTask;
 
         _androidSessionRunId = monitoringRunId;
+        _monitoringAudioEnabled = audioEnabled;
         var context = Platform.AppContext;
         PrepareAndroidPlaybackService();
         if (_monitoringRouteWatch == null)
@@ -130,6 +132,8 @@ public partial class SystemMediaService
             _ = _settings.MobileAudio;
             _monitoringRouteWatch = AndroidAudioEnvironment.Watch(context, _settings);
             AndroidAudioEnvironment.ResumeStateChanged += OnResumeStateChanged;
+            AndroidAudioEnvironment.InterruptionChanged += OnResumeStateChanged;
+            AndroidAudioEnvironment.ClipFocusInterrupted += OnClipFocusInterrupted;
             AndroidForeground.StateChanged += OnResumeStateChanged;
         }
         AndroidMediaCenter.SetConnected(context, true);
@@ -144,6 +148,8 @@ public partial class SystemMediaService
 
         _androidSessionRunId = 0;
         AndroidAudioEnvironment.ResumeStateChanged -= OnResumeStateChanged;
+        AndroidAudioEnvironment.InterruptionChanged -= OnResumeStateChanged;
+        AndroidAudioEnvironment.ClipFocusInterrupted -= OnClipFocusInterrupted;
         AndroidForeground.StateChanged -= OnResumeStateChanged;
         _monitoringRouteWatch?.Dispose();
         _monitoringRouteWatch = null;
@@ -152,10 +158,19 @@ public partial class SystemMediaService
         return Task.CompletedTask;
     }
 
-    private partial void PlatformUpdateNowPlaying(NowPlayingMetadata metadata, bool audioEnabled) =>
+    private partial void PlatformUpdateNowPlaying(NowPlayingMetadata metadata, bool audioEnabled)
+    {
         _nextClipMetadata = metadata;
+        if (_monitoringAudioEnabled != audioEnabled)
+            _ = PlatformRefreshAudioSessionAsync(audioEnabled, "Audio state changed");
+    }
 
-    private partial Task PlatformRefreshAudioSessionAsync(bool audioEnabled, string reason) => Task.CompletedTask;
+    private partial Task PlatformRefreshAudioSessionAsync(bool audioEnabled, string reason)
+    {
+        _monitoringAudioEnabled = audioEnabled;
+        OnResumeStateChanged();
+        return Task.CompletedTask;
+    }
 
     private partial Task PlatformSetClipPlaybackStateAsync(bool isPlaying, bool audioEnabled, string reason)
     {
@@ -189,12 +204,16 @@ public partial class SystemMediaService
         }
     }
 
-    private static void UpdateIdleNotification()
+    private void OnClipFocusInterrupted(PlaybackCompletion owner, bool blocked) => OnResumeStateChanged();
+
+    private void UpdateIdleNotification()
     {
         var context = Platform.AppContext;
         AndroidMediaCenter.SetPlaybackState(context, false);
         AndroidMediaCenter.UpdateNowPlaying(context, "Joe's Scanner",
+            !_monitoringAudioEnabled ? "Audio off. Monitoring." :
             AndroidAudioEnvironment.RequiresPlay ? "Playback paused. Select Play to resume." :
+            AndroidAudioEnvironment.IsBlocked || AndroidAudioEnvironment.HasInterruptedClip ? "Audio interrupted. Monitoring." :
             AndroidForeground.StartFailed ? "Monitoring. Background playback unavailable." : "Monitoring");
     }
 

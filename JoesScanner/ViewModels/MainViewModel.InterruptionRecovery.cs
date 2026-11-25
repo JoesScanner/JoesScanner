@@ -17,36 +17,35 @@ public partial class MainViewModel
     private bool _selectingManualPlayback;
 
 #if ANDROID
+    private (long Run, DateTimeOffset Since)? _androidBackgroundGap;
+
     private void OnAndroidAudioInterruption() =>
-        ObserveInterruption(LiveInterruptionSource.NativeAudio, AndroidAudioEnvironment.CallActive || AndroidAudioEnvironment.RoutePaused,
-            AndroidAudioEnvironment.RoutePaused);
+        _ = ObserveInterruption(LiveInterruptionSource.NativeAudio, AndroidAudioEnvironment.IsBlocked, AndroidAudioEnvironment.RoutePaused);
 
-    private void OnAndroidFocusInterruption(bool blocked, bool released)
-    {
-        if (released && _playbackRequests.HasManualSelection && _interruption is { } episode &&
-            episode.IsBlockedBy(LiveInterruptionSource.AndroidFocus))
-        {
-            // Releasing the previous clip's focus is part of a manual handoff.
-            episode.SetBlocked(LiveInterruptionSource.AndroidFocus, false);
-            episode.Complete();
-            return;
-        }
-
-        if (!blocked || _playbackOwnership.Live != null)
-            ObserveInterruption(LiveInterruptionSource.AndroidFocus, blocked);
-    }
+    private void OnAndroidFocusInterruption(PlaybackCompletion owner, bool blocked) =>
+        _ = ObserveClipFocusInterruption(owner, blocked);
 
     private void OnAndroidForegroundChanged()
     {
         var foreground = SystemMediaService.AndroidForeground;
         var blocked = !foreground.ActivityVisible && !foreground.IsReady;
-        if (!blocked && _interruption?.IsBlockedBy(LiveInterruptionSource.Background) == true && _interruption.Since is { } since)
-            RequestRecorderRecovery(since);
-        ObserveInterruption(LiveInterruptionSource.Background, blocked);
+        if (_monitoring.Current is { } run && _monitoring.CanRecover(run))
+        {
+            if (blocked && _androidBackgroundGap?.Run != run.Id)
+                _androidBackgroundGap = (run.Id, DateTimeOffset.UtcNow);
+            else if (!blocked && _androidBackgroundGap is { } gap && gap.Run == run.Id)
+            {
+                _androidBackgroundGap = null;
+                RequestRecorderRecovery(gap.Since);
+            }
+        }
+        _ = ObserveInterruption(LiveInterruptionSource.Background, blocked);
     }
 #elif IOS
     private void OnIosAudioInterruption() =>
-        ObserveInterruption(LiveInterruptionSource.NativeAudio, IosAudioEnvironment.HasRecoveryInterruption, IosAudioEnvironment.RoutePaused);
+        _ = ObserveInterruption(LiveInterruptionSource.NativeAudio,
+            IosAudioEnvironment.IsRecoveryBlocked(waitForActivation: _nativeLiveRequest?.CanContinue == true),
+            IosAudioEnvironment.RoutePaused);
 
     private void OnIosBackgroundCheckpoint(DateTimeOffset since)
     {
@@ -58,14 +57,14 @@ public partial class MainViewModel
     private bool IsLiveInterruptionBlockingPlayback =>
         _interruptionJump != null || _interruption?.IsInterrupted == true;
 
-    private void StartInterruptionTracking()
+    private void StartInterruptionTracking(TimeProvider? clock = null)
     {
-        _interruption = new LiveInterruptionRecovery(TimeProvider.System, checkpoint => SaveInterruption(PlaybackInterruptionKey, checkpoint));
+        _interruption = new LiveInterruptionRecovery(clock ?? TimeProvider.System, checkpoint => SaveInterruption(PlaybackInterruptionKey, checkpoint));
         SaveInterruption(PlaybackInterruptionKey, null);
 #if IOS
         SaveInterruptionValue(PlaybackInterruptionKey + "_background", string.Empty);
 #endif
-        OnPropertyChanged(nameof(CanResumePlayback));
+        NotifyPlaybackResumeState();
     }
 
     private static void SaveInterruption(string key, LiveInterruptionRecovery.Checkpoint? checkpoint) =>
@@ -93,29 +92,89 @@ public partial class MainViewModel
         _interruptionJump?.Cancel();
         _interruptionJump = null;
         _interruption = null;
+#if ANDROID
+        _androidBackgroundGap = null;
+#endif
         SaveInterruption(PlaybackInterruptionKey, null);
 #if IOS
         SaveInterruptionValue(PlaybackInterruptionKey + "_background", string.Empty);
 #endif
     }
 
-    private void ObserveInterruption(LiveInterruptionSource source, bool blocked, bool requiresPlay = false, DateTimeOffset? beganAt = null)
+    private void ResetInterruptionRecovery()
     {
-        if (_interruption is not { } episode || !_monitoring.CanRecover(_monitoring.Current))
-            return;
+        _interruptionJump?.Cancel();
+        _interruption?.Reset();
+        NotifyPlaybackResumeState();
+    }
+
+    private void RefreshNativeInterruptionState()
+    {
+#if ANDROID
+        OnAndroidAudioInterruption();
+        OnAndroidForegroundChanged();
+#elif IOS
+        OnIosAudioInterruption();
+#endif
+    }
+
+    private Task ObserveClipFocusInterruption(PlaybackCompletion owner, bool blocked) =>
+        ReferenceEquals(_nativeLiveCompletion, owner) && (!blocked || _nativeLiveRequest?.CanContinue == true)
+            ? ObserveInterruption(LiveInterruptionSource.AndroidFocus, blocked) : Task.CompletedTask;
+
+    private Task ObserveInterruption(LiveInterruptionSource source, bool blocked, bool requiresPlay = false, DateTimeOffset? beganAt = null)
+    {
+        if (_interruption is not { } episode || !_monitoring.CanRecover(_monitoring.Current) || _playbackOwnership.Live == null)
+            return Task.CompletedTask;
         var explicitPlay = episode.RequiresPlay;
-        episode.SetBlocked(source, blocked, requiresPlay, beganAt);
+        var manual = _selectingManualPlayback || _playbackRequests.HasManualSelection;
+        episode.SetBlocked(source, blocked, requiresPlay, beganAt, trackRecovery: !manual);
         if (explicitPlay != episode.RequiresPlay)
-            OnPropertyChanged(nameof(CanResumePlayback));
+            NotifyPlaybackResumeState();
         if (blocked)
+        {
+            _automaticPreloads.Retire();
             _interruptionJump?.Cancel();
+        }
         else if (episode.Since.HasValue && !episode.IsInterrupted)
-            _ = RecoverInterruptedPlaybackAsync();
+            return RecoverInterruptedPlaybackAsync();
+        return Task.CompletedTask;
+    }
+
+    private LivePlaybackRequests.Request BeginManualPlayback(PlaybackOwnership.Lease live)
+    {
+        LivePlaybackRequests.Request? request = null;
+        _selectingManualPlayback = true;
+        try
+        {
+            request = BeginLiveManualRequest(live);
+            if (!request.CanContinue)
+                return request;
+            ResetInterruptionRecovery();
+            SetPlaybackRetry(null);
+#if ANDROID
+            AndroidAudioEnvironment.RequestPlay();
+            if (IsRunning)
+                SystemMediaService.PrepareAndroidPlaybackService();
+#elif IOS
+            IosAudioEnvironment.RequestPlay();
+#endif
+            RefreshNativeInterruptionState();
+        }
+        catch
+        {
+            request?.Dispose();
+            throw;
+        }
+        finally { _selectingManualPlayback = false; }
+
+        return request;
     }
 
     private Task RecoverInterruptedPlaybackAsync(bool userInitiated = false)
     {
         if (_interruption is not { } episode || _interruptionJump != null || _selectingManualPlayback ||
+            _playbackRequests.HasManualSelection || _transportLookups.HasManualSelection ||
             _monitoring.Current is not { } run || !_monitoring.CanRecover(run) ||
             _playbackOwnership.Live is not { } live || !AudioEnabled ||
             !(userInitiated || _settingsService.AutoPlay || _userRunShouldDriveQueue || _currentPlayingCall != null))
@@ -147,15 +206,16 @@ public partial class MainViewModel
             InvalidateLivePlayback();
             if (!await WaitForLiveEdgeAsync(jump.Token) || !await WaitForAutomaticAudioSourceAsync(jump.Token))
                 return;
-            var result = await _durableQueue.JumpToLiveAsync(AutomaticQueueScopes(), LocalRecoveryFloor, skipSelected: false, jump.Token,
+            var floor = await _durableQueue.SetPlaybackFloorAtLiveEdgeAsync(LiveQueueScopes(), jump.Token,
+                skipOutstandingRecovery: true,
                 prepareBoundary: () => FlushLiveCompletionAsync(jump.Token),
-                commitPlayback: transaction => AppStateStore.Write(transaction, PlaybackInterruptionKey, string.Empty),
-                automatic: AutomaticJumpFilter);
-            if (!_monitoring.CanRecover(run) || jump.IsCancellationRequested)
+                commitPlayback: transaction => AppStateStore.Write(transaction, PlaybackInterruptionKey, string.Empty));
+            if (!_monitoring.CanRecover(run) || !_playbackOwnership.IsCurrent(live) ||
+                _interruption != episode || jump.IsCancellationRequested)
                 return;
             _manualLiveTraversal = null;
-            if (result != null)
-                _livePlaybackFloor = result.Target.Row.ArrivalSequence;
+            _livePlaybackFloor = floor;
+            ResetScheduler();
             episode.Complete(persisted: true);
             SetPlaybackRetry(null);
             _lastTransportCall = null;
@@ -173,7 +233,7 @@ public partial class MainViewModel
                 _interruptionJump = null;
         }
 
-        if (!_monitoring.CanRecover(run) || !_playbackOwnership.IsCurrent(live))
+        if (!_monitoring.CanRecover(run) || !_playbackOwnership.IsCurrent(live) || _interruption != episode)
             return;
         if (!episode.Since.HasValue)
             await RequestQueuePlaybackAsync("ReturnedToLiveAfterInterruption", userInitiated || _userRunShouldDriveQueue);

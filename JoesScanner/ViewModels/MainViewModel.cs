@@ -160,9 +160,11 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
         // Command bound to the global Audio On or Audio Off button on the main page.
         // Only affects audio (mute or unmute), never starts or stops the stream.
         public ICommand ToggleAudioCommand { get; }
-        public ICommand ResumeMobilePlaybackCommand { get; }
+        public ICommand RetryPlaybackCommand { get; }
         public ICommand SkipUnavailableRecordingCommand { get; }
         public bool CanResumePlayback => _retryPlaybackCall != null || IsMobilePlaybackPaused;
+        public bool CanRetryPlayback => _retryPlaybackCall != null && !IsMobilePlaybackPaused;
+        public bool ShowPausedPlaybackActions => _monitoring.Current?.IsActive == true && IsMobilePlaybackPaused;
 
         public bool IsMobilePlaybackPaused =>
             _interruption?.RequiresPlay == true ||
@@ -296,15 +298,15 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             StopCommand = new Command(async () => await StopMonitoringAsync(), () => _monitoring.Current != null);
             OpenDonateCommand = new Command(async () => await OpenDonateAsync());
             ToggleAudioCommand = new Command(async () => await OnToggleAudioAsync());
-            ResumeMobilePlaybackCommand = new Command(async () => await RunLivePlaybackInputAsync(ResumeMobilePlaybackAsync));
+            RetryPlaybackCommand = new Command(async () => await RunLivePlaybackInputAsync(ResumeMobilePlaybackAsync));
             SkipUnavailableRecordingCommand = new Command(async () => await RunLivePlaybackInputAsync(SkipUnavailableRecordingAsync));
 #if ANDROID
-            AndroidAudioEnvironment.ResumeStateChanged += () => OnPropertyChanged(nameof(CanResumePlayback));
+            AndroidAudioEnvironment.ResumeStateChanged += NotifyPlaybackResumeState;
             AndroidAudioEnvironment.InterruptionChanged += OnAndroidAudioInterruption;
             AndroidAudioEnvironment.ClipFocusInterrupted += OnAndroidFocusInterruption;
             SystemMediaService.AndroidForeground.StateChanged += OnAndroidForegroundChanged;
 #elif IOS
-            IosAudioEnvironment.ResumeStateChanged += () => OnPropertyChanged(nameof(CanResumePlayback));
+            IosAudioEnvironment.ResumeStateChanged += NotifyPlaybackResumeState;
             IosAudioEnvironment.RecoveryInterruptionChanged += OnIosAudioInterruption;
             IosAudioEnvironment.BackgroundMonitoringCheckpoint += OnIosBackgroundCheckpoint;
             IosAudioEnvironment.ForegroundRecovered += OnIosForegroundRecovered;
@@ -405,7 +407,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                 return;
             }
             _interruption?.AllowExplicitPlay();
-            OnPropertyChanged(nameof(CanResumePlayback));
+            NotifyPlaybackResumeState();
 #if ANDROID
             SystemMediaService.PrepareAndroidPlaybackService();
             AndroidAudioEnvironment.RequestPlay();
@@ -457,8 +459,8 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             RequestRecorderRecovery(since);
             if (suspendedSince is { } start)
             {
-                ObserveInterruption(LiveInterruptionSource.Background, true, beganAt: start);
-                ObserveInterruption(LiveInterruptionSource.Background, false);
+                _ = ObserveInterruption(LiveInterruptionSource.Background, true, beganAt: start);
+                _ = ObserveInterruption(LiveInterruptionSource.Background, false);
             }
             if (AudioEnabled && (_settingsService.AutoPlay || _userRunShouldDriveQueue))
                 _ = RequestQueuePlaybackAsync("IosForegroundRecovery", _userRunShouldDriveQueue);
@@ -491,9 +493,18 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 
         private void NotifyMonitoringControls()
         {
-            OnPropertyChanged(nameof(MediaPlayStopIcon));
+            NotifyPlaybackResumeState();
             ((Command)StartCommand).ChangeCanExecute();
             ((Command)StopCommand).ChangeCanExecute();
+        }
+
+        private void NotifyPlaybackResumeState()
+        {
+            OnPropertyChanged(nameof(CanResumePlayback));
+            OnPropertyChanged(nameof(CanRetryPlayback));
+            OnPropertyChanged(nameof(ShowPausedPlaybackActions));
+            OnPropertyChanged(nameof(MediaPlayStopIcon));
+            OnPropertyChanged(nameof(MediaPlayStopDescription));
         }
 
         // Indicates whether audio playback is enabled.
@@ -634,7 +645,8 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 
         // Icon for the premium media play/stop button.
         // Shows play when disconnected, stop when connected.
-        public string MediaPlayStopIcon => _monitoring.Current != null ? "mc_stop.png" : "mc_play.png";
+        public string MediaPlayStopIcon => _monitoring.Current == null || ShowPausedPlaybackActions ? "mc_play.png" : "mc_stop.png";
+        public string MediaPlayStopDescription => _monitoring.Current == null || ShowPausedPlaybackActions ? "Play" : "Stop";
 
         // Base server URL used for all API calls and displayed in the UI.
         public string ServerUrl
@@ -1128,13 +1140,11 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 #if ANDROID
                 if (_playbackOwnership.Live != null)
                     AndroidAudioEnvironment.RequestPlay();
-                OnAndroidAudioInterruption();
-                OnAndroidForegroundChanged();
 #elif IOS
                 if (!automaticStopRevision.HasValue && _playbackOwnership.Live != null)
                     IosAudioEnvironment.RequestPlay();
-                OnIosAudioInterruption();
 #endif
+                RefreshNativeInterruptionState();
                 if (IsAppleIosTestAccount())
                     AudioEnabled = true;
                 ReconcileScannerConnections();
@@ -2181,37 +2191,6 @@ public void DismissAddressAlert(CallItem call)
             }
         }
 
-        private LivePlaybackRequests.Request BeginManualPlayback(PlaybackOwnership.Lease live)
-        {
-            LivePlaybackRequests.Request? request = null;
-            _selectingManualPlayback = true;
-            try
-            {
-                request = BeginLiveManualRequest(live);
-                if (!request.CanContinue)
-                    return request;
-                _interruptionJump?.Cancel();
-                _interruption?.AllowExplicitPlay();
-                SetPlaybackRetry(null);
-#if ANDROID
-                AndroidAudioEnvironment.RequestPlay();
-                if (IsRunning)
-                    SystemMediaService.PrepareAndroidPlaybackService();
-#elif IOS
-                IosAudioEnvironment.RequestPlay();
-#endif
-                _interruption?.Complete();
-            }
-            catch
-            {
-                request?.Dispose();
-                throw;
-            }
-            finally { _selectingManualPlayback = false; }
-
-            return request;
-        }
-
         private void SetPlaybackRetry(CallItem? item, bool automatic = false)
         {
             _retryIsAutomatic = item != null && automatic;
@@ -2220,7 +2199,7 @@ public void DismissAddressAlert(CallItem call)
             _retryPlaybackCall = item;
             _unavailableRecording = false;
 
-            OnPropertyChanged(nameof(CanResumePlayback));
+            NotifyPlaybackResumeState();
             OnPropertyChanged(nameof(CanSkipUnavailableRecording));
         }
 

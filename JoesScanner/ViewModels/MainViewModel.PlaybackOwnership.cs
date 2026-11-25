@@ -19,6 +19,7 @@ namespace JoesScanner.ViewModels
         private Task<long?>? _liveEdgeBoundary;
         private long _livePlaybackFloor;
         private readonly LiveAudioPreloader _automaticPreloads = new();
+        private PlaybackCompletion? _nativeLiveCompletion;
 
         private void ResetLiveTraversal()
         {
@@ -76,6 +77,7 @@ namespace JoesScanner.ViewModels
         {
             if (_playbackOwnership.Live == null)
             {
+                ResetInterruptionRecovery();
                 InvalidateLivePlayback();
                 ResetAutomaticAudioSource();
                 ResetScheduler();
@@ -88,6 +90,7 @@ namespace JoesScanner.ViewModels
 
             // Reserve the boundary synchronously with the lease change, ahead of later admissions.
             BeginAudioAtLiveEdge(skipOutstandingRecovery: true);
+            RefreshNativeInterruptionState();
             SetPlaybackRetry(null);
 
             _lastPlayedCall = Calls.FirstOrDefault();
@@ -612,6 +615,7 @@ namespace JoesScanner.ViewModels
                     }
 
                     _nativeLiveRequest = request;
+                    _nativeLiveCompletion = completion;
                     try
                     {
                         enteringNative?.Invoke();
@@ -634,7 +638,11 @@ namespace JoesScanner.ViewModels
                     finally
                     {
                         _automaticPreloads.Retire();
+                        _nativeLiveCompletion = null;
                         _nativeLiveRequest = null;
+#if IOS
+                        OnIosAudioInterruption();
+#endif
                     }
                 }
                 catch (Exception ex) when (completion.Confirmed)

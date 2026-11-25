@@ -68,6 +68,11 @@ internal sealed class AndroidForegroundOwnership
 
     internal bool IsCurrent(long runId) => runId != 0 && RunId == runId;
 
+    internal bool CanUpdateNotification(long runId) => IsCurrent(runId) && IsReady;
+
+    internal bool OwnsService(long runId, object service) =>
+        IsCurrent(runId) && ReferenceEquals(_readyInstance, service);
+
     internal bool Promote(long runId, object service)
     {
         if (!IsCurrent(runId))
@@ -90,7 +95,7 @@ internal sealed class AndroidForegroundOwnership
 
     internal void Destroy(long runId, object service)
     {
-        if (IsCurrent(runId) && ReferenceEquals(_readyInstance, service))
+        if (OwnsService(runId, service))
         {
             _readyInstance = null;
             StartFailed = true;

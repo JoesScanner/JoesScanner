@@ -151,7 +151,8 @@ internal static class AndroidAudioTests
         var state = new AndroidForegroundOwnership();
         state.SetActivityVisible(true);
         state.Begin(1);
-        Check(state.TryRequest(), "Request promotion while visible before locking.");
+        Check(state.TryRequest() && !state.CanUpdateNotification(1),
+            "The service must publish the initial media notification while promoting; the pending run may not post an update first.");
         state.SetActivityVisible(false);
         var promotion = state.Changed;
         state.RequestFailed(1);
@@ -171,13 +172,15 @@ internal static class AndroidAudioTests
         state.SetActivityVisible(false);
         Check(!state.CanPlay(requiresForegroundService: true), "An accepted start is not yet a promoted service.");
         var service = new object();
-        Check(state.Promote(1, service) && state.CanPlay(requiresForegroundService: true) && !state.StartFailed,
+        Check(state.Promote(1, service) && state.OwnsService(1, service) && state.CanUpdateNotification(1) &&
+            state.CanPlay(requiresForegroundService: true) && !state.StartFailed,
             "Promotion may complete after locking if the request was made while visible.");
         state.Destroy(1, service);
         Check(!state.IsReady && !state.CanPlay(requiresForegroundService: true), "Losing the service must suspend the pending recording again.");
         state.Begin(-1);
         state.RequestFailed(1);
-        Check(!state.StartFailed && !state.IsReady, "Standalone playback cannot inherit a previous monitoring run's service or failure.");
+        Check(!state.StartFailed && !state.IsReady && !state.OwnsService(1, service) && !state.CanUpdateNotification(1),
+            "Standalone playback cannot inherit a previous run's service, notification, or failure.");
         Console.WriteLine("PASS Android foreground-service failure, reentry, lock, destruction, and standalone ownership");
     }
 

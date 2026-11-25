@@ -77,9 +77,8 @@ internal sealed class IosClipSession(Func<IosAudioOptions, bool> activate, Func<
         if (++_releaseRetries == ReleaseDelaysMs.Length && releasePriority?.Invoke() == true)
         {
             // Some failures leave the session active. A plain mixing category
-            // releases ducking or exclusive priority even in that case.
+            // releases priority, while native deactivation remains pending.
             FinishDeactivation(lease);
-            _pendingRelease = 0;
         }
     }
 
@@ -115,10 +114,10 @@ internal sealed class IosAudioSuspension
         (_recovery != Recovery.None && !_mayRetryActivation);
     internal bool NeedsReconciliation => _recovery != Recovery.None;
     internal bool IsRoutePaused => _routePaused;
-    internal bool HasRecoveryInterruption => _routePaused || _callActive || _resumeRequired || _mediaUnavailable ||
-        (_recovery is Recovery.Interrupted or Recovery.PlayerPaused && !_mayRetryActivation);
+    internal bool IsRecoveryBlocked(bool waitForActivation = false) => IsBlocked || waitForActivation && NeedsReconciliation;
     internal int MediaGeneration { get; private set; }
     internal int RouteGeneration { get; private set; }
+    internal int RecordingRestartRevision { get; private set; }
 
     internal async Task WaitUntilPlayableAsync(Func<Task> changed, CancellationToken token, Task? terminal)
     {
@@ -137,6 +136,7 @@ internal sealed class IosAudioSuspension
 
         _recovery = Recovery.Interrupted;
         _mayRetryActivation = false;
+        ++RecordingRestartRevision;
         return true;
     }
 
@@ -163,7 +163,10 @@ internal sealed class IosAudioSuspension
     internal void UnreportedPause()
     {
         if (_recovery == Recovery.None)
+        {
             _recovery = Recovery.PlayerPaused;
+            ++RecordingRestartRevision;
+        }
         _mayRetryActivation = false;
     }
 
@@ -195,8 +198,14 @@ internal sealed class IosAudioSuspension
         ++RouteGeneration;
         if (_recovery == Recovery.PlayerPaused)
             ClearRecovery();
-        _routePaused |= preference == AudioDisconnectionBehavior.PausePlayback;
+        if (!_routePaused && preference == AudioDisconnectionBehavior.PausePlayback)
+        {
+            _routePaused = true;
+            ++RecordingRestartRevision;
+        }
     }
+
+    internal void ForegroundAfterSuspension() => ++RecordingRestartRevision;
 
     internal void RouteDeactivated(AudioDisconnectionBehavior preference, bool hadClip)
     {

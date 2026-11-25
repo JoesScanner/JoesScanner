@@ -63,8 +63,6 @@ namespace JoesScanner.ViewModels
         private CallItem? _lastTransportCall;
         private bool _userRunShouldDriveQueue;
         private bool _isQueuePlaybackRunning;
-        private bool IsLiveInterruptionBlockingPlayback => false;
-        private static void CancelSourceRecoveryJump() { }
         private int _queuePlaybackVersion;
         private int _audioToggleSerial;
         private int _refreshingCallMetadata;
@@ -87,7 +85,9 @@ namespace JoesScanner.ViewModels
         internal string? ServerUrlForTest { set => _settingsService.ServerUrl = value; }
 
         private bool IsRunning => _monitoring.CanRecover(_monitoring.Current);
-        private bool CanResumePlayback => _retryPlaybackCall != null;
+        private bool CanResumePlayback => _retryPlaybackCall != null || ShowPausedPlaybackActions;
+        private bool ShowPausedPlaybackActions => IsRunning && _interruption?.RequiresPlay == true;
+        private void NotifyPlaybackResumeState() { }
         private bool AudioEnabled { get; set; } = true;
         internal int CallsWaiting => _durableQueue.CountReadyAsync(AutomaticQueueScopes(), LocalRecoveryFloor,
             _currentPlayingCall?.LiveArrivalSequence, default, _automaticAudioFilter).GetAwaiter().GetResult();
@@ -225,6 +225,8 @@ namespace JoesScanner.ViewModels
             _userRunShouldDriveQueue = false;
             ResetLiveTraversal();
             InvalidateLivePlayback();
+            if (_interruption != null)
+                StopInterruptionTracking();
         }, _ => { }, async _ =>
         {
             await FlushLiveCompletionAsync();
@@ -238,9 +240,23 @@ namespace JoesScanner.ViewModels
         internal Task StartQueueForTestAsync() => EnsureQueuePlaybackAsync(_playbackOwnership.Live!);
         internal Task PressPlayStopForTestAsync() => ToggleConnectionAsync();
         internal Task PressSystemPlayForTestAsync() => SystemPlayAsync();
+        internal void TrackInterruptionsForTest(TimeProvider clock) => StartInterruptionTracking(clock);
+        internal Task SignalInterruptionForTestAsync(LiveInterruptionSource source, bool blocked, bool requiresPlay = false,
+            DateTimeOffset? beganAt = null) => ObserveInterruption(source, blocked, requiresPlay, beganAt);
+        internal Task SignalFocusForTestAsync(PlaybackCompletion owner, bool blocked) => ObserveClipFocusInterruption(owner, blocked);
+        internal bool InterruptionIsBlockingForTest => IsLiveInterruptionBlockingPlayback;
+        internal bool HasInterruptCheckpointForTest => _interruption?.Since.HasValue == true;
         internal Task PressVisibleCardForTestAsync(CallItem item) => PlayVisibleCallAsync(item);
         internal CallItem CardForTest(string id) => Calls.Single(card => card.BackendId == id);
-        private Task ResumeMobilePlaybackAsync() => throw new InvalidOperationException("Unexpected mobile resume in the fixture.");
+        internal Func<Task>? RequestNativeResumeForTest { get; set; }
+
+        private Task ResumeMobilePlaybackAsync()
+        {
+            if (RequestNativeResumeForTest is not { } resume)
+                throw new InvalidOperationException("Unexpected mobile resume in the fixture.");
+            _interruption?.AllowExplicitPlay();
+            return resume();
+        }
 
         internal Task SelectForTestAsync(string id) => OnCallTappedAsync(Calls.FirstOrDefault(card => card.BackendId == id) ??
             new CallItem
@@ -256,9 +272,14 @@ namespace JoesScanner.ViewModels
 
         private Task RequestQueuePlaybackAsync(string reason, bool userInitiated)
         {
+            if (_playbackOwnership.Live == null || !IsRunning || IsLiveInterruptionBlockingPlayback || !AudioEnabled)
+                return Task.CompletedTask;
+            if (_interruption?.Since.HasValue == true)
+                return RecoverInterruptedPlaybackAsync(userInitiated);
             LiveHistoryHandoffTests.Check((reason is "HistoryReleasedAudio" or "TappedCallFinished" or "JumpToLiveFinished"
                 or "JumpToLiveResume" or "TestLiveArrival" or "UserPlay" or "ManualPreparationReleased"
-                or "AutomaticAudioSourceChanged" or "FavoritesChanged") && (userInitiated || _settingsService.AutoPlay),
+                or "AutomaticAudioSourceChanged" or "FavoritesChanged" or "InterruptionEnded" or "ReturnedToLiveAfterInterruption") &&
+                (userInitiated || _settingsService.AutoPlay),
                 "Only the current listening intent can drive the queue.");
             ++ResumeRequests;
             return ResumedQueue = EnsureQueuePlaybackAsync(_playbackOwnership.Live!);
@@ -377,13 +398,6 @@ namespace JoesScanner.ViewModels
         internal bool BacklogWarningForTest => _backlog.WarningActive;
         internal Guid? VisibleServerForTest { set => _visibleLiveServer = value; }
 
-        private LivePlaybackRequests.Request BeginManualPlayback(PlaybackOwnership.Lease live)
-        {
-            var request = BeginLiveManualRequest(live);
-            SetPlaybackRetry(null);
-            return request;
-        }
-
         private void SetPlaybackRetry(CallItem? item) => _retryPlaybackCall = item;
         private static void ReportPlaybackFailure(Exception error, LivePlaybackRequests.Request request)
         {
@@ -452,6 +466,7 @@ namespace JoesScanner.ViewModels
         {
             internal bool AutoPlay { get; set; }
             internal string? ServerUrl { get; set; } = Server;
+            internal MobileAudioPreferences MobileAudio { get; } = MobileAudioPreferences.Default;
         }
         private sealed class TestCallStream
         {

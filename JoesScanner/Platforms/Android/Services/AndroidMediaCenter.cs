@@ -294,6 +294,9 @@ style.SetShowActionsInCompactView(0, 1);
 
         public static void UpdateNotification(Context context)
         {
+            // The foreground service publishes the first notification on promotion.
+            if (_monitoringRunId != 0 && !SystemMediaService.AndroidForeground.CanUpdateNotification(_monitoringRunId))
+                return;
             EnsureInitialized(context);
 
             var nm = (NotificationManager?)context.GetSystemService(Context.NotificationService);

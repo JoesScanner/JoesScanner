@@ -12,6 +12,8 @@ internal static class AndroidAudioEnvironment
     private static TaskCompletionSource _changed = NewSignal();
     private static NoisyReceiver? _receiver;
     private static DeviceWatcher? _devices;
+    private static IDisposable? _modeWatch;
+    private static PlaybackCompletion? _interruptedClip;
     private static int _watchers;
 
     public static bool RequiresPlay => State.RequiresPlay;
@@ -19,6 +21,7 @@ internal static class AndroidAudioEnvironment
     public static bool CallActive => State.CallActive;
     public static bool RequiresNewFocusRequest => State.FocusBlocked;
     public static bool RoutePaused => State.RoutePaused;
+    internal static bool HasInterruptedClip => _interruptedClip != null;
     public static long CallRevision => State.CallRevision;
     public static AndroidFocusAttemptAction GetFocusAction(AndroidClipFocusStatus status, long callRevision) =>
         State.GetFocusAction(status, callRevision);
@@ -26,10 +29,15 @@ internal static class AndroidAudioEnvironment
     public static event Action? ResumeStateChanged;
     public static event Action? PlaybackBlocked;
     internal static event Action? InterruptionChanged;
-    internal static event Action<bool, bool>? ClipFocusInterrupted;
+    internal static event Action<PlaybackCompletion, bool>? ClipFocusInterrupted;
 
-    internal static void ReportClipFocusInterruption(bool interrupted, bool released) =>
-        ClipFocusInterrupted?.Invoke(interrupted, released);
+    internal static void ReportClipFocusInterruption(PlaybackCompletion owner, bool interrupted)
+    {
+        if (!interrupted && !ReferenceEquals(_interruptedClip, owner))
+            return;
+        _interruptedClip = interrupted ? owner : null;
+        ClipFocusInterrupted?.Invoke(owner, interrupted);
+    }
 
     public static IDisposable Watch(Context context, ISettingsService settings)
     {
@@ -46,6 +54,7 @@ internal static class AndroidAudioEnvironment
             {
                 if (context.GetSystemService(Context.AudioService) is AudioManager manager)
                 {
+                    _modeWatch = WatchCallMode(context, manager);
                     _devices = new DeviceWatcher(manager, settings, context.GetSystemService(Context.MediaRouterService) as MediaRouter);
                     _devices.RefreshExpectedRoute();
                 }
@@ -84,40 +93,40 @@ internal static class AndroidAudioEnvironment
 
     private static void SetCallMode(Mode mode)
     {
-        var wasBlocked = State.IsBlocked;
-        var requiredPlay = State.RequiresPlay;
+        var before = InterruptionState;
         State.SetCallActive(mode is Mode.InCall or Mode.InCommunication or Mode.Ringtone);
-        PublishChange(wasBlocked, requiredPlay);
+        PublishChange(before);
     }
 
     public static void BlockForFocus(long requestCallRevision)
     {
-        var wasBlocked = State.IsBlocked;
-        var requiredPlay = State.RequiresPlay;
+        var before = InterruptionState;
         State.BlockForFocus(requestCallRevision);
-        PublishChange(wasBlocked, requiredPlay);
+        PublishChange(before);
     }
 
     public static void RequestPlay()
     {
-        var wasBlocked = State.IsBlocked;
-        var requiredPlay = State.RequiresPlay;
+        var before = InterruptionState;
         State.RequestPlay();
-        PublishChange(wasBlocked, requiredPlay);
+        PublishChange(before);
     }
 
-    private static void PublishChange(bool wasBlocked, bool requiredPlay)
+    private static (bool Blocked, bool RequiresPlay, bool RoutePaused, bool CallActive) InterruptionState =>
+        (State.IsBlocked, State.RequiresPlay, State.RoutePaused, State.CallActive);
+
+    private static void PublishChange((bool Blocked, bool RequiresPlay, bool RoutePaused, bool CallActive) before)
     {
+        var after = InterruptionState;
+        if (before == after)
+            return;
         InterruptionChanged?.Invoke();
-        if (wasBlocked != State.IsBlocked || requiredPlay != State.RequiresPlay)
-        {
-            var prior = _changed;
-            _changed = NewSignal();
-            prior.TrySetResult();
-        }
-        if (!wasBlocked && State.IsBlocked)
+        var prior = _changed;
+        _changed = NewSignal();
+        prior.TrySetResult();
+        if (!before.Blocked && after.Blocked)
             PlaybackBlocked?.Invoke();
-        if (requiredPlay != State.RequiresPlay)
+        if (before.RequiresPlay != after.RequiresPlay)
             ResumeStateChanged?.Invoke();
     }
 
@@ -132,10 +141,9 @@ internal static class AndroidAudioEnvironment
 
     private static void OnRouteDisconnected(ISettingsService settings)
     {
-        var wasBlocked = State.IsBlocked;
-        var requiredPlay = State.RequiresPlay;
+        var before = InterruptionState;
         State.RouteDisconnected(settings.MobileAudio.OnDisconnect);
-        PublishChange(wasBlocked, requiredPlay);
+        PublishChange(before);
     }
 
     [System.Runtime.Versioning.SupportedOSPlatform("android31.0")]
@@ -400,6 +408,8 @@ internal static class AndroidAudioEnvironment
             receiver.Dispose();
             _devices?.Dispose();
             _devices = null;
+            _modeWatch?.Dispose();
+            _modeWatch = null;
             Routes.Reset();
             SetCallMode(Mode.Normal);
             RequestPlay();

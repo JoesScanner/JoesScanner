@@ -201,7 +201,8 @@ public partial class MainViewModel
 
     private void StartAutomaticPreloads(LivePlaybackScheduler.Choice current, CancellationToken playback, long revision)
     {
-        if (!AudioEnabled || !IsRunning || _playbackOwnership.Live == null || ManualBacklogExemption || _backlog.JumpPending)
+        if (!AudioEnabled || !IsRunning || _playbackOwnership.Live == null || IsLiveInterruptionBlockingPlayback ||
+            ManualBacklogExemption || _backlog.JumpPending)
             return;
 
         _ = _automaticPreloads.Start(async token =>
@@ -220,7 +221,8 @@ public partial class MainViewModel
                     row.Row.ToCallItem(row.Scope.Server, row.Scope.ServerId);
                 return new LiveAudioPreloader.Candidate(row.Row.ArrivalSequence, async preloadToken =>
                 {
-                    if (_backlog.JumpPending || !IsCurrentLiveScope(row.Scope) || !AutomaticAudioIncludes(card) ||
+                    if (_backlog.JumpPending || IsLiveInterruptionBlockingPlayback || !IsCurrentLiveScope(row.Scope) ||
+                        !AutomaticAudioIncludes(card) ||
                         IsFilteredForPlayback(card))
                         return;
                     using var audio = await AcquireRecordingAudioAsync(card, preloadToken, automatic: true, speculative: true);

@@ -438,21 +438,28 @@ namespace JoesScanner.Services
             var manager = (AudioManager?)context.GetSystemService(Context.AudioService)
                 ?? throw new InvalidOperationException("Android audio manager is unavailable.");
             using var routeWatch = AndroidAudioEnvironment.Watch(context, _settings);
-            using var callModeWatch = AndroidAudioEnvironment.WatchCallMode(context, manager);
-            using var player = new Android.Media.MediaPlayer();
-            try
+            AndroidAudioEnvironment.ReadCallMode(manager);
+            var mode = _settings.MobileAudio.Mode;
+            while (true)
             {
-                player.SetWakeMode(context, global::Android.OS.WakeLockFlags.Partial);
-                await PlayAndroidPlayerAsync(context, manager, player, prepared, rate, token, completion);
-            }
-            finally
-            {
-                player.Release();
+                token.ThrowIfCancellationRequested();
+                using var player = new Android.Media.MediaPlayer();
+                using var attempt = new MobileRecordingAttempt(completion);
+                try
+                {
+                    player.SetWakeMode(context, global::Android.OS.WakeLockFlags.Partial);
+                    await PlayAndroidPlayerAsync(context, manager, player, prepared, rate, mode, token, completion, attempt);
+                }
+                finally { player.Release(); }
+                if (!attempt.WasInterrupted)
+                    return;
+                AppLog.Add("Android audio: restarting the interrupted recording from the beginning.");
             }
         }
 
         private async Task PlayAndroidPlayerAsync(Context context, AudioManager manager, Android.Media.MediaPlayer player,
-            PreparedAudio prepared, double rate, CancellationToken token, PlaybackCompletion completion)
+            PreparedAudio prepared, double rate, MobileAudioMode mode, CancellationToken token, PlaybackCompletion completion,
+            MobileRecordingAttempt attempt)
         {
             using var builder = new AudioAttributes.Builder();
             builder.SetUsage(AudioUsageKind.Media);
@@ -462,37 +469,46 @@ namespace JoesScanner.Services
             var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
             player.SetAudioAttributes(attributes);
-            var released = false;
             void OnPrepared(object? sender, EventArgs args)
             {
-                if (!released && !token.IsCancellationRequested)
+                if (!token.IsCancellationRequested)
                     ready.TrySetResult();
             }
             void OnCompletion(object? sender, EventArgs args)
             {
-                if (!released && completion.Confirm(token))
+                if (attempt.Confirm(token))
                     finished.TrySetResult();
             }
             void OnError(object? sender, Android.Media.MediaPlayer.ErrorEventArgs args)
             {
                 args.Handled = true;
-                if (released || !completion.Reject())
+                if (!attempt.Reject())
                     return;
                 var error = new InvalidOperationException($"Android audio playback failed ({args.What}, {args.Extra}).");
                 if (!ready.TrySetException(error))
                     finished.TrySetException(error);
             }
+            void Interrupt() => attempt.Interrupt();
+            void OnForegroundChanged()
+            {
+                if (!HasAndroidAudioEligibility(mode))
+                    Interrupt();
+            }
 
             player.Prepared += OnPrepared;
             player.Completion += OnCompletion;
             player.Error += OnError;
+            AndroidAudioEnvironment.PlaybackBlocked += Interrupt;
+            SystemMediaService.AndroidForeground.StateChanged += OnForegroundChanged;
             try
             {
                 await PlayPreparedAndroidPlayerAsync();
             }
             finally
             {
-                released = true;
+                attempt.Dispose();
+                SystemMediaService.AndroidForeground.StateChanged -= OnForegroundChanged;
+                AndroidAudioEnvironment.PlaybackBlocked -= Interrupt;
                 player.Prepared -= OnPrepared;
                 player.Completion -= OnCompletion;
                 player.Error -= OnError;
@@ -508,8 +524,6 @@ namespace JoesScanner.Services
                 player.PrepareAsync();
                 await ready.Task.WaitAsync(TimeSpan.FromSeconds(90), token);
 
-                // Snapshot the setting for this recording, including any resumed segments.
-                var mode = _settings.MobileAudio.Mode;
                 Task? duckingDeadline = null;
                 using var playerRoute = AndroidAudioEnvironment.WatchPlayer(player);
                 while (true)
@@ -532,7 +546,8 @@ namespace JoesScanner.Services
                         continue;
 
                     var requestCallRevision = AndroidAudioEnvironment.CallRevision;
-                    using var focus = new AndroidClipFocus(manager);
+                    using var focus = new AndroidClipFocus(manager, completion);
+                    focus.LostAudibility += Interrupt;
                     focus.Request(focusMode, attributes);
                     while (!finished.Task.IsCompleted && CanKeepAndroidFocus(focusMode))
                     {
@@ -557,6 +572,9 @@ namespace JoesScanner.Services
                             continue;
                         }
 
+                        if (attempt.WasInterrupted)
+                            return;
+
                         if (focusMode == MobileAudioMode.MixAndDuck)
                         {
                             duckingDeadline ??= Task.Delay(TimeSpan.FromSeconds(3), token);
@@ -564,7 +582,7 @@ namespace JoesScanner.Services
                                 break;
                         }
                         await PlayAndroidSegmentAsync(manager, player, playerRoute, prepared, focusMode, rate, focus, finished.Task,
-                            focusMode == MobileAudioMode.MixAndDuck ? duckingDeadline : null, token, completion);
+                            focusMode == MobileAudioMode.MixAndDuck ? duckingDeadline : null, token, completion, attempt);
                     }
                 }
             }
@@ -572,7 +590,8 @@ namespace JoesScanner.Services
 
         private async Task PlayAndroidSegmentAsync(AudioManager manager, Android.Media.MediaPlayer player,
             AndroidAudioEnvironment.PlayerRouteWatch playerRoute, PreparedAudio prepared, MobileAudioMode mode, double rate,
-            AndroidClipFocus focus, Task finished, Task? duckingDeadline, CancellationToken token, PlaybackCompletion completion)
+            AndroidClipFocus focus, Task finished, Task? duckingDeadline, CancellationToken token, PlaybackCompletion completion,
+            MobileRecordingAttempt attempt)
         {
             var playing = false;
             var showPlayingState = false;
@@ -635,8 +654,9 @@ namespace JoesScanner.Services
                     return;
                 }
 
-                // Keep the same prepared player and resume at its paused position.
+                // The planned duck-to-mix handoff keeps this player and position.
                 var playbackLimit = TimeSpan.FromSeconds(Math.Clamp((player.Duration / 1000d / rate * 2) + 120, 180, 10800));
+                attempt.Start();
                 player.Start();
                 completion.NotifyStarted(token);
                 playing = true;
@@ -655,6 +675,7 @@ namespace JoesScanner.Services
                 if (playing)
                 {
                     showPlayingState = true;
+                    AppLog.DebugWriteLine(() => $"Android audio segment started (mode={mode}, positionMs={player.CurrentPosition}).");
                     await _systemMediaService.SetClipPlaybackStateAsync(true, true, "AndroidClipStarted");
                     if (prepared.StaticFilterEnabled || (prepared.ToneFilterEnabled && prepared.ToneDuckSegments.Count > 0))
                         volume = ApplyDynamicVolumeAndroidAsync(prepared, player, audibleSegment.Token);
@@ -703,7 +724,8 @@ namespace JoesScanner.Services
         {
             var needsFocus = OperatingSystem.IsAndroidVersionAtLeast(35) && mode != MobileAudioMode.MixNormally;
             return SystemMediaService.AndroidForeground.CanPlay(
-                requiresForegroundService: OperatingSystem.IsAndroidVersionAtLeast(37) || needsFocus,
+                requiresForegroundService: SystemMediaService.AndroidForeground.RunId != 0 ||
+                    OperatingSystem.IsAndroidVersionAtLeast(37) || needsFocus,
                 requiresTopActivity: needsFocus);
         }
 

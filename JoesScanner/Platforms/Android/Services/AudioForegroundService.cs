@@ -26,25 +26,18 @@ namespace JoesScanner.Platforms.Android.Services
             {
                 // A queued foreground start can arrive after Stop. Satisfy
                 // Android's promotion contract without publishing its readiness.
+                if (ownership.OwnsService(_runId, this))
+                    return StartCommandResult.NotSticky;
                 if (!_promoted && runId != 0)
-                    PromoteBootstrap(notificationId, runId < 0);
+                    Promote(notificationId, runId, publishMedia: false);
                 StopSelfResult(startId);
                 return StartCommandResult.NotSticky;
             }
 
-            if (PromoteBootstrap(notificationId, runId < 0))
+            if (Promote(notificationId, runId, publishMedia: runId > 0))
             {
                 _runId = runId;
                 ownership.Promote(runId, this);
-                try
-                {
-                    if (runId > 0)
-                        StartForeground(notificationId, AndroidMediaCenter.BuildNotification(this));
-                }
-                catch (Exception ex)
-                {
-                    AppLog.Add(() => $"Android audio notification update failed ({ex.GetType().Name}).");
-                }
             }
             else
             {
@@ -53,6 +46,13 @@ namespace JoesScanner.Platforms.Android.Services
                 StopSelfResult(startId);
             }
             return StartCommandResult.NotSticky;
+        }
+
+        public override void OnTaskRemoved(Intent? rootIntent)
+        {
+            if (_runId > 0 && SystemMediaService.AndroidForeground.OwnsService(_runId, this))
+                AndroidMediaCenter.HandleAction(_runId, MediaActionReceiver.ActionStop);
+            base.OnTaskRemoved(rootIntent);
         }
 
         public override void OnDestroy()
@@ -65,13 +65,18 @@ namespace JoesScanner.Platforms.Android.Services
 
         public override IBinder? OnBind(Intent? intent) => null;
 
-        private bool PromoteBootstrap(int notificationId, bool standalone)
+        private bool Promote(int notificationId, long runId, bool publishMedia)
         {
             try
             {
                 CreateNotificationChannelIfNeeded();
 
-                StartForeground(notificationId, BuildBootstrapNotification(standalone));
+                // Keep the media notification's identity and style from its first
+                // publication. Replacing it with a bootstrap can make System UI
+                // remove the media entry and call the active session's Stop.
+                StartForeground(notificationId, publishMedia
+                    ? AndroidMediaCenter.BuildNotification(this)
+                    : BuildBootstrapNotification(runId < 0));
                 _promoted = true;
                 return true;
             }

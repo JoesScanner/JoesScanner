@@ -96,8 +96,8 @@
                                     WidthRequest="60"
                                     Padding="0"
                                     AutomationId="MediaPlayStop"
-                                    SemanticProperties.Description="Connect or disconnect"
-                                    ToolTipProperties.Text="Connect or disconnect" />
+                                    SemanticProperties.Description="{Binding MediaPlayStopDescription}"
+                                    ToolTipProperties.Text="{Binding MediaPlayStopDescription}" />
 
                                 <ImageButton
                                     Source="mc_next.png"
@@ -189,14 +189,13 @@
                                    Text="Recording audio unavailable"
                                    TextColor="White"
                                    HorizontalTextAlignment="Center" />
+                            <Label IsVisible="{Binding ShowPausedPlaybackActions}"
+                                   Text="Playback paused. Press Play to continue."
+                                   TextColor="White"
+                                   HorizontalTextAlignment="Center" />
                             <HorizontalStackLayout HorizontalOptions="Center" Spacing="8" Margin="0,0,0,4">
-                                <Button Command="{Binding ResumeMobilePlaybackCommand}" Text="Resume audio">
-                                    <Button.Triggers>
-                                        <DataTrigger TargetType="Button" Binding="{Binding CanSkipUnavailableRecording}" Value="True">
-                                            <Setter Property="Text" Value="Retry audio" />
-                                        </DataTrigger>
-                                    </Button.Triggers>
-                                </Button>
+                                <Button IsVisible="{Binding CanRetryPlayback}" Command="{Binding RetryPlaybackCommand}" Text="Retry audio" />
+                                <Button IsVisible="{Binding ShowPausedPlaybackActions}" Command="{Binding StopCommand}" Text="Stop monitoring" />
                                 <Button IsVisible="{Binding CanSkipUnavailableRecording}"
                                         Command="{Binding SkipUnavailableRecordingCommand}"
                                         Text="Skip recording" />

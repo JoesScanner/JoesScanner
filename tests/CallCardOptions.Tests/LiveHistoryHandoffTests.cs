@@ -759,6 +759,7 @@ internal sealed class HandoffAudio : IAudioPlaybackService
     internal ConcurrentQueue<string> Completed { get; } = new();
     internal ConcurrentQueue<double> Rates { get; } = new();
     internal Func<string, CancellationToken, Task>? Playing { get; set; }
+    internal Func<string, CancellationToken, PlaybackCompletion, Task>? NativeAttemptForTest { get; set; }
 
     public Task PlayAsync(string audioUrl, CancellationToken cancellationToken = default) =>
         PlayAsync(audioUrl, 1, cancellationToken);
@@ -773,6 +774,13 @@ internal sealed class HandoffAudio : IAudioPlaybackService
         Started.Enqueue(audioUrl);
         Rates.Enqueue(playbackRate);
         completion.NotifyStarted(cancellationToken);
+        if (NativeAttemptForTest is { } native)
+        {
+            await native(audioUrl, cancellationToken, completion);
+            if (completion.Confirmed)
+                Completed.Enqueue(audioUrl);
+            return;
+        }
         if (Playing is { } play)
             await play(audioUrl, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();

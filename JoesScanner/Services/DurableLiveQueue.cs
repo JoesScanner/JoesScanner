@@ -448,24 +448,30 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
         SetPlaybackFloorAtLiveEdgeAsync(new[] { run }, token, skipOutstandingRecovery);
 
     internal Task<long> SetPlaybackFloorAtLiveEdgeAsync(IReadOnlyList<Run> runs, CancellationToken token,
-        bool skipOutstandingRecovery = false) =>
-        InArrivalOrderAsync(() => WithConnectionAsync(token, db =>
+        bool skipOutstandingRecovery = false, Func<Task>? prepareBoundary = null, Action<SqliteTransaction>? commitPlayback = null) =>
+        InArrivalOrderAsync(async () =>
         {
-            using var transaction = db.BeginTransaction();
-            using var edge = db.CreateCommand();
-            edge.Transaction = transaction;
-            edge.CommandText = "SELECT coalesce(MAX(arrival_sequence), 0) + 1 FROM live_queue_recordings;";
-            var floor = (long)edge.ExecuteScalar()!;
-            foreach (var run in runs)
+            if (prepareBoundary != null)
+                await prepareBoundary().ConfigureAwait(false);
+            return await WithConnectionAsync(token, db =>
             {
-                if (skipOutstandingRecovery)
-                    MarkRecoveryBacklog(db, transaction, run);
-                UpdatePlaybackFloor(db, transaction, run, floor);
-            }
-            token.ThrowIfCancellationRequested();
-            transaction.Commit();
-            return floor;
-        }), token);
+                using var transaction = db.BeginTransaction();
+                using var edge = db.CreateCommand();
+                edge.Transaction = transaction;
+                edge.CommandText = "SELECT coalesce(MAX(arrival_sequence), 0) + 1 FROM live_queue_recordings;";
+                var floor = (long)edge.ExecuteScalar()!;
+                foreach (var run in runs)
+                {
+                    if (skipOutstandingRecovery)
+                        MarkRecoveryBacklog(db, transaction, run);
+                    UpdatePlaybackFloor(db, transaction, run, floor);
+                }
+                commitPlayback?.Invoke(transaction);
+                token.ThrowIfCancellationRequested();
+                transaction.Commit();
+                return floor;
+            }).ConfigureAwait(false);
+        }, token);
 
     private static void UpdatePlaybackFloor(SqliteConnection db, SqliteTransaction tx, Run run, long floor)
     {

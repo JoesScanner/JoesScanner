@@ -22,10 +22,11 @@ internal static class IosAudioEnvironment
 
     internal static bool RequiresPlay => Suspension.RequiresPlay;
     internal static bool IsBlocked => Suspension.IsBlocked;
-    internal static bool HasRecoveryInterruption => Suspension.HasRecoveryInterruption;
+    internal static bool IsRecoveryBlocked(bool waitForActivation) => Suspension.IsRecoveryBlocked(waitForActivation);
     internal static bool RoutePaused => Suspension.IsRoutePaused;
     internal static int MediaGeneration => Suspension.MediaGeneration;
     internal static int RouteGeneration => Suspension.RouteGeneration;
+    internal static int RecordingRestartRevision => Suspension.RecordingRestartRevision;
     internal static MobileAudioMode? ActiveMode => Session.ActiveMode;
     internal static Task Changed => _changed.Task;
     internal static event Action? ResumeStateChanged;
@@ -67,10 +68,9 @@ internal static class IosAudioEnvironment
                 ReleaseClip(lease);
                 return 0;
             }
-            Suspension.ActivationSucceeded();
+            if (Suspension.NeedsReconciliation)
+                Change(Suspension.ActivationSucceeded);
         }
-        else if (Session.PendingRelease != 0)
-            throw new InvalidOperationException("iOS could not release the previous audio session. Press Play to retry.");
         else if (!IsBlocked)
             Change(Suspension.ActivationDenied);
         return lease;
@@ -102,7 +102,9 @@ internal static class IosAudioEnvironment
 
     internal static void HandleUnreportedPause(long lease)
     {
-        if (Session.Owns(lease))
+        var route = RouteGeneration;
+        _observers?.ReconcileCurrentRoute();
+        if (Session.Owns(lease) && route == RouteGeneration)
             Change(Suspension.UnreportedPause);
     }
 
@@ -187,7 +189,7 @@ internal static class IosAudioEnvironment
         var result = AVAudioSession.SharedInstance().SetActive(false,
             AVAudioSessionSetActiveOptions.NotifyOthersOnDeactivation, out var error);
         // AVAudioSession documents IsBusy as having deactivated the session.
-        var released = error == null || error.Code == (long)AVAudioSessionErrorCode.IsBusy;
+        var released = result && error == null || error?.Code == (long)AVAudioSessionErrorCode.IsBusy;
         AppLog.DebugWriteLine(() => $"iOS audio deactivation (notify others, result={result}, released={released}, error={error?.Code ?? 0}).");
         return released;
     }
@@ -436,6 +438,7 @@ internal static class IosAudioEnvironment
             if (!_checkForeground || UIApplication.SharedApplication.ApplicationState != UIApplicationState.Active)
                 return;
             _checkForeground = false;
+            RefreshCallState();
             if (_backgroundSince is { } since)
             {
                 ObserveBackgroundPulse();
@@ -444,8 +447,9 @@ internal static class IosAudioEnvironment
                 var suspendedSince = _suspendedSince;
                 _suspendedSince = null;
                 ForegroundRecovered?.Invoke(since, suspendedSince);
+                if (suspendedSince.HasValue)
+                    Change(Suspension.ForegroundAfterSuspension);
             }
-            RefreshCallState();
             ReconcilePlayerState?.Invoke();
             Session.FinishDeactivation();
             ReconcileRecovery();

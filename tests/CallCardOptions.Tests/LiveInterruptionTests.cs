@@ -9,6 +9,7 @@ internal static class LiveInterruptionTests
         CheckThresholdsAndQuietGaps();
         CheckPlatformSignalsAndRestart();
         await CheckBoundaryAsync();
+        await MobileInterruptionIntegrationTests.RunAsync();
     }
 
     private static void CheckThresholdsAndQuietGaps()
@@ -43,11 +44,11 @@ internal static class LiveInterruptionTests
         var episode = new LiveInterruptionRecovery(clock, value => saved = value);
         var ios = new IosAudioSuspension();
         ios.BeginInterruption();
-        episode.SetBlocked(LiveInterruptionSource.NativeAudio, ios.HasRecoveryInterruption);
+        episode.SetBlocked(LiveInterruptionSource.NativeAudio, ios.IsRecoveryBlocked());
         episode.SetBlocked(LiveInterruptionSource.Background, true);
         clock.Advance(TimeSpan.FromMinutes(6));
         ios.RecommendResume(true);
-        episode.SetBlocked(LiveInterruptionSource.NativeAudio, ios.HasRecoveryInterruption);
+        episode.SetBlocked(LiveInterruptionSource.NativeAudio, ios.IsRecoveryBlocked());
         Check(episode.ShouldJump(InterruptionRecoveryPreference.Default) == null, "iOS foreground recovery must still be pending.");
         episode.SetBlocked(LiveInterruptionSource.Background, false);
         Check(episode.ShouldJump(InterruptionRecoveryPreference.Default) == true, "Long iOS suspension must jump on foreground recovery.");

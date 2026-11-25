@@ -63,13 +63,13 @@ public partial class AudioPlaybackService
             if (!await PrepareIosPlayerAsync(observers, generation, token))
                 continue;
 
-            while (generation == IosAudioEnvironment.MediaGeneration)
+            while (generation == IosAudioEnvironment.MediaGeneration && !observers.RestartIfInterrupted())
             {
                 await IosAudioEnvironment.WaitForReleaseAsync(token);
                 await IosAudioEnvironment.WaitUntilPlayableAsync(token, observers.Terminal);
                 if (observers.Finished.IsCompletedSuccessfully)
                     return;
-                if (generation != IosAudioEnvironment.MediaGeneration)
+                if (generation != IosAudioEnvironment.MediaGeneration || observers.RestartIfInterrupted())
                     break;
                 if (observers.ProcessFailure())
                     break;
@@ -97,6 +97,11 @@ public partial class AudioPlaybackService
                 var lease = IosAudioEnvironment.StartClip(selected, mode);
                 if (lease == 0)
                     continue;
+                if (observers.RestartIfInterrupted())
+                {
+                    IosAudioEnvironment.ReleaseClip(lease);
+                    break;
+                }
                 recording.Activated(mode);
 
                 var result = await PlayIosSegmentAsync(prepared, player, observers, recording, rate, generation, lease,
@@ -112,6 +117,11 @@ public partial class AudioPlaybackService
                     await Task.Delay(TimeSpan.FromSeconds(1), token);
                     break;
                 }
+            }
+            if (observers.RestartIfInterrupted())
+            {
+                recording.Restart();
+                AppLog.Add("iOS audio: restarting the interrupted recording from the beginning.");
             }
         }
     }
@@ -188,7 +198,7 @@ public partial class AudioPlaybackService
 
         void OnAudioStateChanged()
         {
-            if (IosAudioEnvironment.IsBlocked || generation != IosAudioEnvironment.MediaGeneration ||
+            if (observers.RestartIfInterrupted() || IosAudioEnvironment.IsBlocked || generation != IosAudioEnvironment.MediaGeneration ||
                 route != IosAudioEnvironment.RouteGeneration)
             {
                 stopReason = "audio session or route changed";
@@ -328,9 +338,9 @@ public partial class AudioPlaybackService
         private readonly TaskCompletionSource _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource _finished = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<NSError?> _failure = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private readonly PlaybackCompletion _itemCompletion = new();
+        private readonly MobileRecordingAttempt _attempt;
         private readonly PlaybackCompletion _completion;
-        private int _started;
+        private int _restartRevision;
         private readonly IDisposable _status;
         private readonly NSObject _end;
         private readonly NSObject _failed;
@@ -342,13 +352,14 @@ public partial class AudioPlaybackService
         internal IosPlayerObservers(AVPlayerItem item, PlaybackCompletion completion, CancellationToken token)
         {
             _completion = completion;
+            _attempt = new(completion);
             Terminal = Task.WhenAny(Finished, Failure);
             var center = NSNotificationCenter.DefaultCenter;
-            _end = center.AddObserver(AVPlayerItem.DidPlayToEndTimeNotification, _ =>
+            _end = center.AddObserver(AVPlayerItem.DidPlayToEndTimeNotification, _ => DispatchQueue.MainQueue.DispatchAsync(() =>
             {
-                if (Volatile.Read(ref _started) != 0 && _itemCompletion.Confirm(token) && completion.Confirm(token))
+                if (!RestartIfInterrupted() && _attempt.Confirm(token))
                     _finished.TrySetResult();
-            }, item);
+            }), item);
             _failed = center.AddObserver(AVPlayerItem.ItemFailedToPlayToEndTimeNotification, e =>
                 Fail(e.UserInfo?[AVPlayerItem.ItemFailedToPlayToEndTimeErrorKey] as NSError ?? item.Error), item);
             _status = item.AddObserver("status", NSKeyValueObservingOptions.Initial | NSKeyValueObservingOptions.New, _ =>
@@ -360,15 +371,27 @@ public partial class AudioPlaybackService
             });
         }
 
-        internal void Started() => Volatile.Write(ref _started, 1);
+        internal void Started()
+        {
+            if (!_attempt.HasStarted)
+                _restartRevision = IosAudioEnvironment.RecordingRestartRevision;
+            _attempt.Start();
+        }
+
+        internal bool RestartIfInterrupted()
+        {
+            if (_restartRevision != IosAudioEnvironment.RecordingRestartRevision)
+                _attempt.Interrupt();
+            return _attempt.WasInterrupted;
+        }
 
         internal void NotifyStarted(CancellationToken token) => _completion.NotifyStarted(token);
 
-        internal bool TryRetireStalledItem() => _itemCompletion.Reject();
+        internal bool TryRetireStalledItem() => _attempt.Reject();
 
         private void Fail(NSError? error)
         {
-            if (_itemCompletion.Reject())
+            if (_attempt.Reject())
                 _failure.TrySetResult(error);
         }
 
@@ -388,7 +411,7 @@ public partial class AudioPlaybackService
 
         public void Dispose()
         {
-            _itemCompletion.Reject();
+            _attempt.Dispose();
             _status.Dispose();
             NSNotificationCenter.DefaultCenter.RemoveObserver(_end);
             NSNotificationCenter.DefaultCenter.RemoveObserver(_failed);

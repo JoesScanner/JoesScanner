@@ -27,7 +27,8 @@ internal sealed class LiveInterruptionRecovery(TimeProvider clock, Action<LiveIn
     internal bool IsInterrupted => _blocked != 0 || RequiresPlay;
     internal bool IsBlockedBy(LiveInterruptionSource source) => (_blocked & source) != 0;
 
-    internal void SetBlocked(LiveInterruptionSource source, bool blocked, bool requiresPlay = false, DateTimeOffset? beganAt = null)
+    internal void SetBlocked(LiveInterruptionSource source, bool blocked, bool requiresPlay = false,
+        DateTimeOffset? beganAt = null, bool trackRecovery = true)
     {
         if (!blocked)
         {
@@ -37,6 +38,8 @@ internal sealed class LiveInterruptionRecovery(TimeProvider clock, Action<LiveIn
         }
 
         _blocked |= source;
+        if (!trackRecovery)
+            return;
         _recoveredAt = null;
         if (_checkpoint == null || beganAt is { } earlier && earlier < _checkpoint.Since)
         {
@@ -68,6 +71,14 @@ internal sealed class LiveInterruptionRecovery(TimeProvider clock, Action<LiveIn
             if (!persisted)
                 persist(null);
         }
+    }
+
+    internal void Reset()
+    {
+        _blocked = 0;
+        _recoveredAt = null;
+        if (_checkpoint != null)
+            Save(null);
     }
 
     private void Save(Checkpoint? checkpoint)

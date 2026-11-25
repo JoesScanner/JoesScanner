@@ -6,7 +6,7 @@ namespace JoesScanner.Platforms.Android.Services;
 
 // A focus request and its listener belong to one audible attempt. Disposal never
 // consults a shared "current request" that could have been replaced by a newer clip.
-internal sealed class AndroidClipFocus(AudioManager manager) : Java.Lang.Object, AudioManager.IOnAudioFocusChangeListener
+internal sealed class AndroidClipFocus(AudioManager manager, PlaybackCompletion owner) : Java.Lang.Object, AudioManager.IOnAudioFocusChangeListener
 {
     private AudioFocusRequestClass? _request;
     private readonly AndroidClipFocusState _state = new();
@@ -19,11 +19,11 @@ internal sealed class AndroidClipFocus(AudioManager manager) : Java.Lang.Object,
 
     private void ReportInterruption(bool released = false)
     {
-        var interrupted = !released && Status is (AndroidClipFocusStatus.Pending or AndroidClipFocusStatus.TransientLoss or AndroidClipFocusStatus.DuckableLoss);
+        var interrupted = !released && Status != AndroidClipFocusStatus.Granted;
         if (interrupted == _interruptionReported)
             return;
         _interruptionReported = interrupted;
-        AndroidAudioEnvironment.ReportClipFocusInterruption(interrupted, released);
+        AndroidAudioEnvironment.ReportClipFocusInterruption(owner, interrupted);
     }
 
     public void Request(MobileAudioMode mode, AudioAttributes attributes)
@@ -38,10 +38,11 @@ internal sealed class AndroidClipFocus(AudioManager manager) : Java.Lang.Object,
         if (OperatingSystem.IsAndroidVersionAtLeast(26))
         {
             using var builder = new AudioFocusRequestClass.Builder(gain);
+            using var handler = new global::Android.OS.Handler(global::Android.OS.Looper.MainLooper!);
             _request = builder.SetAudioAttributes(attributes)
                 .SetAcceptsDelayedFocusGain(true)
                 .SetWillPauseWhenDucked(true)
-                .SetOnAudioFocusChangeListener(this)
+                .SetOnAudioFocusChangeListener(this, handler)
                 .Build() ?? throw new InvalidOperationException("Android audio focus request could not be created.");
             var result = manager.RequestAudioFocus(_request);
             _state.Requested(result is AudioFocusRequest.Granted or AudioFocusRequest.Delayed,
@@ -69,28 +70,27 @@ internal sealed class AndroidClipFocus(AudioManager manager) : Java.Lang.Object,
         };
         if (!_state.OnChange(status))
             return;
-        ReportInterruption();
         if (_state.Status != AndroidClipFocusStatus.Granted)
             LostAudibility?.Invoke();
+        ReportInterruption();
     }
 
     public void Release()
     {
-        if (_state.Release())
+        try
         {
-            try
+            if (!_state.Release())
+                return;
+            if (OperatingSystem.IsAndroidVersionAtLeast(26) && _request is { } request)
+                manager.AbandonAudioFocusRequest(request);
+            else
             {
-                if (OperatingSystem.IsAndroidVersionAtLeast(26) && _request is { } request)
-                    manager.AbandonAudioFocusRequest(request);
-                else
-                {
 #pragma warning disable CS0618, CA1422
-                    manager.AbandonAudioFocus(this);
+                manager.AbandonAudioFocus(this);
 #pragma warning restore CS0618, CA1422
-                }
             }
-            finally { ReportInterruption(released: true); }
         }
+        finally { ReportInterruption(released: true); }
     }
 
     protected override void Dispose(bool disposing)

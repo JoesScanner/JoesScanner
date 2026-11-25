@@ -52,6 +52,7 @@
     <Compile Include="../../JoesScanner/Services/MonitoringTransportOwnership.cs" Link="MonitoringTransportOwnership.cs" />
     <Compile Include="../../JoesScanner/Services/PlaybackOutcome.cs" Link="PlaybackOutcome.cs" />
     <Compile Include="../../JoesScanner/Services/PlaybackCompletion.cs" Link="PlaybackCompletion.cs" />
+    <Compile Include="../../JoesScanner/Services/MobileRecordingAttempt.cs" Link="MobileRecordingAttempt.cs" />
     <Compile Include="../../JoesScanner/Services/DurablePlaybackCommit.cs" Link="DurablePlaybackCommit.cs" />
     <Compile Include="../../JoesScanner/Services/LiveQueueWake.cs" Link="LiveQueueWake.cs" />
     <Compile Include="../../JoesScanner/Services/PlaybackOwnership.cs" Link="PlaybackOwnership.cs" />
@@ -59,6 +60,7 @@
     <Compile Include="../../JoesScanner/ViewModels/MainViewModel.PlaybackOwnership.cs" Link="MainViewModel.PlaybackOwnership.cs" />
     <Compile Include="../../JoesScanner/ViewModels/MainViewModel.LiveAudioSource.cs" Link="MainViewModel.LiveAudioSource.cs" />
     <Compile Include="../../JoesScanner/ViewModels/MainViewModel.ListeningSession.cs" Link="MainViewModel.ListeningSession.cs" />
+    <Compile Include="../../JoesScanner/ViewModels/MainViewModel.InterruptionRecovery.cs" Link="MainViewModel.InterruptionRecovery.cs" />
     <Compile Include="../../JoesScanner/Services/HistoryResultOrder.cs" Link="HistoryResultOrder.cs" />
     <Compile Include="../../JoesScanner/Services/ICallHistoryService.cs" Link="ICallHistoryService.cs" />
     <Compile Include="../../JoesScanner/ViewModels/HistoryViewModel.Paging.cs" Link="HistoryViewModel.Paging.cs" />
