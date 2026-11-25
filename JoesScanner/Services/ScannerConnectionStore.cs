@@ -94,10 +94,11 @@ public sealed class ScannerConnectionStore(IDatabasePathProvider paths)
             if (profile.DirectoryId == null)
             {
                 var archive = snapshot.Entries.FirstOrDefault(entry => entry.IsOfficial &&
-                    Normalize(entry.Url) == profile.Endpoint && profiles.All(other => other.DirectoryId != entry.DirectoryId));
-                if (archive == null)
+                    Normalize(entry.Url) == profile.Endpoint);
+                var archiveId = archive?.DirectoryId ?? ReadCachedArchiveId(db, transaction, profile.Endpoint, snapshot.Source);
+                if (archiveId <= 0 || profiles.Any(other => other.DirectoryId == archiveId))
                     continue;
-                profile = profile with { DirectoryId = archive.DirectoryId };
+                profile = profile with { DirectoryId = archiveId };
             }
             var id = profile.DirectoryId.Value;
             var entry = entries.GetValueOrDefault(id);
@@ -125,6 +126,20 @@ public sealed class ScannerConnectionStore(IDatabasePathProvider paths)
             if (profile != saved)
                 WriteConnection(db, transaction, profile);
         }
+    }
+
+    private static int ReadCachedArchiveId(SqliteConnection db, SqliteTransaction transaction, string endpoint, string source)
+    {
+        using var lookup = db.CreateCommand();
+        lookup.Transaction = transaction;
+        lookup.CommandText = """
+            SELECT directory_id FROM servers WHERE source = 'directory' AND is_official = 1 AND base_url = $endpoint
+                AND directory_id > 0 AND (directory_source IS NULL OR directory_source = $source)
+            ORDER BY sort_order, directory_id LIMIT 1;
+            """;
+        lookup.Parameters.AddWithValue("$endpoint", endpoint);
+        lookup.Parameters.AddWithValue("$source", source);
+        return lookup.ExecuteScalar() is long id && id <= int.MaxValue ? (int)id : 0;
     }
 
     internal SavedScannerConnection? ConfirmDirectory(Guid id, string endpoint, string source)

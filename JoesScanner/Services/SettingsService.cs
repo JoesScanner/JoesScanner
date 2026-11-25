@@ -981,6 +981,8 @@ ORDER BY is_official DESC, sort_order ASC, display_name ASC;";
             using var tx = conn.BeginTransaction();
 
             var now = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+            if (snapshot != null)
+                ScannerConnectionStore.ApplyDirectory(conn, tx, snapshot);
 
             // Upsert all incoming.
             for (var i = 0; i < normalized.Count; i++)
@@ -1058,22 +1060,18 @@ ON CONFLICT(server_key) DO UPDATE SET
                 del.ExecuteNonQuery();
             }
 
-            if (snapshot != null)
+            if (snapshot?.Suspended != null)
             {
-                ScannerConnectionStore.ApplyDirectory(conn, tx, snapshot);
-                if (snapshot.Suspended != null)
-                {
-                    using var mark = conn.CreateCommand();
-                    mark.Transaction = tx;
-                    mark.CommandText = """
-                        INSERT INTO app_settings(setting_key, setting_value, updated_utc)
-                        VALUES ('directory_snapshot_source', $source, $now)
-                        ON CONFLICT(setting_key) DO UPDATE SET setting_value = $source, updated_utc = $now;
-                        """;
-                    mark.Parameters.AddWithValue("$source", snapshot.Source);
-                    mark.Parameters.AddWithValue("$now", now);
-                    mark.ExecuteNonQuery();
-                }
+                using var mark = conn.CreateCommand();
+                mark.Transaction = tx;
+                mark.CommandText = """
+                    INSERT INTO app_settings(setting_key, setting_value, updated_utc)
+                    VALUES ('directory_snapshot_source', $source, $now)
+                    ON CONFLICT(setting_key) DO UPDATE SET setting_value = $source, updated_utc = $now;
+                    """;
+                mark.Parameters.AddWithValue("$source", snapshot.Source);
+                mark.Parameters.AddWithValue("$now", now);
+                mark.ExecuteNonQuery();
             }
             tx.Commit();
             if (snapshot?.Suspended != null)

@@ -186,6 +186,15 @@ internal static class ServerDirectoryTests
         Check(settings.GetCachedDirectoryServers().Count == 0 &&
             store.Load(null).Any(profile => profile.Id == managed.Id && !profile.DirectoryBlocked),
             "Ordinary removal must clear the public directory choice and preserve the local recorder.");
+
+        var legacyArchive = store.Save(HostedServerRules.DefaultServerUrl, "Hosted archive", null, null);
+        var cachedArchive = Entry(96, legacyArchive.Endpoint, "Official archive", firewall: true);
+        cachedArchive.IsOfficial = true;
+        settings.UpsertCachedDirectoryServers([cachedArchive]);
+        settings.PersistDirectorySnapshot([], new HashSet<int> { 96 }, source);
+        Check(store.Load(null).Any(profile => profile.Id == legacyArchive.Id &&
+            profile.DirectoryId == 96 && profile.Hold == DirectoryHold.Suspended),
+            "The fixed hosted archive must honor suspension of its previously cached official ID.");
         manager.Retire(_ => true);
     }
 
