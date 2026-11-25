@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Joe's Scanner Auth API
  * Description: REST endpoint and admin settings for authenticating Joe's Scanner app users against WordPress + SureCart subscriptions, with connection tracking and reporting.
- * Version: 2.7.4
+ * Version: 2.7.5
  * Author: Joe's Scanner
  */
 
@@ -19,6 +19,9 @@ require_once __DIR__ . '/includes/database.php';
 require_once __DIR__ . '/includes/tracking.php';
 require_once __DIR__ . '/includes/admin.php';
 require_once __DIR__ . '/includes/comms.php';
+require_once __DIR__ . '/includes/directory-store.php';
+require_once __DIR__ . '/includes/directory-verification.php';
+require_once __DIR__ . '/includes/directory-pages.php';
 require_once __DIR__ . '/includes/server-directory.php';
 require_once __DIR__ . '/includes/rest.php';
 require_once __DIR__ . '/includes/favorites.php';

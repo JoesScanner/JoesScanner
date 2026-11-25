@@ -1,4 +1,4 @@
-# WordPress Favorites integration
+# WordPress Favorites and server directory integration
 
 From the repository root, run this suite on a workstation with a local Linux-container Docker Engine, Docker Compose v2, Python 3.10+, and the .NET SDK in `global.json`.
 
@@ -9,11 +9,13 @@ python tests/WordPressFavorites.Integration/run.py
 
 The runner creates a unique Compose project and mounts the repository plugin read-only. WordPress, the Apache authorization bridge, MariaDB, and a Caddy HTTPS proxy are real services. WordPress and MariaDB use an internal network. The proxy exposes only loopback ports 18443 for HTTPS and 18080 for the plaintext rejection test. Different ports can be selected with `--https-port` and `--http-port`. The Python and .NET clients trust the temporary CA for these requests. The runner cleans up its project and volumes on exit.
 
-The schema test activates the plugin, removes the Favorites table from an otherwise populated test schema stamped `1.5.8`, and requests WordPress to trigger the `1.5.9` upgrade. It also exercises repair when `1.5.9` is already recorded. The fixture represents the old schema state using current source.
+The schema test activates the plugin and exercises upgrades from modeled `1.5.8` and `1.5.9` database schemas to `1.5.10`. It checks Favorites table repair and retention, directory IDs and ownership, and historical URLs from legacy audit entries.
 
 The authenticated tests use synthetic free WordPress accounts. They cover username and email, passwords containing quotes and backslashes, user isolation, 207 Favorites across multiple pages, concurrent revisions, retrying the same mutation, tombstones, invalid and oversized requests, lockout after 20 failed attempts, and storage and diagnostic log redaction. The legacy tests exercise WordPress login, the admin Settings page, retained SureCart options, and the legacy endpoint with SureCart absent or disabled. Active subscription and billing verification require a separate SureCart development tenant.
 
 The client test runs `FavoritesService` and `FavoritesRepository` against that HTTPS endpoint using two temporary SQLite databases. It covers groups, changes on both devices, conflicts and resolution, stale deletes, account switching, Local Only, resuming sync, and an independent loopback recorder. The regular `ServerAuthentication.Tests` command uses mocked endpoint responses for its Favorites cases.
+
+The directory checks exercise the shortcodes, administrator forms, and REST endpoints over HTTPS with synthetic WordPress accounts. They cover owner and recipient access, visibility, approval and rejection, staged edits, removal, suspension, address validation, and credential origin binding. The test-only WordPress mail catcher stores synthetic verification codes in the disposable database without sending mail. The suite checks code expiry and reuse, rate limits, directory-only sessions, and preservation of existing WordPress account credentials and roles.
 
 ## Windows app smoke test
 

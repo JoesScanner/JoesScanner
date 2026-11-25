@@ -1,3 +1,28 @@
+Joe's Scanner Auth API 2.7.5
+
+Server directory
+- Add [joes_scanner_my_servers] to an HTTPS page for listing owners and
+  Restricted recipients. [joes_scanner_server_submit] remains available.
+  [joes_scanner_server_directory] provides alphabetical public search by name,
+  area, and description. Exclude the owner and submission pages from any
+  reverse-proxy or full-page cache.
+- Existing WordPress sign-in and directory-only email verification can both
+  establish ownership. Verification uses single-use codes and a short-lived
+  directory cookie. WordPress password recovery remains available.
+- Public submissions and Restricted sharing require approval. Owners can save
+  Private entries immediately. Sensitive edits to published listings await
+  review while their approved version remains available.
+- Removal allows resubmission. Security suspension retains the listing and
+  blocks its known URLs. Administrator reinstatement permits a new review.
+- Schema 1.5.10 keeps stable listing IDs. It migrates numeric ownership links,
+  puts unassigned legacy rows in administrator custody, and records aliases
+  from valid legacy admin log entries. It adds revision, address, recipient,
+  and limited verification tables.
+- /servers keeps its existing app ordering and adds safe suspension IDs and
+  separate scanner and firewall requirements. The existing privileged firewall
+  endpoint requires an entitled HTTPS session and the approved HTTPS URL.
+  A change of origin drops any previously saved managed credentials.
+
 Joe's Scanner Auth API 2.7.4
 
 Favorites

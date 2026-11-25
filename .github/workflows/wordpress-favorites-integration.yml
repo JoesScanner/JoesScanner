@@ -1,4 +1,4 @@
-name: WordPress Favorites integration
+name: WordPress plugin integration
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   integration:
-    name: WordPress, MariaDB, and Favorites clients
+    name: WordPress directory and Favorites integration
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:

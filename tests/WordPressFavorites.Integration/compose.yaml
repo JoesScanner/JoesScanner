@@ -38,6 +38,7 @@ services:
     volumes:
       - wordpress:/var/www/html
       - ../../JoesScanner/API_Plugin/joes-scanner-auth:/var/www/html/wp-content/plugins/joes-scanner-auth:ro
+      - ./mail-catcher.php:/var/www/html/wp-content/mu-plugins/js-directory-test-mail.php:ro
       - ./fixtures.php:/fixtures.php:ro
       - ./wordpress.conf:/etc/apache2/conf-enabled/js-favorites-integration.conf:ro
     networks: [backend]

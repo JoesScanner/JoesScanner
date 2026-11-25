@@ -1,4 +1,4 @@
-"""Run the disposable WordPress and Favorites integration suite."""
+"""Run the disposable WordPress, Favorites, and server directory integration suite."""
 
 import argparse
 import base64
@@ -22,6 +22,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from directory_checks import check_directory
 
 
 HERE = Path(__file__).resolve().parent
@@ -359,16 +360,17 @@ def prepare(compose, directory, https_port, http_port):
                "--admin_password=" + admin_password, "--admin_email=integration_admin@example.invalid", "--skip-email",
                label="Install WordPress locally")
     compose.wp("rewrite", "structure", "/%postname%/", label="Enable local REST paths")
-    compose.run("exec", "-T", "wordpress", "sh", "-ec", "for file in /var/www/html/wp-content/plugins/joes-scanner-auth/*.php /var/www/html/wp-content/plugins/joes-scanner-auth/includes/*.php /fixtures.php; do php -l \"$file\"; done",
+    compose.run("exec", "-T", "wordpress", "sh", "-ec", "for file in /var/www/html/wp-content/plugins/joes-scanner-auth/*.php /var/www/html/wp-content/plugins/joes-scanner-auth/includes/*.php /fixtures.php /var/www/html/wp-content/mu-plugins/js-directory-test-mail.php; do php -l \"$file\"; done",
                 label="Lint plugin and test PHP")
     compose.wp("plugin", "activate", PLUGIN, label="Activate Joe's Scanner Auth API")
     compose.fixture("schema")
-    for operation in ("upgrade-from-1.5.8", "missing-table"):
+    for operation in ("upgrade-from-1.5.8", "missing-table", "upgrade-from-1.5.9"):
         compose.fixture(operation)
         _, index = site.request("/wp-json/", 200)
         check(API.replace("/wp-json", "") + "/favorites/sync" in json.loads(index)["routes"], "The plugin did not register Favorites.")
         compose.fixture("schema")
-    print("PASS Plugin activation, schema 1.5.8 to 1.5.9, and repair of a missing Favorites table", flush=True)
+    compose.fixture("directory-schema")
+    print("PASS Plugin activation, previous schema upgrades to 1.5.10, legacy directory ownership and URLs, and Favorites table repair", flush=True)
     return site, ca_path, admin, admin_password
 
 
@@ -425,9 +427,10 @@ def exercise(compose, directory, arguments):
     check_payload_validation(site, alpha, owners[0], marker)
     check_rate_limit(site)
     tokens = check_legacy(site, compose, admin, admin_password, alpha, beta, owners)
+    directory_secret = check_directory(site, compose, admin, admin_password, alpha, beta, tokens[0])
     check_client(site, ca_path, alpha, beta, directory, arguments.hold)
 
-    redact = [marker, admin_password, *tokens]
+    redact = [marker, admin_password, directory_secret, *tokens]
     for user in (alpha, beta):
         redact.extend([user["password"].split("-", 1)[0], account_header(user).split(" ", 1)[1],
                        account_header(user, by_email=True).split(" ", 1)[1]])

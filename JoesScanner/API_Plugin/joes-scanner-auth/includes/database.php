@@ -308,6 +308,14 @@ $sql_comms_changes = "CREATE TABLE {$comms_changes_tbl} (
         updated_at_utc DATETIME NULL,
         status VARCHAR(20) NOT NULL DEFAULT 'pending',
         sort_order INT NOT NULL DEFAULT 0,
+        owner_user_id BIGINT(20) UNSIGNED NOT NULL DEFAULT 0,
+        visibility VARCHAR(12) NOT NULL DEFAULT 'public',
+        description TEXT NULL,
+        requires_scanner_login TINYINT(1) NOT NULL DEFAULT 0,
+        requires_firewall_auth TINYINT(1) NOT NULL DEFAULT 0,
+        address_key CHAR(64) NOT NULL DEFAULT '',
+        was_public TINYINT(1) NOT NULL DEFAULT 0,
+        directory_version BIGINT(20) UNSIGNED NOT NULL DEFAULT 1,
         server_name VARCHAR(120) NOT NULL,
         server_url VARCHAR(255) NOT NULL,
         info_url VARCHAR(255) NULL,
@@ -339,8 +347,10 @@ $sql_comms_changes = "CREATE TABLE {$comms_changes_tbl} (
         KEY status (status),
         KEY sort_order (sort_order),
         KEY is_official (is_official),
+        KEY owner_user_id (owner_user_id,id),
+        KEY address_key (address_key),
         KEY server_url (server_url)
-    ) {$charset_collate};";
+    ) ENGINE=InnoDB {$charset_collate};";
 
     $sql_lookups_cache = "CREATE TABLE {$lookups_cache_tbl} (
         server_key VARCHAR(255) NOT NULL,
@@ -448,7 +458,7 @@ $sql_comms_changes = "CREATE TABLE {$comms_changes_tbl} (
 
     joes_scanner_auth_observed_triples_migrate_v1_to_v2();
 
-    if ( joes_scanner_auth_table_exists( joes_scanner_auth_favorites_table() ) ) {
+    if ( joes_scanner_auth_table_exists( joes_scanner_auth_favorites_table() ) && joes_scanner_auth_install_directory() ) {
         update_option( JOES_SCANNER_AUTH_DB_VERSION_KEY, JOES_SCANNER_AUTH_PLUGIN_DB_VERSION );
     }
 
@@ -642,7 +652,8 @@ function joes_scanner_auth_maybe_upgrade_db() {
     try {
     $current = get_option( JOES_SCANNER_AUTH_DB_VERSION_KEY, '' );
     if ( $current !== JOES_SCANNER_AUTH_PLUGIN_DB_VERSION || ! joes_scanner_auth_comms_tables_exist()
-        || ! joes_scanner_auth_table_exists( joes_scanner_auth_favorites_table() ) ) {
+        || ! joes_scanner_auth_table_exists( joes_scanner_auth_favorites_table() )
+        || ! joes_scanner_auth_directory_tables_exist() ) {
         joes_scanner_auth_install_db();
         return;
     }

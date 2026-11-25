@@ -627,28 +627,47 @@ function joes_scanner_auth_servers_endpoint( $request ) {
         }
 
         global $wpdb;
-        $tbl = joes_scanner_auth_table_server_directory();
-        $rows = $wpdb->get_results( $wpdb->prepare( "SELECT id, server_name, server_url, info_url, area_label, map_anchor, is_official, use_api_firewall_credentials FROM {$tbl} WHERE status = %s ORDER BY sort_order ASC, server_name ASC", 'approved' ) );
+        $rows = joes_scanner_auth_dir_public_rows();
+        if ( $wpdb->last_error ) {
+            return new WP_REST_Response( array( 'ok' => false, 'error' => 'server_directory_not_available' ), 503 );
+        }
 
         $out = array();
         foreach ( (array) $rows as $r ) {
+            $url = joes_scanner_auth_dir_url( $r->server_url );
+            if ( $url === '' ) {
+                continue;
+            }
             $out[] = array(
                 'id'         => (int) $r->id,
                 'name'       => (string) $r->server_name,
-                'url'        => (string) $r->server_url,
-                'info_url'   => isset( $r->info_url ) ? (string) $r->info_url : '',
+                'url'        => $url,
+                'info_url'   => joes_scanner_auth_dir_url( $r->info_url ),
                 'area_label' => isset( $r->area_label ) ? (string) $r->area_label : '',
                 'map_anchor'   => (string) $r->map_anchor,
                 'is_official' => isset( $r->is_official ) ? ( (int) $r->is_official === 1 ) : false,
                 'badge'       => ( isset( $r->is_official ) && (int) $r->is_official === 1 ) ? 'shield' : '',
                 'badge_label' => ( isset( $r->is_official ) && (int) $r->is_official === 1 ) ? 'Official' : '',
-                'uses_api_firewall_credentials' => isset( $r->use_api_firewall_credentials ) ? ( (int) $r->use_api_firewall_credentials === 1 ) : false,
+                'description' => (string) $r->description,
+                'requires_scanner_login' => (bool) $r->requires_scanner_login,
+                'requires_firewall_auth' => (bool) $r->requires_firewall_auth,
+                'uses_api_firewall_credentials' => (bool) $r->use_api_firewall_credentials && strpos( $url, 'https://' ) === 0,
             );
         }
 
-        return new WP_REST_Response( array( 'ok' => true, 'servers' => $out ), 200 );
-    } catch ( Exception $ex ) {
-        return new WP_REST_Response( array( 'ok' => false, 'error' => 'exception', 'message' => $ex->getMessage() ), 500 );
+        $tbl = joes_scanner_auth_table_server_directory();
+        $blocked = joes_scanner_auth_dir_suspended_address_sql();
+        $ids = $wpdb->get_col( "SELECT id FROM {$tbl} WHERE was_public = 1
+            AND (status = 'suspended' OR (visibility = 'public' AND address_key IN ({$blocked}))) ORDER BY id" );
+        if ( $wpdb->last_error ) {
+            return new WP_REST_Response( array( 'ok' => false, 'error' => 'server_directory_not_available' ), 503 );
+        }
+        $suspended = array_map( static function ( $id ) {
+            return array( 'id' => (int) $id, 'status' => 'suspended' );
+        }, $ids );
+        return new WP_REST_Response( array( 'ok' => true, 'servers' => $out, 'suspended' => $suspended ), 200 );
+    } catch ( Throwable $ex ) {
+        return new WP_REST_Response( array( 'ok' => false, 'error' => 'server_directory_not_available' ), 500 );
     }
 }
 
@@ -975,18 +994,18 @@ function joes_scanner_auth_get_subscription_state_for_email( $email ) {
 
 function joes_scanner_auth_server_firewall_credentials_endpoint( $request ) {
     try {
-        if ( ! function_exists( 'joes_scanner_auth_table_server_directory' ) ) {
-            return new WP_REST_Response( array( 'ok' => false, 'error' => 'server_directory_not_available' ), 500 );
+        if ( ! is_ssl() ) {
+            return new WP_REST_Response( array( 'ok' => false, 'error' => 'https_required' ), 403 );
         }
 
         $params = $request->get_json_params();
         if ( ! is_array( $params ) ) {
-            $params = $request->get_params();
+            $params = $request->get_body_params();
         }
 
         $session_token = isset( $params['session_token'] ) ? sanitize_text_field( (string) $params['session_token'] ) : '';
         $directory_id = isset( $params['directory_id'] ) ? (int) $params['directory_id'] : 0;
-        $server_url = isset( $params['server_url'] ) ? esc_url_raw( (string) $params['server_url'] ) : '';
+        $server_url = joes_scanner_auth_dir_url( $params['server_url'] ?? '' );
         $device_id_hash = isset( $params['device_id_hash'] ) ? joes_scanner_auth_sanitize_device_string( (string) $params['device_id_hash'], 64 ) : '';
         $device_id = isset( $params['device_id'] ) ? joes_scanner_auth_sanitize_device_string( (string) $params['device_id'], 120 ) : '';
 
@@ -994,7 +1013,7 @@ function joes_scanner_auth_server_firewall_credentials_endpoint( $request ) {
             return new WP_REST_Response( array( 'ok' => false, 'error' => 'missing_session_token' ), 400 );
         }
 
-        if ( $directory_id <= 0 && $server_url === '' ) {
+        if ( strpos( $server_url, 'https://' ) !== 0 ) {
             return new WP_REST_Response( array( 'ok' => false, 'error' => 'missing_server' ), 400 );
         }
 
@@ -1030,19 +1049,16 @@ function joes_scanner_auth_server_firewall_credentials_endpoint( $request ) {
 
         global $wpdb;
         $tbl = joes_scanner_auth_table_server_directory();
-
-        if ( $directory_id > 0 ) {
-            $row = $wpdb->get_row( $wpdb->prepare(
-                "SELECT id, server_url, use_api_firewall_credentials, firewall_username, firewall_password FROM {$tbl} WHERE id = %d AND status = %s LIMIT 1",
-                $directory_id,
-                'approved'
-            ) );
-        } else {
-            $row = $wpdb->get_row( $wpdb->prepare(
-                "SELECT id, server_url, use_api_firewall_credentials, firewall_username, firewall_password FROM {$tbl} WHERE TRIM(TRAILING '/' FROM server_url) = %s AND status = %s LIMIT 1",
-                rtrim( joes_scanner_auth_normalize_url_for_compare( $server_url ), '/' ),
-                'approved'
-            ) );
+        $published = joes_scanner_auth_dir_shareable_sql( 'd' );
+        $row = $wpdb->get_row( $wpdb->prepare(
+            "SELECT id,server_url,use_api_firewall_credentials,firewall_username,firewall_password FROM {$tbl} d
+             WHERE d.visibility = 'public' AND {$published} AND d.address_key = %s AND (%d = 0 OR d.id = %d) LIMIT 1",
+            joes_scanner_auth_dir_address_key( $server_url ),
+            max( 0, $directory_id ),
+            max( 0, $directory_id )
+        ) );
+        if ( $row && joes_scanner_auth_dir_url( $row->server_url ) !== $server_url ) {
+            $row = null;
         }
 
         if ( ! $row ) {
@@ -1060,18 +1076,20 @@ function joes_scanner_auth_server_firewall_credentials_endpoint( $request ) {
             return new WP_REST_Response( array( 'ok' => false, 'error' => 'not_configured' ), 404 );
         }
 
-        return new WP_REST_Response(
+        $response = new WP_REST_Response(
             array(
                 'ok' => true,
                 'directory_id' => (int) $row->id,
-                'server_url' => (string) $row->server_url,
+                'server_url' => $server_url,
                 'username' => $username,
                 'password' => $password,
             ),
             200
         );
-    } catch ( Exception $ex ) {
-        return new WP_REST_Response( array( 'ok' => false, 'error' => 'exception', 'message' => $ex->getMessage() ), 500 );
+        $response->header( 'Cache-Control', 'private, no-store' );
+        return $response;
+    } catch ( Throwable $ex ) {
+        return new WP_REST_Response( array( 'ok' => false, 'error' => 'server_directory_not_available' ), 500 );
     }
 }
 

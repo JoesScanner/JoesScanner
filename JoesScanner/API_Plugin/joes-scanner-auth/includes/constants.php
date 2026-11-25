@@ -2,9 +2,9 @@
 /*
 //|--------------------------------------------------------------------------//| Constants//|--------------------------------------------------------------------------*/
 
-define( 'JOES_SCANNER_AUTH_PLUGIN_DB_VERSION', '1.5.9' );
+define( 'JOES_SCANNER_AUTH_PLUGIN_DB_VERSION', '1.5.10' );
 if ( ! defined( 'JOES_SCANNER_AUTH_VERSION' ) ) {
-    define( 'JOES_SCANNER_AUTH_VERSION', '2.7.4' );
+    define( 'JOES_SCANNER_AUTH_VERSION', '2.7.5' );
 }
 define( 'JOES_SCANNER_AUTH_OPTIONS_KEY', 'joes_scanner_auth_options' );
 define( 'JOES_SCANNER_AUTH_DB_VERSION_KEY', 'joes_scanner_auth_db_version' );
