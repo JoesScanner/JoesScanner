@@ -448,7 +448,9 @@ $sql_comms_changes = "CREATE TABLE {$comms_changes_tbl} (
 
     joes_scanner_auth_observed_triples_migrate_v1_to_v2();
 
-    update_option( JOES_SCANNER_AUTH_DB_VERSION_KEY, JOES_SCANNER_AUTH_PLUGIN_DB_VERSION );
+    if ( joes_scanner_auth_table_exists( joes_scanner_auth_favorites_table() ) ) {
+        update_option( JOES_SCANNER_AUTH_DB_VERSION_KEY, JOES_SCANNER_AUTH_PLUGIN_DB_VERSION );
+    }
 
     if ( is_object( $wpdb ) && method_exists( $wpdb, 'suppress_errors' ) ) {
         $wpdb->suppress_errors( $prev_suppress );
@@ -624,7 +626,7 @@ function joes_scanner_auth_table_exists( $table_name ) {
     if ( empty( $table_name ) ) {
         return false;
     }
-    $found = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $table_name ) );
+    $found = $wpdb->get_var( $wpdb->prepare( "SHOW TABLES LIKE %s", $wpdb->esc_like( $table_name ) ) );
     return ( $found === $table_name );
 }
 
@@ -639,7 +641,8 @@ function joes_scanner_auth_maybe_upgrade_db() {
 
     try {
     $current = get_option( JOES_SCANNER_AUTH_DB_VERSION_KEY, '' );
-    if ( $current !== JOES_SCANNER_AUTH_PLUGIN_DB_VERSION || ! joes_scanner_auth_comms_tables_exist() ) {
+    if ( $current !== JOES_SCANNER_AUTH_PLUGIN_DB_VERSION || ! joes_scanner_auth_comms_tables_exist()
+        || ! joes_scanner_auth_table_exists( joes_scanner_auth_favorites_table() ) ) {
         joes_scanner_auth_install_db();
         return;
     }

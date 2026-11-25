@@ -4,9 +4,10 @@ namespace JoesScanner.Services;
 
 internal static class DiagnosticRedaction
 {
-    private static readonly Regex AuthorizationHeader = new(@"(?i)(authorization[""']?[ \t]*[:=][ \t]*[""']?(?:basic|bearer)[ \t]+)[^,;\s""']+", RegexOptions.Compiled);
+    private static readonly Regex AuthorizationHeader = new(@"(?i)(authorization[""']?[ \t]*[:=][ \t]*[""']?(?:basic|bearer|joesscanneraccount)[ \t]+)[^,;\s""']+", RegexOptions.Compiled);
     private static readonly Regex BasicToken = new(@"(?i)(\bBasic[ \t]+)(?!(?:auth(?:entication)?|credentials)\b)[A-Za-z0-9+/=]{8,}", RegexOptions.Compiled);
     private static readonly Regex BearerToken = new(@"(?i)(\bBearer[ \t]+)[^,;\s""']+", RegexOptions.Compiled);
+    private static readonly Regex FavoritesToken = new(@"(?i)(\bJoesScannerAccount[ \t]+)[A-Za-z0-9+/=]{4,}", RegexOptions.Compiled);
     private static readonly Regex CredentialValue = new(
         """(?ix)(?<![\w-])(["']?(?:(?:basic[_-]?auth[_-]?)?(?:password|passwd|passphrase|username)|(?:auth[_ -]?)?(?:(?:access|refresh|session|bearer|id)[_ -]?)?token|(?:(?:what3words|x)[_-]?)?api[_ -]?key|client[_-]?secret)["']?[ \t]*[:=][ \t]*)(\[REDACTED\]|"(?:\\.|[^"\r\n])*"|'(?:\\.|[^'\r\n])*'|[^\r\n]+)""",
         RegexOptions.Compiled);
@@ -55,6 +56,7 @@ internal static class DiagnosticRedaction
         sanitized = AuthorizationHeader.Replace(sanitized, "$1[REDACTED]");
         sanitized = BasicToken.Replace(sanitized, "$1[REDACTED]");
         sanitized = BearerToken.Replace(sanitized, "$1[REDACTED]");
+        sanitized = FavoritesToken.Replace(sanitized, "$1[REDACTED]");
         return CredentialValue.Replace(sanitized, "$1[REDACTED]");
     }
 

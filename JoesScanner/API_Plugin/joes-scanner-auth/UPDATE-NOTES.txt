@@ -15,6 +15,15 @@ Favorites
 Database changes
 - Schema 1.5.9 adds the account-scoped joes_scanner_favorites table to the
   plugin's existing activation and upgrade path.
+- The upgrade records completion once the Favorites table exists and repairs
+  a missing table even when the stored version is already 1.5.9.
+
+Integration compatibility
+- Both account routes preserve WordPress browser-form password handling and
+  support literal passwords set through the WordPress user API. WordPress
+  still runs its complete authentication policy.
+- Favorites mutations must be a JSON array. The complete batch is validated
+  before its first write.
 
 Validate on a test WordPress installation with synthetic accounts. Check free
 account sign-in, account isolation, concurrent writes, retrying a lost

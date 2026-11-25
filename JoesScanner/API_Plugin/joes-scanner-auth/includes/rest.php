@@ -1126,14 +1126,7 @@ function joes_scanner_auth_endpoint( $request ) {
                 $username = $email;
             }
         }
-        // WordPress's wp_magic_quotes() calls addslashes() on all $_POST data
-        // during boot. This means passwords set via WordPress web forms are hashed
-        // from the addslashes-transformed value (e.g. test'pass is hashed as
-        // test\'pass). REST API JSON input bypasses $_POST and therefore bypasses
-        // magic quotes, so we must apply wp_slash() here to replicate the same
-        // transformation, otherwise wp_authenticate() will always reject passwords
-        // containing apostrophes, backslashes, or double quotes.
-        $password = isset( $params['password'] ) ? wp_slash( (string) $params['password'] ) : '';
+        $password = isset( $params['password'] ) ? (string) $params['password'] : '';
 
         $telemetry = joes_scanner_auth_parse_telemetry_from_params( $params );
         $device_type     = $telemetry['device_type'];
@@ -1244,7 +1237,7 @@ function joes_scanner_auth_endpoint( $request ) {
             );
         }
 
-        $user = wp_authenticate( $username, $password );
+        $user = joes_scanner_auth_authenticate_account( $username, $password );
 
         if ( is_wp_error( $user ) ) {
             joes_scanner_auth_rate_limit_record_failure( $ip, $username, 20, 10 * MINUTE_IN_SECONDS );

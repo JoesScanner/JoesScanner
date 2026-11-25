@@ -10,6 +10,12 @@ using JoesScanner.Helpers;
 using JoesScanner.Models;
 using JoesScanner.Services;
 
+if (args is ["--wordpress-favorites", var fixture])
+{
+    await WordPressFavoritesIntegration.RunAsync(fixture);
+    return;
+}
+
 var cases = new (string Name, Func<Task> Run)[]
 {
     ("Built-in and directory requests use only endpoint-issued credentials", HostedSelection),

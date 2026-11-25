@@ -196,6 +196,25 @@ function joes_scanner_auth_body_too_large( $request, $max_bytes ) {
     return false;
 }
 
+function joes_scanner_auth_authenticate_account( $username, $password ) {
+    // WordPress web forms pass a slashed password to wp_authenticate(). Core
+    // APIs such as wp_create_user() can store a hash of the literal password.
+    // Preserve browser login compatibility. Use the hash check only to choose
+    // the input format, then run the full WordPress authentication policy once.
+    $candidate = wp_slash( $password );
+    if ( $candidate !== $password ) {
+        $login = sanitize_user( $username );
+        $account = get_user_by( 'login', $login );
+        if ( ! $account && is_email( $login ) ) {
+            $account = get_user_by( 'email', $login );
+        }
+        if ( $account instanceof WP_User && wp_check_password( trim( $password ), $account->user_pass, $account->ID ) ) {
+            $candidate = $password;
+        }
+    }
+    return wp_authenticate( $username, $candidate );
+}
+
 function joes_scanner_auth_rate_limit_allow( $ip, $username, $max_attempts, $window_seconds ) {
     $ip = is_string( $ip ) ? trim( $ip ) : '';
     $username = is_string( $username ) ? trim( strtolower( $username ) ) : '';

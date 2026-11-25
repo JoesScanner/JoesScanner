@@ -256,6 +256,18 @@ internal static class SavedCredentialTests
         Check(message.Contains("redacted.example") &&
             !new[] { "log-user", "url-secret", "query-secret", "bearer-secret", "coords-secret", "raw-secret" }.Any(message.Contains),
             "Diagnostic export must redact URI credentials, bearer tokens, API keys and echoed secrets.");
+        var encoded = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("fixture-user:synthetic-p@ss'word\\"));
+        foreach (var line in new[]
+        {
+            $"Authorization: JoesScannerAccount {encoded}",
+            $$"""{"Authorization":"joesscanneraccount {{encoded}}"}""",
+            $"Favorites authentication used JoesScannerAccount {encoded}."
+        })
+        {
+            var sanitized = DiagnosticRedaction.Sanitize(line);
+            Check(!sanitized.Contains(encoded) && sanitized.Contains("[REDACTED]"),
+                "The Favorites account credential must be redacted with or without an Authorization header label.");
+        }
         return Task.CompletedTask;
     }
 

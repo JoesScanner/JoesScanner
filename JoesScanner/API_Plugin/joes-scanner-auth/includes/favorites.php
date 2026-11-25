@@ -76,7 +76,7 @@ function joes_scanner_auth_favorites_authorize( WP_REST_Request $request ) {
     }
     // Reuse the auth plugin's WordPress password handling. No SureCart or
     // scanner entitlement check is part of Favorites authorization.
-    $user = wp_authenticate( $username, wp_slash( $password ) );
+    $user = joes_scanner_auth_authenticate_account( $username, $password );
     if ( is_wp_error( $user ) || ! ( $user instanceof WP_User ) || $user->ID <= 0 ) {
         joes_scanner_auth_rate_limit_record_failure( $ip, $username, 20, 10 * MINUTE_IN_SECONDS );
         return joes_scanner_auth_favorites_error( 'authentication_required', 401 );
@@ -148,6 +148,12 @@ function joes_scanner_auth_favorites_sync( WP_REST_Request $request ) {
         return joes_scanner_auth_favorites_error( 'authentication_required', 401 );
     }
     if ( ! joes_scanner_auth_is_json_request( $request ) || joes_scanner_auth_body_too_large( $request, 262144 ) ) {
+        return joes_scanner_auth_favorites_error( 'invalid_payload', 400 );
+    }
+    // WordPress decodes both a JSON object and a JSON array into PHP arrays.
+    // Check the wire shape so an object cannot stand in for a mutation list.
+    $body = json_decode( $request->get_body() );
+    if ( ! is_object( $body ) || ! is_array( $body->changes ?? null ) ) {
         return joes_scanner_auth_favorites_error( 'invalid_payload', 400 );
     }
     $params = $request->get_json_params();

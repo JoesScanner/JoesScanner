@@ -1,0 +1,19 @@
+{
+	admin off
+	auto_https disable_redirects
+	skip_install_trust
+}
+
+https://localhost {
+	tls internal
+	reverse_proxy wordpress:80 {
+		header_up -CF-Connecting-IP
+	}
+}
+
+http://:8080 {
+	reverse_proxy wordpress:80 {
+		header_up -Authorization
+		header_up -CF-Connecting-IP
+	}
+}
