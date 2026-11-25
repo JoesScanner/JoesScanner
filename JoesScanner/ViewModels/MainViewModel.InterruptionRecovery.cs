@@ -133,6 +133,7 @@ public partial class MainViewModel
             NotifyPlaybackResumeState();
         if (blocked)
         {
+            RetirePlaybackLag();
             _automaticPreloads.Retire();
             _interruptionJump?.Cancel();
         }

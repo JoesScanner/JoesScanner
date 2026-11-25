@@ -256,8 +256,9 @@ namespace JoesScanner.Services
 
                 var callsUrl = baseUrl + "/calljson";
                 var (window, newRecoveryRequest) = recovery?.BeginAttempt() ?? default;
+                var transportGap = recovery?.GetTransportGap(window);
                 var recoveryRequestedAt = newRecoveryRequest ? _clock.GetUtcNow() : default;
-                if (newRecoveryRequest)
+                if (newRecoveryRequest && transportGap == null)
                     wsDisableUntilUtc = DateTime.MinValue;
 
                 // On iOS/MacCatalyst, cleartext (ws://) WebSockets can still be blocked even when HTTP polling is allowed.
@@ -298,8 +299,12 @@ namespace JoesScanner.Services
                     }
                 }
 
+                if (transportGap != null && pollGrant == null)
+                    recovery!.ReportIndeterminate(transportGap);
+
                 if (socket != null)
                 {
+                    recovery?.TransportSucceeded(_clock.GetUtcNow());
                     if (window != null && pollGrant == null)
                         recovery?.AllowPlaybackWithoutHistory(window);
                     consecutiveFailures = 0;
@@ -325,7 +330,8 @@ namespace JoesScanner.Services
                     if (!InRecoveryScope())
                         yield break;
                     livePollSince = _clock.GetUtcNow();
-                    if (recovery?.Pending.IsCompleted != true)
+                    if (recovery?.Pending.IsCompleted != true ||
+                        recovery.GetTransportGap(recovery.OutstandingWindow) != null)
                     {
                         if (recovery != null)
                             wsDisableUntilUtc = DateTime.UtcNow.AddSeconds(5); // Poll instead of trusting a failing socket.
@@ -449,6 +455,10 @@ namespace JoesScanner.Services
                 // Surface any error from the poll as a synthetic CallItem row.
                 if (errorMessage != null)
                 {
+                    if (isAuthError)
+                        recovery?.TransportAuthenticationChanged();
+                    else if (recovery != null && InRecoveryScope())
+                        await recovery.TransportLostAsync();
                     hasReportedIdleConnection = false;
                     var talkgroup = isAuthError ? "AUTH" : "ERROR";
 
@@ -481,6 +491,7 @@ namespace JoesScanner.Services
                 if (!InRecoveryScope())
                     yield break;
 
+                recovery?.TransportSucceeded(_clock.GetUtcNow());
                 if (window != null && pollGrant == null)
                     recovery?.AllowPlaybackWithoutHistory(window);
 
@@ -829,6 +840,73 @@ namespace JoesScanner.Services
                 AppLog.Add(() => $"Foreground call recovery ended early ({ex.GetType().Name}).");
             }
             return false;
+        }
+
+        private async Task<(bool Completed, PlaybackLagEvidence? Evidence)> ReceiveTransportRecoveryAsync(string server,
+            LiveStreamRecovery.TransportGap gap, RecordingPlaybackAccess.HistoryGrant grant, ChannelWriter<IncomingRows> writer,
+            Func<bool> inScope, CancellationToken token)
+        {
+            var since = gap.Window.Since;
+            var now = _clock.GetUtcNow();
+            if (now < since || now - since > PlaybackLagEvidence.MaximumWindow)
+                return (true, null);
+
+            // The recorder's Date filter uses its wall time. The existing
+            // zero-row calljson request can report the offset without reading History.
+            void Validate()
+            {
+                ValidateHistoryGrant(grant, token);
+                if (!inScope())
+                    throw RecordingPlaybackAccess.VerificationRequired();
+            }
+
+            var lower = grant.Cutoff is { } cutoff && cutoff > since ? cutoff : since;
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+            deadline.CancelAfter(TimeSpan.FromSeconds(20));
+            var probe = await FetchRecordingAudioPageAsync(server, RecordingPlaybackAccess.DateSearch(lower, now),
+                0, 0, Validate, deadline.Token).ConfigureAwait(false);
+            Validate();
+            if (probe.UtcOffset is not { } offset)
+                return (true, null);
+
+            // Freeze the request range for this catch-up. Larger or changing
+            // snapshots can reconcile normally, but cannot verify a time-based Jump.
+            var through = _clock.GetUtcNow();
+            var started = _clock.GetTimestamp();
+            var range = RecordingPlaybackAccess.DateSearch(lower, through, offset);
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            const int pageSize = 200;
+            for (var start = 0; inScope();)
+            {
+                var version = LiveCallState.NextVersion();
+                using var pageDeadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+                pageDeadline.CancelAfter(TimeSpan.FromSeconds(20));
+                var page = await FetchRecordingAudioPageAsync(server, range, start, pageSize, Validate, pageDeadline.Token)
+                    .ConfigureAwait(false);
+                Validate();
+                var evidence = start == 0 && page.UtcOffset == offset && !gap.Audio.Token.IsCancellationRequested
+                    ? PlaybackLagEvidence.VerifyRecorderSnapshot(page.Rows.Select(row =>
+                        PlaybackLagEvidence.Stamp.Read(row.DT_RowId, row.StartTimeUTC, row.GetDurationSeconds())),
+                        page.FilteredCount, lower, through, _clock, started)
+                    : null;
+
+                // A server ignoring the bounded Date filter must not admit
+                // calls beyond the fixed snapshot or the authorized window.
+                var returned = page.Rows.Count;
+                page.Rows.RemoveAll(row => TryParseTimestampUtc(row.StartTime, row.StartTimeUTC) is not { } recorded ||
+                    recorded < lower || recorded > through || !grant.Allows(recorded));
+                var batch = new IncomingRows(page.Rows, version, grant);
+                if (!writer.TryWrite(batch) || !await batch.Consumed.Task.WaitAsync(token).ConfigureAwait(false))
+                    return (false, null);
+
+                var newRows = page.Rows.Count(row => row.DT_RowId?.Trim() is { Length: > 0 } id && seen.Add(id));
+                start += returned;
+                if (returned < pageSize || page.FilteredCount is { } count && start >= count)
+                    return (true, evidence);
+                if (newRows == 0)
+                    return (false, null);
+            }
+            return (false, null);
         }
 
         private async IAsyncEnumerable<CallItem> PublishRecentRecoveryAsync(string baseUrl, LiveCallIndex liveCalls,
@@ -1562,6 +1640,7 @@ namespace JoesScanner.Services
             // batch. One reader serializes admission in registration order.
             var incoming = Channel.CreateUnbounded<IncomingRows>(new UnboundedChannelOptions { SingleReader = true });
             var receive = ws == null ? Task.CompletedTask : ReceiveSocketBatchesAsync(ws, incoming.Writer, socketLifetime.Token);
+            var transportGap = recovery?.GetTransportGap(window);
             var gap = window != null && historyGrant != null ? RecoverAsync(historyGrant) : null;
             Task? retry = window != null && gap == null && ws != null ? Task.Delay(RecoveryRetryDelay, token) : null;
             Task<bool>? ready = null;
@@ -1577,10 +1656,16 @@ namespace JoesScanner.Services
                 {
                     if (gap is { IsCompleted: true })
                     {
-                        if (await gap && !token.IsCancellationRequested && inScope())
-                            await recovery!.CompleteAsync(window!, token);
-                        else if (!receive.IsCompleted)
-                            retry = Task.Delay(RecoveryRetryDelay, token);
+                        var result = await gap;
+                        if (result.Completed && !token.IsCancellationRequested && inScope())
+                            await recovery!.CompleteAsync(window!, token, result.Evidence);
+                        else
+                        {
+                            if (transportGap != null)
+                                recovery!.ReportIndeterminate(transportGap);
+                            if (!receive.IsCompleted)
+                                retry = Task.Delay(RecoveryRetryDelay, token);
+                        }
                         gap = null;
                     }
 
@@ -1622,6 +1707,7 @@ namespace JoesScanner.Services
                             // Receive one more socket batch while the consumer
                             // persists the current one.
                             batch.Consumed.SetResult(true);
+                            recovery?.TransportSucceeded(_clock.GetUtcNow());
                             await foreach (var call in PublishSocketRowsAsync(batch))
                                 yield return call;
                         }
@@ -1687,6 +1773,7 @@ namespace JoesScanner.Services
             }
             finally
             {
+                var transportEnded = ws != null && !reconnecting && receive.IsCompleted && !receive.IsCanceled;
                 session.Cancel();
                 await ((Task)receive).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
                 if (gap != null)
@@ -1696,15 +1783,29 @@ namespace JoesScanner.Services
                 foreach (var target in targets)
                     target.CompleteNotification();
                 liveCalls.ClearNotifications();
+                if (transportEnded && recovery != null && !cancellationToken.IsCancellationRequested && inScope())
+                    await recovery.TransportLostAsync();
             }
 
-            async Task<bool> RecoverAsync(RecordingPlaybackAccess.HistoryGrant? grant = null)
+            async Task<(bool Completed, PlaybackLagEvidence? Evidence)> RecoverAsync(
+                RecordingPlaybackAccess.HistoryGrant? grant = null)
             {
                 if (!inScope())
-                    return false;
+                    return (false, null);
                 grant ??= await GetHistoryGrantAsync(baseUrl, token);
-                return grant != null && inScope() && await ReceiveRecoveryPagesAsync(callsUrl, window!.Since,
-                    grant, incoming.Writer, inScope, token);
+                if (grant == null || !inScope())
+                    return (false, null);
+                if (transportGap == null)
+                    return (await ReceiveRecoveryPagesAsync(callsUrl, window!.Since,
+                        grant, incoming.Writer, inScope, token), null);
+
+                try { return await ReceiveTransportRecoveryAsync(baseUrl, transportGap, grant, incoming.Writer, inScope, token); }
+                catch (Exception ex) when (!token.IsCancellationRequested &&
+                    ex is HttpRequestException or RecordingAccessException or CallStreamAuthException or OperationCanceledException)
+                {
+                    recovery!.ReportIndeterminate(transportGap);
+                    return (false, null);
+                }
             }
 
             async IAsyncEnumerable<CallItem> PublishSocketRowsAsync(IncomingRows batch)

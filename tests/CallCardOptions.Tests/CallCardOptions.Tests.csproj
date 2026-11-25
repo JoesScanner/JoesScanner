@@ -32,6 +32,8 @@
     <Compile Include="../../JoesScanner/Data/DbCallRecord.cs" Link="DbCallRecord.cs" />
     <Compile Include="../../JoesScanner/Services/DurableLiveQueue.cs" Link="DurableLiveQueue.cs" />
     <Compile Include="../../JoesScanner/Services/DurableLiveQueue.Scheduling.cs" Link="DurableLiveQueue.Scheduling.cs" />
+    <Compile Include="../../JoesScanner/Services/DurableLiveQueue.PlaybackLag.cs" Link="DurableLiveQueue.PlaybackLag.cs" />
+    <Compile Include="../../JoesScanner/Services/PlaybackLagRecovery.cs" Link="PlaybackLagRecovery.cs" />
     <Compile Include="../../JoesScanner/Services/LiveAudioSource.cs" Link="LiveAudioSource.cs" />
     <Compile Include="../../JoesScanner/Services/LivePlaybackScheduler.cs" Link="LivePlaybackScheduler.cs" />
     <Compile Include="../../JoesScanner/Services/LiveAudioPreloader.cs" Link="LiveAudioPreloader.cs" />
@@ -58,6 +60,7 @@
     <Compile Include="../../JoesScanner/Services/PlaybackOwnership.cs" Link="PlaybackOwnership.cs" />
     <Compile Include="../../JoesScanner/Services/IAudioPlaybackService.cs" Link="IAudioPlaybackService.cs" />
     <Compile Include="../../JoesScanner/ViewModels/MainViewModel.PlaybackOwnership.cs" Link="MainViewModel.PlaybackOwnership.cs" />
+    <Compile Include="../../JoesScanner/ViewModels/MainViewModel.PlaybackLag.cs" Link="MainViewModel.PlaybackLag.cs" />
     <Compile Include="../../JoesScanner/ViewModels/MainViewModel.LiveAudioSource.cs" Link="MainViewModel.LiveAudioSource.cs" />
     <Compile Include="../../JoesScanner/ViewModels/MainViewModel.ListeningSession.cs" Link="MainViewModel.ListeningSession.cs" />
     <Compile Include="../../JoesScanner/ViewModels/MainViewModel.InterruptionRecovery.cs" Link="MainViewModel.InterruptionRecovery.cs" />

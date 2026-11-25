@@ -5,6 +5,8 @@ namespace JoesScanner.Services;
 public sealed class LiveStreamRecovery
 {
     internal sealed record Window(DateTimeOffset Since, string Id, long Revision);
+    internal sealed record TransportGap(Window Window, long Version, PlaybackLagGeneration.Lease Audio);
+    internal sealed record LagObservation(TransportGap Gap, PlaybackLagEvidence? Evidence);
 
     private readonly object _gate = new();
     private readonly DurableLiveQueue? _queue;
@@ -16,6 +18,12 @@ public sealed class LiveStreamRecovery
     private TaskCompletionSource? _reconciled;
     private string? _inheritedWindowId;
     private bool _hasPollingBaseline;
+    private Func<PlaybackLagGeneration.Lease>? _captureLagAudio;
+    private Action<LagObservation>? _reportLag;
+    private DateTimeOffset? _lastTransportSuccess;
+    private TransportGap? _transportGap;
+    private long _recoveryVersion;
+    private long _reportedIndeterminate;
 
     public LiveStreamRecovery() { }
 
@@ -79,12 +87,76 @@ public sealed class LiveStreamRecovery
         }
     }
 
-    internal void Request(DateTimeOffset since) => _ = RequestAsync(since);
+    internal void ObserveTransportRecovery(Func<PlaybackLagGeneration.Lease> captureAudio, Action<LagObservation> report)
+    {
+        _captureLagAudio = captureAudio;
+        _reportLag = report;
+    }
 
-    internal Task<bool> RequestAsync(DateTimeOffset since)
+    internal void TransportSucceeded(DateTimeOffset observed)
+    {
+        lock (_gate)
+            _lastTransportSuccess = observed;
+    }
+
+    internal Task TransportLostAsync()
     {
         lock (_gate)
         {
+            if (!IsDurable || _captureLagAudio == null || _lastTransportSuccess is not { } since)
+                return Task.CompletedTask;
+
+            _lastTransportSuccess = null;
+            // Do not turn an outstanding foreground or inherited checkpoint
+            // into evidence about a different transport gap.
+            if (_outstanding != null && _transportGap == null)
+                return Task.CompletedTask;
+            return RequestAsync(since, _captureLagAudio());
+        }
+    }
+
+    internal void TransportAuthenticationChanged()
+    {
+        lock (_gate)
+        {
+            _lastTransportSuccess = null;
+            ++_recoveryVersion;
+        }
+    }
+
+    internal TransportGap? GetTransportGap(Window? window)
+    {
+        lock (_gate)
+            return ReferenceEquals(_transportGap?.Window, window) ? _transportGap : null;
+    }
+
+    internal void ReportIndeterminate(TransportGap gap)
+    {
+        lock (_gate)
+        {
+            if (gap.Version != _recoveryVersion || _reportedIndeterminate == gap.Version)
+                return;
+            _reportedIndeterminate = gap.Version;
+            _reportLag?.Invoke(new(gap, null));
+        }
+    }
+
+    internal bool CommitLagIfCurrent(TransportGap gap, Action commit)
+    {
+        lock (_gate)
+            return !_lifetime.IsCancellationRequested && gap.Version == _recoveryVersion &&
+                _outstanding == null && gap.Audio.TryCommit(commit);
+    }
+
+    internal void Request(DateTimeOffset since) => _ = RequestAsync(since);
+
+    internal Task<bool> RequestAsync(DateTimeOffset since) => RequestAsync(since, null);
+
+    private Task<bool> RequestAsync(DateTimeOffset since, PlaybackLagGeneration.Lease? lagAudio)
+    {
+        lock (_gate)
+        {
+            var version = ++_recoveryVersion;
             EnsureReconciliationSignal();
             if (_queue == null)
             {
@@ -101,7 +173,11 @@ public sealed class LiveStreamRecovery
             return PublishInOrder(_queue.RequestRecoveryAsync(_run!, since, ReportStorageFailure, _lifetime), saved =>
             {
                 if (saved != null)
+                {
+                    if (version == _recoveryVersion)
+                        _transportGap = lagAudio != null ? new(saved, version, lagAudio) : null;
                     PublishRequest(saved);
+                }
                 return saved != null;
             });
         }
@@ -131,7 +207,7 @@ public sealed class LiveStreamRecovery
         }
     }
 
-    internal Task CompleteAsync(Window window, CancellationToken token)
+    internal Task CompleteAsync(Window window, CancellationToken token, PlaybackLagEvidence? evidence = null)
     {
         lock (_gate)
         {
@@ -143,21 +219,28 @@ public sealed class LiveStreamRecovery
 
             return PublishInOrder(_queue.CompleteRecoveryAsync(_run!, window, ReportStorageFailure, token), completed =>
             {
-                if (completed)
-                    CompleteIfCurrent(window);
+                if (completed && CompleteIfCurrent(window) && GetTransportGap(window) is { } gap &&
+                    gap.Version == _recoveryVersion)
+                {
+                    if (evidence == null)
+                        ReportIndeterminate(gap);
+                    else
+                        _reportLag?.Invoke(new(gap, evidence));
+                }
                 return completed;
             });
         }
     }
 
-    private void CompleteIfCurrent(Window window)
+    private bool CompleteIfCurrent(Window window)
     {
         // A new request may cover additional time even when it shares a window.
-        if (ReferenceEquals(_outstanding, window))
-        {
-            _outstanding = null;
-            _reconciled?.TrySetResult();
-        }
+        if (!ReferenceEquals(_outstanding, window))
+            return false;
+
+        _outstanding = null;
+        _reconciled?.TrySetResult();
+        return true;
     }
 
     // SQLite operations are reserved immediately. Publish their outcomes in the

@@ -6,6 +6,8 @@ namespace JoesScanner.Services;
 internal sealed record LivePlaybackPreferences(bool GroupCalls = true, bool PrioritizeFavorites = true,
     int ConsecutiveLimit = 3, int WarningThreshold = 80, int JumpThreshold = 100, LiveAudioSourceMode SourceMode = LiveAudioSourceMode.AllEnabledServers)
 {
+    public PlaybackLagRecoveryPreference VerifiedLagRecovery { get; init; } = new();
+
     internal const int MinimumConsecutive = 1;
     internal const int MaximumConsecutive = 10;
     private const string SettingsKey = "live_playback_preferences";
@@ -35,7 +37,8 @@ internal sealed record LivePlaybackPreferences(bool GroupCalls = true, bool Prio
                     ? options.ConsecutiveLimit : Default.ConsecutiveLimit,
                 WarningThreshold = options.WarningThreshold > 0 ? options.WarningThreshold : Default.WarningThreshold,
                 JumpThreshold = options.JumpThreshold > 0 ? options.JumpThreshold : Default.JumpThreshold,
-                SourceMode = Enum.IsDefined(options.SourceMode) ? options.SourceMode : Default.SourceMode
+                SourceMode = Enum.IsDefined(options.SourceMode) ? options.SourceMode : Default.SourceMode,
+                VerifiedLagRecovery = options.VerifiedLagRecovery is { IsValid: true } ? options.VerifiedLagRecovery : Default.VerifiedLagRecovery
             };
         }
         catch (JsonException) { return Default; }

@@ -975,6 +975,16 @@
                                    Text="{Binding LiveBacklogJumpThreshold, Mode=TwoWay, UpdateSourceEventName=Unfocused}"
                                    SemanticProperties.Description="Automatic Jump threshold in ready calls" />
                         </Grid>
+                        <Label Text="Verified Playback Lag Recovery" FontSize="12" />
+                        <Picker ItemsSource="{Binding VerifiedLagOptions}"
+                                SelectedIndex="{Binding VerifiedLagOptionIndex, Mode=TwoWay}"
+                                AutomationId="VerifiedPlaybackLagRecovery" SemanticProperties.Description="Verified Playback Lag Recovery" />
+                        <Grid IsVisible="{Binding ShowsCustomVerifiedLagMinutes}" ColumnDefinitions="*,105" ColumnSpacing="8">
+                            <Label Text="Custom threshold (minutes)" FontSize="12" VerticalOptions="Center" />
+                            <Entry Grid.Column="1" Keyboard="Numeric" MaxLength="4" AutomationId="CustomVerifiedLagMinutes"
+                                   Text="{Binding CustomVerifiedLagMinutes, Mode=TwoWay, UpdateSourceEventName=Unfocused}"
+                                   SemanticProperties.Description="Custom verified playback lag in minutes, 1 to 1440" />
+                        </Grid>
                         <Label IsVisible="{Binding HasLivePlaybackSettingsError}" Text="{Binding LivePlaybackSettingsError}"
                                FontSize="12" TextColor="{AppThemeBinding Light=#b91c1c, Dark=#fca5a5}" />
                         <VerticalStackLayout Spacing="8" IsVisible="{OnPlatform Android=true, iOS=true, Default=false}">

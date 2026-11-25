@@ -88,6 +88,7 @@ public partial class MainViewModel
                 ? _selectedAudioSource : default;
         if (requested != _requestedAudioSource)
         {
+            RetirePlaybackLag();
             _requestedAudioSource = requested;
             _audioSourceTransitions.RetireCurrent();
             _favoriteAudioUpdates.RetireCurrent();
@@ -174,6 +175,7 @@ public partial class MainViewModel
 
     private void ResetAutomaticAudioSource()
     {
+        RetirePlaybackLag();
         _audioSourceTransitions.RetireCurrent();
         _favoriteAudioUpdates.RetireCurrent();
         _audioSourceBoundary = null;
@@ -307,6 +309,7 @@ public partial class MainViewModel
     private void ReplaceFavoriteAudioEdges(IReadOnlyDictionary<(Guid, FavoriteTalkgroupIdentity), long> edges)
     {
         _automaticPreloads.Retire();
+        RetirePlaybackLag();
         _automaticAudioFilter = _automaticAudioFilter! with { FavoriteEdges = edges };
         ++_automaticAudioRevision;
         _backlog.Reset();

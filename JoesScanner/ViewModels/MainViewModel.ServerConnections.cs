@@ -90,12 +90,18 @@ public partial class MainViewModel
     internal void SaveScannerConnection(string endpoint, string? name, int? directoryId, Guid? editId,
         (string Username, string Password)? customCredentials = null, bool credentialsChanged = false)
     {
+        if (editId is { } id && _profiles.Any(profile => profile.Id == id &&
+            profile.Endpoint != ScannerConnectionStore.Normalize(endpoint)))
+            InvalidateRecorderLagEvidence(id);
+
         var saved = _connectionStore.Save(endpoint, name, directoryId, editId, profile =>
             {
                 if (customCredentials is { } credentials)
                 {
                     credentialsChanged = !_settingsService.TryGetRecorderCredentials(profile.Id, profile.Endpoint, out var user, out var password)
                         ? credentials.Username.Length != 0 : (user, password) != credentials;
+                    if (credentialsChanged)
+                        InvalidateRecorderLagEvidence(profile.Id);
                     _settingsService.SetRecorderCredentials(profile.Id, profile.Endpoint, credentials.Username, credentials.Password);
                 }
             });
@@ -118,6 +124,8 @@ public partial class MainViewModel
     {
         try
         {
+            if (!enabled)
+                InvalidateRecorderLagEvidence(row.Id);
             _connectionStore.SetEnabled(row.Id, enabled);
             LoadScannerConnections();
             ReconcileScannerConnections();
@@ -155,6 +163,7 @@ public partial class MainViewModel
         if (profile == null)
             return;
 
+        InvalidateRecorderLagEvidence(row.Id);
         // Joe's account is shared by the directory and other recorders. Remove only this recorder's logins.
         foreach (var origin in _connectionStore.CredentialOrigins(profile))
         {
@@ -296,6 +305,13 @@ public partial class MainViewModel
         return status;
     }
 
+    private void InvalidateRecorderLagEvidence(Guid id)
+    {
+        foreach (var recorder in _recorderRuns.Values)
+            if (recorder.Queue.ServerId == id)
+                recorder.Recovery.TransportAuthenticationChanged();
+    }
+
     private void RetireRecorder(ServerConnectionManager.Connection connection)
     {
         _automaticPreloads.Retire();
@@ -303,6 +319,7 @@ public partial class MainViewModel
             _ = SaveRecorderStopAsync(retired.Queue);
         MainThread.BeginInvokeOnMainThread(() =>
         {
+            RetireRecorderPlaybackLag(connection.Generation);
             if (_retryPlaybackCall?.LivePlaybackOwner != connection.Generation)
                 return;
             SetPlaybackRetry(null);
@@ -396,6 +413,9 @@ public partial class MainViewModel
             var scope = new DurableLiveQueue.Run(server, connection.Generation, tier, hosted, account, connection.Profile.Id);
             var recovery = await LiveStreamRecovery.StartListeningAsync(_durableQueue, scope, DateTimeOffset.UtcNow, token);
             recorder = new RecorderRun(connection, scope, recovery, identity);
+            recovery.ObserveTransportRecovery(_lagGeneration.Capture, observation =>
+                MainThread.BeginInvokeOnMainThread(() => OnPlaybackLag(scope, recovery, observation, token,
+                    action => _connections.RunIfCurrent(connection, action))));
             _recorderRuns[connection.Generation] = recorder;
             if (!IsCurrentLiveScope(scope))
             {

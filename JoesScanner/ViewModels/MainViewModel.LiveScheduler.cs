@@ -39,6 +39,8 @@ public partial class MainViewModel
             _scheduler.Reset();
         if (previous.JumpThreshold != options.JumpThreshold)
             _backlog.ResetJump();
+        if (previous.VerifiedLagRecovery != options.VerifiedLagRecovery)
+            RetirePlaybackLag();
         PublishReadyCount(_readyWaiting);
         RequestQueueForLiveArrival("PlaybackOptionsChanged");
     }
@@ -171,6 +173,7 @@ public partial class MainViewModel
 
     private async Task ApplyAutomaticAudioFiltersAsync()
     {
+        RetirePlaybackLag();
         _automaticPreloads.Retire();
         UpdateQueueDerivedState();
         var run = _monitoring.Current;

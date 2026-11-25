@@ -33,6 +33,7 @@ await LiveInterruptionTests.RunAsync();
 await RecordingDatabaseMaintenanceTests.RunAsync();
 await LiveHistoryHandoffTests.RunAsync();
 await IntelligentLivePlaybackTests.RunAsync();
+await VerifiedPlaybackLagTests.RunAsync();
 await LiveAudioSourceTests.RunAsync();
 await AudioCacheTests.RunAsync();
 await AudioPreloadTests.RunAsync();

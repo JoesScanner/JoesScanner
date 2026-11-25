@@ -114,6 +114,12 @@ internal sealed class ServerConnectionManager(TimeProvider clock,
             return IsCurrentLocked(connection);
     }
 
+    internal bool RunIfCurrent(Connection connection, Func<bool> action)
+    {
+        lock (_gate)
+            return IsCurrentLocked(connection) && action();
+    }
+
     private bool IsCurrentLocked(Connection connection) =>
         !connection.Token.IsCancellationRequested &&
         ReferenceEquals(_connections.GetValueOrDefault(connection.Profile.Id), connection);

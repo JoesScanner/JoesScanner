@@ -623,7 +623,8 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 						isQueuePlaybackRunning: _isQueuePlaybackRunning,
 						visibleQueueCount: AutomaticQueueScopes().Length != 0 || _manualLiveTraversal != null ? Math.Max(1, CallsWaiting) : 0);
 
-					if (!canStart || _playbackRequests.HasManualSelection || _retryPlaybackCall != null)
+					if (!canStart || _playbackRequests.HasManualSelection ||
+                        (_retryPlaybackCall != null && !HasLagRecoveryForAutomaticRetry))
 						return;
 
                     _queueWake.Signal();

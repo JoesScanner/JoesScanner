@@ -160,8 +160,16 @@ namespace JoesScanner.ViewModels
                     var sourceRevision = _automaticAudioRevision;
                     var traversal = _manualLiveTraversal is { } selected && selected.Session == run!.Id ? selected : null;
                     var beforeRead = _queueWake.BeforeRead();
-                    if (traversal == null && await TryAutomaticBacklogJumpAsync(run!, live, version, token))
-                        continue;
+                    if (traversal == null)
+                    {
+                        await ApplyVerifiedPlaybackLagAsync(token);
+                        if (_retryPlaybackCall != null)
+                            break;
+                        if (sourceRevision == _automaticAudioRevision && OwnsSelection() && AudioEnabled &&
+                            !IsLiveInterruptionBlockingPlayback &&
+                            await TryAutomaticBacklogJumpAsync(run!, live, version, token))
+                            continue;
+                    }
                     if (sourceRevision != _automaticAudioRevision)
                         continue;
                     if (!OwnsSelection() || !AudioEnabled || IsLiveInterruptionBlockingPlayback)
@@ -234,6 +242,8 @@ namespace JoesScanner.ViewModels
                     UpdateQueueDerivedState();
                     if (!hadFailure)
                         LastQueueEvent = aborted ? "Queue playback aborted" : "Queue playback finished";
+                    if (hadFailure && HasLagRecoveryForAutomaticRetry)
+                        RequestQueueForLiveArrival("RecorderLagAfterAutomaticRetry");
                 }
             }
 
@@ -249,6 +259,7 @@ namespace JoesScanner.ViewModels
         {
             // Retire an automatic loop immediately. Its canceled I/O may still be unwinding
             // when the newer manual selection finishes and requests queue playback again.
+            RetirePlaybackLag();
             ++_queuePlaybackVersion;
             _isQueuePlaybackRunning = false;
             _manualPlaybackTarget = null;
@@ -288,6 +299,7 @@ namespace JoesScanner.ViewModels
                     .Select(card => card.LiveArrivalSequence!.Value).Distinct().ToArray()
                 : [];
 
+            RetirePlaybackLag();
             _backlog.CancelPendingJump();
             _automaticPreloads.Retire();
             using var preparation = _transportLookups.Begin(manual: true, live.Token);

@@ -59,6 +59,9 @@ namespace JoesScanner.ViewModels
         private CallItem? _currentPlayingCall;
         private CallItem? _manualPlaybackTarget;
         private CallItem? _retryPlaybackCall;
+        private bool _retryIsAutomatic;
+        private bool ManualBacklogExemption => _manualLiveTraversal != null || _playbackRequests.HasManualSelection ||
+            _transportLookups.HasManualSelection;
         private CallItem? _lastPlayedCall;
         private CallItem? _lastTransportCall;
         private bool _userRunShouldDriveQueue;
@@ -170,17 +173,30 @@ namespace JoesScanner.ViewModels
         }
 
         internal async Task AddForTestAsync(string id, bool later = false, bool audio = true, bool visible = true,
-            RecordingOrigin origin = RecordingOrigin.Live, Guid? serverId = null, string? talkgroup = null)
+            RecordingOrigin origin = RecordingOrigin.Live, Guid? serverId = null, string? talkgroup = null, DateTimeOffset? recordedAt = null)
         {
             var run = serverId.HasValue && _secondRecorder is { } second && second.ServerId == serverId ? second : _durableRun!;
             var metadata = new CallCardMetadata { SystemId = "SYS", TalkgroupId = talkgroup };
             var snapshot = new LiveCallSnapshot(metadata, null, CallCardIdFallback.None, audio ? run.Server + "/" + id + ".mp3" : null);
-            var recorded = later ? Recorded.AddSeconds(1) : Recorded;
+            var recorded = recordedAt ?? (later ? Recorded.AddSeconds(1) : Recorded);
             var observation = await _durableQueue.ObserveWithPositionAsync(run, id, recorded,
                 snapshot, default, origin, existingOnly: false, skipAutomatic: !AudioEnabled);
             if (visible && observation.ArrivalSequence is { } arrival)
                 Calls.Insert(0, new DurableLiveQueue.Recording(id, arrival, recorded.UtcTicks, snapshot,
                     new RecordingAccessContext(origin, run.Protected, run.Account), run.Owner).ToCallItem(run.Server, run.ServerId));
+        }
+
+        internal async Task<Func<Task>> HoldPlaybackLagForTestAsync(Guid server, DateTimeOffset since, PlaybackLagEvidence evidence)
+        {
+            var scope = LiveQueueScopes().Single(run => run.ServerId == server);
+            var token = _monitoring.Current!.Token;
+            var recovery = await LiveStreamRecovery.OpenAsync(_durableQueue, scope, token);
+            recovery.ObserveTransportRecovery(_lagGeneration.Capture,
+                lag => OnPlaybackLag(scope, recovery, lag, token, commit => commit()));
+            recovery.TransportSucceeded(since);
+            await recovery.TransportLostAsync();
+            var window = recovery.OutstandingWindow!;
+            return () => recovery.CompleteAsync(window, default, evidence);
         }
 
         internal async Task<string?> PendingHeadForTestAsync() =>
@@ -278,7 +294,8 @@ namespace JoesScanner.ViewModels
                 return RecoverInterruptedPlaybackAsync(userInitiated);
             LiveHistoryHandoffTests.Check((reason is "HistoryReleasedAudio" or "TappedCallFinished" or "JumpToLiveFinished"
                 or "JumpToLiveResume" or "TestLiveArrival" or "UserPlay" or "ManualPreparationReleased"
-                or "AutomaticAudioSourceChanged" or "FavoritesChanged" or "InterruptionEnded" or "ReturnedToLiveAfterInterruption") &&
+                or "AutomaticAudioSourceChanged" or "FavoritesChanged" or "InterruptionEnded" or "ReturnedToLiveAfterInterruption"
+                or "RecorderLagReconciled" or "RecorderLagAfterAutomaticRetry") &&
                 (userInitiated || _settingsService.AutoPlay),
                 "Only the current listening intent can drive the queue.");
             ++ResumeRequests;
@@ -398,7 +415,11 @@ namespace JoesScanner.ViewModels
         internal bool BacklogWarningForTest => _backlog.WarningActive;
         internal Guid? VisibleServerForTest { set => _visibleLiveServer = value; }
 
-        private void SetPlaybackRetry(CallItem? item) => _retryPlaybackCall = item;
+        private void SetPlaybackRetry(CallItem? item, bool automatic = false)
+        {
+            _retryIsAutomatic = item != null && automatic;
+            _retryPlaybackCall = item;
+        }
         private static void ReportPlaybackFailure(Exception error, LivePlaybackRequests.Request request)
         {
             if (error is not IOException)
