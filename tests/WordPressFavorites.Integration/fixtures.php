@@ -71,15 +71,17 @@ switch ( $mode ) {
 
     case 'legacy-settings':
         fixture_check( function_exists( 'joes_scanner_auth_add_admin_menu' ), 'Legacy administration callback is missing.' );
+        $surecart_enabled = ! empty( $input['surecartEnabled'] );
         $opts = joes_scanner_auth_sanitize_options( array(
             'allowed_statuses' => array( 'active', 'trialing' ),
-            'surecart_enabled' => 0,
+            'surecart_enabled' => (int) $surecart_enabled,
         ) );
         update_option( JOES_SCANNER_AUTH_OPTIONS_KEY, $opts );
         $opts = joes_scanner_auth_sanitize_options( array( 'event_retention_days' => 14 ) );
         update_option( JOES_SCANNER_AUTH_OPTIONS_KEY, $opts );
         fixture_check( joes_scanner_auth_get_allowed_statuses() === array( 'active', 'trialing' )
-            && ! joes_scanner_auth_is_surecart_enabled(), 'Legacy settings must retain SureCart statuses across unrelated changes.' );
+            && joes_scanner_auth_is_surecart_enabled() === $surecart_enabled,
+            'Legacy settings must retain SureCart statuses across unrelated changes.' );
         break;
 
     case 'storage':

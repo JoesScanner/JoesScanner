@@ -310,7 +310,22 @@ def check_legacy(site, compose, admin, admin_password, alpha, beta, owners):
     payload = {"username": alpha["username"], "password": alpha["password"], "app_version": "99.0"}
     _, missing = site.request(API + "/auth", 500, body=payload)
     check(json.loads(missing)["error"] == "surecart_not_available", "The legacy hosted entitlement guard changed.")
-    compose.fixture("legacy-settings")
+
+    compose.fixture("legacy-settings", {"surecartEnabled": True})
+    browser = site.opener(cookies=True)
+    admin_page = "/wp-admin/options-general.php?page=joes-scanner-auth&tab=surecart"
+    site.request("/wp-login.php", 200, opener=browser)
+    site.request("/wp-login.php", 302, form=True, opener=browser, body={
+        "log": admin, "pwd": admin_password, "testcookie": "1", "redirect_to": site.https + admin_page
+    })
+    _, enabled_page = site.request(admin_page, 200, opener=browser)
+    settings_field = b"joes_scanner_auth_options[allowed_statuses][]"
+    check(settings_field in enabled_page, "The enabled SureCart tab must load its status settings.")
+
+    compose.fixture("legacy-settings", {"surecartEnabled": False})
+    _, disabled_page = site.request(admin_page, 200, opener=browser)
+    check(b"SureCart integration is disabled." in disabled_page and settings_field not in disabled_page,
+          "The disabled SureCart tab must show the disabled state.")
     session_tokens = []
     for user, expected_owner in zip((alpha, beta), owners, strict=True):
         for login in (user["username"], user["email"]):
@@ -322,14 +337,6 @@ def check_legacy(site, compose, admin, admin_password, alpha, beta, owners):
                   and response["session_token"], "Legacy WordPress authentication or subscription response compatibility changed.")
             session_tokens.append(response["session_token"])
 
-    browser = site.opener(cookies=True)
-    admin_page = "/wp-admin/options-general.php?page=joes-scanner-auth&tab=surecart"
-    site.request("/wp-login.php", 200, opener=browser)
-    site.request("/wp-login.php", 302, form=True, opener=browser, body={
-        "log": admin, "pwd": admin_password, "testcookie": "1", "redirect_to": site.https + admin_page
-    })
-    _, page = site.request(admin_page, 200, opener=browser)
-    check(b"joes_scanner_auth_options[allowed_statuses][]" in page, "The existing administration page must load its SureCart settings.")
     print("PASS Legacy auth, missing/disabled SureCart behavior, and the WordPress admin settings page", flush=True)
     return session_tokens
 
