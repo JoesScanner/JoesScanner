@@ -12,7 +12,7 @@ internal sealed class RecordingAccessException(string message) : InvalidOperatio
 internal static class RecordingPlaybackAccess
 {
     internal sealed record HistoryGrant(string Server, string? Account, int? Tier, DateTimeOffset VerifiedAt,
-        DateTime? ExpiresUtc, TimeProvider Clock, bool Independent = false)
+        TimeProvider Clock, bool Independent = false, long AccountVersion = 0)
     {
         internal DateTimeOffset? Cutoff => Tier == 1 ? Clock.GetUtcNow().AddHours(-24) : null;
 
@@ -35,10 +35,9 @@ internal static class RecordingPlaybackAccess
             if (Tier == null)
                 return !HostedServerRules.RequiresApiFirewallCredentials(settings, Server);
 
-            var now = Clock.GetUtcNow().UtcDateTime;
             return (Independent || IsSelected(settings, Server)) && AccountKey(settings, Server, Independent) == Account &&
-                settings.SubscriptionLastStatusOk && settings.SubscriptionLastValidatedOnline &&
-                settings.SubscriptionTierLevel == Tier && !(ExpiresUtc <= now) && !(settings.SubscriptionExpiresUtc <= now);
+                settings.ReadAccountSession().AccountVersion == AccountVersion &&
+                HostedEntitlement.For(settings).Current(Clock)?.Tier == Tier;
         }
     }
 
@@ -54,8 +53,9 @@ internal static class RecordingPlaybackAccess
     {
         clock ??= TimeProvider.System;
         if (!protectedSource && !HostedServerRules.RequiresApiFirewallCredentials(settings, server))
-            return new(server, null, null, clock.GetUtcNow(), null, clock);
+            return new(server, null, null, clock.GetUtcNow(), clock);
 
+        var accountVersion = settings.ReadAccountSession().AccountVersion;
         var account = AccountKey(settings, server, independent);
         if ((!independent && !IsSelected(settings, server)) || account == null)
             throw VerificationRequired();
@@ -72,17 +72,17 @@ internal static class RecordingPlaybackAccess
         }
 
         token.ThrowIfCancellationRequested();
-        if (!result.IsAllowed || result.VerifiedOnlineTier is not (1 or 2))
+        var tier = result.EffectiveTier ?? result.VerifiedOnlineTier;
+        if (!result.IsAllowed || tier is not (1 or 2))
             throw VerificationRequired();
 
-        var grant = new HistoryGrant(server, account, result.VerifiedOnlineTier, clock.GetUtcNow(),
-            settings.SubscriptionExpiresUtc, clock, independent);
+        var grant = new HistoryGrant(server, account, tier, clock.GetUtcNow(), clock, independent, accountVersion);
         grant.Validate(settings);
         return grant;
     }
 
     internal static RecordingAccessException VerificationRequired() =>
-        new("Hosted history requires a verified active subscription.");
+        new("Hosted recordings require a current verified subscription.");
 
     internal static DateTimeOffset RoundStartToSecond(DateTimeOffset lower)
     {
@@ -130,16 +130,7 @@ internal static class RecordingPlaybackAccess
     {
         RequireAccount(settings, server, account, independent);
         var now = (clock ?? TimeProvider.System).GetUtcNow();
-        var grant = settings.ReadHostedSubscription();
-        var offline = settings.LocalOnlyMode || !grant.VerifiedOnline;
-        if (!grant.IsAllowed || grant.CheckedUtc is not { } checkedAt ||
-            checkedAt < now.AddHours(-24).UtcDateTime || checkedAt > now.UtcDateTime ||
-            grant.ExpiresUtc <= now.UtcDateTime || grant.RenewalUtc <= now.UtcDateTime ||
-            offline && (grant.RenewalUtc ?? grant.ExpiresUtc) == null)
-            throw new RecordingAccessException("Cached hosted audio requires a valid subscription.");
-
-        if (!currentLive && grant.Tier is not (1 or 2))
-            throw VerificationRequired();
+        var grant = HostedEntitlement.For(settings).Current(clock) ?? throw VerificationRequired();
         if (!currentLive && grant.Tier == 1 && !(recordedAt >= now.AddHours(-24) && recordedAt <= now))
             throw new RecordingAccessException("This recording is outside the Standard 24-hour history window.");
     }
@@ -164,7 +155,11 @@ internal static class RecordingPlaybackAccess
             throw new RecordingAccessException("This recording could not be authorized for the current hosted account.");
 
         if (currentLive && context.Origin == RecordingOrigin.Live && !lookup)
+        {
+            if (HostedEntitlement.For(settings).Current(clock) == null)
+                throw VerificationRequired();
             return null;
+        }
 
         var grant = await VerifyHistoryAsync(settings, subscription, server, token, clock, protectedSource: true, independent: independent)
             .ConfigureAwait(false);

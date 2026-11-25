@@ -229,11 +229,7 @@ namespace JoesScanner.Services
             set => SetString(KeyThemeMode, (value ?? "System").Trim());
         }
 
-        public bool HasActiveHostedSubscription()
-        {
-            var state = ReadHostedSubscription();
-            return state.IsAllowed && state.Tier >= 1 && state.ExpiresUtc > DateTime.UtcNow;
-        }
+        public bool HasActiveHostedSubscription() => HostedEntitlement.For(this).Current() != null;
 
         // WordPress account state is shared by the protected scanner servers.
         public DateTime? SubscriptionLastCheckUtc
@@ -1207,6 +1203,7 @@ ON CONFLICT(setting_key) DO UPDATE SET
                     LastMessage = snapshot.Message
                 });
             }
+            HostedEntitlement.For(this).NotifyChanged();
         }
 
         private void DeleteServerAuthStateRow(string normalizedServerKey)

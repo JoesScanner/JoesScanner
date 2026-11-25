@@ -5,7 +5,7 @@ using System.Text.Json;
 using JoesScanner.Helpers;
 using JoesScanner.Services;
 
-internal static class WordPressOwnershipTests
+internal static partial class WordPressOwnershipTests
 {
     private const string Recorder = HostedServerRules.DefaultServerUrl;
     private const string OtherEndpoint = "https://other-wordpress.test";
@@ -89,15 +89,20 @@ internal static class WordPressOwnershipTests
             2 => new(HttpStatusCode.ServiceUnavailable),
             3 => throw new TaskCanceledException("Synthetic timeout"),
             4 => throw new HttpRequestException("Synthetic connection failure"),
+            5 => new(HttpStatusCode.RequestTimeout),
             _ => ActiveResponse(1)
         }));
-        using var service = new SubscriptionService(settings, new TelemetryStub(settings), client);
-        Check((await service.EnsureSubscriptionAsync(default)).ErrorCode == "http_429" &&
-            (await service.EnsureSubscriptionAsync(default)).ErrorCode == "http_503",
-            "Transient HTTP responses must be reported.");
-        Check((await service.EnsureSubscriptionAsync(default)).ErrorCode == "offline_cached" &&
-            (await service.EnsureSubscriptionAsync(default)).ErrorCode == "offline_cached",
-            "Timeout and connection failures may reuse only this account's valid cache.");
+        var clock = new EntitlementClock(DateTimeOffset.UtcNow);
+        using var service = new SubscriptionService(settings, new TelemetryStub(settings), client, clock);
+        for (var i = 0; i < 5; i++)
+        {
+            var result = await service.EnsureSubscriptionAsync(default);
+            Check(result is { IsAllowed: true, ErrorCode: "offline_cached", EffectiveTier: 1, VerifiedOnlineTier: null },
+                "All transient failures must reuse only the current account's valid proof.");
+            Check(settings.ReadHostedSubscription().CheckedUtc == first.ReadHostedSubscription().CheckedUtc,
+                "A transient failure must not extend the original verification.");
+            clock.Advance(TimeSpan.FromSeconds(15));
+        }
         Check((await service.EnsureSubscriptionAsync(default)).VerifiedOnlineTier == 1 &&
             fixture.Load().BasicAuthUsername == "saved-login", "A successful reconnect must reuse the stored login.");
     }

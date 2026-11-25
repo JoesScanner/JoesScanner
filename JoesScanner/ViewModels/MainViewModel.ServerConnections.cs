@@ -9,7 +9,7 @@ namespace JoesScanner.ViewModels;
 public partial class MainViewModel
 {
     private sealed record RecorderRun(ServerConnectionManager.Connection Connection,
-        DurableLiveQueue.Run Queue, LiveStreamRecovery Recovery, long AccountIdentity);
+        DurableLiveQueue.Run Queue, LiveStreamRecovery Recovery, long AccountIdentity, HostedEntitlement.Access? Entitlement);
 
     private readonly ServerConnectionManager _connections = new(TimeProvider.System);
     private readonly ConcurrentDictionary<long, RecorderRun> _recorderRuns = new();
@@ -260,6 +260,16 @@ public partial class MainViewModel
     private bool RequiresHostedAccount(string server) =>
         HostedServerRules.RequiresApiFirewallCredentials(_settingsService, server);
 
+    private void OnHostedEntitlementChanged() => MainThread.BeginInvokeOnMainThread(() =>
+    {
+        UpdateSubscriptionSummaryFromSettings();
+        if (HostedEntitlement.For(_settingsService).Current() is not { VerifiedOnline: true })
+            return;
+        foreach (var connection in _connections.Snapshot())
+            if (connection.Status == ServerConnectionStatus.SetupRequired && RequiresHostedAccount(connection.Profile.Endpoint))
+                ReconcileScannerConnections(connection.Profile.Id);
+    });
+
     private void OnRecorderStatusChanged(ServerConnectionManager.Connection connection) =>
         MainThread.BeginInvokeOnMainThread(() =>
         {
@@ -354,7 +364,11 @@ public partial class MainViewModel
     {
         _automaticPreloads.Retire();
         if (_recorderRuns.TryRemove(connection.Generation, out var retired))
+        {
+            if (retired.Entitlement is { } entitlement)
+                _ = entitlement.RetireAsync();
             _ = SaveRecorderStopAsync(retired.Queue);
+        }
         MainThread.BeginInvokeOnMainThread(() =>
         {
             MonitoringDevice.EndRecorderFailure(connection.Profile.Id, connection.Generation);
@@ -393,7 +407,7 @@ public partial class MainViewModel
     private bool IsCurrentLiveScope(DurableLiveQueue.Run scope)
     {
         if (!_recorderRuns.TryGetValue(scope.Owner, out var recorder) || recorder.Queue != scope ||
-            !_connections.IsCurrent(recorder.Connection))
+            recorder.Entitlement?.Token.IsCancellationRequested == true || !_connections.IsCurrent(recorder.Connection))
             return false;
 
         try { return RecorderAccountIsCurrent(recorder.Connection, scope.Protected, scope.Account, recorder.AccountIdentity); }
@@ -438,12 +452,11 @@ public partial class MainViewModel
                 var result = await _subscriptionService.EnsureSubscriptionForRecorderAsync(server, token).WaitAsync(token);
                 if (!result.IsAllowed)
                 {
-                    if (result.ErrorCode is "missing_credentials" or "credential_storage_unavailable" or "http_401" or "http_403" ||
-                        _settingsService.SubscriptionExpiresUtc <= DateTime.UtcNow)
+                    if (result.RequiresIntervention)
                         _connections.Report(connection, ServerConnectionStatus.SetupRequired);
                     return;
                 }
-                tier = result.VerifiedOnlineTier;
+                tier = result.EffectiveTier ?? result.VerifiedOnlineTier;
             }
             token.ThrowIfCancellationRequested();
             if (!_connections.IsCurrent(connection) || !RecorderAccountIsCurrent(connection, hosted, account, identity))
@@ -451,11 +464,23 @@ public partial class MainViewModel
 
             var scope = new DurableLiveQueue.Run(server, connection.Generation, tier, hosted, account, connection.Profile.Id);
             var recovery = await LiveStreamRecovery.StartListeningAsync(_durableQueue, scope, DateTimeOffset.UtcNow, token);
-            recorder = new RecorderRun(connection, scope, recovery, identity);
+            var entitlement = hosted ? HostedEntitlement.For(_settingsService).Protect(token, accountVersion: identity) : null;
+            recorder = new RecorderRun(connection, scope, recovery, identity, entitlement);
             recovery.ObserveTransportRecovery(_lagGeneration.Capture, observation =>
                 MainThread.BeginInvokeOnMainThread(() => OnPlaybackLag(scope, recovery, observation, token,
                     action => _connections.RunIfCurrent(connection, action))));
             _recorderRuns[connection.Generation] = recorder;
+            // A lost grant retires only this recorder's generation.
+            entitlement?.Token.Register(() =>
+            {
+                if (connection.Token.IsCancellationRequested)
+                    return;
+                MainThread.BeginInvokeOnMainThread(() =>
+                {
+                    if (_connections.IsCurrent(connection))
+                        ReconcileScannerConnections(connection.Profile.Id);
+                });
+            });
             if (!IsCurrentLiveScope(scope))
             {
                 RetireRecorder(connection);
@@ -469,28 +494,44 @@ public partial class MainViewModel
             return;
         }
 
-        using var stream = _callStreamService.ForRecorder(server, connection.Profile.Id);
-        var initial = await MainThread.InvokeOnMainThreadAsync(() => SnapshotLiveCalls()
-            .Where(item => item.ServerId == connection.Profile.Id && item.LivePlaybackOwner == connection.Generation &&
-                item.RecordingServer == server &&
-                recorder.Queue.Owns(item.RecordingAccess)).ToArray());
-        await foreach (var call in stream.GetCallStreamAsync(initial, token, recorder.Recovery).WithCancellation(token))
+        token = recorder.Entitlement?.Token ?? token;
+        using var revalidation = recorder.Entitlement != null ? CancellationTokenSource.CreateLinkedTokenSource(token) : null;
+        var maintain = revalidation != null
+            ? _subscriptionService.MaintainHostedSubscriptionAsync(server, revalidation.Token)
+            : Task.CompletedTask;
+        try
         {
-            if (!IsCurrentLiveScope(recorder.Queue))
-                break;
-            if (call.LiveState == null && !call.IsRecordingNotification)
+            using var stream = _callStreamService.ForRecorder(server, connection.Profile.Id);
+            var initial = await MainThread.InvokeOnMainThreadAsync(() => SnapshotLiveCalls()
+                .Where(item => item.ServerId == connection.Profile.Id && item.LivePlaybackOwner == connection.Generation &&
+                    item.RecordingServer == server &&
+                    recorder.Queue.Owns(item.RecordingAccess)).ToArray());
+            await foreach (var call in stream.GetCallStreamAsync(initial, token, recorder.Recovery).WithCancellation(token))
             {
-                if (call.IsConnectionActionRequired)
+                if (!IsCurrentLiveScope(recorder.Queue))
+                    break;
+                if (call.LiveState == null && !call.IsRecordingNotification)
                 {
-                    _connections.Report(connection, ServerConnectionStatus.SetupRequired);
-                    return;
+                    if (call.IsConnectionActionRequired)
+                    {
+                        _connections.Report(connection, ServerConnectionStatus.SetupRequired);
+                        return;
+                    }
+                    _connections.Report(connection, call.Talkgroup == "HEARTBEAT"
+                        ? ServerConnectionStatus.Monitoring : ServerConnectionStatus.Reconnecting);
+                    continue;
                 }
-                _connections.Report(connection, call.Talkgroup == "HEARTBEAT"
-                    ? ServerConnectionStatus.Monitoring : ServerConnectionStatus.Reconnecting);
-                continue;
+                _connections.Report(connection, ServerConnectionStatus.Monitoring);
+                await ReceiveRecorderCallAsync(recorder.Queue, call, token);
             }
-            _connections.Report(connection, ServerConnectionStatus.Monitoring);
-            await ReceiveRecorderCallAsync(recorder.Queue, call, token);
+        }
+        finally
+        {
+            if (revalidation != null)
+            {
+                await revalidation.CancelAsync();
+                await maintain;
+            }
         }
     }
 
@@ -510,7 +551,7 @@ public partial class MainViewModel
         if (!_recorderRuns.TryGetValue(scope.Owner, out var recorder) || !IsCurrentLiveScope(scope))
             return;
 
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(recorder.Connection.Token);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(recorder.Entitlement?.Token ?? recorder.Connection.Token);
         timeout.CancelAfter(TimeSpan.FromSeconds(12));
         try
         {

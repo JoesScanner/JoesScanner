@@ -33,6 +33,9 @@
     <Compile Include="../../JoesScanner/Services/RecordingAudioTransfer.cs" Link="RecordingAudioTransfer.cs" />
     <Compile Include="../../JoesScanner/Services/WordPressSession.cs" Link="WordPressSession.cs" />
     <Compile Include="../../JoesScanner/Services/SubscriptionService.cs" Link="SubscriptionService.cs" />
+    <Compile Include="../../JoesScanner/Services/HostedEntitlement.cs" Link="HostedEntitlement.cs" />
+    <Compile Include="../../JoesScanner/Services/PlaybackCoordinator.cs" Link="PlaybackCoordinator.cs" />
+    <Compile Include="../../JoesScanner/Services/IPlaybackCoordinator.cs" Link="IPlaybackCoordinator.cs" />
     <Compile Include="../../JoesScanner/Services/ITelemetryService.cs" Link="ITelemetryService.cs" />
     <Compile Include="../../JoesScanner/Services/AuthLookupsSyncService.cs" Link="AuthLookupsSyncService.cs" />
     <Compile Include="../../JoesScanner/Services/IAuthLookupsSyncService.cs" Link="IAuthLookupsSyncService.cs" />

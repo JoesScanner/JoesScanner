@@ -57,10 +57,12 @@ namespace JoesScanner.Services
 
             var fileName = BuildSingleFileName(call, uri);
             var tempPath = Path.Combine(FileSystem.CacheDirectory, fileName);
+            var copying = false;
 
             try
             {
-                using var response = await AcquireRecordingAsync(call, uri, cancellationToken);
+                using var recording = await AcquireRecordingAsync(call, uri, cancellationToken);
+                var response = recording.Response;
 
                 if (!response.IsSuccessStatusCode)
                 {
@@ -69,21 +71,27 @@ namespace JoesScanner.Services
                     return;
                 }
 
-                await using var inStream = await response.Content.ReadAsStreamAsync(cancellationToken);
                 await using var outStream = File.Create(tempPath);
-                await inStream.CopyToAsync(outStream, cancellationToken);
+                copying = true;
+                await recording.CopyToAsync(outStream);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                if (copying)
+                    DeleteIncompleteDownload(tempPath);
                 return;
             }
             catch (RecordingAccessException ex)
             {
+                if (copying)
+                    DeleteIncompleteDownload(tempPath);
                 await ShowErrorAsync("Download failed", ex.Message);
                 return;
             }
             catch (Exception ex)
             {
+                if (copying)
+                    DeleteIncompleteDownload(tempPath);
                 AppLog.Add(() => $"Download: single failed ({ex.GetType().Name}).");
                 await ShowErrorAsync("Download failed", ex is FirewallAuthenticationException ? ex.Message : "Could not download the audio file.");
                 return;
@@ -132,9 +140,11 @@ namespace JoesScanner.Services
                         continue;
                     }
 
+                    var copying = false;
                     try
                     {
-                        using var response = await AcquireRecordingAsync(call, uri, cancellationToken);
+                        using var recording = await AcquireRecordingAsync(call, uri, cancellationToken);
+                        var response = recording.Response;
 
                         if (!response.IsSuccessStatusCode)
                         {
@@ -145,13 +155,19 @@ namespace JoesScanner.Services
 
                         var entryName = BuildZipEntryName(i + 1, call, uri);
                         var entry = zip.CreateEntry(entryName, CompressionLevel.Optimal);
-                        await using var inStream = await response.Content.ReadAsStreamAsync(cancellationToken);
                         await using var entryStream = entry.Open();
-                        await inStream.CopyToAsync(entryStream, cancellationToken);
+                        copying = true;
+                        await recording.CopyToAsync(entryStream);
                         downloadedCount++;
                     }
                     catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                     {
+                        throw;
+                    }
+                    catch (RecordingAccessException) when (copying)
+                    {
+                        // A partially copied protected entry cannot be removed from a
+                        // create-mode archive. Discard the incomplete export.
                         throw;
                     }
                     catch (Exception ex) when (ex is FirewallAuthenticationException or RecordingAccessException)
@@ -175,6 +191,13 @@ namespace JoesScanner.Services
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                DeleteIncompleteDownload(zipPath);
+                return;
+            }
+            catch (RecordingAccessException ex)
+            {
+                DeleteIncompleteDownload(zipPath);
+                await ShowErrorAsync("Download failed", ex.Message);
                 return;
             }
             catch (Exception ex)
@@ -195,14 +218,15 @@ namespace JoesScanner.Services
             }
         }
 
-        private async Task<HttpResponseMessage> AcquireRecordingAsync(CallItem call, Uri uri, CancellationToken token)
+        private async Task<RecordingDownload> AcquireRecordingAsync(CallItem call, Uri uri, CancellationToken token)
         {
             var server = call.RecordingServer ?? call.LiveState?.ServerUrl ?? _settingsService.ServerUrl ?? "";
             var access = call.RecordingAccess ?? new RecordingAccessContext(RecordingOrigin.History, false);
-            if (HostedServerRules.RequiresApiFirewallCredentials(_settingsService, uri) &&
-                !HostedServerRules.RequiresApiFirewallCredentials(_settingsService, server))
+            var hosted = HostedServerRules.RequiresApiFirewallCredentials(_settingsService, server);
+            if (HostedServerRules.RequiresApiFirewallCredentials(_settingsService, uri) && !hosted)
                 throw new RecordingAccessException("The recording's hosted server could not be verified.");
 
+            var accountVersion = hosted || access.Protected ? _settingsService.ReadAccountSession().AccountVersion : (long?)null;
             await RecordingPlaybackAccess.VerifyAsync(_settingsService, _subscriptionService, server,
                 call.RecordingTimeUtc, access, currentLive: false, requireAccount: access.Protected, token, _clock, independent: call.ServerId.HasValue)
                 .ConfigureAwait(false);
@@ -210,7 +234,56 @@ namespace JoesScanner.Services
             using var request = new HttpRequestMessage(HttpMethod.Get, uri);
             if (call.ServerId.HasValue && Uri.TryCreate(server, UriKind.Absolute, out var origin))
                 request.Options.Set(ServerAuthenticationHandler.Recorder, new RecorderRequestScope(origin, call.ServerId));
-            return await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
+            var authorization = accountVersion.HasValue
+                ? HostedEntitlement.For(_settingsService).Protect(token, _clock, call.RecordingTimeUtc,
+                    history: true, accountVersion: accountVersion)
+                : null;
+            try
+            {
+                authorization?.Validate();
+                var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead,
+                    authorization?.Token ?? token).ConfigureAwait(false);
+                return new(response, token, authorization);
+            }
+            catch
+            {
+                authorization?.Dispose();
+                throw;
+            }
+        }
+
+        private sealed class RecordingDownload(HttpResponseMessage response, CancellationToken token, HostedEntitlement.Access? authorization)
+            : IDisposable
+        {
+            internal HttpResponseMessage Response => response;
+
+            internal async Task CopyToAsync(Stream stream)
+            {
+                try
+                {
+                    authorization?.Validate();
+                    var copyToken = authorization?.Token ?? token;
+                    await using var input = await response.Content.ReadAsStreamAsync(copyToken).ConfigureAwait(false);
+                    await input.CopyToAsync(stream, copyToken).ConfigureAwait(false);
+                    authorization?.Validate();
+                }
+                catch (Exception) when (!token.IsCancellationRequested && authorization?.Token.IsCancellationRequested == true)
+                {
+                    throw RecordingPlaybackAccess.VerificationRequired();
+                }
+            }
+
+            public void Dispose()
+            {
+                response.Dispose();
+                authorization?.Dispose();
+            }
+        }
+
+        private static void DeleteIncompleteDownload(string path)
+        {
+            try { File.Delete(path); }
+            catch (Exception ex) { AppLog.Add(() => $"Download cleanup failed ({ex.GetType().Name})."); }
         }
 
         private Uri? TryBuildAudioUri(CallItem call)

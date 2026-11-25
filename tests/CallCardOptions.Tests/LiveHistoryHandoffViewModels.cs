@@ -462,6 +462,8 @@ namespace JoesScanner.ViewModels
         private void InsertLiveCardInDisplayOrder(CallItem item) => Calls.Add(item);
         private bool IsPlayableForQueue(CallItem item) => !string.IsNullOrWhiteSpace(item.AudioUrl) && !IsFilteredForPlayback(item);
 
+        private static void RequireLiveRecordingEntitlement(CallItem item) { }
+
         private string? RequireCurrentRecordingAccount(CallItem item)
         {
             // A stopped manual replay keeps its original authorization scope.
@@ -619,8 +621,12 @@ namespace JoesScanner.ViewModels
                 throw new RecordingAccessException("The recorder sign-in changed. Search again.");
         }
 
-        private void RequireCachedHistoryEntitlement(HistorySearchSnapshot snapshot, CallItem call) =>
+        private Task RunAuthorizedHistoryAudioAsync(HistorySearchSnapshot snapshot, CallItem call,
+            CancellationToken token, Func<CancellationToken, Task> play)
+        {
             RequireHistoryRecordingAccess(snapshot, call);
+            return play(token);
+        }
 
         private Task<PlaybackAudioLease> AcquireHistoryRecordingAsync(HistorySearchSnapshot snapshot, CallItem call,
             CancellationToken token)

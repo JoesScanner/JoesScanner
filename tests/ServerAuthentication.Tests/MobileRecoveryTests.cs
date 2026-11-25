@@ -268,9 +268,12 @@ internal static partial class MobileRecoveryTests
         await Denied(() => Authorize(Now.AddHours(-24).AddTicks(-1), history));
         subscription.Tier = null;
         await Denied(() => Authorize(Now.AddHours(-1), history));
-        Check(await Authorize(old, history with { Origin = RecordingOrigin.Live }, currentLive: true) == null,
-            "A legitimately received current Live recording may still play.");
+        await Denied(() => Authorize(old, history with { Origin = RecordingOrigin.Live }, currentLive: true));
         await Denied(() => Authorize(old, history with { Origin = RecordingOrigin.Live }));
+        subscription.Tier = 1;
+        await Authorize(Now.AddHours(-1), history);
+        Check(await Authorize(old, history with { Origin = RecordingOrigin.Live }, currentLive: true) == null,
+            "An authorized current Live recording is independent of the Standard History cutoff.");
         subscription.Tier = 2;
         stub.SubscriptionExpiry = Now.UtcDateTime;
         await Denied(() => Authorize(Now.AddMinutes(-1), history));
@@ -421,6 +424,7 @@ internal static partial class MobileRecoveryTests
             {
                 stub.SubscriptionTier = Tier ?? 0;
                 stub.VerifiedSubscription = Allowed && Tier is 1 or 2;
+                stub.SubscriptionCheckedUtc = stub.VerifiedSubscription ? Now.UtcDateTime : null;
             }
             return Task.FromResult(new SubscriptionCheckResult(Allowed) { VerifiedOnlineTier = Tier });
         }

@@ -107,6 +107,13 @@ var cases = new (string Name, Func<Task> Run)[]
     ("Playback cache isolates recorder, endpoint and account identities with no readable credentials or signed URLs", AudioCacheEntitlementTests.IdentityAsync),
     ("Protected cache reauthorizes playback and respects expiration, offline grace, tier and Local Only", AudioCacheEntitlementTests.AuthorizationAsync),
     ("Subsequent verification after 429, 503, timeout, and connection failure preserves saved credentials", WordPressOwnershipTests.SubscriptionFailuresAndRestart),
+    ("Live, History, and cache share verified grace at 23:59 and deny after 24 hours", WordPressOwnershipTests.GraceAcrossHostedFeatures),
+    ("401, 403 and confirmed revocation erase grace, and first-time access stays denied", WordPressOwnershipTests.AuthoritativeDenialsEndGrace),
+    ("Verified subscription and credential expiration independently shorten grace", WordPressOwnershipTests.EarliestVerifiedDeadline),
+    ("Hosted monitoring revalidates at 30 minutes and concurrent features share one request", WordPressOwnershipTests.SharedVerificationCadence),
+    ("Revocation cancels protected native audio and media preparation while independent playback continues", WordPressOwnershipTests.RevocationCancelsProtectedWork),
+    ("Revocation cancels an in-flight protected export body and discards the incomplete file", WordPressOwnershipTests.RevocationCancelsExportBody),
+    ("Hosted tier changes fence old History work while allowed Live and recent audio continue", WordPressOwnershipTests.HostedTierChangesPreserveLive),
     ("Concurrent lookup requests keep their original authority and reject stale results", WordPressOwnershipTests.LookupSwitch),
     ("Communications discards old-session responses and restarts the cursor for a new account", WordPressOwnershipTests.CommunicationsSwitch),
     ("WordPress clients refuse cross-authority redirects that preserve request bodies", WordPressOwnershipTests.Redirect),
@@ -566,12 +573,14 @@ class SettingsStub : DispatchProxy
     internal DateTime? SubscriptionExpiry { get; set; }
     internal int SubscriptionTier { get; set; }
     internal bool VerifiedSubscription { get; set; }
+    internal DateTime? SubscriptionCheckedUtc { get; set; }
 
     protected override object? Invoke(MethodInfo? method, object?[]? args) => method!.Name switch
     {
         "get_AuthServerBaseUrl" => "https://wordpress.test",
         "get_LocalOnlyMode" => false,
         "add_LocalOnlyModeChanged" or "remove_LocalOnlyModeChanged" => null,
+        "add_AccountIdentityChanged" or "remove_AccountIdentityChanged" => null,
         "get_ServerUrl" => ServerUrl,
         "get_BasicAuthUsername" => Username,
         "get_BasicAuthPassword" => Password,
@@ -582,6 +591,9 @@ class SettingsStub : DispatchProxy
         "get_SubscriptionTierLevel" => SubscriptionTier,
         "get_SubscriptionLastStatusOk" or "get_SubscriptionLastValidatedOnline" => VerifiedSubscription,
         nameof(ISettingsService.HasActiveHostedSubscription) => ActiveSubscription,
+        nameof(ISettingsService.ReadHostedSubscription) => new HostedSubscriptionSnapshot(VerifiedSubscription,
+            VerifiedSubscription, SubscriptionTier, SubscriptionCheckedUtc, SubscriptionExpiry, null, "", "", ""),
+        nameof(ISettingsService.TryApplyAccountIdentity) => ApplyAccountIdentity(args!),
         nameof(ISettingsService.TryGetServerCredentials) => ReadAccount(args!),
         nameof(ISettingsService.TryGetRecorderCredentials) => ReadRecorder(args!),
         nameof(ISettingsService.GetCachedDirectoryServers) => new[]
@@ -595,6 +607,14 @@ class SettingsStub : DispatchProxy
         },
         _ => throw new NotSupportedException(method.Name)
     };
+
+    private static bool ApplyAccountIdentity(object?[] args)
+    {
+        if ((long)args[0]! != 0)
+            return false;
+        ((Action)args[1]!).Invoke();
+        return true;
+    }
 
     private bool ReadRecorder(object?[] args)
     {

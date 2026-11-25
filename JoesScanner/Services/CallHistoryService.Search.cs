@@ -49,6 +49,12 @@ public sealed partial class CallHistoryService
     private async Task<HistorySearchResult> ReadResultsAsync(HistorySearchSnapshot snapshot, HistoryPageCursor cursor,
         RecordingPlaybackAccess.HistoryGrant grant, int limit, CancellationToken token)
     {
+        using var authorization = snapshot.Access.Protected
+            ? HostedEntitlement.For(_settingsService).Protect(token, _clock, expectedTier: grant.Tier,
+                accountVersion: grant.AccountVersion) : null;
+        token = authorization?.Token ?? token;
+        grant.Validate(_settingsService);
+        token.ThrowIfCancellationRequested();
         if (snapshot.FromUtc >= snapshot.UntilUtc || grant.Cutoff >= snapshot.UntilUtc)
             return new(snapshot, cursor, [], false);
 

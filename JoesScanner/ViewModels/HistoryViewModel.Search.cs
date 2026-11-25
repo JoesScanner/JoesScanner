@@ -122,12 +122,14 @@ public sealed partial class HistoryViewModel
     {
         var restrict = _historyRecorder is { } recorder &&
             HostedServerRules.RequiresApiFirewallCredentials(_settingsService, recorder.Endpoint) &&
-            _settingsService.ReadHostedSubscription().Tier < 2;
+            HostedEntitlement.For(_settingsService).Current()?.Tier != 2;
         if (_enforceHistory24HourLimit == restrict)
             return;
         _enforceHistory24HourLimit = restrict;
         OnPropertyChanged(nameof(CanPickDateRange));
     }
+
+    private void OnHistoryEntitlementChanged() => _ = RunOnMainThreadAsync(RefreshHistoryDateAccess);
 
     private void OnHistoryAccountChanged(object? sender, EventArgs args) => _ = RunOnMainThreadAsync(() =>
     {

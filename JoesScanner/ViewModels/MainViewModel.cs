@@ -246,6 +246,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             _scheduler = new(favorites);
             _privacyNetwork = PrivacyNetworkPolicy.For(settingsService);
             _settingsService.LocalOnlyModeChanged += OnPrivacyNetworkChanged;
+            HostedEntitlement.For(settingsService).Changed += OnHostedEntitlementChanged;
             Favorites.Changed += () => MainThread.BeginInvokeOnMainThread(() => _ = RefreshFavoriteAudioSourceAsync());
             _connections.StatusChanged += OnRecorderStatusChanged;
             _connections.Retired += RetireRecorder;
@@ -690,8 +691,6 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                 {
                     _changingHostedAccount = true;
                     _connections.Retire(profile => RequiresHostedAccount(profile.Endpoint));
-                    if (_currentPlayingCall?.RecordingAccess?.Protected == true)
-                        InvalidateLivePlayback();
                     foreach (var call in Calls.Where(call => call.RecordingAccess?.Protected == true).ToArray())
                         Calls.Remove(call);
                     foreach (var call in AddressAlerts.Where(call => call.RecordingAccess?.Protected == true).ToArray())
@@ -1549,11 +1548,10 @@ private static string SpeedStepToLabel(double step)
         private long LocalRecoveryFloor(DurableLiveQueue.Run run)
         {
             var now = DateTimeOffset.UtcNow;
-            return DurableLiveQueue.HistoricalFloor(run.Protected || HostedServerRules.RequiresApiFirewallCredentials(_settingsService, run.Server),
-                run.VerifiedTier, IsCurrentLiveScope(run) &&
-                _settingsService.SubscriptionLastStatusOk && _settingsService.SubscriptionLastValidatedOnline &&
-                (_settingsService.SubscriptionExpiresUtc is not { } expires || expires > now.UtcDateTime),
-                _settingsService.SubscriptionTierLevel, now);
+            if (!run.Protected && !HostedServerRules.RequiresApiFirewallCredentials(_settingsService, run.Server))
+                return 0;
+            var tier = HostedEntitlement.For(_settingsService).Current()?.Tier;
+            return DurableLiveQueue.HistoricalFloor(true, tier, IsCurrentLiveScope(run), tier ?? 0, now);
         }
 
         private static bool TryGetDurableRecording(CallItem item, DurableLiveQueue.Run run, out string id)
@@ -1796,6 +1794,8 @@ private static string SpeedStepToLabel(double step)
                 var audio = preparedAudio ?? acquired ?? throw new RecordingAudioUnavailableException();
                 if (!request.IsManual && ScopeOf(item) == null)
                     return;
+                using var authorization = ProtectLiveRecording(item, token);
+                authorization?.Validate();
                 if (!request.IsManual && !item.IsCompletedReplay && ScopeOf(item) is { } pending &&
                     TryGetDurableRecording(item, pending, out var id))
                     await _durableQueue.MarkPlayingAsync(pending, id, token);
@@ -1807,7 +1807,7 @@ private static string SpeedStepToLabel(double step)
                 try { _systemMediaService.UpdateNowPlaying(BuildNowPlayingMetadataSnapshot(item), AudioEnabled); } catch { }
                 AppLog.Add(() => $"QueueTiming: backendId={item.BackendId} acquisitionMs={started.Elapsed.TotalMilliseconds:0} rate={rate:0.###}");
 
-                using var watchdog = CancellationTokenSource.CreateLinkedTokenSource(token);
+                using var watchdog = CancellationTokenSource.CreateLinkedTokenSource(authorization?.Token ?? token);
 #if !(ANDROID || IOS)
                 var expectedSeconds = item.CallDurationSeconds > 0 ? item.CallDurationSeconds / Math.Max(rate, 0.1) : 90;
                 watchdog.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(expectedSeconds * 2 + 120, 180, 10800)));
@@ -1817,10 +1817,15 @@ private static string SpeedStepToLabel(double step)
                 {
                     await PlayOnDeviceAsync(item, audio.Url, rate, request, watchdog.Token, completion, () =>
                     {
-                        if (audio.CacheHit)
-                            RequireCachedLiveEntitlement(item);
+                        authorization?.Validate();
                         enteringNative();
                     }, forecastFrom, audio.Invalidate);
+                    if (!completion.Confirmed)
+                        authorization?.Validate();
+                }
+                catch (OperationCanceledException) when (!token.IsCancellationRequested && authorization?.Token.IsCancellationRequested == true)
+                {
+                    throw RecordingPlaybackAccess.VerificationRequired();
                 }
                 catch (OperationCanceledException ex) when (!token.IsCancellationRequested && watchdog.IsCancellationRequested)
                 {

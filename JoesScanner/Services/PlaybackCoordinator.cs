@@ -53,45 +53,8 @@ namespace JoesScanner.Services
             if (visibleQueueCount <= 0)
                 return Deny(normalizedReason, "queue_empty", server, autoPlayEnabled, userInitiated, audioEnabled, isMainAudioSoftMuted, isAlreadyPlaying, isQueuePlaybackRunning, visibleQueueCount, isHosted);
 
-            // Hosted Joe's server additional policy: only allow queue playback if the account is verified and active.
-            if (isHosted && !IsHostedAccountVerifiedActive(server))
-            {
-                return Deny(normalizedReason, "hosted_not_verified_active", server, autoPlayEnabled, userInitiated, audioEnabled, isMainAudioSoftMuted, isAlreadyPlaying, isQueuePlaybackRunning, visibleQueueCount, isHosted);
-            }
-
-            // Allowed.
+            // Recorder scopes authorize this shared queue independently of the selected display recorder.
             LogDecision(normalizedReason, "allow", server, autoPlayEnabled, userInitiated, audioEnabled, isMainAudioSoftMuted, isAlreadyPlaying, isQueuePlaybackRunning, visibleQueueCount, isHosted);
-            return true;
-        }
-
-        private bool IsHostedAccountVerifiedActive(string serverUrl)
-        {
-            // Tier 0 is no-access for Joe's hosted server.
-            if (_settings.SubscriptionTierLevel < 1)
-                return false;
-
-            var user = (_settings.BasicAuthUsername ?? string.Empty).Trim();
-            var pass = (_settings.BasicAuthPassword ?? string.Empty).Trim();
-
-            if (string.IsNullOrWhiteSpace(user) || string.IsNullOrWhiteSpace(pass))
-                return false;
-
-            // Must match credentials that were stored after a successful Validate.
-            if (!_settings.TryGetServerCredentials(serverUrl, out var cachedUser, out var cachedPass))
-                return false;
-
-            if (!string.Equals(user, cachedUser, StringComparison.Ordinal) ||
-                !string.Equals(pass, cachedPass, StringComparison.Ordinal))
-                return false;
-
-            // Must have a successful subscription check and not be expired.
-            if (!_settings.SubscriptionLastStatusOk)
-                return false;
-
-            var expiresUtc = _settings.SubscriptionExpiresUtc;
-            if (expiresUtc.HasValue && expiresUtc.Value <= DateTime.UtcNow)
-                return false;
-
             return true;
         }
 

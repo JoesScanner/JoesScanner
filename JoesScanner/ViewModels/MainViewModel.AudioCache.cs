@@ -12,7 +12,8 @@ public partial class MainViewModel
         var server = item.RecordingServer ?? item.LiveState?.ServerUrl ?? _settingsService.ServerUrl ?? "";
         var protectedSource = IsProtectedRecording(item, server);
         var account = RequireCurrentRecordingAccount(item);
-        var authority = protectedSource ? _settingsService.ReadAccountSession().BaseUrl : null;
+        var accountSession = protectedSource ? _settingsService.ReadAccountSession() : default;
+        var authority = protectedSource ? accountSession.BaseUrl : null;
         var key = RecordingCacheKey.Create(item.ServerId, server, item.BackendId, account, authority);
         (string Server, bool Protected, DateTimeOffset? RecordedAt) access = default;
         return _audioCache.AcquireAsync(key, Authorize, Fetch, token, speculative);
@@ -20,7 +21,7 @@ public partial class MainViewModel
         void RequireAccount()
         {
             if (RequireCurrentRecordingAccount(item) != account ||
-                protectedSource && _settingsService.ReadAccountSession().BaseUrl != authority)
+                protectedSource && _settingsService.ReadAccountSession().AccountVersion != accountSession.AccountVersion)
                 throw new RecordingAccessException("This recording belongs to a different account.");
         }
 
@@ -35,6 +36,10 @@ public partial class MainViewModel
 
         async Task<string> Fetch(PlaybackAudioCache.Transfer transfer, CancellationToken acquireToken)
         {
+            using var authorization = ProtectLiveRecording(item, acquireToken, access.RecordedAt);
+            authorization?.Validate();
+            RequireAccount();
+            var fetchToken = authorization?.Token ?? acquireToken;
             var lastUrl = item.AudioUrl;
             var scope = Uri.TryCreate(server, UriKind.Absolute, out var origin)
                 ? new RecorderRequestScope(origin, item.ServerId) : (RecorderRequestScope?)null;
@@ -42,12 +47,13 @@ public partial class MainViewModel
             if (automatic)
             {
                 // Speculation never refreshes URLs or writes metadata into the durable queue.
-                var url = string.IsNullOrWhiteSpace(lastUrl) && !speculative ? await Refresh(acquireToken) : lastUrl;
-                path = !string.IsNullOrWhiteSpace(url) && await Download(url, acquireToken) is { Length: > 0 } file
+                var url = string.IsNullOrWhiteSpace(lastUrl) && !speculative ? await Refresh(fetchToken) : lastUrl;
+                path = !string.IsNullOrWhiteSpace(url) && await Download(url, fetchToken) is { Length: > 0 } file
                     ? file : throw new RecordingAudioUnavailableException();
             }
             else
-                path = await RecordingAudioRecovery.AcquireAsync(lastUrl, Refresh, Download, acquireToken);
+                path = await RecordingAudioRecovery.AcquireAsync(lastUrl, Refresh, Download, fetchToken);
+            authorization?.Validate();
             RequireAccount();
             return path;
 
@@ -89,12 +95,26 @@ public partial class MainViewModel
     private bool IsProtectedRecording(CallItem item, string server) =>
         item.RecordingAccess?.Protected == true || HostedServerRules.RequiresApiFirewallCredentials(_settingsService, server);
 
-    private void RequireCachedLiveEntitlement(CallItem item)
+    private bool CanPlayAsCurrentLive(CallItem item) =>
+        item.RecordingAccess?.Origin == RecordingOrigin.Live && ScopeOf(item) is { } scope &&
+        scope.Owner == item.LivePlaybackOwner;
+
+    private HostedEntitlement.Access? ProtectLiveRecording(CallItem item, CancellationToken token,
+        DateTimeOffset? recordedAt = null)
+    {
+        var server = item.RecordingServer ?? item.LiveState?.ServerUrl ?? _settingsService.ServerUrl ?? "";
+        if (!IsProtectedRecording(item, server))
+            return null;
+        RequireCurrentRecordingAccount(item);
+        return HostedEntitlement.For(_settingsService).Protect(token, recordedAt: recordedAt ?? item.RecordingTimeUtc,
+            history: !CanPlayAsCurrentLive(item));
+    }
+
+    private void RequireLiveRecordingEntitlement(CallItem item)
     {
         var server = item.RecordingServer ?? item.LiveState?.ServerUrl ?? _settingsService.ServerUrl ?? "";
         if (IsProtectedRecording(item, server))
             RecordingPlaybackAccess.RequireCachedEntitlement(_settingsService, server, RequireCurrentRecordingAccount(item),
-                item.RecordingTimeUtc, item.RecordingAccess?.Origin == RecordingOrigin.Live && ScopeOf(item) is { } scope &&
-                scope.Owner == item.LivePlaybackOwner, independent: item.ServerId != null);
+                item.RecordingTimeUtc, CanPlayAsCurrentLive(item), independent: item.ServerId != null);
     }
 }

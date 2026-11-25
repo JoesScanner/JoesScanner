@@ -379,11 +379,10 @@ namespace JoesScanner.ViewModels
                     if (rate == null)
                         throw new OperationCanceledException(token);
 
-                    await _playbackOwnership.RunNativeAsync(playback.Lease, token, async nativeToken =>
+                    await RunAuthorizedHistoryAudioAsync(playback.Snapshot, call, token, authorizedToken =>
+                        _playbackOwnership.RunNativeAsync(playback.Lease, authorizedToken, async nativeToken =>
                     {
                         RequireHistoryRecordingAccess(playback.Snapshot, call);
-                        if (audio.CacheHit)
-                            RequireCachedHistoryEntitlement(playback.Snapshot, call);
                         try
                         {
                             await _audioPlaybackService.PlayAsync(audio.Url, rate.Value, nativeToken, completion).ConfigureAwait(false);
@@ -394,7 +393,7 @@ namespace JoesScanner.ViewModels
                             audio.Invalidate();
                             throw;
                         }
-                    }).ConfigureAwait(false);
+                    })).ConfigureAwait(false);
                 }, token, ex => failure = ex, completion).ConfigureAwait(false);
 
                 if (failure != null)

@@ -6,8 +6,8 @@ internal static class ForegroundRecoveryEntitlement
         ISubscriptionService subscription, string server, TimeProvider clock, CancellationToken token,
         RecordingPlaybackAccess.HistoryGrant? previous = null, bool independent = false)
     {
-        // Polling runs every two seconds. Reuse a recent successful check while
-        // its account, tier, and expiry remain current. Never reuse an offline result.
+        // Polling runs every two seconds. Reuse a recent grant while the
+        // shared policy still authorizes its account, tier and deadline.
         if (previous?.Server == server && clock.GetUtcNow() - previous.VerifiedAt < TimeSpan.FromSeconds(15))
         {
             try

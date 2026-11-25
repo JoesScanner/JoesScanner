@@ -311,6 +311,7 @@ namespace JoesScanner.ViewModels
                 if (!preparation.CanContinue || !_playbackOwnership.IsCurrent(live) || _monitoring.Current != run ||
                     favoriteFilter != null && !favoriteFilter(item))
                     return;
+                RequireLiveRecordingEntitlement(item);
 
                 // A failed or superseded preparation never cancels the current clip
                 // or changes its traversal. The prepared recording can now take over.
