@@ -529,7 +529,7 @@ private bool IsInAudioFilterCache(string localPath) => _cache.HasAnalysisLease(l
             }
             catch (Exception ex)
             {
-                AppLog.Add(() => $"AudioStatic: detection failed: {ex.Message}");
+                AppLog.Add(() => $"AudioStatic: detection failed: {DiagnosticRedaction.Describe(ex)}");
                 return (prepared, staticDetectionElapsedMs);
             }
         }

@@ -1,176 +1,229 @@
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
 using JoesScanner.Helpers;
 using JoesScanner.Services;
 using JoesScanner.ViewModels;
 
-namespace JoesScanner
+namespace JoesScanner;
+
+public partial class App : Application
 {
-    public partial class App : Application
+    private readonly IServiceProvider _services;
+    private FileStream? _storageLease;
+    private Task<ISettingsService>? _databaseStartup;
+    private bool _servicesStarted;
+
+    internal string? RecoveryNotice { get; private set; }
+
+    public App(IServiceProvider services)
     {
-        private readonly IServiceProvider _services;
-        private readonly ISettingsService _settings;
-        private readonly ITelemetryService _telemetryService;
-        private readonly ISubscriptionService _subscriptionService;
-        private readonly ICommsBadgeService _commsBadgeService;
+        _services = services;
+        InitializeComponent();
+        _ = AppLog.InitializeAsync();
+    }
 
-        public App(IServiceProvider services, ISettingsService settings, ITelemetryService telemetryService, ISubscriptionService subscriptionService,
-            ICommsBadgeService commsBadgeService, IDbMaintenanceService dbMaintenance)
+    protected override Window CreateWindow(IActivationState? activationState)
+    {
+        var message = new Label { Text = "Opening saved data…", TextColor = Colors.White };
+        var progress = new ActivityIndicator { IsRunning = true, Color = Colors.White };
+        var retry = new Button { Text = "Retry", IsVisible = false };
+        var window = new Window(new ContentPage
         {
-            _services = services ?? throw new ArgumentNullException(nameof(services));
-            _settings = settings ?? throw new ArgumentNullException(nameof(settings));
-            _telemetryService = telemetryService ?? throw new ArgumentNullException(nameof(telemetryService));
-            _subscriptionService = subscriptionService ?? throw new ArgumentNullException(nameof(subscriptionService));
-            _commsBadgeService = commsBadgeService ?? throw new ArgumentNullException(nameof(commsBadgeService));
-
-            // Resolve the persisted logging preference before any app initialization work begins.
-            AppLog.ReloadEnabledStateFromStorage();
-
-            InitializeComponent();
-
-            // Always create a new session token for each process start.
-            // This guarantees the first ping after startup uses the new token.
-            _settings.AuthSessionToken = Guid.NewGuid().ToString();
-
-            // Touch DeviceInstallId so it is created early if settings lazily generates it.
-            _ = _settings.DeviceInstallId;
-
-            _telemetryService.TrackAppStarted();
-            _settings.LocalOnlyModeChanged += (_, _) =>
+            Content = new VerticalStackLayout
             {
-                if (!_settings.LocalOnlyMode)
-                {
-                    _telemetryService.TrackAppStarted();
-                    BeginStartupAuthVerification();
-                }
-            };
-
-            var favorites = _services.GetRequiredService<FavoritesService>();
-            favorites.Start();
-            favorites.Wake();
-            Connectivity.Current.ConnectivityChanged += (_, e) =>
-            {
-                if (e.NetworkAccess == NetworkAccess.Internet)
-                    favorites.Wake(force: true);
-            };
-
-            // Verify auth + subscription once per app start.
-            // This keeps the local subscription cache current and ensures the server can associate
-            // the current session token to an account whenever credentials are configured.
-            BeginStartupAuthVerification();
-
-            // Start the communications badge poller so the tab can show unread state.
-            // The poller is best effort and will no-op until credentials are configured and the session is associated.
-            try { _commsBadgeService.Start(); } catch { }
-            dbMaintenance.Start();
-
-
-            AppDomain.CurrentDomain.ProcessExit += (_, _) =>
-            {
-                try
-                {
-                    _telemetryService.TrackAppStopping();
-                }
-                catch
-                {
-                }
-            };
-        }
-
-        private void BeginStartupAuthVerification()
-        {
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    if (_settings.LocalOnlyMode)
-                        return;
-                    var serverUrl = (_settings.ServerUrl ?? string.Empty).Trim();
-                    if (!Uri.TryCreate(serverUrl, UriKind.Absolute, out var serverUri))
-                        return;
-
-                    // Register the process session with WordPress for protected scanner servers.
-                    if (!HostedServerRules.RequiresApiFirewallCredentials(_settings, serverUri))
-                        return;
-
-                    await _subscriptionService.EnsureSubscriptionAsync(CancellationToken.None).ConfigureAwait(false);
-                }
-                catch
-                {
-                    // Best effort. Offline behavior is handled inside SubscriptionService.
-                }
-            });
-        }
-
-
-        protected override Window CreateWindow(IActivationState? activationState)
-        {
-            Page rootPage;
-#if IOS
-            // iOS launch is more stable when we avoid the extra Shell/DataTemplate hop and
-            // host the RootPage directly. RootPage already owns the tab strip and content area,
-            // so Shell does not add value on iOS here.
-            rootPage = _services.GetRequiredService<Views.RootPage>();
-#else
-            rootPage = new AppShell(_services);
-#endif
-
-            var window = new Window(rootPage);
-
+                Padding = new Thickness(24),
+                Spacing = 12,
+                VerticalOptions = LayoutOptions.Center,
+                HorizontalOptions = LayoutOptions.Center,
+                Children = { progress, message, retry }
+            }
+        });
 #if WINDOWS
-            const double defaultWidth = 430;
-            const double defaultHeight = 1000;
+        window.Width = 430;
+        window.Height = 1000;
+        window.MinimumWidth = 430;
+        window.MinimumHeight = 500;
+#endif
+        window.Created += (_, _) => window.Dispatcher.Dispatch(() => _ = OpenAsync());
+        retry.Clicked += (_, _) => _ = OpenAsync();
+        return window;
 
-            const double minWidth = 430;
-            const double minHeight = 500;
-
-            var width = AppStateStore.GetDouble("window_width", defaultWidth);
-            var height = AppStateStore.GetDouble("window_height", defaultHeight);
-            var x = AppStateStore.GetDouble("window_x", double.NaN);
-            var y = AppStateStore.GetDouble("window_y", double.NaN);
-
-            window.Width = width;
-            window.Height = height;
-
-            window.MinimumWidth = minWidth;
-            window.MinimumHeight = minHeight;
-
-            if (!double.IsNaN(x) && !double.IsNaN(y))
+        async Task OpenAsync()
+        {
+            retry.IsVisible = false;
+            progress.IsRunning = progress.IsVisible = true;
+            message.Text = "Opening saved data…";
+            ISettingsService settings;
+            try
             {
-                window.X = x;
-                window.Y = y;
+                settings = await (_databaseStartup ??= Task.Run(PrepareDatabasesAsync));
+            }
+            catch (Exception error)
+            {
+                _databaseStartup = null;
+                AppLog.Basic(() => $"Opening saved data failed ({DatabaseRecovery.Describe(error)}).");
+                progress.IsRunning = progress.IsVisible = false;
+                message.Text = error switch
+                {
+                    NewerDatabaseException => "Your saved data requires a newer version of Joe’s Scanner.",
+                    SqliteException { SqliteErrorCode: 5 or 6 } => "Saved data is busy. Close any other copy of Joe’s Scanner and retry.",
+                    SqliteException { SqliteErrorCode: 13 } => "Saved data needs more free space. Free up space and retry.",
+                    UnauthorizedAccessException or SqliteException { SqliteErrorCode: 3 or 8 or 23 } =>
+                        "Joe’s Scanner could not write to its data folder. Check folder permissions and retry.",
+                    _ => "Saved data is temporarily unavailable. Check storage and close any other copy of Joe’s Scanner, then retry."
+                };
+                retry.IsVisible = true;
+                return;
             }
 
-            window.SizeChanged += (_, _) =>
+#if WINDOWS
+            RestoreWindowPlacement(window);
+#endif
+            var startMonitoring = !_servicesStarted;
+            if (startMonitoring)
+            {
+                _servicesStarted = true;
+                StartBackgroundServices(settings);
+            }
+#if IOS
+            window.Page = _services.GetRequiredService<Views.RootPage>();
+#else
+            window.Page = new AppShell(_services);
+#endif
+            if (startMonitoring)
+            {
+                try
+                {
+                    await _services.GetRequiredService<MainViewModel>()
+                        .StartMonitoringWithAutoplayAsync(() => Task.Delay(400));
+                }
+                catch (Exception error)
+                {
+                    AppLog.Basic(() => $"Could not start Live monitoring on launch ({DiagnosticRedaction.Describe(error)}).");
+                }
+            }
+        }
+    }
+
+    private async Task<ISettingsService> PrepareDatabasesAsync()
+    {
+        await AppLog.InitializeAsync().ConfigureAwait(false);
+        var path = _services.GetRequiredService<IDatabasePathProvider>().DbPath;
+        var recoveredMain = false;
+        var recoveredFavorites = false;
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                _storageLease ??= DatabaseRecovery.AcquireLease(path);
+                recoveredMain |= DatabaseRecovery.PrepareMain(path);
+                recoveredFavorites |= FavoritesRepository.PrepareStorage(path);
+                var settings = _services.GetRequiredService<ISettingsService>();
+                _ = settings.DeviceInstallId; // Initialize the cache and protected migration off the UI thread.
+                settings.AuthSessionToken = Guid.NewGuid().ToString();
+                var invalidSettings = settings is SettingsService { HadUnreadableSettings: true };
+                var credentialWarning = settings.SavedCredentialWarning;
+                RecoveryNotice = DatabaseRecovery.StartupNotice(recoveredMain, recoveredFavorites, invalidSettings, credentialWarning);
+                _ = _services.GetRequiredService<FavoritesService>();
+                if (invalidSettings)
+                    AppLog.Basic("Ignored unreadable saved settings while retaining other local data.");
+#if WINDOWS
+                ReadWindowPlacement();
+#endif
+                return settings;
+            }
+            catch (SqliteException error) when (attempt < 2 && error.SqliteErrorCode is 5 or 6)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(400)).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private void StartBackgroundServices(ISettingsService settings)
+    {
+        var telemetry = _services.GetRequiredService<ITelemetryService>();
+        telemetry.TrackAppStarted();
+        settings.LocalOnlyModeChanged += (_, _) =>
+        {
+            if (!settings.LocalOnlyMode)
+            {
+                telemetry.TrackAppStarted();
+                BeginStartupAuthVerification(settings);
+            }
+        };
+
+        var favorites = _services.GetRequiredService<FavoritesService>();
+        favorites.Start();
+        favorites.Wake();
+        Connectivity.Current.ConnectivityChanged += (_, e) =>
+        {
+            if (e.NetworkAccess == NetworkAccess.Internet)
+                favorites.Wake(force: true);
+        };
+
+        BeginStartupAuthVerification(settings);
+        try { _services.GetRequiredService<ICommsBadgeService>().Start(); } catch { }
+        _services.GetRequiredService<IDbMaintenanceService>().Start();
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        {
+            try { telemetry.TrackAppStopping(); } catch { }
+        };
+    }
+
+    private void BeginStartupAuthVerification(ISettingsService settings)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                if (settings.LocalOnlyMode ||
+                    !Uri.TryCreate(settings.ServerUrl, UriKind.Absolute, out var serverUri) ||
+                    !HostedServerRules.RequiresApiFirewallCredentials(settings, serverUri))
+                    return;
+
+                await _services.GetRequiredService<ISubscriptionService>()
+                    .EnsureSubscriptionAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception error)
+            {
+                AppLog.Basic(() => $"Startup account verification deferred ({DiagnosticRedaction.Describe(error)}).");
+            }
+        });
+    }
+
+#if WINDOWS
+    private (double Width, double Height, double X, double Y) _placement;
+
+    private void ReadWindowPlacement() => _placement = (
+        AppStateStore.GetDouble("window_width", 430),
+        AppStateStore.GetDouble("window_height", 1000),
+        AppStateStore.GetDouble("window_x", double.NaN),
+        AppStateStore.GetDouble("window_y", double.NaN));
+
+    private void RestoreWindowPlacement(Window window)
+    {
+        window.Width = _placement.Width;
+        window.Height = _placement.Height;
+        if (double.IsFinite(_placement.X) && double.IsFinite(_placement.Y))
+        {
+            window.X = _placement.X;
+            window.Y = _placement.Y;
+        }
+
+        window.SizeChanged += (_, _) =>
+        {
+            try
             {
                 AppStateStore.SetDouble("window_width", window.Width);
                 AppStateStore.SetDouble("window_height", window.Height);
                 AppStateStore.SetDouble("window_x", window.X);
                 AppStateStore.SetDouble("window_y", window.Y);
-            };
-#endif
-
-            // Let the window initialize before starting scanner monitoring.
-            try
-            {
-                MainThread.BeginInvokeOnMainThread(async () =>
-                {
-                    try
-                    {
-                        await _services.GetRequiredService<MainViewModel>()
-                            .StartMonitoringWithAutoplayAsync(() => Task.Delay(400));
-                    }
-                    catch (Exception ex)
-                    {
-                        AppLog.Add(() => $"Could not start Live monitoring on launch ({ex.GetType().Name}).");
-                    }
-                });
             }
-            catch
+            catch (Exception error)
             {
+                AppLog.Basic(() => $"Saving window placement deferred ({DatabaseRecovery.Describe(error)}).");
             }
-
-
-            return window;
-        }
+        };
     }
+#endif
 }

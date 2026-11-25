@@ -1,577 +1,152 @@
-using System;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.IO;
-using System.Linq;
-using System.Threading;
-using System.Threading.Channels;
-using System.Threading.Tasks;
 using Microsoft.Maui.Storage;
 
-namespace JoesScanner.Services
+namespace JoesScanner.Services;
+
+public static class AppLog
 {
-    // Simple in-memory, thread-safe application log with a fixed maximum number of entries.
-    // Also writes to a daily rolling file under AppDataDirectory/Logs.
-    public static class AppLog
+    private const string LegacyPreference = "app_log_enabled";
+    private const string StateFile = "app_log_detailed.state";
+    private static readonly object Mode = new();
+    private static readonly SemaphoreSlim PreferenceWrite = new(1, 1);
+    private static readonly Lazy<IReadOnlyList<string>> Locations = new(FindLocations);
+    private static readonly DiagnosticLog Store = new(() => Locations.Value, TimeProvider.System);
+    private static bool _modeChosen;
+    private static readonly Lazy<Task> Startup = new(() => Task.Run(async () =>
     {
-        private const string LogEnabledPreferenceKey = "app_log_enabled";
-        private const string LogEnabledMarkerFileName = "app_log_enabled.txt";
-        private const string LogEnabledStateFileName = "app_log_enabled.state";
-
-        private static readonly object Sync = new();
-        private static readonly LinkedList<string> Buffer = new();
-
-        private const int MaxEntries = 500;
-
-        // Keep this bounded so a burst cannot grow memory without limit.
-        // DropOldest keeps the most recent events, which is usually what you want for debugging.
-        private readonly record struct LogWriteItem(string Line, int Generation);
-
-        private static readonly Channel<LogWriteItem> FileChannel = Channel.CreateBounded<LogWriteItem>(new BoundedChannelOptions(5000)
+        var detail = ReadPreference();
+        lock (Mode)
         {
-            SingleReader = true,
-            SingleWriter = false,
-            FullMode = BoundedChannelFullMode.DropOldest
-        });
-
-        private static int _fileWriterStarted;
-        private static int _writeGeneration;
-
-        private static volatile bool _isEnabled;
-
-
-        static AppLog()
-        {
-            // Fail closed until persisted state is resolved. This avoids early startup
-            // writes slipping through when storage APIs are temporarily unavailable.
-            _isEnabled = false;
-
-            // Enforce persisted state immediately on first use so startup cannot keep
-            // stale in-memory or queued log entries alive when logging is off.
-            ReloadEnabledStateFromStorage(purgePersistedLogs: true);
+            if (!_modeChosen)
+                Store.Detailed = detail;
         }
+        _ = Task.Run(Store.RunAsync);
+        await PersistPreferenceAsync().ConfigureAwait(false);
+    }));
 
-        private static bool ReadEnabledPreference()
+    // Existing trace call sites use this flag for optional, more expensive diagnostics.
+    public static bool IsEnabled => Store.Detailed;
+
+    internal static Task InitializeAsync() => Startup.Value;
+
+    public static void SetEnabled(bool enabled)
+    {
+        lock (Mode)
         {
-            // Use one canonical state file as the authoritative source.
-            // Preferences and marker files are compatibility mirrors only.
-            if (TryReadEnabledStateFile(out var stateEnabled))
-                return stateEnabled;
-
-            try
-            {
-                return Preferences.Get(LogEnabledPreferenceKey, false);
-            }
-            catch
-            {
-            }
-
-            if (TryReadEnabledMarker(out var markerEnabled))
-                return markerEnabled;
-
-            return false;
+            _modeChosen = true;
+            Store.Detailed = enabled;
         }
+        _ = Startup.Value;
+        _ = Task.Run(PersistPreferenceAsync);
+    }
 
-        private static bool TryReadEnabledMarker(out bool enabled)
+    public static void Basic(string message) => Record(message, detailed: false);
+    public static void Basic(Func<string> message) => Record(message, detailed: false);
+    public static void Add(string message) => Record(message, detailed: true);
+    public static void Add(Func<string> message) => Record(message, detailed: true);
+    public static void DebugWriteLine(string message) => Add(message);
+    public static void DebugWriteLine(Func<string> message) => Add(message);
+
+    private static void Record(Func<string> message, bool detailed)
+    {
+        if (detailed && !Store.Detailed)
+            return;
+        try { Record(message(), detailed); } catch { }
+    }
+
+    private static void Record(string message, bool detailed)
+    {
+        if (detailed && !Store.Detailed)
+            return;
+        Store.Add(message, detailed);
+        _ = Startup.Value;
+    }
+
+    public static string[] GetSnapshot(int maxLines) => Store.Snapshot(maxLines);
+    public static Task ClearAllAsync() => Task.Run(Store.ClearAsync);
+
+    public static async Task<string?> ExportLogsAsync(int maxLogFiles = 50, int snapshotMaxLines = 500)
+    {
+        try
         {
-            enabled = true;
-            var sawExplicitTrue = false;
-
-            foreach (var dir in GetCandidateLogsDirectories())
+            await Startup.Value.ConfigureAwait(false);
+            return await Task.Run(async () =>
             {
-                try
-                {
-                    var path = Path.Combine(dir, LogEnabledMarkerFileName);
-                    if (!File.Exists(path))
-                        continue;
-
-                    var text = (File.ReadAllText(path) ?? string.Empty).Trim();
-
-                    if (string.Equals(text, "0", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(text, "false", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(text, "off", StringComparison.OrdinalIgnoreCase))
-                    {
-                        enabled = false;
-                        return true;
-                    }
-
-                    if (string.Equals(text, "1", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(text, "true", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(text, "on", StringComparison.OrdinalIgnoreCase))
-                    {
-                        sawExplicitTrue = true;
-                    }
-                }
-                catch
-                {
-                }
-            }
-
-            enabled = sawExplicitTrue;
-            return sawExplicitTrue;
-        }
-
-        private static string? GetCanonicalLogsDirectory()
-        {
-            try
-            {
-                var dirs = GetCandidateLogsDirectories();
-                if (dirs.Count > 0)
-                    return dirs[0];
-            }
-            catch
-            {
-            }
-
-            return null;
-        }
-
-        private static bool TryReadEnabledStateFile(out bool enabled)
-        {
-            enabled = false;
-
-            try
-            {
-                var dir = GetCanonicalLogsDirectory();
-                if (string.IsNullOrWhiteSpace(dir))
-                    return false;
-
-                var path = Path.Combine(dir, LogEnabledStateFileName);
-                if (!File.Exists(path))
-                    return false;
-
-                var text = (File.ReadAllText(path) ?? string.Empty).Trim();
-
-                if (string.Equals(text, "1", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(text, "true", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(text, "on", StringComparison.OrdinalIgnoreCase))
-                {
-                    enabled = true;
-                    return true;
-                }
-
-                if (string.Equals(text, "0", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(text, "false", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(text, "off", StringComparison.OrdinalIgnoreCase))
-                {
-                    enabled = false;
-                    return true;
-                }
-            }
-            catch
-            {
-            }
-
-            return false;
-        }
-
-        private static void TryWriteEnabledStateFile(bool enabled)
-        {
-            try
-            {
-                var dir = GetCanonicalLogsDirectory();
-                if (string.IsNullOrWhiteSpace(dir))
-                    return;
-
-                Directory.CreateDirectory(dir);
-                var path = Path.Combine(dir, LogEnabledStateFileName);
-                File.WriteAllText(path, enabled ? "1" : "0");
-            }
-            catch
-            {
-            }
-        }
-
-        private static void TryWriteEnabledMarker(bool enabled)
-        {
-            foreach (var dir in GetCandidateLogsDirectories())
-            {
-                try
-                {
-                    Directory.CreateDirectory(dir);
-
-                    var path = Path.Combine(dir, LogEnabledMarkerFileName);
-                    File.WriteAllText(path, enabled ? "1" : "0");
-                }
-                catch
-                {
-                }
-            }
-        }
-
-        private static IReadOnlyList<string> GetCandidateLogsDirectories()
-        {
-            var results = new List<string>();
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-            void Add(string? path)
-            {
-                if (string.IsNullOrWhiteSpace(path))
-                    return;
-
-                var full = path;
-                try { full = Path.GetFullPath(path); } catch { }
-
-                if (seen.Add(full))
-                    results.Add(full);
-            }
-
-            try
-            {
-                Add(Path.Combine(AppPaths.GetAppDataDirectorySafe(), "Logs"));
-            }
-            catch
-            {
-            }
-
-            try
-            {
-                var appDataDirectory = FileSystem.AppDataDirectory;
-                if (!string.IsNullOrWhiteSpace(appDataDirectory))
-                    Add(Path.Combine(appDataDirectory, "Logs"));
-            }
-            catch
-            {
-            }
-
-            try
-            {
-                var baseDir = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-                if (!string.IsNullOrWhiteSpace(baseDir))
-                    Add(Path.Combine(baseDir, "JoesScanner", "Logs"));
-            }
-            catch
-            {
-            }
-
-            return results;
-        }
-
-        private static void ApplyResolvedEnabledState(bool enabled, bool purgePersistedLogs)
-        {
-            _isEnabled = enabled;
-            Interlocked.Increment(ref _writeGeneration);
-
-            if (enabled)
-                return;
-
-            Clear();
-            DrainPendingWrites();
-
-            if (purgePersistedLogs)
-            {
-                ClearPersistedLogsSafe();
-            }
-        }
-
-
-        public static bool IsEnabled => _isEnabled;
-
-        public static bool ReloadEnabledStateFromStorage(bool purgePersistedLogs = true)
-        {
-            var enabled = ReadEnabledPreference();
-            ApplyResolvedEnabledState(enabled, purgePersistedLogs: purgePersistedLogs && !enabled);
-            return enabled;
-        }
-
-        public static bool GetStoredEnabledState()
-        {
-            return ReadEnabledPreference();
-        }
-
-        public static void DebugWriteLine(Func<string> messageFactory)
-        {
-            if (!_isEnabled || messageFactory == null)
-                return;
-
-            string message;
-            try
-            {
-                message = messageFactory();
-            }
-            catch
-            {
-                return;
-            }
-
-            DebugWriteLine(message);
-        }
-
-        public static void DebugWriteLine(string message)
-        {
-            if (string.IsNullOrWhiteSpace(message))
-                return;
-
-            if (!_isEnabled)
-                return;
-
-            // When logging is off, nothing should be emitted anywhere.
-            // When logging is on, keep a single logging path through AppLog only.
-            Add(message);
-        }
-
-        public static void SetEnabled(bool enabled)
-        {
-            TryWriteEnabledStateFile(enabled);
-
-            try
-            {
-                Preferences.Set(LogEnabledPreferenceKey, enabled);
-            }
-            catch
-            {
-            }
-
-            TryWriteEnabledMarker(enabled);
-            ApplyResolvedEnabledState(enabled, purgePersistedLogs: !enabled);
-        }
-
-        public static void Clear()
-        {
-            lock (Sync)
-            {
-                Buffer.Clear();
-            }
-        }
-
-        public static void ClearAll()
-        {
-            try
-            {
-                Clear();
-                ClearPersistedLogsSafe();
-            }
-            catch
-            {
-            }
-        }
-
-        private static void ClearPersistedLogsSafe()
-        {
-            foreach (var dir in GetCandidateLogsDirectories())
-            {
-                try
-                {
-                    if (!Directory.Exists(dir))
-                        continue;
-
-                    foreach (var file in Directory.EnumerateFiles(dir, "app_log_*.txt", SearchOption.TopDirectoryOnly))
-                    {
-                        try
-                        {
-                            File.Delete(file);
-                        }
-                        catch
-                        {
-                        }
-                    }
-                }
-                catch
-                {
-                }
-            }
-        }
-
-        private static void StartFileWriterIfNeeded()
-        {
-            if (Interlocked.Exchange(ref _fileWriterStarted, 1) != 0)
-                return;
-
-            _ = Task.Run(FileWriterLoopAsync);
-        }
-
-        private static void DrainPendingWrites()
-        {
-            try
-            {
-                while (FileChannel.Reader.TryRead(out _))
-                {
-                }
-            }
-            catch
-            {
-            }
-        }
-
-        private static async Task FileWriterLoopAsync()
-        {
-            StreamWriter? writer = null;
-            string? currentPath = null;
-
-            try
-            {
-                while (await FileChannel.Reader.WaitToReadAsync().ConfigureAwait(false))
-                {
-                    var batch = new List<LogWriteItem>(128);
-
-                    while (FileChannel.Reader.TryRead(out var item))
-                    {
-                        batch.Add(item);
-
-                        // Cap batch size so we do not hold huge batches if a burst arrives.
-                        if (batch.Count >= 512)
-                            break;
-                    }
-
-                    if (batch.Count == 0)
-                        continue;
-
-                    try
-                    {
-                        var path = GetLogFilePath();
-                        if (!string.Equals(path, currentPath, StringComparison.OrdinalIgnoreCase))
-                        {
-                            writer?.Dispose();
-                            currentPath = path;
-
-                            var dir = Path.GetDirectoryName(path);
-                            if (!string.IsNullOrWhiteSpace(dir))
-                            {
-                                Directory.CreateDirectory(dir);
-                            }
-
-                            writer = new StreamWriter(new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read))
-                            {
-                                AutoFlush = false
-                            };
-                        }
-
-                        var currentGeneration = Volatile.Read(ref _writeGeneration);
-                        var loggingEnabled = _isEnabled;
-
-                        for (var i = 0; i < batch.Count; i++)
-                        {
-                            var item = batch[i];
-                            if (!loggingEnabled || item.Generation != currentGeneration)
-                                continue;
-
-                            writer!.WriteLine(item.Line);
-                        }
-
-                        writer!.Flush();
-                    }
-                    catch
-                    {
-                        // Never let logging break the app.
-                        try
-                        {
-                            writer?.Dispose();
-                        }
-                        catch
-                        {
-                        }
-
-                        writer = null;
-                        currentPath = null;
-                    }
-                }
-            }
-            catch
-            {
-                // Swallow.
-            }
-            finally
-            {
-                try
-                {
-                    writer?.Dispose();
-                }
-                catch
-                {
-                }
-            }
-        }
-
-        private static string GetLogsDirectory()
-        {
-            return Path.Combine(AppPaths.GetAppDataDirectorySafe(), "Logs");
-        }
-
-        private static string GetLogFilePath()
-        {
-            // Daily rolling file based on LOCAL date so the file name matches the timestamps users see.
-            var day = DateTime.Now.ToString("yyyy-MM-dd");
-            return Path.Combine(GetLogsDirectory(), $"app_log_{day}.txt");
-        }
-
-        public static void Add(Func<string> messageFactory)
-        {
-            if (!_isEnabled || messageFactory == null)
-                return;
-
-            string message;
-            try
-            {
-                message = messageFactory();
-            }
-            catch
-            {
-                return;
-            }
-
-            Add(message);
-        }
-
-        public static void Add(string message)
-        {
-            if (!_isEnabled || string.IsNullOrWhiteSpace(message))
-                return;
-
-            var sanitized = DiagnosticRedaction.Sanitize(message);
-            if (string.IsNullOrWhiteSpace(sanitized))
-                return;
-
-            var line = $"{DateTime.Now:HH:mm:ss}  {sanitized}";
-
-            lock (Sync)
-            {
-                Buffer.AddLast(line);
-                if (Buffer.Count > MaxEntries)
-                    Buffer.RemoveFirst();
-            }
-
-            StartFileWriterIfNeeded();
-
-            // If the channel is full, DropOldest mode makes this succeed while keeping recent logs.
-            var generation = Volatile.Read(ref _writeGeneration);
-            FileChannel.Writer.TryWrite(new LogWriteItem(line, generation));
-        }
-
-        // Returns a snapshot of up to maxLines log entries as an array.
-        // The result is ordered from newest to oldest.
-        public static string[] GetSnapshot(int maxLines)
-        {
-            if (!_isEnabled)
-                return [];
-
-            lock (Sync)
-            {
-                return Buffer.Reverse().Take(maxLines).ToArray();
-            }
-        }
-
-        // Creates a zip containing the most recent log files plus a snapshot of the in-memory buffer.
-        // Returns the full path to the zip on disk.
-        public static async Task<string?> ExportLogsAsync(int maxLogFiles = 3, int snapshotMaxLines = 500)
-        {
-            try
-            {
-                if (!_isEnabled)
+                await Store.FlushAsync(prune: true).ConfigureAwait(false);
+                var cache = AppPaths.TryGetCacheDirectory();
+                if (string.IsNullOrWhiteSpace(cache))
                     return null;
-
-                var cacheDir = FileSystem.CacheDirectory;
-                if (string.IsNullOrWhiteSpace(cacheDir))
-                    return null;
-
-                var snapshot = GetSnapshot(snapshotMaxLines).Reverse().ToArray();
-                return await Task.Run(() => DiagnosticZip.CreateAsync(cacheDir, GetLogsDirectory(), snapshot, maxLogFiles))
-                    .ConfigureAwait(false);
-            }
-            catch
-            {
-                return null;
-            }
+                return await DiagnosticZip.CreateAsync(cache, Locations.Value, Store.Snapshot(snapshotMaxLines).Reverse().ToArray(),
+                    maxLogFiles, TimeProvider.System).ConfigureAwait(false);
+            }).ConfigureAwait(false);
         }
+        catch { return null; }
+    }
 
+    private static bool ReadPreference()
+    {
+        var roots = Locations.Value;
+        if (roots.Count > 0 && ReadState(roots[0], StateFile) is { } current)
+            return current;
+        if (roots.Count > 0 && ReadState(roots[0], "app_log_enabled.state") is { } legacy)
+            return legacy;
+        try
+        {
+            if (Preferences.ContainsKey(LegacyPreference))
+                return Preferences.Get(LegacyPreference, false);
+        }
+        catch { }
+        var markers = roots.Select(root => ReadState(root, "app_log_enabled.txt")).ToArray();
+        return !markers.Contains(false) && markers.Contains(true);
+    }
+
+    private static bool? ReadState(string root, string name)
+    {
+        try
+        {
+            return File.ReadAllText(Path.Combine(root, name)).Trim().ToLowerInvariant() switch
+            {
+                "1" or "true" or "on" => true,
+                "0" or "false" or "off" => false,
+                _ => null
+            };
+        }
+        catch { return null; }
+    }
+
+    private static async Task PersistPreferenceAsync()
+    {
+        await PreferenceWrite.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            var detailed = Store.Detailed;
+            try
+            {
+                var root = Locations.Value.FirstOrDefault();
+                if (root == null)
+                    return;
+                Directory.CreateDirectory(root);
+                var path = Path.Combine(root, StateFile);
+                File.WriteAllText(path + ".new", detailed ? "1" : "0");
+                File.Move(path + ".new", path, overwrite: true);
+            }
+            catch { }
+        }
+        finally { PreferenceWrite.Release(); }
+    }
+
+    private static IReadOnlyList<string> FindLocations()
+    {
+        var list = new List<string>();
+        try { list.Add(Path.Combine(AppPaths.GetAppDataDirectorySafe(), "Logs")); } catch { }
+        try
+        {
+            if (FileSystem.AppDataDirectory is { Length: > 0 } path)
+                list.Add(Path.Combine(path, "Logs"));
+            var fallback = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (fallback.Length > 0)
+                list.Add(Path.Combine(fallback, "JoesScanner", "Logs"));
+        }
+        catch { }
+        return list.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
     }
 }

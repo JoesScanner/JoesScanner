@@ -9,6 +9,7 @@
     <PackageReference Include="Microsoft.Data.Sqlite" Version="11.0.0" />
     <PackageReference Include="SQLite" Version="3.54.1" />
     <Compile Include="../../JoesScanner/Services/DbBootstrapper.cs" Link="DbBootstrapper.cs" />
+    <Compile Include="../../JoesScanner/Services/DatabaseRecovery.cs" Link="DatabaseRecovery.cs" />
     <Compile Include="../../JoesScanner/Services/DurableLiveQueue.cs" Link="DurableLiveQueue.cs" />
     <Compile Include="../../JoesScanner/Services/DurableLiveQueue.Scheduling.cs" Link="DurableLiveQueue.Scheduling.cs" />
     <Compile Include="../../JoesScanner/Services/DurableLiveQueue.PlaybackLag.cs" Link="DurableLiveQueue.PlaybackLag.cs" />
@@ -48,6 +49,7 @@
     <Compile Include="../../JoesScanner/Services/SavedConnectionUrl.cs" Link="SavedConnectionUrl.cs" />
     <Compile Include="../../JoesScanner/Services/DiagnosticRedaction.cs" Link="DiagnosticRedaction.cs" />
     <Compile Include="../../JoesScanner/Services/DiagnosticZip.cs" Link="DiagnosticZip.cs" />
+    <Compile Include="../../JoesScanner/Services/DiagnosticLog.cs" Link="DiagnosticLog.cs" />
     <EmbeddedResource Include="../../JoesScanner/Platforms/Android/AndroidManifest.xml" LogicalName="AndroidManifest.xml" />
     <EmbeddedResource Include="../../JoesScanner/Platforms/Android/Resources/xml/credential_backup_rules.xml" LogicalName="credential_backup_rules.xml" />
     <EmbeddedResource Include="../../JoesScanner/Platforms/Android/Resources/xml/credential_extraction_rules.xml" LogicalName="credential_extraction_rules.xml" />

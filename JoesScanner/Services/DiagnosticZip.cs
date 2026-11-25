@@ -1,15 +1,11 @@
 using System.IO.Compression;
-using System.Text.RegularExpressions;
 
 namespace JoesScanner.Services;
 
 internal static class DiagnosticZip
 {
-    private static readonly Regex LogFileName = new(
-        @"\Aapp_log_[0-9]{4}-[0-9]{2}-[0-9]{2}\.txt\z", RegexOptions.CultureInvariant);
-
-    internal static async Task<string> CreateAsync(string cacheDirectory, string logsDirectory,
-        IReadOnlyList<string> snapshot, int maxLogFiles)
+    internal static async Task<string> CreateAsync(string cacheDirectory, IReadOnlyList<string> logsDirectories,
+        IReadOnlyList<string> snapshot, int maxLogFiles, TimeProvider clock)
     {
         Directory.CreateDirectory(cacheDirectory);
         var path = Path.Combine(cacheDirectory, $"joesscanner_logs_{DateTime.Now:yyyyMMdd_HHmmss}_{Guid.NewGuid():N}.zip");
@@ -22,17 +18,18 @@ internal static class DiagnosticZip
                 using (var snapshotSource = new StringReader(string.Join(Environment.NewLine, snapshot)))
                     await WriteEntryAsync(zip, "snapshot.txt", snapshotSource).ConfigureAwait(false);
 
-                if (maxLogFiles > 0 && Directory.Exists(logsDirectory))
+                if (maxLogFiles > 0)
                 {
-                    // Only the app's dated text logs are eligible for export.
-                    var logs = new DirectoryInfo(logsDirectory).EnumerateFiles("app_log_*.txt")
-                        .Where(file => LogFileName.IsMatch(file.Name) &&
-                            (file.Attributes & FileAttributes.ReparsePoint) == 0)
-                        .OrderByDescending(file => file.LastWriteTimeUtc)
-                        .Take(maxLogFiles);
+                    var cutoff = clock.GetUtcNow() - DiagnosticLog.MaximumAge;
+                    var logs = DiagnosticLog.Files(logsDirectories).Where(file => file.Start > cutoff)
+                        .OrderByDescending(file => file.Start).Take(maxLogFiles);
+                    long remaining = DiagnosticLog.MaximumBytes;
+                    var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-                    foreach (var file in logs)
+                    foreach (var (file, _) in logs)
                     {
+                        if (file.Length > remaining || !names.Add(file.Name))
+                            continue;
                         FileStream input;
                         try
                         {
@@ -45,6 +42,7 @@ internal static class DiagnosticZip
                         }
                         using var reader = new StreamReader(input);
                         await WriteEntryAsync(zip, $"files/{file.Name}", reader).ConfigureAwait(false);
+                        remaining -= file.Length;
                     }
                 }
             }

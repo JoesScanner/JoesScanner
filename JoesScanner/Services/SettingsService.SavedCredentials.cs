@@ -332,24 +332,34 @@ public sealed partial class SettingsService
             command.Parameters.AddWithValue("$pass", KeyBasicAuthPass);
             string? user = null;
             string? password = null;
+            var unreadable = false;
             using (var reader = command.ExecuteReader())
             {
                 while (reader.Read())
                 {
+                    if (reader.GetValue(1) is not string value)
+                    {
+                        unreadable = true;
+                        continue;
+                    }
                     if (reader.GetString(0) == KeyBasicAuthUser)
-                        user = reader.GetString(1);
+                        user = value;
                     else
-                        password = reader.GetString(1);
+                        password = value;
                 }
             }
-            if (user == null && password == null)
+            if (!unreadable && user == null && password == null)
             {
                 _unscopedBasicAuthPending = false;
                 return;
             }
 
             var preserved = true;
-            if (!string.IsNullOrEmpty(user) || !string.IsNullOrEmpty(password))
+            if (unreadable)
+            {
+                HadUnreadableSettings = true;
+            }
+            else if (!string.IsNullOrEmpty(user) || !string.IsNullOrEmpty(password))
             {
                 // The selection is only a hint for the re-entry notice. Only
                 // per-server rows and URL user info can identify a recorder.
@@ -406,15 +416,20 @@ public sealed partial class SettingsService
         command.Transaction = transaction;
         command.CommandText = "SELECT setting_key, setting_value FROM app_settings;";
         var legacy = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var unreadable = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         using (var reader = command.ExecuteReader())
         {
             while (reader.Read())
             {
-                var key = reader.GetString(0);
-                if (key is KeyBasicAuthUser or KeyBasicAuthPass)
+                if (reader.GetValue(0) is not string key || key is KeyBasicAuthUser or KeyBasicAuthPass)
                     continue;
                 if (IsLegacySecret(key) || key is KeyServerUrl or KeyAuthServerBaseUrl)
-                    legacy[key] = reader.GetString(1);
+                {
+                    if (reader.GetValue(1) is string value)
+                        legacy[key] = value;
+                    else
+                        unreadable.Add(key);
+                }
             }
         }
 
@@ -426,7 +441,17 @@ public sealed partial class SettingsService
                 : $"SELECT server_key, '', '' FROM {table};";
             using var reader = command.ExecuteReader();
             while (reader.Read())
-                urls.Add(new(table, reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+            {
+                if (reader.GetValue(0) is not string key)
+                {
+                    HadUnreadableSettings = true;
+                    continue;
+                }
+                var url = reader.GetValue(1) as string;
+                var info = reader.GetValue(2) as string;
+                HadUnreadableSettings |= url == null || info == null;
+                urls.Add(new(table, key, url ?? "", info ?? ""));
+            }
         }
 
         var values = new Dictionary<string, string>();
@@ -454,6 +479,8 @@ public sealed partial class SettingsService
             key.StartsWith(LegacyPassPrefix, StringComparison.OrdinalIgnoreCase)).Select(key => key[(key.IndexOf("::", StringComparison.Ordinal) + 2)..])
             .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(key => key != SavedConnectionUrl.Scope(key)))
         {
+            if (unreadable.Contains(LegacyUserPrefix + suffix) || unreadable.Contains(LegacyPassPrefix + suffix))
+                continue;
             var pair = new ProtectedCredentials.Pair(legacy.GetValueOrDefault(LegacyUserPrefix + suffix, ""),
                 legacy.GetValueOrDefault(LegacyPassPrefix + suffix, ""));
             if (pair.Username.Length != 0 || pair.Password.Length != 0)
@@ -541,6 +568,8 @@ public sealed partial class SettingsService
                 Execute("UPDATE app_settings SET setting_value = $value WHERE setting_key = $key;",
                     ("$key", key), ("$value", safe));
         }
+        foreach (var key in unreadable)
+            Execute("DELETE FROM app_settings WHERE setting_key = $key;", ("$key", key));
         foreach (var (row, clean) in cleanUrls)
         {
             if (row.Table == TableServers)
@@ -552,5 +581,6 @@ public sealed partial class SettingsService
                 Execute($"DELETE FROM {row.Table} WHERE server_key=$old;", ("$old", row.Key));
         }
         transaction.Commit();
+        HadUnreadableSettings |= unreadable.Count > 0;
     }
 }

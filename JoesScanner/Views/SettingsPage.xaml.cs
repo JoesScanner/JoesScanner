@@ -84,7 +84,7 @@ namespace JoesScanner.Views
             {
                 // If XAML load fails (often a WinRT/WinUI COMException when running unpackaged),
                 // don't let it abort navigation. Render a simple fallback view and log details.
-                try { AppLog.DebugWriteLine(() => $"SettingsPage.InitializeComponent failed: {ex}"); } catch { }
+                try { AppLog.DebugWriteLine(() => $"SettingsPage.InitializeComponent failed: {DiagnosticRedaction.Describe(ex)}"); } catch { }
 
                 Content = new ScrollView
                 {
@@ -447,7 +447,7 @@ namespace JoesScanner.Views
         $"Snapshot taken at: {snapshotTime:yyyy-MM-dd HH:mm} (local)",
         $"App: v{appVersion} ({appBuild})",
         $"Package: {appId}",
-        $"Server URL: {serverUrl}",
+        $"Server: {SavedConnectionUrl.Scope(serverUrl) ?? "(not set)"}",
         $"Platform: {platform} {osVersion}",
         "Max log file size: 1 MB",
         string.Empty
@@ -888,7 +888,7 @@ namespace JoesScanner.Views
             {
                 try
                 {
-                    AppLog.DebugWriteLine(() => $"SettingsPage.OnValidateClicked failed: {ex}");
+                    AppLog.DebugWriteLine(() => $"SettingsPage.OnValidateClicked failed: {DiagnosticRedaction.Describe(ex)}");
                 }
                 catch
                 {
@@ -978,7 +978,7 @@ private void OnConnectionHeaderTapped(object sender, EventArgs e)
         }
         catch (Exception ex)
         {
-            try { AppLog.DebugWriteLine(() => $"SettingsPage: connection refresh failed: {ex}"); } catch { }
+            try { AppLog.DebugWriteLine(() => $"SettingsPage: connection refresh failed: {DiagnosticRedaction.Describe(ex)}"); } catch { }
         }
     });
 }
@@ -997,7 +997,7 @@ private void OnServerPickerFocused(object sender, FocusEventArgs e)
         }
         catch (Exception ex)
         {
-            try { AppLog.DebugWriteLine(() => $"SettingsPage: picker refresh failed: {ex}"); } catch { }
+            try { AppLog.DebugWriteLine(() => $"SettingsPage: picker refresh failed: {DiagnosticRedaction.Describe(ex)}"); } catch { }
         }
     });
 }
@@ -1100,7 +1100,7 @@ private async void OnClearLogClicked(object sender, EventArgs e)
 {
     try
     {
-        AppLog.ClearAll();
+        await AppLog.ClearAllAsync();
         RefreshLogText();
         await UiDialogs.AlertAsync("Cleared", "Log cleared.", "Close");
     }
@@ -1243,12 +1243,6 @@ private void RefreshLogText()
 
     try
     {
-        if (!AppLog.IsEnabled)
-        {
-            editor.Text = "Logging is disabled. Turn on Enable logging to capture entries.";
-            return;
-        }
-
         var lines = AppLog.GetSnapshot(500);
         editor.Text = lines.Length == 0
             ? "No log entries yet."

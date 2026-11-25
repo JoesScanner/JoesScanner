@@ -55,6 +55,7 @@ namespace JoesScanner.Services
             }
             catch (CredentialStorageException ex)
             {
+                AppLog.Basic("Account verification could not read protected credentials.");
                 return new(false, "credential_storage_unavailable", ex.Message);
             }
 
@@ -107,6 +108,7 @@ namespace JoesScanner.Services
             catch (Exception ex) when (!cancellationToken.IsCancellationRequested &&
                 ex is HttpRequestException or IOException or TaskCanceledException)
             {
+                AppLog.Basic(() => $"Account verification request failed ({DiagnosticRedaction.Describe(ex)}).");
                 return ApplyOffline();
             }
 
@@ -115,6 +117,8 @@ namespace JoesScanner.Services
                 return Replaced();
 
             var code = (int)status;
+            if (code is 401 or 403 or 429 || code >= 500)
+                AppLog.Basic(() => $"Account verification returned HTTP {code}.");
             if (code == 429 || code >= 500)
                 return new(false, "http_" + code, $"The account service is temporarily unavailable (HTTP {code}).");
 

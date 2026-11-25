@@ -17,7 +17,7 @@ namespace JoesScanner.Services;
 // must be handled via EnsureColumnExists.
 public static class DbBootstrapper
 {
-    private const int CurrentSchemaVersion = 5;
+    internal const int CurrentSchemaVersion = 5;
     private static readonly SemaphoreSlim InitializationGate = new(1, 1);
     private static readonly ConcurrentDictionary<string, byte> InitializedDataSources = new(StringComparer.OrdinalIgnoreCase);
 
@@ -40,12 +40,24 @@ public static class DbBootstrapper
 
             var version = await GetUserVersionAsync(connection, cancellationToken).ConfigureAwait(false);
             if (version > CurrentSchemaVersion)
-                throw new InvalidOperationException($"Database schema version {version} is newer than this app supports ({CurrentSchemaVersion}).");
+                throw new NewerDatabaseException();
 
-            await EnsureSchemaV1Async(connection, cancellationToken).ConfigureAwait(false);
+            if (version < CurrentSchemaVersion && File.Exists(dataSource))
+                DatabaseRecovery.BackupBeforeMigration(connection, dataSource, version);
+
+            await using var transaction = connection.BeginTransaction();
+            // Re-read once the write lock is held. A concurrent initializer may already have upgraded.
+            version = await GetUserVersionAsync(connection, cancellationToken, transaction).ConfigureAwait(false);
+            if (version > CurrentSchemaVersion)
+                throw new NewerDatabaseException();
+            await EnsureSchemaV1Async(connection, transaction, cancellationToken).ConfigureAwait(false);
             if (version < CurrentSchemaVersion)
-                await MigrateLiveQueueAsync(connection, cancellationToken).ConfigureAwait(false);
-            await EnsureLiveRecoverySchemaAsync(connection, cancellationToken).ConfigureAwait(false);
+                await MigrateLiveQueueAsync(connection, transaction, version, cancellationToken).ConfigureAwait(false);
+            await EnsureLiveRecoverySchemaAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            if (version < CurrentSchemaVersion)
+                AppLog.Basic(() => $"Local database schema upgraded from {version} to {CurrentSchemaVersion}.");
 
             if (!string.IsNullOrWhiteSpace(dataSource))
                 InitializedDataSources[dataSource] = 0;
@@ -59,9 +71,10 @@ public static class DbBootstrapper
     public static void EnsureInitialized(SqliteConnection connection) =>
         EnsureInitializedAsync(connection).GetAwaiter().GetResult();
 
-    private static async Task EnsureLiveRecoverySchemaAsync(SqliteConnection connection, CancellationToken token)
+    internal static void Forget(string path) => InitializedDataSources.TryRemove(path, out _);
+
+    private static async Task EnsureLiveRecoverySchemaAsync(SqliteConnection connection, SqliteTransaction transaction, CancellationToken token)
     {
-        await using var transaction = connection.BeginTransaction();
         await EnsureColumnExistsAsync(connection, "live_queue_recordings", "recovery_backlog",
             "INTEGER NOT NULL DEFAULT 0", token, transaction).ConfigureAwait(false);
         await EnsureColumnExistsAsync(connection, "live_queue_recordings", "audio_revision",
@@ -85,7 +98,6 @@ public static class DbBootstrapper
             );
             """;
         await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
-        await transaction.CommitAsync(token).ConfigureAwait(false);
     }
 
     public static async Task ApplyPragmasAsync(SqliteConnection connection, CancellationToken cancellationToken = default)
@@ -100,9 +112,10 @@ PRAGMA busy_timeout=5000;";
         await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private static async Task EnsureSchemaV1Async(SqliteConnection connection, CancellationToken cancellationToken)
+    private static async Task EnsureSchemaV1Async(SqliteConnection connection, SqliteTransaction transaction, CancellationToken cancellationToken)
     {
         using var cmd = connection.CreateCommand();
+        cmd.Transaction = transaction;
         cmd.CommandText = @"
 CREATE TABLE IF NOT EXISTS app_settings (
   setting_key TEXT PRIMARY KEY,
@@ -120,7 +133,16 @@ CREATE TABLE IF NOT EXISTS servers (
   created_utc TEXT NOT NULL,
   updated_utc TEXT NOT NULL,
   last_used_utc TEXT NULL,
-  uses_api_firewall_credentials INTEGER NOT NULL DEFAULT 0
+  uses_api_firewall_credentials INTEGER NOT NULL DEFAULT 0,
+  info_url TEXT NOT NULL DEFAULT '',
+  area_label TEXT NOT NULL DEFAULT '',
+  map_anchor TEXT NOT NULL DEFAULT '',
+  is_official INTEGER NOT NULL DEFAULT 0,
+  directory_id INTEGER NOT NULL DEFAULT 0,
+  badge TEXT NOT NULL DEFAULT '',
+  badge_label TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT '',
+  directory_source TEXT NULL
 );
 
 -- Saved listening connections are distinct from cached directory and legacy URL rows.
@@ -158,6 +180,7 @@ CREATE TABLE IF NOT EXISTS server_runtime_state (
 CREATE TABLE IF NOT EXISTS server_auth_state (
   server_key TEXT PRIMARY KEY,
   is_validated INTEGER NOT NULL DEFAULT 0,
+  validated_online INTEGER NOT NULL DEFAULT 0,
   validated_utc TEXT NULL,
   expires_utc TEXT NULL,
   last_attempt_utc TEXT NULL,
@@ -262,52 +285,56 @@ CREATE TABLE IF NOT EXISTS unregistered_session_queue (
   json_payload TEXT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_servers_enabled_sort ON servers(enabled, sort_order);
-CREATE INDEX IF NOT EXISTS idx_calls_server_start ON calls(server_key, start_time_utc);
-CREATE INDEX IF NOT EXISTS idx_calls_server_received ON calls(server_key, received_at_utc);
-
-CREATE INDEX IF NOT EXISTS idx_filter_profiles_name ON filter_profiles(name);
-CREATE INDEX IF NOT EXISTS idx_telemetry_queue_created ON telemetry_queue(created_utc);
-CREATE INDEX IF NOT EXISTS idx_unregistered_queue_created ON unregistered_session_queue(created_utc);
 ";
         await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 
-        await EnsureColumnExistsAsync(connection, "scanner_connections", "sort_order", "INTEGER NULL", cancellationToken).ConfigureAwait(false);
-        await EnsureColumnExistsAsync(connection, "scanner_connections", "directory_source", "TEXT NULL", cancellationToken).ConfigureAwait(false);
-        await EnsureColumnExistsAsync(connection, "scanner_connections", "directory_hold", "INTEGER NOT NULL DEFAULT 0", cancellationToken).ConfigureAwait(false);
-        await EnsureColumnExistsAsync(connection, "scanner_connections", "directory_candidate", "TEXT NULL", cancellationToken).ConfigureAwait(false);
-        await EnsureColumnExistsAsync(connection, "scanner_connections", "directory_firewall", "INTEGER NULL", cancellationToken).ConfigureAwait(false);
-        await EnsureColumnExistsAsync(connection, "scanner_connections", "candidate_firewall", "INTEGER NULL", cancellationToken).ConfigureAwait(false);
-        await EnsureColumnExistsAsync(connection, "servers", "display_name", "TEXT NOT NULL DEFAULT ''", cancellationToken).ConfigureAwait(false);
-        await EnsureColumnExistsAsync(connection, "servers", "enabled", "INTEGER NOT NULL DEFAULT 1", cancellationToken).ConfigureAwait(false);
-        await EnsureColumnExistsAsync(connection, "servers", "sort_order", "INTEGER NOT NULL DEFAULT 0", cancellationToken).ConfigureAwait(false);
-        await EnsureColumnExistsAsync(connection, "servers", "is_builtin", "INTEGER NOT NULL DEFAULT 0", cancellationToken).ConfigureAwait(false);
-        await EnsureColumnExistsAsync(connection, "servers", "created_utc", "TEXT NOT NULL DEFAULT ''", cancellationToken).ConfigureAwait(false);
-        await EnsureColumnExistsAsync(connection, "servers", "updated_utc", "TEXT NOT NULL DEFAULT ''", cancellationToken).ConfigureAwait(false);
-        await EnsureColumnExistsAsync(connection, "servers", "last_used_utc", "TEXT NULL", cancellationToken).ConfigureAwait(false);
-        await EnsureColumnExistsAsync(connection, "servers", "uses_api_firewall_credentials", "INTEGER NOT NULL DEFAULT 0", cancellationToken).ConfigureAwait(false);
-        await EnsureColumnExistsAsync(connection, "servers", "directory_source", "TEXT NULL", cancellationToken).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "scanner_connections", "sort_order", "INTEGER NULL", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "scanner_connections", "directory_source", "TEXT NULL", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "scanner_connections", "directory_hold", "INTEGER NOT NULL DEFAULT 0", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "scanner_connections", "directory_candidate", "TEXT NULL", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "scanner_connections", "directory_firewall", "INTEGER NULL", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "scanner_connections", "candidate_firewall", "INTEGER NULL", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "servers", "display_name", "TEXT NOT NULL DEFAULT ''", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "servers", "enabled", "INTEGER NOT NULL DEFAULT 1", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "servers", "sort_order", "INTEGER NOT NULL DEFAULT 0", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "servers", "is_builtin", "INTEGER NOT NULL DEFAULT 0", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "servers", "created_utc", "TEXT NOT NULL DEFAULT ''", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "servers", "updated_utc", "TEXT NOT NULL DEFAULT ''", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "servers", "last_used_utc", "TEXT NULL", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "servers", "uses_api_firewall_credentials", "INTEGER NOT NULL DEFAULT 0", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "servers", "directory_source", "TEXT NULL", cancellationToken, transaction).ConfigureAwait(false);
+
+        await EnsureColumnExistsAsync(connection, "servers", "info_url", "TEXT NOT NULL DEFAULT ''", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "servers", "area_label", "TEXT NOT NULL DEFAULT ''", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "servers", "map_anchor", "TEXT NOT NULL DEFAULT ''", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "servers", "is_official", "INTEGER NOT NULL DEFAULT 0", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "servers", "directory_id", "INTEGER NOT NULL DEFAULT 0", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "servers", "badge", "TEXT NOT NULL DEFAULT ''", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "servers", "badge_label", "TEXT NOT NULL DEFAULT ''", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "servers", "source", "TEXT NOT NULL DEFAULT ''", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "server_auth_state", "validated_online", "INTEGER NOT NULL DEFAULT 0", cancellationToken, transaction).ConfigureAwait(false);
 
         // Auth state columns have grown over time; older installs may not have these.
-        await EnsureColumnExistsAsync(connection, "server_auth_state", "subscription_amount_usd", "REAL NULL", cancellationToken).ConfigureAwait(false);
-        await EnsureColumnExistsAsync(connection, "server_auth_state", "premium_min_amount_usd", "REAL NULL", cancellationToken).ConfigureAwait(false);
-        await EnsureColumnExistsAsync(connection, "server_auth_state", "tier_level", "INTEGER NULL", cancellationToken).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "server_auth_state", "subscription_amount_usd", "REAL NULL", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "server_auth_state", "premium_min_amount_usd", "REAL NULL", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "server_auth_state", "tier_level", "INTEGER NULL", cancellationToken, transaction).ConfigureAwait(false);
 
-        await EnsureColumnExistsAsync(connection, "calls", "transcript_available", "INTEGER NOT NULL DEFAULT 0", cancellationToken).ConfigureAwait(false);
-        await EnsureFilterProfileSchemaAsync(connection, cancellationToken).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "calls", "transcript_available", "INTEGER NOT NULL DEFAULT 0", cancellationToken, transaction).ConfigureAwait(false);
+        await EnsureFilterProfileSchemaAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
+        cmd.CommandText = """
+            CREATE INDEX IF NOT EXISTS idx_servers_enabled_sort ON servers(enabled, sort_order);
+            CREATE INDEX IF NOT EXISTS idx_calls_server_start ON calls(server_key, start_time_utc);
+            CREATE INDEX IF NOT EXISTS idx_calls_server_received ON calls(server_key, received_at_utc);
+            CREATE INDEX IF NOT EXISTS idx_filter_profiles_name ON filter_profiles(name);
+            CREATE INDEX IF NOT EXISTS idx_telemetry_queue_created ON telemetry_queue(created_utc);
+            CREATE INDEX IF NOT EXISTS idx_unregistered_queue_created ON unregistered_session_queue(created_utc);
+            """;
+        await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private static async Task MigrateLiveQueueAsync(SqliteConnection connection, CancellationToken token)
+    private static async Task MigrateLiveQueueAsync(SqliteConnection connection, SqliteTransaction transaction,
+        int version, CancellationToken token)
     {
-        await using var transaction = connection.BeginTransaction();
-        // Another process can finish the migration while this connection is
-        // waiting for the write lock.
-        var version = await GetUserVersionAsync(connection, token, transaction).ConfigureAwait(false);
-        if (version == CurrentSchemaVersion)
-            return;
-        if (version > CurrentSchemaVersion)
-            throw new InvalidOperationException($"Database schema version {version} is newer than this app supports ({CurrentSchemaVersion}).");
-
         await using var queue = connection.CreateCommand();
         queue.Transaction = transaction;
         if (version < 4)
@@ -357,8 +384,6 @@ CREATE INDEX IF NOT EXISTS idx_unregistered_queue_created ON unregistered_sessio
         queue.Parameters.AddWithValue("$v", CurrentSchemaVersion);
         queue.Parameters.AddWithValue("$u", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
         await queue.ExecuteNonQueryAsync(token).ConfigureAwait(false);
-        token.ThrowIfCancellationRequested();
-        await transaction.CommitAsync(token).ConfigureAwait(false);
     }
 
     private static async Task MigrateLiveQueueScopesAsync(SqliteConnection connection, SqliteTransaction transaction,
@@ -506,11 +531,11 @@ CREATE INDEX IF NOT EXISTS idx_unregistered_queue_created ON unregistered_sessio
         }
     }
 
-    private static async Task EnsureFilterProfileSchemaAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    private static async Task EnsureFilterProfileSchemaAsync(SqliteConnection connection, SqliteTransaction transaction,
+        CancellationToken cancellationToken)
     {
         // Older databases can have either the split JSON columns or only the bootstrap payload.
         // Keep the payload column so inserts also satisfy the older NOT NULL constraint.
-        await using var transaction = connection.BeginTransaction();
         await EnsureColumnExistsAsync(connection, "filter_profiles", "json_payload", "TEXT NOT NULL DEFAULT '{}'", cancellationToken, transaction).ConfigureAwait(false);
         var addedServerKey = await EnsureColumnExistsAsync(connection, "filter_profiles", "server_key", "TEXT NOT NULL DEFAULT ''", cancellationToken, transaction).ConfigureAwait(false);
         var addedFilters = await EnsureColumnExistsAsync(connection, "filter_profiles", "filters_json", "TEXT NOT NULL DEFAULT '{}'", cancellationToken, transaction).ConfigureAwait(false);
@@ -544,7 +569,6 @@ CREATE INDEX IF NOT EXISTS idx_unregistered_queue_created ON unregistered_sessio
         cmd.Parameters.AddWithValue("$filters", addedFilters);
         cmd.Parameters.AddWithValue("$rules", addedRules);
         await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task<bool> EnsureColumnExistsAsync(SqliteConnection connection, string tableName, string columnName,

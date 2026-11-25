@@ -231,7 +231,7 @@ namespace JoesScanner.ViewModels
             catch (Exception ex)
             {
                 aborted = true;
-                AppLog.DebugWriteLine(() => $"Error in EnsureQueuePlaybackAsync: {ex}");
+                AppLog.DebugWriteLine(() => $"Error in EnsureQueuePlaybackAsync: {DiagnosticRedaction.Describe(ex)}");
             }
             finally
             {

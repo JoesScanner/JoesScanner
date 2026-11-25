@@ -58,12 +58,6 @@ namespace JoesScanner.Views
         {
             try
             {
-                if (!AppLog.IsEnabled)
-                {
-                    LogEditor.Text = "Logging is disabled.";
-                    return;
-                }
-
                 var lines = AppLog.GetSnapshot(MaxLines);
                 LogEditor.Text = string.Join(Environment.NewLine, lines);
 
@@ -103,13 +97,7 @@ namespace JoesScanner.Views
         {
             try
             {
-                if (!AppLog.IsEnabled)
-                {
-                    await DisplayAlertAsync("Logs", "Logging is disabled.", "OK");
-                    return;
-                }
-
-                var zipPath = await AppLog.ExportLogsAsync(maxLogFiles: 3, snapshotMaxLines: MaxLines);
+                var zipPath = await AppLog.ExportLogsAsync(snapshotMaxLines: MaxLines);
                 if (string.IsNullOrWhiteSpace(zipPath) || !File.Exists(zipPath))
                 {
                     await DisplayAlertAsync("Logs", "Unable to export logs.", "OK");
@@ -175,12 +163,6 @@ namespace JoesScanner.Views
 
             try
             {
-                if (!AppLog.IsEnabled)
-                {
-                    LogEditor.Text = "Logging is disabled.";
-                    return;
-                }
-
                 _autoRefreshTimer.Tick -= OnAutoRefreshTick;
                 _autoRefreshTimer.Stop();
             }
@@ -254,13 +236,6 @@ namespace JoesScanner.Views
             AppLog.SetEnabled(e.Value);
             SyncLoggingState(e.Value);
 
-            if (!e.Value)
-            {
-                _autoRefreshEnabled = false;
-                UpdateAutoRefreshButtonVisual();
-                StopAutoRefreshTimer();
-            }
-
             RefreshLog();
         }
 
@@ -269,19 +244,13 @@ namespace JoesScanner.Views
             var resolvedEnabled = enabled ?? AppLog.IsEnabled;
 
             // The Switch provides the visual state; this label provides explicit text.
-            LoggingStateLabel.Text = resolvedEnabled ? "Enabled" : "Disabled";
+            LoggingStateLabel.Text = resolvedEnabled ? "Detailed diagnostics on" : "Detailed diagnostics off";
         }
 
         private async void OnCopyClicked(object sender, EventArgs e)
         {
             try
             {
-                if (!AppLog.IsEnabled)
-                {
-                    LogEditor.Text = "Logging is disabled.";
-                    return;
-                }
-
                 var text = LogEditor.Text ?? string.Empty;
                 await AppClipboard.SetTextAsync(text);
                 await UiDialogs.AlertAsync("Copied", "Log copied to clipboard.", "OK");

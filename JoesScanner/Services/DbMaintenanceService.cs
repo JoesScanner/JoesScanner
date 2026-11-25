@@ -62,7 +62,7 @@ public sealed class DbMaintenanceService : IDbMaintenanceService, IDisposable
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    AppLog.DebugWriteLine(() => $"Database maintenance deferred ({ex.GetType().Name}).");
+                    AppLog.Basic(() => $"Database maintenance deferred ({ex.GetType().Name}).");
                 }
 
                 await Task.Delay(delay, token).ConfigureAwait(false);

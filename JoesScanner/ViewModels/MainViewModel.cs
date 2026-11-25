@@ -1465,10 +1465,10 @@ public async Task ApplyAudioMenuSelectionAsync(double? speedStep)
     }
     catch (Exception ex)
     {
-        AppLog.DebugWriteLine(() => $"Error in ApplyAudioMenuSelectionAsync: {ex}");
+        AppLog.DebugWriteLine(() => $"Error in ApplyAudioMenuSelectionAsync: {DiagnosticRedaction.Describe(ex)}");
         try
         {
-            AppLog.Add(() => $"Audio(VM): Menu apply error. {ex.GetType().Name}: {ex.Message}");
+            AppLog.Add(() => $"Audio(VM): Menu apply error. {DiagnosticRedaction.Describe(ex)}");
         }
         catch
         {
@@ -1508,10 +1508,10 @@ private async Task SetAudioEnabledAsync(bool enabled, string reason)
     }
     catch (Exception ex)
     {
-        AppLog.DebugWriteLine(() => $"Error in SetAudioEnabledAsync: {ex}");
+        AppLog.DebugWriteLine(() => $"Error in SetAudioEnabledAsync: {DiagnosticRedaction.Describe(ex)}");
         try
         {
-            AppLog.Add(() => $"Audio(VM): Enable error. {ex.GetType().Name}: {ex.Message}");
+            AppLog.Add(() => $"Audio(VM): Enable error. {DiagnosticRedaction.Describe(ex)}");
         }
         catch
         {
@@ -2227,7 +2227,7 @@ public void DismissAddressAlert(CallItem call)
         private void ReportPlaybackFailure(Exception ex, LivePlaybackRequests.Request request)
         {
             // Log failure types without recording URLs or request details.
-            AppLog.DebugWriteLine(() => ex is HttpRequestException { StatusCode: { } status }
+            AppLog.Basic(() => ex is HttpRequestException { StatusCode: { } status }
                 ? $"Live playback failed: {ex.GetType().Name}, HTTP {(int)status}"
                 : $"Live playback failed: {ex.GetType().Name}");
             if (!request.CanContinue)

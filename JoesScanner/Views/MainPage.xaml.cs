@@ -106,7 +106,7 @@ namespace JoesScanner.Views
                     {
                         try
                         {
-                            AppLog.Add(() => $"Audio(UI): Overlay toggle error. {ex.GetType().Name}: {ex.Message}");
+                            AppLog.Add(() => $"Audio(UI): Overlay toggle error. {DiagnosticRedaction.Describe(ex)}");
                         }
                         catch
                         {
@@ -165,7 +165,7 @@ namespace JoesScanner.Views
             {
                 try
                 {
-                    AppLog.Add(() => $"Audio(UI): Audio menu option error. {ex.GetType().Name}: {ex.Message}");
+                    AppLog.Add(() => $"Audio(UI): Audio menu option error. {DiagnosticRedaction.Describe(ex)}");
                 }
                 catch
                 {
@@ -831,7 +831,7 @@ private void AttachAddressAlertHandlers()
             }
             catch (Exception ex)
             {
-                AppLog.Add(() => $"AddressDetection: open maps failed. {ex.Message}");
+                AppLog.Add(() => $"AddressDetection: open maps failed. {DiagnosticRedaction.Describe(ex)}");
             }
         }
 
@@ -862,7 +862,7 @@ private void AttachAddressAlertHandlers()
             }
             catch (Exception ex)
             {
-                AppLog.Add(() => $"AddressDetection: open maps failed. {ex.Message}");
+                AppLog.Add(() => $"AddressDetection: open maps failed. {DiagnosticRedaction.Describe(ex)}");
             }
         }
 
@@ -883,7 +883,7 @@ private void AttachAddressAlertHandlers()
             }
             catch (Exception ex)
             {
-                AppLog.Add(() => $"What3Words: open map failed. {ex.Message}");
+                AppLog.Add(() => $"What3Words: open map failed. {DiagnosticRedaction.Describe(ex)}");
             }
         }
 
@@ -902,7 +902,7 @@ private void AttachAddressAlertHandlers()
             }
             catch (Exception ex)
             {
-                AppLog.Add(() => $"What3Words: copy failed. {ex.Message}");
+                AppLog.Add(() => $"What3Words: copy failed. {DiagnosticRedaction.Describe(ex)}");
             }
         }
 
@@ -920,7 +920,7 @@ private void AttachAddressAlertHandlers()
             }
             catch (Exception ex)
             {
-                AppLog.Add(() => $"What3Words: copy coords failed. {ex.Message}");
+                AppLog.Add(() => $"What3Words: copy coords failed. {DiagnosticRedaction.Describe(ex)}");
             }
         }
 

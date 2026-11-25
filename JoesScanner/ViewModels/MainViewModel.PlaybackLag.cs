@@ -120,5 +120,5 @@ public partial class MainViewModel
     }
 
     private static void LogPlaybackLag(DurableLiveQueue.Run scope, string result) =>
-        AppLog.Add(() => $"Verified playback lag for recorder {scope.ServerId:N}: {result}.");
+        AppLog.Basic(() => $"Verified playback lag for recorder {scope.ServerId:N}: {result}.");
 }

@@ -45,6 +45,15 @@ internal static class AppPaths
         return Path.Combine(dir, fileName);
     }
 
+#if IOS || MACCATALYST
+    internal static void ExcludeFromPlatformBackup(string directory)
+    {
+        using var url = Foundation.NSUrl.FromFilename(directory);
+        using var excluded = Foundation.NSNumber.FromBoolean(true);
+        url.SetResource(Foundation.NSUrl.IsExcludedFromBackupKey, excluded);
+    }
+#endif
+
     internal static string? TryGetCacheDirectory()
     {
         try { return FileSystem.CacheDirectory; }

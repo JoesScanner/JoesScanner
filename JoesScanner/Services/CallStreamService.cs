@@ -379,33 +379,32 @@ namespace JoesScanner.Services
                 {
                     // Most likely an HttpClient timeout or similar; treat as recoverable.
                     errorMessage = "The connection to the audio server timed out. The app will retry automatically.";
-                    AppLog.DebugWriteLine(() => $"[CallStreamService] [Timeout] {ex}");
-                    AppLog.Add(() => $"CallStream: poll timed out. ex={ex.GetType().Name}: {ex.Message}");
+                    AppLog.Basic(() => $"CallStream: poll timed out. ex={DiagnosticRedaction.Describe(ex)}");
                 }
                 catch (FirewallAuthenticationException ex)
                 {
                     isAuthError = true;
                     setupRequired = ex.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden;
                     errorMessage = ex.Message;
+                    AppLog.Basic(() => $"Recorder firewall authentication failed ({DiagnosticRedaction.Describe(ex)}).");
                 }
                 catch (CallStreamAuthException ex)
                 {
                     isAuthError = true;
                     setupRequired = true;
                     errorMessage = ex.Message;
-                    AppLog.DebugWriteLine(() => $"[CallStreamService] [AuthError] {ex}");
-                    AppLog.Add(() => $"CallStream: auth error. {ex.Message}");
+                    AppLog.Basic(() => $"CallStream: auth error. {DiagnosticRedaction.Describe(ex)}");
                 }
                 catch (RecordingAccessException ex)
                 {
                     isAuthError = true;
                     errorMessage = ex.Message;
+                    AppLog.Basic("Recorder access was rejected.");
                 }
                 catch (HttpRequestException ex)
                 {
                     // Retry once on transient transport failures (for example: "Socket closed").
-                    AppLog.DebugWriteLine(() => $"[CallStreamService] [HttpError] {ex}");
-                    AppLog.Add(() => $"CallStream: http error. ex={ex.GetType().Name}: {ex.Message}");
+                    AppLog.Basic(() => $"CallStream: http error. ex={DiagnosticRedaction.Describe(ex)}");
 
                     try
                     {
@@ -430,8 +429,7 @@ namespace JoesScanner.Services
                         isAuthError = true;
                         setupRequired = true;
                         errorMessage = retryAuth.Message;
-                        AppLog.DebugWriteLine(() => $"[CallStreamService] [AuthError] {retryAuth}");
-                        AppLog.Add(() => $"CallStream: auth error after retry. {retryAuth.Message}");
+                        AppLog.Basic(() => $"CallStream: auth error after retry. {DiagnosticRedaction.Describe(retryAuth)}");
                     }
                     catch (RecordingAccessException retryAuth)
                     {
@@ -441,15 +439,13 @@ namespace JoesScanner.Services
                     catch (Exception retryEx)
                     {
                         errorMessage = BuildTransportErrorMessage(retryEx);
-                        AppLog.DebugWriteLine(() => $"[CallStreamService] [HttpRetryFailed] {retryEx}");
-                        AppLog.Add(() => $"CallStream: http retry failed. ex={retryEx.GetType().Name}: {retryEx.Message}");
+                        AppLog.Basic(() => $"CallStream: http retry failed. ex={DiagnosticRedaction.Describe(retryEx)}");
                     }
                 }
                 catch (Exception ex)
                 {
                     errorMessage = BuildTransportErrorMessage(ex);
-                    AppLog.DebugWriteLine(() => $"[CallStreamService] [UnexpectedError] {ex}");
-                    AppLog.Add(() => $"CallStream: unexpected error. ex={ex.GetType().Name}: {ex.Message}");
+                    AppLog.Basic(() => $"CallStream: unexpected error. ex={DiagnosticRedaction.Describe(ex)}");
                 }
 
                 // Surface any error from the poll as a synthetic CallItem row.
@@ -466,7 +462,6 @@ namespace JoesScanner.Services
                         ? errorMessage
                         : $"Error talking to {callsUrl}: {errorMessage}";
 
-                    AppLog.Add(() => $"CallStream: {talkgroup} - {transcription} [ServerUrl={callsUrl}]");
 
                     // Clear error row for the UI.
                     yield return new CallItem
@@ -687,13 +682,13 @@ namespace JoesScanner.Services
                     }
                     catch (Exception ex2)
                     {
-                        AppLog.Add(() => $"AppleTest: backfill failed: {ex2.Message}");
+                        AppLog.Add(() => $"AppleTest: backfill failed: {DiagnosticRedaction.Describe(ex2)}");
                         yield break;
                     }
                 }
                 catch (Exception ex)
                 {
-                    AppLog.Add(() => $"AppleTest: backfill failed: {ex.Message}");
+                    AppLog.Add(() => $"AppleTest: backfill failed: {DiagnosticRedaction.Describe(ex)}");
                     yield break;
                 }
 
@@ -837,7 +832,7 @@ namespace JoesScanner.Services
                                         ex is HttpRequestException or CallStreamAuthException or FirewallAuthenticationException or
                                             RecordingAccessException or OperationCanceledException or JsonException)
             {
-                AppLog.Add(() => $"Foreground call recovery ended early ({ex.GetType().Name}).");
+                AppLog.Basic(() => $"Foreground call recovery ended early ({ex.GetType().Name}).");
             }
             return false;
         }
@@ -1308,7 +1303,7 @@ namespace JoesScanner.Services
             }
             catch (Exception ex)
             {
-                try { AppLog.Add(() => $"AddressDetection: Apply failed. {ex.Message}"); } catch { }
+                try { AppLog.Add(() => $"AddressDetection: Apply failed. {DiagnosticRedaction.Describe(ex)}"); } catch { }
             }
         }
 
@@ -1497,7 +1492,7 @@ namespace JoesScanner.Services
             }
             catch (Exception ex) when (!token.IsCancellationRequested)
             {
-                AppLog.DebugWriteLine(() => $"Live WebSocket connection failed ({ex.GetType().Name}).");
+                AppLog.Basic(() => $"Live WebSocket connection failed ({ex.GetType().Name}).");
                 return null;
             }
         }

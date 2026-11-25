@@ -553,7 +553,7 @@ namespace JoesScanner.ViewModels
             {
                 try
                 {
-                    AppLog.Add(() => $"{operation} failed. ex={ex.GetType().Name}: {ex.Message}");
+                    AppLog.Add(() => $"{operation} failed. ex={DiagnosticRedaction.Describe(ex)}");
                 }
                 catch
                 {
@@ -761,7 +761,7 @@ namespace JoesScanner.ViewModels
                         }
                         catch (Exception ex)
                         {
-                            try { AppLog.Add(() => $"AddrDetect(Hist): apply failed call={call?.BackendId}. {ex.Message}"); } catch { }
+                            try { AppLog.Add(() => $"AddrDetect(Hist): apply failed call={call?.BackendId}. {DiagnosticRedaction.Describe(ex)}"); } catch { }
                         }
                     }
 

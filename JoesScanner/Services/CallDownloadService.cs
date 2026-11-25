@@ -95,7 +95,7 @@ namespace JoesScanner.Services
             }
             catch (Exception ex)
             {
-                AppLog.Add(() => $"Download: share failed. ex={ex.GetType().Name}: {ex.Message}");
+                AppLog.Add(() => $"Download: share failed. ex={DiagnosticRedaction.Describe(ex)}");
                 await ShowErrorAsync("Save failed", $"The file was downloaded but could not be shared: {ex.Message}");
             }
         }
@@ -179,7 +179,7 @@ namespace JoesScanner.Services
             }
             catch (Exception ex)
             {
-                AppLog.Add(() => $"Download: range zip failed. ex={ex.GetType().Name}: {ex.Message}");
+                AppLog.Add(() => $"Download: range zip failed. ex={DiagnosticRedaction.Describe(ex)}");
                 await ShowErrorAsync("Download failed", $"Could not create the zip file: {ex.Message}");
                 return;
             }
@@ -190,7 +190,7 @@ namespace JoesScanner.Services
             }
             catch (Exception ex)
             {
-                AppLog.Add(() => $"Download: share zip failed. ex={ex.GetType().Name}: {ex.Message}");
+                AppLog.Add(() => $"Download: share zip failed. ex={DiagnosticRedaction.Describe(ex)}");
                 await ShowErrorAsync("Save failed", $"The zip was created but could not be shared: {ex.Message}");
             }
         }

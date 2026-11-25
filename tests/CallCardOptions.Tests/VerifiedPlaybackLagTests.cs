@@ -171,10 +171,13 @@ internal static class VerifiedPlaybackLagTests
         await live.ResumedQueue.WaitAsync(Timeout);
 
         live.PlaybackOptionsForTest = live.PlaybackOptionsForTest with { SourceMode = LiveAudioSourceMode.SelectedOnly };
-        await live.WaitForSourceForTestAsync();
+        Check(await live.WaitForSourceForTestAsync().WaitAsync(Timeout), "The initial selected source must be active.");
+        // A source change wakes the automatic queue. Let that wake finish before
+        // seeding the next proof, so normal playback cannot consume its test rows.
+        await live.ResumedQueue.WaitAsync(Timeout);
         var previousSource = await AddLagForTestAsync(live, "-source");
         live.ChooseLiveAudioSource(LiveAudioSource.Recorder(B));
-        await live.WaitForSourceForTestAsync();
+        Check(await live.WaitForSourceForTestAsync().WaitAsync(Timeout), "The alternate source must be active.");
         await previousSource();
         Check(await live.IsPendingForTestAsync("a-old-1-source"),
             "A reply captured for the previous source may not change its floor after the switch.");

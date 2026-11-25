@@ -97,7 +97,7 @@ namespace JoesScanner.Services
             catch (Exception ex)
             {
                 if (AppLog.IsEnabled)
-                    AppLog.Add(() => $"W3W: convert-to-coordinates error for '{normalized}'. {ex.Message}");
+                    AppLog.Add(() => $"W3W: convert-to-coordinates error for '{normalized}'. {DiagnosticRedaction.Describe(ex)}");
             }
             finally
             {

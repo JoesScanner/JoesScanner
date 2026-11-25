@@ -35,7 +35,7 @@ namespace JoesScanner.Services
             }
             catch (Exception ex)
             {
-                AppLog.Add(() => $"Startup: SetRunOnLogin failed. {ex.GetType().Name}: {ex.Message}");
+                AppLog.Add(() => $"Startup: SetRunOnLogin failed. {DiagnosticRedaction.Describe(ex)}");
                 return false;
             }
 #else
@@ -63,7 +63,7 @@ namespace JoesScanner.Services
             }
             catch (Exception ex)
             {
-                AppLog.Add(() => $"Startup: IsRunOnLoginEnabled check failed. {ex.GetType().Name}: {ex.Message}");
+                AppLog.Add(() => $"Startup: IsRunOnLoginEnabled check failed. {DiagnosticRedaction.Describe(ex)}");
                 return false;
             }
 #else
@@ -139,7 +139,7 @@ namespace JoesScanner.Services
             }
             catch (Exception ex)
             {
-                AppLog.Add(() => $"Startup: StartupTask operation failed. {ex.GetType().Name}: {ex.Message}");
+                AppLog.Add(() => $"Startup: StartupTask operation failed. {DiagnosticRedaction.Describe(ex)}");
                 return false;
             }
         }

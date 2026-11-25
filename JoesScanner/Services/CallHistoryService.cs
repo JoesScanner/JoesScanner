@@ -270,7 +270,7 @@ namespace JoesScanner.Services
             }
             catch (Exception ex)
             {
-            AppLog.Add(() => $"History: lookup threw. url={uri} ex={ex.GetType().Name}: {ex.Message}");
+            AppLog.Add(() => $"History: lookup threw. url={uri} ex={DiagnosticRedaction.Describe(ex)}");
                 return Array.Empty<HistoryLookupItem>();
             }
         }
@@ -369,7 +369,7 @@ namespace JoesScanner.Services
             }
             catch (Exception ex)
             {
-            AppLog.Add(() => $"History: talkgroups lookup threw. url={uri} ex={ex.GetType().Name}: {ex.Message}");
+            AppLog.Add(() => $"History: talkgroups lookup threw. url={uri} ex={DiagnosticRedaction.Describe(ex)}");
                 return (Array.Empty<HistoryLookupItem>(), new Dictionary<string, IReadOnlyList<HistoryLookupItem>>(StringComparer.OrdinalIgnoreCase));
             }
         }

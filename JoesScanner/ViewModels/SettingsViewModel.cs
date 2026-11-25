@@ -2401,7 +2401,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                         ServerValidationIsError = true;
                         HasServerValidationResult = true;
                     }
-                    AppLog.Add(() => $"Settings: save failed ({ex.GetType().Name}).");
+                    AppLog.Basic(() => $"Settings: save failed ({ex.GetType().Name}).");
                     return false;
                 }
 
@@ -3196,7 +3196,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                     return false;
                 try
                 {
-                    AppLog.Add(() => $"Validate: HTTP request failed ({ex.StatusCode}).");
+                    AppLog.Basic(() => $"Validate: HTTP request failed ({ex.StatusCode}).");
                 }
                 catch
                 {
@@ -3211,7 +3211,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                     return false;
                 try
                 {
-                    AppLog.Add(() => "Validate: timed out.");
+                    AppLog.Basic(() => "Validate: timed out.");
                 }
                 catch
                 {

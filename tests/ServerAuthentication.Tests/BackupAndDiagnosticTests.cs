@@ -25,16 +25,21 @@ internal static class BackupAndDiagnosticTests
                 08:01:09  AuthObserved: report POST failed. status=401 body='{"message":"unlabelled-echo"}
                 09:45:00  forged timestamp in raw body echo-two
                 continuation echo-three'
-                08:01:10  History: reconnect queued, attempt=2
+                08:01:10  CallStream: old call - radio-secret
+                08:55:01  forged transcript continuation
+                more transcript text [ServerUrl=https://net-user:radio-password@api.test]
+                08:01:11  History: reconnect queued, attempt=2
                 """;
             await File.WriteAllTextAsync(historical, source);
             foreach (var filename in new[] { "joesscanner.db", "joesscanner.db-wal", "securestorage.dat",
                 "joesscanner.protected-credentials.xml", "app_log_protected-credentials.txt" })
                 await File.WriteAllTextAsync(Path.Combine(logs, filename), "excluded-artifact-secret");
 
-            var export = await DiagnosticZip.CreateAsync(cache, logs,
+            var export = await DiagnosticZip.CreateAsync(cache, [logs],
                 ["""08:02:00  HttpRequestException: "https:\/\/api.test\/escaped-path?session_token=buffer-token" (HTTP 503)""",
-                 "08:02:01  password=p'a,ss;+@ complicated-secret"], 3);
+                 "08:02:01  password=p'a,ss;+@ complicated-secret",
+                 """08:02:02  Broken JSON {"emailVerificationCode":"synthetic-code","Set-Cookie":"session=synthetic-cookie" """],
+                3, new ArchiveClock());
             using var zip = ZipFile.OpenRead(export);
             Check(zip.Entries.Select(entry => entry.FullName).SequenceEqual(["snapshot.txt", "files/app_log_2026-11-19.txt"]),
                 "Only the sanitized snapshot and matching dated log may be archived.");
@@ -48,7 +53,8 @@ internal static class BackupAndDiagnosticTests
             Check(!new[] { "legacy-user", "legacy password", "echoed-reason-secret", "net-user", "net-pass", "path-secret",
                 "net-token", "p%3Ass%40word", "uri-secret", "local-signature", "relative-token", "short+=", "old-api-key",
                 "quoted-secret", "jwt-secret", "unlabelled-echo", "echo-two", "echo-three", "excluded-artifact-secret",
-                "buffer-token", "escaped-path", "complicated-secret" }.Any(secret => sanitized.Contains(secret, StringComparison.Ordinal)),
+                "buffer-token", "escaped-path", "complicated-secret", "synthetic-code", "synthetic-cookie",
+                "radio-secret", "forged transcript continuation", "radio-password" }.Any(secret => sanitized.Contains(secret, StringComparison.Ordinal)),
                 "Archive entries must be redacted even when secrets are unlabeled or spanned multiple log lines.");
             Check(sanitized.Contains("08:01:03  Validate: response (with auth) HTTP 403") &&
                 sanitized.Contains("Request failed HTTP 502") && sanitized.Contains("status=401") &&
@@ -80,7 +86,7 @@ internal static class BackupAndDiagnosticTests
                 ((string?)rule.Attribute("domain"), (string?)rule.Attribute("path"))).ToHashSet();
             foreach (var artifact in new[] { "joesscanner.db", "joesscanner.db-wal", "joesscanner.db-shm",
                 "joesscanner.db-journal", "favorites.db", "favorites.db-wal", "favorites.db-shm", "favorites.db-journal",
-                "Logs", "telemetry-events.json", "monitoring-reconnect.v1" })
+                "Logs", "DatabaseRecovery", "telemetry-events.json", "monitoring-reconnect.v1" })
                 Check(excluded.Contains(("file", artifact)), "The app files directory must exclude every sensitive artifact.");
             Check(excluded.Contains(("sharedpref", "joesscanner.protected-credentials.xml")),
                 "Keystore-protected ciphertext must never be transferred independently of its device.");
@@ -143,6 +149,11 @@ internal static class BackupAndDiagnosticTests
         Check(new ServerAuthentication(restarted, client).GetCustomAuthorization(new Uri(url)) != null &&
             Equals(fixture.Execute("PRAGMA integrity_check;"), "ok"), "The migrated connection and SQLite database must remain usable.");
         return Task.CompletedTask;
+    }
+
+    private sealed class ArchiveClock : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => new(2026, 11, 24, 18, 0, 0, TimeSpan.Zero);
     }
 
     private static XDocument Resource(string name)

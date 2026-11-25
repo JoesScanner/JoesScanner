@@ -4,12 +4,20 @@ namespace JoesScanner.Services;
 
 internal static class DiagnosticRedaction
 {
-    private static readonly Regex AuthorizationHeader = new(@"(?i)(authorization[""']?[ \t]*[:=][ \t]*[""']?(?:basic|bearer|joesscanneraccount)[ \t]+)[^,;\s""']+", RegexOptions.Compiled);
+    private static readonly Regex AuthorizationHeader = new(
+        @"(?i)(?<![\w-])((?:proxy[-_ ]?)?authorization[""']?\s*[:=]\s*)(?:\[REDACTED\]|""(?:\\.|[^""\r\n])*""|'(?:\\.|[^'\r\n])*'|[^\r\n]+)(?:\r?\n[ \t]+[^\r\n]*)*",
+        RegexOptions.Compiled);
+    private static readonly Regex CookieHeader = new(
+        @"(?i)(?<![\w-])((?:set[-_ ]?)?cookie[""']?[ \t]*[:=][ \t]*)(?:\[REDACTED\]|""(?:\\.|[^""\r\n])*""|'(?:\\.|[^'\r\n])*'|[^\r\n]+)(?:\r?\n[ \t]+[^\r\n]*)*",
+        RegexOptions.Compiled);
+    private static readonly Regex VerificationCode = new(
+        @"(?i)(\b(?:directory[ _-]+)?(?:email[ _-]+)?verification[ _-]+code\s+(?:is\s+)?)[0-9](?:[0-9 -]{2,}[0-9])",
+        RegexOptions.Compiled);
     private static readonly Regex BasicToken = new(@"(?i)(\bBasic[ \t]+)(?!(?:auth(?:entication)?|credentials)\b)[A-Za-z0-9+/=]{8,}", RegexOptions.Compiled);
     private static readonly Regex BearerToken = new(@"(?i)(\bBearer[ \t]+)[^,;\s""']+", RegexOptions.Compiled);
     private static readonly Regex FavoritesToken = new(@"(?i)(\bJoesScannerAccount[ \t]+)[A-Za-z0-9+/=]{4,}", RegexOptions.Compiled);
     private static readonly Regex CredentialValue = new(
-        """(?ix)(?<![\w-])(["']?(?:(?:basic[_-]?auth[_-]?)?(?:password|passwd|passphrase|username)|(?:auth[_ -]?)?(?:(?:access|refresh|session|bearer|id)[_ -]?)?token|(?:(?:what3words|x)[_-]?)?api[_ -]?key|client[_-]?secret)["']?[ \t]*[:=][ \t]*)(\[REDACTED\]|"(?:\\.|[^"\r\n])*"|'(?:\\.|[^'\r\n])*'|[^\r\n]+)""",
+        """(?ix)(?<![\w-])(["']?(?:(?:(?:basic[_-]?auth|scanner|firewall|account|wordpress)[_-]?)?(?:password|passwd|passphrase|username|pwd)|(?:auth[_ -]?)?(?:(?:access|refresh|session|bearer|id|csrf)[_ -]?)?token|(?:(?:what3words|x)[_-]?)?api[_ -]?key|client[_-]?secret|(?:x[_-]?)?(?:directory[_ -]?)?(?:email[_ -]?)?(?:verification|challenge|recovery|one[_-]?time|email|directory)[_ -]?code|otp|(?:wp[_-]?)?nonce|(?:submission[_ -]?)?grant)["']?[ \t]*[:=][ \t]*)(\[REDACTED\]|"(?:\\.|[^"\r\n])*"|'(?:\\.|[^'\r\n])*'|[^\r\n]+)""",
         RegexOptions.Compiled);
     private static readonly Regex RemoteUrl = new(@"(?i)(?:\b(?:https?|wss?)://|(?<![\w:/])//)[^\s""'<>]+", RegexOptions.Compiled);
     private const string Host = @"(?:\[[0-9a-f:.%]+\]|[a-z0-9-]+(?:\.[a-z0-9-]+)*)";
@@ -32,15 +40,25 @@ internal static class DiagnosticRedaction
         @"(?im)(\b(?:Validate: response \((?:with|no) auth\) HTTP |History: calljson response headers received\.[^\r\n]*? status=)[0-9]{3})[ \t]+[^\r\n]+",
         RegexOptions.Compiled);
     private static readonly Regex RawPayload = new(
-        @"(?i)(?<![\w-])(?:body|(?:response|request)[_ -]?(?:body|json)|payload)[""']?[ \t]*[:=][ \t]*",
+        @"(?i)(?<![\w-])(?:body|(?:response|request)[_ -]?(?:body|json)|payload|transcription|call[_-]?text)[""']?[ \t]*[:=][ \t]*",
         RegexOptions.Compiled);
     private static readonly Regex LogEntryStart = new(@"^\d{2}:\d{2}:\d{2} {2}", RegexOptions.Compiled);
+    private static readonly Regex LegacyRadioStart = new(
+        @"(?i)\bCallStream:[ \t]+(?!(?:INFO|HEARTBEAT) - )[^\r\n]*? - ",
+        RegexOptions.Compiled);
+
+    internal static string Describe(Exception error) =>
+        error is HttpRequestException { StatusCode: { } status }
+            ? $"{error.GetType().Name} (HTTP {(int)status})"
+            : error.GetType().Name;
 
     internal static string Sanitize(string? message)
     {
         if (string.IsNullOrWhiteSpace(message))
             return string.Empty;
 
+        if (LegacyRadioStart.Match(message) is { Success: true } radio)
+            message = message[..radio.Index] + "CallStream: [recording content omitted]";
         // Raw bodies can echo a credential without a label. Retain only metadata before the body.
         if (RawPayload.Match(message) is { Success: true } payload)
             message = message[..(payload.Index + payload.Length)] + "[REDACTED]";
@@ -54,6 +72,8 @@ internal static class DiagnosticRedaction
         sanitized = SchemelessLocalQuery.Replace(sanitized, match => RedactUrl(match.Value, schemeless: true));
         sanitized = RelativeQueryUrl.Replace(sanitized, "[URL REDACTED]");
         sanitized = AuthorizationHeader.Replace(sanitized, "$1[REDACTED]");
+        sanitized = CookieHeader.Replace(sanitized, "$1[REDACTED]");
+        sanitized = VerificationCode.Replace(sanitized, "$1[REDACTED]");
         sanitized = BasicToken.Replace(sanitized, "$1[REDACTED]");
         sanitized = BearerToken.Replace(sanitized, "$1[REDACTED]");
         sanitized = FavoritesToken.Replace(sanitized, "$1[REDACTED]");
@@ -70,8 +90,8 @@ internal static class DiagnosticRedaction
 
     internal static async Task WriteSanitizedLogAsync(TextReader source, TextWriter destination)
     {
-        var omittingPayload = false;
         char? payloadQuote = null;
+        var omittingRadioText = false;
         while (await source.ReadLineAsync().ConfigureAwait(false) is { } line)
         {
             // Older response loggers surrounded raw strings with quotes. Ignore
@@ -82,12 +102,21 @@ internal static class DiagnosticRedaction
                     payloadQuote = null;
                 continue;
             }
-            if (LogEntryStart.IsMatch(line))
-                omittingPayload = false;
-            if (omittingPayload)
+            if (omittingRadioText)
+            {
+                omittingRadioText = !line.Contains("[ServerUrl=", StringComparison.Ordinal);
                 continue;
+            }
+            if (!LogEntryStart.IsMatch(line))
+                continue;
+            if (LegacyRadioStart.Match(line) is { Success: true } radio)
+            {
+                omittingRadioText = !line.Contains("[ServerUrl=", StringComparison.Ordinal);
+                await destination.WriteLineAsync(Sanitize(line[..radio.Index]) +
+                    "CallStream: [recording content omitted]").ConfigureAwait(false);
+                continue;
+            }
             var payload = RawPayload.Match(line);
-            omittingPayload = payload.Success;
             if (payload.Success)
             {
                 var value = line[(payload.Index + payload.Length)..].TrimEnd();

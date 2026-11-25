@@ -1542,13 +1542,13 @@
                     <VerticalStackLayout Spacing="10">
 
             <Label
-                Text="Recent log entries. Use Refresh, Copy, or Download to export."
+                Text="Basic diagnostics are always recorded. Use Refresh, Copy, or Download to export."
                 FontSize="12"
                 Opacity="0.8"
                 TextColor="{AppThemeBinding Light=#4b5563, Dark=#d1d5db}" />
             <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12" VerticalOptions="Center">
                 <Label
-                    Text="Enable logging"
+                    Text="Detailed diagnostics"
                     FontSize="12"
                     VerticalOptions="Center"
                     TextColor="{AppThemeBinding Light=#111827, Dark=#e5e7eb}" />

@@ -135,7 +135,7 @@ var shouldLog = AppLog.IsEnabled;
             catch (Exception ex)
             {
                 if (shouldLog)
-                    AppLog.Add(() => $"AddrDetect: regex error call={callKey}. {ex.Message}");
+                    AppLog.Add(() => $"AddrDetect: regex error call={callKey}. {DiagnosticRedaction.Describe(ex)}");
                 Clear(item);
                 return;
             }
@@ -229,7 +229,7 @@ var shouldLog = AppLog.IsEnabled;
                 catch (Exception ex)
                 {
                     if (shouldLog)
-                        AppLog.Add(() => $"AddrDetect: intersection regex error call={callKey}. {ex.Message}");
+                        AppLog.Add(() => $"AddrDetect: intersection regex error call={callKey}. {DiagnosticRedaction.Describe(ex)}");
                     intersectionMatches = null;
                 }
 
@@ -298,7 +298,7 @@ var shouldLog = AppLog.IsEnabled;
                 catch (Exception ex)
                 {
                     if (shouldLog)
-                        AppLog.Add(() => $"AddrDetect: grid regex error call={callKey}. {ex.Message}");
+                        AppLog.Add(() => $"AddrDetect: grid regex error call={callKey}. {DiagnosticRedaction.Describe(ex)}");
                     gridMatches = null;
                 }
 
@@ -357,7 +357,7 @@ var shouldLog = AppLog.IsEnabled;
                 catch (Exception ex)
                 {
                     if (shouldLog)
-                        AppLog.Add(() => $"AddrDetect: noSuffix regex error call={callKey}. {ex.Message}");
+                        AppLog.Add(() => $"AddrDetect: noSuffix regex error call={callKey}. {DiagnosticRedaction.Describe(ex)}");
                     noSuffixMatches = null;
                 }
 

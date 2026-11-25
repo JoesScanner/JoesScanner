@@ -140,7 +140,7 @@ namespace JoesScanner.Services
             }
             catch (Exception ex)
             {
-                AppLog.Add(() => $"History: lookup preload failed. reason={reason} ex={ex.GetType().Name}: {ex.Message}");
+                AppLog.Add(() => $"History: lookup preload failed. reason={reason} ex={DiagnosticRedaction.Describe(ex)}");
             }
         }
 

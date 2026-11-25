@@ -194,6 +194,8 @@ internal sealed class ServerConnectionManager(TimeProvider clock,
             if (connection.Status == ServerConnectionStatus.Reconnecting)
                 connection.ScheduleOutageTimer(clock, generation => ReportOutageDeadline(connection, generation));
         }
+        if (status is ServerConnectionStatus.Reconnecting or ServerConnectionStatus.SetupRequired or ServerConnectionStatus.Unavailable)
+            AppLog.Basic(() => $"Recorder {connection.Profile.Id:N} connection changed to {status}.");
         StatusChanged?.Invoke(connection);
     }
 
@@ -225,7 +227,7 @@ internal sealed class ServerConnectionManager(TimeProvider clock,
                 catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
                 catch (Exception ex) when (!token.IsCancellationRequested)
                 {
-                    AppLog.Add(() => $"Recorder connection failed ({ex.GetType().Name}).");
+                    AppLog.Basic(() => $"Recorder connection failed ({ex.GetType().Name}).");
                 }
                 catch (Exception) when (token.IsCancellationRequested) { break; }
 

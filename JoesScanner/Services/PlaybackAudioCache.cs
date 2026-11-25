@@ -376,7 +376,7 @@ public sealed class PlaybackAudioCache
         if (low != _underPressure)
         {
             _underPressure = low;
-            AppLog.Add(() => low ? "Audio cache: low storage, preloading suspended." : "Audio cache: storage recovered.");
+            AppLog.Basic(() => low ? "Audio cache: low storage, preloading suspended." : "Audio cache: storage recovered.");
         }
         if (low)
         {

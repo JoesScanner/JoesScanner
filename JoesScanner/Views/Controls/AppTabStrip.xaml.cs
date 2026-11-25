@@ -350,7 +350,7 @@ public partial class AppTabStrip : ContentView
         {
             try
             {
-                AppLog.DebugWriteLine(() => $"AppTabStrip.NavigateTo({tab}) failed: {ex}");
+                AppLog.DebugWriteLine(() => $"AppTabStrip.NavigateTo({tab}) failed: {DiagnosticRedaction.Describe(ex)}");
             }
             catch
             {

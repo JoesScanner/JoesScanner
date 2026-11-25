@@ -57,7 +57,7 @@ public partial class MainViewModel
                         .FirstOrDefault(entry => entry.DirectoryId > 0 && entry.IsOfficial &&
                             ScannerConnectionStore.Normalize(entry.Url) == selected);
                 }
-                catch (Exception ex) { AppLog.Add(() => $"Cached directory could not be read ({ex.GetType().Name})."); }
+                catch (Exception ex) { AppLog.Basic(() => $"Cached directory could not be read ({ex.GetType().Name})."); }
             }
             _profiles = _connectionStore.Load(selected, listed?.DirectoryId, listed?.Name);
             DirectoryRecorderPolicy.For(_settingsService).Update(_profiles);
@@ -82,7 +82,7 @@ public partial class MainViewModel
         }
         catch (Exception ex)
         {
-            AppLog.Add(() => $"Could not load saved scanner connections ({ex.GetType().Name}).");
+            AppLog.Basic(() => $"Could not load saved scanner connections ({ex.GetType().Name}).");
         }
         return _profiles;
     }
@@ -374,7 +374,7 @@ public partial class MainViewModel
         }
         catch (Exception ex)
         {
-            AppLog.Add(() => $"Recorder queue retirement could not be saved ({ex.GetType().Name}).");
+            AppLog.Basic(() => $"Recorder queue retirement could not be saved ({ex.GetType().Name}).");
         }
     }
 

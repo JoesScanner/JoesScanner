@@ -74,7 +74,7 @@ namespace JoesScanner.Views
             }
             catch (Exception ex)
             {
-                AppLog.Add(() => $"HistoryPage: Showing History failed. ex={ex.GetType().Name}: {ex.Message}");
+                AppLog.Add(() => $"HistoryPage: Showing History failed. ex={DiagnosticRedaction.Describe(ex)}");
             }
         }
 
@@ -132,7 +132,7 @@ namespace JoesScanner.Views
             }
             catch (Exception ex)
             {
-                AppLog.Add(() => $"HistoryPage: Hiding History failed. ex={ex.GetType().Name}: {ex.Message}");
+                AppLog.Add(() => $"HistoryPage: Hiding History failed. ex={DiagnosticRedaction.Describe(ex)}");
             }
         }
 
@@ -819,7 +819,7 @@ private void OnAlertDismissInvoked(object? sender, EventArgs e)
             }
             catch (Exception ex)
             {
-                try { AppLog.Add(() => $"AddrDetect(Hist): open maps failed. {ex.Message}"); } catch { }
+                try { AppLog.Add(() => $"AddrDetect(Hist): open maps failed. {DiagnosticRedaction.Describe(ex)}"); } catch { }
             }
         }
 
@@ -840,7 +840,7 @@ private async void OnWhat3WordsLinkTapped(object? sender, TappedEventArgs e)
     }
     catch (Exception ex)
     {
-        try { AppLog.Add(() => $"What3Words(Hist): open map failed. {ex.Message}"); } catch { }
+        try { AppLog.Add(() => $"What3Words(Hist): open map failed. {DiagnosticRedaction.Describe(ex)}"); } catch { }
     }
 }
 
@@ -859,7 +859,7 @@ private async void OnWhat3WordsCopyTapped(object? sender, TappedEventArgs e)
     }
     catch (Exception ex)
     {
-        try { AppLog.Add(() => $"What3Words(Hist): copy failed. {ex.Message}"); } catch { }
+        try { AppLog.Add(() => $"What3Words(Hist): copy failed. {DiagnosticRedaction.Describe(ex)}"); } catch { }
     }
 }
 
@@ -877,7 +877,7 @@ private async void OnWhat3WordsCoordsCopyTapped(object? sender, TappedEventArgs 
     }
     catch (Exception ex)
     {
-        try { AppLog.Add(() => $"What3Words(Hist): copy coords failed. {ex.Message}"); } catch { }
+        try { AppLog.Add(() => $"What3Words(Hist): copy coords failed. {DiagnosticRedaction.Describe(ex)}"); } catch { }
     }
 }
 

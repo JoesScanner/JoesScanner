@@ -10,14 +10,22 @@
 
     <Grid
         Padding="5,0,5,5"
-        RowDefinitions="Auto,*"
+        RowDefinitions="Auto,Auto,*"
         RowSpacing="0">
 
         <controls:AppTabStrip
             x:Name="TabStrip"
             Grid.Row="0" />
 
-        <Grid Grid.Row="1">
+        <Label
+            x:Name="RecoveryBanner"
+            Grid.Row="1"
+            IsVisible="False"
+            Margin="8,4"
+            TextColor="#FFE0A3"
+            FontSize="13" />
+
+        <Grid Grid.Row="2">
 
             <Grid
                 x:Name="ContentHost" />

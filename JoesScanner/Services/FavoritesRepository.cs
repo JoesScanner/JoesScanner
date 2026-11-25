@@ -15,9 +15,13 @@ public sealed class FavoritesRepository
 
     public FavoritesRepository(IDatabasePathProvider paths)
     {
-        var path = Path.Combine(Path.GetDirectoryName(paths.DbPath)!, "favorites.db");
-        _connectionString = new SqliteConnectionStringBuilder { DataSource = path }.ToString();
+        _connectionString = new SqliteConnectionStringBuilder { DataSource = GetPath(paths.DbPath) }.ToString();
     }
+
+    private static string GetPath(string mainPath) => Path.Combine(Path.GetDirectoryName(mainPath)!, "favorites.db");
+
+    internal static bool PrepareStorage(string mainPath) => DatabaseRecovery.Prepare(GetPath(mainPath),
+        EnsureSchema, new[] { "favorite_records", "favorite_server_links" });
 
     private sealed record Row(FavoriteRecord? Remote = null, FavoriteChange? Outbox = null,
         FavoriteEdit? Draft = null, FavoriteEdit? Conflict = null)
@@ -255,8 +259,13 @@ public sealed class FavoritesRepository
     private static Row ReadRow(IDataRecord read) =>
         new(Read<FavoriteRecord>(read, 1), Read<FavoriteChange>(read, 2), Read<FavoriteEdit>(read, 3), Read<FavoriteEdit>(read, 4));
 
-    private static T? Read<T>(IDataRecord read, int ordinal) where T : class => read.IsDBNull(ordinal)
-        ? null : JsonSerializer.Deserialize<T>(read.GetString(ordinal), FavoritesJson.Options);
+    private static T? Read<T>(IDataRecord read, int ordinal) where T : class
+    {
+        if (read.GetValue(ordinal) is not string json)
+            return null;
+        try { return JsonSerializer.Deserialize<T>(json, FavoritesJson.Options); }
+        catch (JsonException) { return null; }
+    }
 
     private static void Write(SqliteTransaction tx, string owner, string id, Row row)
     {
@@ -300,18 +309,7 @@ public sealed class FavoritesRepository
             db.Open();
             if (!_initialized)
             {
-                using var schema = db.CreateCommand();
-                schema.CommandText = """
-                    CREATE TABLE IF NOT EXISTS favorite_records (
-                        owner TEXT NOT NULL, id TEXT NOT NULL, remote TEXT, outbox TEXT, draft TEXT, conflict TEXT,
-                        PRIMARY KEY (owner, id)
-                    );
-                    CREATE TABLE IF NOT EXISTS favorite_server_links (
-                        owner TEXT NOT NULL, server_id TEXT NOT NULL, server_key TEXT NOT NULL,
-                        PRIMARY KEY (owner, server_id), UNIQUE (owner, server_key)
-                    );
-                    """;
-                schema.ExecuteNonQuery();
+                EnsureSchema(db);
                 _initialized = true;
             }
             using var tx = db.BeginTransaction();
@@ -319,5 +317,29 @@ public sealed class FavoritesRepository
             tx.Commit();
             return result;
         }
+    }
+
+    private static void EnsureSchema(SqliteConnection db)
+    {
+        using var transaction = db.BeginTransaction();
+        using var schema = db.CreateCommand();
+        schema.Transaction = transaction;
+        schema.CommandText = """
+            CREATE TABLE IF NOT EXISTS favorite_records (
+                owner TEXT NOT NULL, id TEXT NOT NULL, remote TEXT, outbox TEXT, draft TEXT, conflict TEXT,
+                PRIMARY KEY (owner, id)
+            );
+            CREATE TABLE IF NOT EXISTS favorite_server_links (
+                owner TEXT NOT NULL, server_id TEXT NOT NULL, server_key TEXT NOT NULL,
+                PRIMARY KEY (owner, server_id), UNIQUE (owner, server_key)
+            );
+            """;
+        schema.ExecuteNonQuery();
+        schema.CommandText = """
+            SELECT owner, id, remote, outbox, draft, conflict FROM favorite_records LIMIT 0;
+            SELECT owner, server_id, server_key FROM favorite_server_links LIMIT 0;
+            """;
+        schema.Prepare();
+        transaction.Commit();
     }
 }

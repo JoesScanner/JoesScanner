@@ -46,6 +46,11 @@ public partial class RootPage : ContentPage
     {
         _services = services ?? throw new ArgumentNullException(nameof(services));
         InitializeComponent();
+        if (Application.Current is App { RecoveryNotice: { } notice })
+        {
+            RecoveryBanner.Text = notice;
+            RecoveryBanner.IsVisible = true;
+        }
         _viewDispatcher = ContentHost.Dispatcher;
     }
 
@@ -71,7 +76,7 @@ public partial class RootPage : ContentPage
             }
             catch (Exception ex)
             {
-                LogNavError($"RootPage.RebuildAllTabs failed: {ex}");
+                LogNavError($"RootPage.RebuildAllTabs failed: {DiagnosticRedaction.Describe(ex)}");
             }
         }
 
@@ -93,7 +98,7 @@ public partial class RootPage : ContentPage
         }
         catch (Exception ex)
         {
-            LogNavError($"RootPage.OnAppearing initial SwitchTo({_current}) failed: {ex}");
+            LogNavError($"RootPage.OnAppearing initial SwitchTo({_current}) failed: {DiagnosticRedaction.Describe(ex)}");
             _ = SafeAlertAsync("Navigation error", $"Settings navigation failed:\n{FormatNavException(ex)}");
         }
         if (_current == AppTab.Main && _activeView is { } mainView)
@@ -124,7 +129,7 @@ public partial class RootPage : ContentPage
         }
         catch (Exception ex)
         {
-            LogNavError($"RootPage.OnAppearing deferred navigation failed: {ex}");
+            LogNavError($"RootPage.OnAppearing deferred navigation failed: {DiagnosticRedaction.Describe(ex)}");
             _ = SafeAlertAsync("Navigation error", $"Settings navigation failed:\n{FormatNavException(ex)}");
         }
     }
@@ -294,7 +299,7 @@ public partial class RootPage : ContentPage
         }
         catch (Exception ex)
         {
-            LogNavError($"RootPage.OnTabRequested({tab}) failed: {ex}");
+            LogNavError($"RootPage.OnTabRequested({tab}) failed: {DiagnosticRedaction.Describe(ex)}");
             _ = SafeAlertAsync("Navigation error", $"Switching tabs failed:\n{FormatNavException(ex)}");
         }
     }
@@ -443,7 +448,7 @@ public partial class RootPage : ContentPage
         }
         catch (Exception ex)
         {
-            LogNavError($"RootPage.SwitchTo({tab}) failed: {ex}");
+            LogNavError($"RootPage.SwitchTo({tab}) failed: {DiagnosticRedaction.Describe(ex)}");
             _ = SafeAlertAsync(
                 "Navigation error",
                 $"Unable to open {tab}:\n\n{FormatNavException(ex)}\n\nFULL:\n{ex}");

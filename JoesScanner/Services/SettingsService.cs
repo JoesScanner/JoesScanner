@@ -651,6 +651,8 @@ namespace JoesScanner.Services
             }
         }
 
+        internal bool HadUnreadableSettings { get; private set; }
+
         private void EnsureInitialized()
         {
             lock (_gate)
@@ -674,101 +676,8 @@ namespace JoesScanner.Services
 
         private void EnsureSchema()
         {
-            using var conn = OpenConnection();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = @"
-PRAGMA foreign_keys=ON;
-PRAGMA busy_timeout=5000;
-
-CREATE TABLE IF NOT EXISTS app_settings (
-  setting_key TEXT PRIMARY KEY,
-  setting_value TEXT NOT NULL,
-  updated_utc TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS servers (
-  server_key TEXT PRIMARY KEY,
-  display_name TEXT NOT NULL,
-  base_url TEXT NOT NULL,
-  enabled INTEGER NOT NULL DEFAULT 1,
-  sort_order INTEGER NOT NULL DEFAULT 0,
-  is_builtin INTEGER NOT NULL DEFAULT 0,
-  created_utc TEXT NOT NULL,
-  updated_utc TEXT NOT NULL,
-  last_used_utc TEXT NULL
-);
-
-CREATE TABLE IF NOT EXISTS server_runtime_state (
-  server_key TEXT PRIMARY KEY,
-  last_history_loaded_utc TEXT NULL,
-  last_live_seen_utc TEXT NULL,
-  last_error_utc TEXT NULL,
-  last_error TEXT NULL,
-  updated_utc TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS server_auth_state (
-  server_key TEXT PRIMARY KEY,
-  is_validated INTEGER NOT NULL DEFAULT 0,
-  validated_online INTEGER NOT NULL DEFAULT 0,
-  validated_utc TEXT NULL,
-  expires_utc TEXT NULL,
-  last_attempt_utc TEXT NULL,
-  last_status_code INTEGER NULL,
-  last_error TEXT NULL,
-  last_check_utc TEXT NULL,
-  last_level TEXT NULL,
-  last_message TEXT NULL,
-  price_id TEXT NULL,
-  tier_level INTEGER NOT NULL DEFAULT 0,
-  renewal_utc TEXT NULL,
-  updated_utc TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_servers_enabled_sort ON servers(enabled, sort_order);
-";
-            cmd.ExecuteNonQuery();
-
-            // Upgrade older installs that had a minimal servers table.
-            EnsureColumnExists(conn, TableServers, "display_name", "TEXT NOT NULL DEFAULT ''");
-            EnsureColumnExists(conn, TableServers, "enabled", "INTEGER NOT NULL DEFAULT 1");
-            EnsureColumnExists(conn, TableServers, "sort_order", "INTEGER NOT NULL DEFAULT 0");
-            EnsureColumnExists(conn, TableServers, "is_builtin", "INTEGER NOT NULL DEFAULT 0");
-            EnsureColumnExists(conn, TableServers, "created_utc", "TEXT NOT NULL DEFAULT ''");
-            EnsureColumnExists(conn, TableServers, "updated_utc", "TEXT NOT NULL DEFAULT ''");
-            EnsureColumnExists(conn, TableServers, "last_used_utc", "TEXT NULL");
-
-            EnsureColumnExists(conn, TableServers, "info_url", "TEXT NOT NULL DEFAULT ''");
-            EnsureColumnExists(conn, TableServers, "area_label", "TEXT NOT NULL DEFAULT ''");
-            EnsureColumnExists(conn, TableServers, "map_anchor", "TEXT NOT NULL DEFAULT ''");
-            EnsureColumnExists(conn, TableServers, "is_official", "INTEGER NOT NULL DEFAULT 0");
-            EnsureColumnExists(conn, TableServers, "directory_id", "INTEGER NOT NULL DEFAULT 0");
-            EnsureColumnExists(conn, TableServers, "badge", "TEXT NOT NULL DEFAULT ''");
-            EnsureColumnExists(conn, TableServers, "badge_label", "TEXT NOT NULL DEFAULT ''");
-            EnsureColumnExists(conn, TableServers, "source", "TEXT NOT NULL DEFAULT ''");
-            EnsureColumnExists(conn, TableServers, "uses_api_firewall_credentials", "INTEGER NOT NULL DEFAULT 0");
-            EnsureColumnExists(conn, TableServers, "directory_source", "TEXT NULL");
-
-            // Upgrade older installs that had a minimal auth state table.
-            EnsureColumnExists(conn, TableServerAuthState, "validated_online", "INTEGER NOT NULL DEFAULT 0");
-            EnsureColumnExists(conn, TableServerAuthState, "tier_level", "INTEGER NOT NULL DEFAULT 0");
-        }
-
-        private static void EnsureColumnExists(SqliteConnection conn, string tableName, string columnName, string columnDefinition)
-        {
-            using var pragma = conn.CreateCommand();
-            pragma.CommandText = $"PRAGMA table_info({tableName});";
-            using var reader = pragma.ExecuteReader();
-            while (reader.Read())
-            {
-                var name = reader.GetString(1);
-                if (string.Equals(name, columnName, StringComparison.OrdinalIgnoreCase))
-                    return;
-            }
-
-            using var alter = conn.CreateCommand();
-            alter.CommandText = $"ALTER TABLE {tableName} ADD COLUMN {columnName} {columnDefinition};";
-            alter.ExecuteNonQuery();
+            using var connection = OpenConnection();
+            DbBootstrapper.EnsureInitialized(connection);
         }
 
         private SqliteConnection OpenConnection()
@@ -787,11 +696,16 @@ CREATE INDEX IF NOT EXISTS idx_servers_enabled_sort ON servers(enabled, sort_ord
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
-                var key = reader.GetString(0);
-                if (IsLegacySecret(key))
+                if (reader.GetValue(0) is not string key || reader.GetValue(1) is not string value)
+                {
+                    HadUnreadableSettings = true;
+                    if (reader.GetValue(0) is string unreadableKey &&
+                        (unreadableKey == KeyLocalOnlyMode || unreadableKey == KeyTelemetryEnabled))
+                        _cache.TryAdd(unreadableKey, unreadableKey == KeyLocalOnlyMode ? "true" : "false");
                     continue;
-                var value = reader.GetString(1);
-                _cache[key] = key is KeyServerUrl or KeyAuthServerBaseUrl ? SavedConnectionUrl.SafeDisplay(value) : value;
+                }
+                if (!IsLegacySecret(key))
+                    _cache[key] = key is KeyServerUrl or KeyAuthServerBaseUrl ? SavedConnectionUrl.SafeDisplay(value) : value;
             }
         }
 

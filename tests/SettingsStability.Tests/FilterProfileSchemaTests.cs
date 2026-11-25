@@ -101,7 +101,7 @@ internal static class FilterProfileSchemaTests
                 File.Delete(databasePath);
                 File.Delete(databasePath + "-wal");
                 File.Delete(databasePath + "-shm");
-                temp.Delete();
+                temp.Delete(recursive: true);
             }
         }
     }

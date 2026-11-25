@@ -23,6 +23,7 @@
     <Compile Include="../../JoesScanner/Services/CallCardLayoutStore.cs" Link="CallCardLayoutStore.cs" />
     <Compile Include="../../JoesScanner/Services/CallCardOptionsService.cs" Link="CallCardOptionsService.cs" />
     <Compile Include="../../JoesScanner/Services/DbBootstrapper.cs" Link="DbBootstrapper.cs" />
+    <Compile Include="../../JoesScanner/Services/DatabaseRecovery.cs" Link="DatabaseRecovery.cs" />
     <Compile Include="../../JoesScanner/Services/DbMaintenanceService.cs" Link="DbMaintenanceService.cs" />
     <Compile Include="../../JoesScanner/Services/IDbMaintenanceService.cs" Link="IDbMaintenanceService.cs" />
     <Compile Include="../../JoesScanner/Services/RecordingStorageReference.cs" Link="RecordingStorageReference.cs" />
