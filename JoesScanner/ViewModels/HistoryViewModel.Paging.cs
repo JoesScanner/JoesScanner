@@ -4,16 +4,18 @@ namespace JoesScanner.ViewModels;
 
 public sealed partial class HistoryViewModel
 {
+    private const int HistoryPrefetchThreshold = 25;
     private readonly LivePlaybackRequests _historyPageRequests = new();
     private HistorySearchResult? _historyResults;
     private Task<bool>? _olderHistoryPage;
     private string? _historyPageError;
     private bool _isPaging;
+    private sealed record HistoryOlderPrefetch(HistorySearchResult Results, Task<bool>? LastRequest, int StopRevision);
 
     internal event Action? OlderHistoryResultsAdding;
     internal event Action? OlderHistoryResultsAdded;
 
-    public bool CanSearch => OwnsHistoryPage(_historyOwnership) && !IsLoading && !_isPaging &&
+    public bool CanSearch => OwnsHistoryPage(_historyOwnership) && !IsLoading &&
         _historyRecorder is { } recorder && CurrentFilters().IsValidFor(recorder.Id);
     public bool HasHistoryResults => _historyResults != null && Calls.Count != 0;
     public bool CanLoadMoreOlder => HasHistoryResults && _historyResults!.HasMore && !IsLoading && !_isPaging &&
@@ -60,8 +62,45 @@ public sealed partial class HistoryViewModel
 
     private Task LoadMoreOlderAsync() => ReadOlderHistoryPageAsync();
 
-    // Manual Load More and Previous at the boundary share a request. A newer
-    // playback choice can abandon its wait without altering this search's page.
+    private HistoryOlderPrefetch? CaptureHistoryPrefetch(int index)
+    {
+        if (Calls.Count - index > HistoryPrefetchThreshold ||
+            _historyResults is not { HasMore: true } results || _olderHistoryPage is { IsCompleted: false })
+            return null;
+        return new(results, _olderHistoryPage, _historyStopRevision);
+    }
+
+    private async Task PrefetchOlderHistoryPageAsync(HistoryPlayback playback, HistoryOlderPrefetch prefetch)
+    {
+        try
+        {
+            // Invoked by the native start signal. Return to audio immediately
+            // even when the dispatcher and the service can run synchronously.
+            await Task.Yield();
+            var page = await ReadHistoryUiAsync<Task>(() =>
+            {
+                if (playback.Request.Token.IsCancellationRequested || prefetch.StopRevision != _historyStopRevision ||
+                    !OwnsHistoryPage(playback.Lease) || _historyRecorder != prefetch.Results.Snapshot.Access.Recorder ||
+                    !ReferenceEquals(_historyResults, prefetch.Results))
+                    return Task.CompletedTask;
+
+                // A manual read started since selection may already have finished.
+                // Treat that read as this traversal's page, even if it failed.
+                if (_olderHistoryPage is { IsCompleted: false } pending)
+                    return pending;
+                return ReferenceEquals(_olderHistoryPage, prefetch.LastRequest)
+                    ? ReadOlderHistoryPageAsync() : Task.CompletedTask;
+            }).ConfigureAwait(false);
+            await page.ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            AppLog.DebugWriteLine(() => $"History prefetch failed ({ex.GetType().Name}).");
+        }
+    }
+
+    // Load More, Previous at the boundary, and automatic prefetch share a read.
+    // A newer playback choice can abandon its wait without altering the page.
     private Task<bool> ReadOlderHistoryPageAsync()
     {
         if (_olderHistoryPage is { IsCompleted: false } pending)
@@ -87,9 +126,11 @@ public sealed partial class HistoryViewModel
         StatusText = _isPaging ? "Loading older recordings…" : "Searching…";
         RefreshCommandStates();
 
+        Task<HistorySearchResult>? fetchTask = null;
         try
         {
-            var page = await fetch(deadline.Token).WaitAsync(deadline.Token).ConfigureAwait(false);
+            fetchTask = fetch(deadline.Token);
+            var page = await fetchTask.WaitAsync(deadline.Token).ConfigureAwait(false);
             return await ReadHistoryUiAsync(() =>
             {
                 if (!OwnsRequest())
@@ -135,6 +176,11 @@ public sealed partial class HistoryViewModel
         }
         finally
         {
+            // A canceled waiter releases the UI even if the transport is slow
+            // to cancel. Observe any fault the abandoned fetch reports later.
+            if (deadline.IsCancellationRequested && fetchTask != null)
+                _ = fetchTask.ContinueWith(static late => { _ = late.Exception; }, CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
             await RunOnMainThreadAsync(() =>
             {
                 if (OwnsRequest())

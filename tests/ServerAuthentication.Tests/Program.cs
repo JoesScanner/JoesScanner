@@ -50,6 +50,7 @@ var cases = new (string Name, Func<Task> Run)[]
     ("History scopes authentication, filters, and recording IDs and uses native multi-talkgroup search", MobileRecoveryTests.ScopedHistoryAndNativeTalkgroupFilter),
     ("History loads a fixed 250 then 100 and keeps the result collection stable and deduplicated", MobileRecoveryTests.HistorySnapshotPaging),
     ("History detects recorder archive changes at the page boundary", MobileRecoveryTests.HistoryPageRejectsArchiveDrift),
+    ("Older History pages enforce Standard and Premium access and preserve independent recorders in Local Only", MobileRecoveryTests.HistoryOlderPagesRespectEntitlement),
     ("History rejects results returned after a search is canceled", MobileRecoveryTests.LateHistorySearchCancellation),
     ("Live-to-History handoff rejects a recovery response revoked during an HTTP request", MobileRecoveryTests.EntitlementDuringHandoff),
     ("Foreground recovery aborts a half-open socket, merges late audio, and delivers subsequent live calls once", MobileRecoveryTests.ReconnectAndLateAudio),

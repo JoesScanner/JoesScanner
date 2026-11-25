@@ -38,7 +38,9 @@ This document and the playback integration tests define JoesScanner's playback c
 
 ## F. History
 
-- A selected History result starts playback at that result and continues through the applicable result list. Previous and Next operate on the History result set.
+- History displays results newest-first. A committed selection captures the selected card and the currently loaded newer cards. Playback visits that fixed sequence oldest to newest, skips unavailable audio, and stops naturally at its newest recording.
+- When playback starts from one of the oldest 25 loaded results and the search has more results, prefetch one page of up to 100 older recordings. Audio preparation and playback proceed independently of that request. Prefetched cards join the displayed list with its existing scroll anchor and become available for explicit selection. They never enter the active playback sequence, even if their timestamps place them between already loaded cards.
+- Load More, Previous at the older boundary, and prefetch share the same pending request and search snapshot. A temporary failure leaves the page available for explicit retry. Archive changes require a new search. Stop cancels pending paging and retains loaded results. A replacement search or exit from History retires its pending requests.
 - History owns the audio player while active. Live resumes according to its existing listening intent after History releases ownership. History keeps its own controls and layout.
 - Verify recording entitlement before playback, including replays and protected recovery results.
 

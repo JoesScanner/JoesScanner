@@ -5,7 +5,7 @@ using JoesScanner.Services;
 using JoesScanner.ViewModels;
 using Microsoft.Maui.Dispatching;
 
-internal static class HistoryPlaybackDispatcherTests
+internal static partial class HistoryPlaybackDispatcherTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
 
@@ -15,6 +15,9 @@ internal static class HistoryPlaybackDispatcherTests
         await StopWithPendingNotificationsAsync();
         await NavigateDuringPlaybackStartupAsync();
         await SelectedPlaybackSkipsFailedRecordingsAsync();
+        await PrefetchRespectsThresholdAsync();
+        await PrefetchKeepsPlaybackSequenceAsync();
+        await PrefetchUsesAnExistingPageAsync();
         await PreviousSharesTheOlderPageAsync();
         await LatestPreparationWinsAsync();
         await OlderPageFailuresPreservePlaybackAsync();
@@ -186,7 +189,7 @@ internal static class HistoryPlaybackDispatcherTests
         };
         player.Playing = (id, _) => id == "corrupt" ?
             Task.FromException(new InvalidDataException("Cannot decode.")) : Task.CompletedTask;
-        await dispatcher.DispatchAsync(() => history.SearchForTestAsync([newest, corrupt, unavailable, first, unused], true)).Unwrap();
+        await dispatcher.DispatchAsync(() => history.SearchForTestAsync([newest, corrupt, unavailable, first, unused], false)).Unwrap();
         await history.SelectForTestAsync(first).WaitAsync(Timeout);
 
         await dispatcher.DispatchAsync(() =>
@@ -212,9 +215,15 @@ internal static class HistoryPlaybackDispatcherTests
         var oldest = history.MakeCallForTest("row_10", -2, archiveOffset: 249);
         var older = history.MakeCallForTest("row_9", -2, archiveOffset: 250);
         var last = history.MakeCallForTest("row_8", -3);
+        var prefetchStarted = LiveHistoryHandoffTests.Signal();
         var response = new TaskCompletionSource<HistorySearchResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         HistorySearchResult? observed = null;
-        history.PagesForTest.Older = (prior, _) => { observed = prior; return response.Task; };
+        history.PagesForTest.Older = (prior, _) =>
+        {
+            observed = prior;
+            prefetchStarted.SetResult();
+            return response.Task;
+        };
 
         var cache = Directory.CreateTempSubdirectory("JoesScanner.HistoryPlayback-");
         try
@@ -236,13 +245,14 @@ internal static class HistoryPlaybackDispatcherTests
             await dispatcher.DispatchAsync(() => history.SearchForTestAsync([newest, oldest], true)).Unwrap();
             var original = history.SelectForTestAsync(oldest);
             await ExpectStartAsync(starts, "row_10");
+            await prefetchStarted.Task.WaitAsync(Timeout);
             var manual = await dispatcher.DispatchAsync(history.LoadOlderForTestAsync);
             var crossing = history.PreviousForTestAsync();
             await dispatcher.DispatchAsync(() =>
             {
                 LiveHistoryHandoffTests.Check(history.PagesForTest.PageRequests == 1 && oldest.IsPlaying &&
                     ReferenceEquals(history.ActiveCallForTest, oldest) && history.CallsForTest.Count == 2,
-                    "Previous must share the pending Load More and keep the current card playing while it waits.");
+                    "Load More and Previous must share the pending prefetch while the current card plays.");
             });
             response.SetResult(new(observed!.Snapshot, observed.Cursor, [older, last], false));
             await manual.WaitAsync(Timeout);
@@ -272,7 +282,7 @@ internal static class HistoryPlaybackDispatcherTests
         {
             cache.Delete(recursive: true);
         }
-        Console.WriteLine("PASS Previous crosses a shared older page during playback, then Next and Previous preserve tie order and reuse audio");
+        Console.WriteLine("PASS Prefetch, Load More and Previous share one request, and navigation preserves tie order and reuses audio");
     }
 
     private static async Task LatestPreparationWinsAsync()
@@ -335,22 +345,28 @@ internal static class HistoryPlaybackDispatcherTests
         await OpenAsync(dispatcher, history);
         var active = history.MakeCallForTest("oldest", -1);
         var older = history.MakeCallForTest("older", -2);
-        await dispatcher.DispatchAsync(() => history.SearchForTestAsync([active], true)).Unwrap();
-        var playing = history.SelectForTestAsync(active);
-        await ExpectStartAsync(starts, "oldest");
-
+        var prefetchStarted = LiveHistoryHandoffTests.Signal();
+        var response = new TaskCompletionSource<HistorySearchResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         HistorySearchResult? failedCursor = null;
         history.PagesForTest.Older = (previous, _) =>
         {
             failedCursor = previous;
-            return Task.FromException<HistorySearchResult>(new HttpRequestException("Temporary recorder error."));
+            prefetchStarted.SetResult();
+            return response.Task;
         };
-        await history.PreviousForTestAsync().WaitAsync(Timeout);
+        await dispatcher.DispatchAsync(() => history.SearchForTestAsync([active], true)).Unwrap();
+        var playing = history.SelectForTestAsync(active);
+        await ExpectStartAsync(starts, "oldest");
+        await prefetchStarted.Task.WaitAsync(Timeout);
+        var failure = await dispatcher.DispatchAsync(history.LoadOlderForTestAsync);
+        response.SetException(new HttpRequestException("Temporary recorder error.", null, System.Net.HttpStatusCode.ServiceUnavailable));
+        await failure.WaitAsync(Timeout);
         await dispatcher.DispatchAsync(() =>
         {
             LiveHistoryHandoffTests.Check(history.CallsForTest.SequenceEqual([active]) && active.IsPlaying &&
-                history.CanLoadMoreOlder && history.StatusForTest.Contains("Try again", StringComparison.Ordinal),
-                "An older-page failure must preserve the active card and keep retry available.");
+                history.CanLoadMoreOlder && history.StatusForTest.Contains("Try again", StringComparison.Ordinal) &&
+                history.PagesForTest.PageRequests == 1,
+                "A prefetch failure must preserve the active card and leave the same page available for explicit retry.");
         });
         history.PagesForTest.Older = (previous, _) =>
         {
@@ -360,27 +376,37 @@ internal static class HistoryPlaybackDispatcherTests
         await dispatcher.DispatchAsync(history.LoadOlderForTestAsync).Unwrap().WaitAsync(Timeout);
         LiveHistoryHandoffTests.Check(active.IsPlaying && history.CallsForTest.SequenceEqual([active, older]),
             "A successful manual retry must append without changing playback.");
+        var driftStarted = LiveHistoryHandoffTests.Signal();
+        var drift = new TaskCompletionSource<HistorySearchResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        history.PagesForTest.Older = (_, _) =>
+        {
+            driftStarted.SetResult();
+            return drift.Task;
+        };
         var olderPlayback = history.PreviousForTestAsync();
         await ExpectStartAsync(starts, "older");
         await playing.WaitAsync(Timeout);
-        history.PagesForTest.Older = (_, _) =>
-            Task.FromException<HistorySearchResult>(new HistoryResultsChangedException());
-        await history.PreviousForTestAsync().WaitAsync(Timeout);
+        await driftStarted.Task.WaitAsync(Timeout);
+        var invalidated = await dispatcher.DispatchAsync(history.LoadOlderForTestAsync);
+        drift.SetException(new HistoryResultsChangedException());
+        await invalidated.WaitAsync(Timeout);
+        await dispatcher.DispatchAsync(history.LoadOlderForTestAsync).Unwrap().WaitAsync(Timeout);
         await dispatcher.DispatchAsync(() =>
         {
             LiveHistoryHandoffTests.Check(older.IsPlaying && ReferenceEquals(history.ActiveCallForTest, older) &&
                 history.CallsForTest.SequenceEqual([active, older]) && !history.CanLoadMoreOlder &&
+                history.PagesForTest.PageRequests == 3 &&
                 history.StatusForTest.Contains("Start a new search", StringComparison.Ordinal),
                 "An invalidated archive cursor must require a new search and leave existing audio alone.");
         });
         await history.StopForTestAsync();
         await olderPlayback.WaitAsync(Timeout);
-        Console.WriteLine("PASS History paging errors preserve results, retry the same cursor, and flag archive changes without replacing audio");
+        Console.WriteLine("PASS Failed History prefetch leaves a manual retry, and archive drift requires a new search without interrupting audio");
     }
 
     private static async Task ScopeChangesRetirePendingWorkAsync()
     {
-        foreach (var change in new[] { "recorder", "filters", "account", "stop", "tab" })
+        foreach (var change in new[] { "recorder", "filters", "account", "stop", "tab", "search" })
         {
             using var dispatcher = new HistoryTestDispatcher();
             var ownership = new PlaybackOwnership();
@@ -391,12 +417,9 @@ internal static class HistoryPlaybackDispatcherTests
             var pending = history.MakeCallForTest("preparing", -1);
             var active = history.MakeCallForTest("old", -2);
             var delayedRow = history.MakeCallForTest("late page", -3);
-            await dispatcher.DispatchAsync(() => history.SearchForTestAsync([pending, active], true, hosted: change == "account")).Unwrap();
-            var playing = history.SelectForTestAsync(active);
-            await ExpectStartAsync(starts, "old");
-
             var page = new TaskCompletionSource<HistorySearchResult>(TaskCreationOptions.RunContinuationsAsynchronously);
             var audio = new TaskCompletionSource<PlaybackAudioLease>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var pagingStarted = LiveHistoryHandoffTests.Signal();
             var preparationStarted = LiveHistoryHandoffTests.Signal();
             CancellationToken pagingToken = default;
             CancellationToken preparationToken = default;
@@ -405,6 +428,7 @@ internal static class HistoryPlaybackDispatcherTests
             {
                 pagingToken = token;
                 pageStart = initial;
+                pagingStarted.SetResult();
                 return page.Task;
             };
             history.PrepareForTest = (call, token) =>
@@ -415,6 +439,10 @@ internal static class HistoryPlaybackDispatcherTests
                 preparationStarted.SetResult();
                 return audio.Task;
             };
+            await dispatcher.DispatchAsync(() => history.SearchForTestAsync([pending, active], true, hosted: change == "account")).Unwrap();
+            var playing = history.SelectForTestAsync(active);
+            await ExpectStartAsync(starts, "old");
+            await pagingStarted.Task.WaitAsync(Timeout);
             var paging = await dispatcher.DispatchAsync(history.LoadOlderForTestAsync);
             var preparing = history.SelectForTestAsync(pending);
             await preparationStarted.Task.WaitAsync(Timeout);
@@ -424,19 +452,28 @@ internal static class HistoryPlaybackDispatcherTests
                 case "recorder": await dispatcher.DispatchAsync(history.ChangeRecorderForTest); break;
                 case "filters": await dispatcher.DispatchAsync(history.ChangeFiltersForTest); break;
                 case "account": await dispatcher.DispatchAsync(history.ChangeAccountForTest); break;
-                case "stop": await history.StopForTestAsync(); break;
+                case "stop":
+                    await history.StopForTestAsync();
+                    await dispatcher.DispatchAsync(() =>
+                        LiveHistoryHandoffTests.Check(history.CallsForTest.SequenceEqual([pending, active]) &&
+                            ReferenceEquals(history.ActiveCallForTest, active) && !active.IsPlaying && history.CanLoadMoreOlder,
+                            "Stop must cancel the prefetch and audio while keeping the existing results and cursor."));
+                    break;
                 case "tab":
                     await history.OnPageClosedAsync();
                     LiveHistoryHandoffTests.Check(ownership.Live != null, "Closing History must return ownership to Live.");
                     await dispatcher.DispatchAsync(history.OpenForTest);
                     break;
             }
-            await Task.WhenAll(paging, playing).WaitAsync(Timeout);
             var replacementCall = history.MakeCallForTest("replacement", -1);
             await dispatcher.DispatchAsync(() => history.SearchForTestAsync([replacementCall], false)).Unwrap();
+            await Task.WhenAll(paging, playing).WaitAsync(Timeout);
             var replacement = history.SelectForTestAsync(replacementCall);
             await ExpectStartAsync(starts, "replacement");
-            page.SetResult(new(pageStart!.Snapshot, pageStart.Cursor, [delayedRow], false));
+            if (change == "filters")
+                page.SetException(new HttpRequestException("Retired transport failure."));
+            else
+                page.SetResult(new(pageStart!.Snapshot, pageStart.Cursor, [delayedRow], false));
             audio.SetResult(new("preparing"));
             await preparing.WaitAsync(Timeout);
             await dispatcher.DispatchAsync(() =>
@@ -449,7 +486,7 @@ internal static class HistoryPlaybackDispatcherTests
             await history.StopForTestAsync();
             await replacement.WaitAsync(Timeout);
         }
-        Console.WriteLine("PASS Recorder, filter, account, Stop, and tab changes fence late History pages and audio preparations");
+        Console.WriteLine("PASS Stop, new search, recorder, filter, account and tab changes fence late History prefetch and preparations");
     }
 
     private static ChannelReader<string> HoldNativePlayback(HandoffAudio player)

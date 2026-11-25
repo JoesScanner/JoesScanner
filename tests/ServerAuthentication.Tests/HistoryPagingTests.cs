@@ -6,6 +6,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using JoesScanner.Helpers;
 using JoesScanner.Models;
 using JoesScanner.Services;
 using Microsoft.Data.Sqlite;
@@ -184,6 +185,71 @@ internal static partial class MobileRecoveryTests
         await HistoryThrows<HistoryResultsChangedException>(() => history.LoadMoreAsync(initial));
         Check(initial.Calls.Count == 250 && initial.Calls[0].BackendId == "row_260",
             "Archive movement must preserve the displayed snapshot and require a fresh search.");
+    }
+
+    internal static async Task HistoryOlderPagesRespectEntitlement()
+    {
+        using var fixture = new SavedCredentialTests.Fixture();
+        var settings = fixture.Load();
+        var hosted = new HistoryRecorder(Guid.NewGuid(), HostedServerRules.DefaultServerUrl);
+        var independent = new HistoryRecorder(Guid.NewGuid(), "https://independent.example/archive");
+        settings.ServerUrl = independent.Endpoint;
+        settings.SetServerCredentials(hosted.Endpoint, "history-fixture", "fixture-password");
+        settings.AuthSessionToken = "fixture-session";
+        var subscription = new ScriptSubscription(true, 1);
+        var recent = Enumerable.Range(1, 260).Select(index => Row($"row_{index}", Now.AddMinutes(-index), "audio.mp3"));
+        var archive = recent.Append(Row("older", Now.AddHours(-25), "older.mp3")).ToArray();
+        var requests = new List<(HistoryRecorder Recorder, HistoryRequest Page)>();
+        using var http = new HttpClient(PrivacyNetworkPolicy.For(settings).Wrap(new AsyncStubHandler(async (request, token) =>
+        {
+            var recorder = request.RequestUri!.Host == new Uri(hosted.Endpoint).Host ? hosted : independent;
+            Check(request.Options.TryGetValue(ServerAuthenticationHandler.Recorder, out var scope) && scope == recorder.RequestScope &&
+                request.RequestUri == new Uri(recorder.Endpoint + "/calljson"), "An older History page escaped its recorder.");
+            var page = await ReadHistoryRequest(request, token);
+            requests.Add((recorder, page));
+            return HistoryReply(page, archive.Length, archive.Skip(page.Offset).Take(page.Length).ToArray());
+        })));
+        var history = new CallHistoryService(settings, new RecordedCalls(), new NoHistoryLookups(), subscription, http, new FixedClock(Now));
+        var dates = ArchiveDates() with { From = ArchiveDates().From.AddDays(-2) };
+        Task<HistorySearchResult> Search(HistoryRecorder recorder) => history.SearchAsync(recorder, SiteFilter(recorder), dates);
+        void VerifyTier(int tier)
+        {
+            subscription.Tier = tier;
+            settings.SaveHostedSubscription(new(true, true, tier, Now.UtcDateTime, Now.AddHours(2).UtcDateTime, null, "", "", ""));
+        }
+
+        VerifyTier(1);
+        var standard = await Search(hosted);
+        var standardOlder = await history.LoadMoreAsync(standard);
+        Check(standard.HasMore && standardOlder.LimitedToLast24Hours && standardOlder.Calls.Count == 10 &&
+            standardOlder.Calls.All(call => call.ServerId == hosted.Id && call.RecordingAccess?.Protected == true &&
+                call.RecordingTimeUtc >= Now.AddHours(-24)) &&
+            requests.All(request => request.Recorder == hosted && request.Page.From == standard.Snapshot.FromUtc &&
+                request.Page.Until == standard.Snapshot.UntilUtc && request.Page.Site == "3-SYS" && request.Page.Length <= 200) &&
+            requests[^1].Page is { Offset: 249, Length: 101 },
+            "A Standard older page must keep the verified date range and omit old rows returned by the recorder.");
+
+        VerifyTier(2);
+        await HistoryThrows<HistoryResultsChangedException>(() => history.LoadMoreAsync(standard));
+        Check(requests.Count == 3, "A changed tier must invalidate the cursor before the recorder request.");
+        var premium = await Search(hosted);
+        var premiumOlder = await history.LoadMoreAsync(premium);
+        Check(!premiumOlder.LimitedToLast24Hours && premiumOlder.Calls.Count == 11 &&
+            premiumOlder.Calls.Last() is { BackendId: "older", RecordingAccess.Protected: true },
+            "Premium must reach older protected History within the original search.");
+
+        settings.LocalOnlyMode = true;
+        var before = requests.Count;
+        await HistoryThrows<HttpRequestException>(() => history.LoadMoreAsync(premium));
+        Check(requests.Count == before, "Local Only must prevent an older hosted page from reaching transport.");
+        subscription.Allowed = false;
+        var checks = subscription.Checks;
+        var custom = await Search(independent);
+        var customOlder = await history.LoadMoreAsync(custom);
+        Check(subscription.Checks == checks && customOlder.Calls.Count == 11 &&
+            customOlder.Calls.Last() is { BackendId: "older", RecordingAccess.Protected: false } &&
+            requests.Skip(before).All(request => request.Recorder == independent),
+            "Independent History paging must continue in Local Only with its own permissions and recorder identity.");
     }
 
     internal static async Task LateHistorySearchCancellation()

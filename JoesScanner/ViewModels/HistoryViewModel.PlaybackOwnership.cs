@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using System.Collections.Specialized;
 using JoesScanner.Models;
 using JoesScanner.Services;
@@ -20,6 +21,9 @@ namespace JoesScanner.ViewModels
 
         private sealed record HistoryPlayback(PlaybackOwnership.Lease Lease, HistorySearchSnapshot Snapshot,
             LivePlaybackRequests.Request Request);
+
+        private sealed record HistoryTraversal(HistoryPlayback Playback, ImmutableArray<CallItem> Recordings,
+            HistoryOlderPrefetch? OlderPrefetch);
 
         private sealed record HistorySelection(HistoryPlayback Playback, CallItem? Target, CallItem? PageAnchor,
             Task<bool>? PendingPage, IDisposable? Foreground);
@@ -237,7 +241,7 @@ namespace JoesScanner.ViewModels
                 {
                     var first = prepared;
                     prepared = null;
-                    await PlayHistoryQueueAsync(traversal, target, first).ConfigureAwait(false);
+                    await PlayHistoryQueueAsync(traversal, first).ConfigureAwait(false);
                 }
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { }
@@ -263,14 +267,21 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        private HistoryPlayback? CommitHistorySelection(HistoryPlayback selection, CallItem target)
+        private HistoryTraversal? CommitHistorySelection(HistoryPlayback selection, CallItem target)
         {
-            if (!OwnsHistoryPlayback(selection) || !Calls.Contains(target))
+            if (!OwnsHistoryPlayback(selection))
+                return null;
+            var index = Calls.IndexOf(target);
+            if (index < 0)
                 return null;
 
             // Preparation and authorization must succeed before retiring the
             // existing traversal, even when the target needs an older page.
             RequireHistoryRecordingAccess(selection.Snapshot, target);
+            var recordings = ImmutableArray.CreateBuilder<CallItem>(index + 1);
+            for (var position = index; position >= 0; position--)
+                recordings.Add(Calls[position]);
+            var prefetch = CaptureHistoryPrefetch(index);
 #if ANDROID
             JoesScanner.Platforms.Android.Services.AndroidAudioEnvironment.RequestPlay();
 #elif IOS
@@ -284,7 +295,7 @@ namespace JoesScanner.ViewModels
             if (!_isPaging)
                 StatusText = _historyPageError ?? HistoryPlayingStatus;
             NotifyHistoryPlaybackState();
-            return new(selection.Lease, selection.Snapshot, request);
+            return new(new(selection.Lease, selection.Snapshot, request), recordings.MoveToImmutable(), prefetch);
         }
 
         private async Task<PlaybackAudioLease> PrepareHistorySelectionAsync(HistoryPlayback playback, CallItem call)
@@ -304,26 +315,25 @@ namespace JoesScanner.ViewModels
             return prepared;
         }
 
-        private async Task PlayHistoryQueueAsync(HistoryPlayback playback, CallItem first, PlaybackAudioLease firstAudio)
+        private async Task PlayHistoryQueueAsync(HistoryTraversal traversal, PlaybackAudioLease firstAudio)
         {
+            var playback = traversal.Playback;
             var token = playback.Request.Token;
+            var prefetch = traversal.OlderPrefetch;
+            Action? onStarted = prefetch == null ? null : StartPrefetch;
             PlaybackAudioLease? prepared = firstAudio;
             try
             {
-                CallItem? next = first;
-                while (next != null && !token.IsCancellationRequested)
+                // The display can reorder when archive pages arrive. Visit only
+                // the cards captured at selection, including when a clip fails.
+                foreach (var call in traversal.Recordings)
                 {
-                    var call = next;
+                    token.ThrowIfCancellationRequested();
                     var audio = prepared;
                     prepared = null;
-                    var outcome = await PlayHistoryRecordingAsync(playback, call, audio).ConfigureAwait(false);
+                    var outcome = await PlayHistoryRecordingAsync(playback, call, audio, onStarted).ConfigureAwait(false);
                     if (outcome is PlaybackOutcome.Canceled or PlaybackOutcome.Withheld)
                         break;
-
-                    // Every result is visited once per traversal. Failed recordings
-                    // are skipped and chronological playback never needs an older page.
-                    next = await ReadHistoryUiAsync(() => OwnsHistoryPlayback(playback)
-                        ? AdjacentHistoryCard(call, -1) : null).ConfigureAwait(false);
                 }
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { }
@@ -347,12 +357,21 @@ namespace JoesScanner.ViewModels
                     }
                 }).ConfigureAwait(false);
             }
+
+            void StartPrefetch()
+            {
+                if (Interlocked.Exchange(ref prefetch, null) is { } page)
+                    _ = PrefetchOlderHistoryPageAsync(playback, page);
+            }
         }
 
-        private async Task<PlaybackOutcome> PlayHistoryRecordingAsync(HistoryPlayback playback, CallItem call, PlaybackAudioLease? audio)
+        private async Task<PlaybackOutcome> PlayHistoryRecordingAsync(HistoryPlayback playback, CallItem call,
+            PlaybackAudioLease? audio, Action? onStarted)
         {
             var token = playback.Request.Token;
             var completion = new PlaybackCompletion();
+            if (onStarted != null)
+                completion.OnStarted(onStarted);
             Exception? failure = null;
             CallItem? previous = null;
             var published = false;
