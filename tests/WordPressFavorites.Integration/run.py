@@ -9,6 +9,7 @@ import ipaddress
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import ssl
@@ -366,8 +367,13 @@ def prepare(compose, directory, https_port, http_port):
     compose.fixture("schema")
     for operation in ("upgrade-from-1.5.8", "missing-table", "upgrade-from-1.5.9"):
         compose.fixture(operation)
-        _, index = site.request("/wp-json/", 200)
-        check(API.replace("/wp-json", "") + "/favorites/sync" in json.loads(index)["routes"], "The plugin did not register Favorites.")
+        try:
+            _, index = site.request("/wp-json/", 200)
+            check(API.replace("/wp-json", "") + "/favorites/sync" in json.loads(index)["routes"], "The plugin did not register Favorites.")
+            _, directory_data = site.request(API + "/servers", 200)
+            check(json.loads(directory_data).get("ok") is True, "The plugin did not return its directory after the schema change.")
+        except RuntimeError as error:
+            raise RuntimeError(f"{operation}: {error}") from error
         compose.fixture("schema")
     compose.fixture("directory-schema")
     print("PASS Plugin activation, previous schema upgrades to 1.5.10, legacy directory ownership and URLs, and Favorites table repair", flush=True)
@@ -443,6 +449,22 @@ def exercise(compose, directory, arguments):
     print("PASS Favorites storage and WordPress/proxy diagnostic logs exclude synthetic secrets", flush=True)
 
 
+def report_php_errors(compose):
+    # Error context can contain request data or SQL values. Report only generic
+    # error identifiers and source locations from the disposable site's log.
+    result = compose.run("exec", "-T", "wordpress", "sh", "-c",
+                         "test ! -f /tmp/js-favorites-integration.log || tail -n 250 /tmp/js-favorites-integration.log",
+                         label="Collect disposable PHP error locations", required=False)
+    for line in result.stdout.splitlines():
+        category = re.search(r"PHP (?:Fatal error|Parse error|Warning): (?:Uncaught ([A-Za-z_\\]+): )?", line)
+        location = re.search(r"(/var/www/html/[a-zA-Z0-9_/.-]+\.php)(?::|\(| on line )(\d+)", line)
+        if not category or not location:
+            continue
+        missing = re.search(r"Call to undefined (?:function|method) ([a-zA-Z_\\:][a-zA-Z0-9_\\:]*)\(", line)
+        detail = f" undefined {missing[1]}" if missing else ""
+        print(f"PHP diagnostic {category[1] or 'error'}{detail} at {location[1]}:{location[2]}", file=sys.stderr)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="Check the local tooling without creating containers.")
@@ -462,6 +484,9 @@ def main():
         with tempfile.TemporaryDirectory(prefix="joesscanner-favorites-") as temporary:
             try:
                 exercise(compose, Path(temporary), arguments)
+            except (RuntimeError, OSError, ValueError):
+                report_php_errors(compose)
+                raise
             finally:
                 compose.run("down", "--volumes", "--remove-orphans", label="Remove this disposable project")
         return 0
