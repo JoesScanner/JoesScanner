@@ -9,7 +9,7 @@ namespace JoesScanner.Services
     // Always present dialogs from the active visual root (Shell or window root page).
     internal static class UiDialogs
     {
-        private static Page? GetHostPage()
+        internal static Page? GetHostPage()
         {
             try
             {

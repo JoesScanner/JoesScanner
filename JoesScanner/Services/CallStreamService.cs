@@ -220,6 +220,7 @@ namespace JoesScanner.Services
             // When WebSocket is unavailable, fall back to polling and retry WS after a short cooldown.
             var wsDisableUntilUtc = DateTime.MinValue;
             DateTimeOffset? foregroundPollFloor = null;
+            DateTimeOffset? notificationPollFloor = null;
             var livePollSince = recovery?.ListeningSince ?? _clock.GetUtcNow();
             RecordingPlaybackAccess.HistoryGrant? pollGrant = null;
 
@@ -232,6 +233,7 @@ namespace JoesScanner.Services
                     skipInitialBatch = true;
                     wsDisableUntilUtc = DateTime.MinValue;
                     foregroundPollFloor = null;
+                    notificationPollFloor = null;
                     livePollSince = _clock.GetUtcNow();
                     pollGrant = null;
                 }
@@ -304,6 +306,7 @@ namespace JoesScanner.Services
 
                 if (socket != null)
                 {
+                    notificationPollFloor = null;
                     recovery?.TransportSucceeded(_clock.GetUtcNow());
                     if (window != null && pollGrant == null)
                         recovery?.AllowPlaybackWithoutHistory(window);
@@ -456,6 +459,7 @@ namespace JoesScanner.Services
                     else if (recovery != null && InRecoveryScope())
                         await recovery.TransportLostAsync();
                     hasReportedIdleConnection = false;
+                    notificationPollFloor = null;
                     var talkgroup = isAuthError ? "AUTH" : "ERROR";
 
                     var transcription = isAuthError
@@ -490,6 +494,10 @@ namespace JoesScanner.Services
                 if (window != null && pollGrant == null)
                     recovery?.AllowPlaybackWithoutHistory(window);
 
+                // A successful snapshot after a gap establishes the notification edge.
+                // The polling grant and the journal still govern playback independently.
+                var continuedPolling = notificationPollFloor.HasValue;
+                notificationPollFloor ??= _clock.GetUtcNow();
                 var establishingBaseline = recovery?.NeedsPollingBaseline == true && pollGrant != null;
                 if (rows != null && recovery?.ListeningSince == null && foregroundPollFloor is { } floor)
                 {
@@ -604,6 +612,8 @@ namespace JoesScanner.Services
                     if (item != null)
                     {
                         item.IsListeningBaseline = establishingBaseline && recoveryId == null;
+                        item.IsCurrentTransmission = continuedPolling && !establishingBaseline && recoveryId == null &&
+                            item.RecordingTimeUtc >= notificationPollFloor;
                         if (item.IsListeningBaseline || recoveryId != null)
                             RequireHistoricalAdmission(item, liveCalls, recoveryId, baseUrl);
                         yield return item;
@@ -1866,6 +1876,10 @@ namespace JoesScanner.Services
                     if (call != null)
                     {
                         call.IsListeningBaseline = listeningBaseline;
+                        // Independent recorders may replay buffered rows on a new socket.
+                        // Retain their playback provenance and exclude pre-connection rows from alerts.
+                        call.IsCurrentTransmission = !row.IsUpdateNotification && origin == RecordingOrigin.Live &&
+                            recordedAt >= socketOpenedAfter;
                         if (listeningBaseline)
                             RequireHistoricalAdmission(call, liveCalls, windowId: null, baseUrl);
                         yield return call;

@@ -368,7 +368,7 @@ namespace JoesScanner.Views
                 }
             }
 
-            if (Shell.Current != null)
+            if (UiDialogs.GetHostPage() is Shell or RootPage)
             {
                 try
                 {
@@ -404,7 +404,8 @@ namespace JoesScanner.Views
                 await SaveLogFileInteractiveAsync(bodyText, serverUrl);
             });
 
-            await Navigation.PushModalAsync(new NavigationPage(viewer));
+            if (UiDialogs.GetHostPage()?.Navigation is { } navigation)
+                await navigation.PushModalAsync(new NavigationPage(viewer));
         }
 
         private async Task SaveLogFileInteractiveAsync(string bodyText, string serverUrl)

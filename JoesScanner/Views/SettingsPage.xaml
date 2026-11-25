@@ -1058,6 +1058,114 @@
 
 </Border>
 
+                    <Border Style="{StaticResource SettingsCardStyle}">
+                        <VerticalStackLayout Style="{StaticResource SettingsCardContentStyle}">
+                            <Grid Style="{StaticResource SettingsCardHeaderStyle}" ColumnDefinitions="*,Auto"
+                                  AutomationId="NotificationsHeader">
+                                <Grid.GestureRecognizers>
+                                    <TapGestureRecognizer Tapped="OnNotificationsHeaderTapped" />
+                                </Grid.GestureRecognizers>
+                                <Label Text="Notifications" Style="{StaticResource SettingsCardTitleStyle}" />
+                                <Label x:Name="NotificationsChevron" Text="▾" Grid.Column="1"
+                                       Style="{StaticResource SettingsCardChevronStyle}" />
+                            </Grid>
+                            <VerticalStackLayout x:Name="NotificationsBody" IsVisible="False" Spacing="8">
+                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                                    <Label Text="Transmission notifications" VerticalOptions="Center" />
+                                    <controls:CompactToggleSwitch Grid.Column="1" Style="{StaticResource CompactToggleStyle}"
+                                        AutomationId="TransmissionNotifications" IsToggled="{Binding TransmissionNotifications, Mode=TwoWay}" />
+                                </Grid>
+                                <Label Text="Get local alerts when Live is out of view." FontSize="12" />
+                                <Label Text="Notify for" FontSize="12" />
+                                <Picker ItemsSource="{Binding TransmissionScopeChoices}"
+                                        SelectedIndex="{Binding TransmissionScopeIndex, Mode=TwoWay}"
+                                        AutomationId="TransmissionNotificationScope" />
+                                <VerticalStackLayout IsVisible="{Binding ShowsNotificationTalkgroups}" Spacing="5">
+                                    <Label Text="{Binding SelectedNotificationTalkgroupCount}" FontSize="12" />
+                                    <Label Text="Choose from recent Live calls. Saved selections stay available here."
+                                           FontSize="12" />
+                                    <Picker Title="Choose a recorder and talkgroup"
+                                            ItemsSource="{Binding NotificationTalkgroupLabels}"
+                                            SelectedIndex="{Binding NotificationTalkgroupIndex, Mode=TwoWay}"
+                                            IsEnabled="{Binding HasRecentNotificationChoices}" AutomationId="NotificationTalkgroup" />
+                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                        <Button Text="{Binding NotificationTalkgroupAction}"
+                                                IsEnabled="{Binding CanToggleNotificationTalkgroup}"
+                                                Clicked="OnToggleNotificationTalkgroupClicked" AutomationId="ToggleNotificationTalkgroup" />
+                                        <Button Text="Refresh" Grid.Column="1" Clicked="OnRefreshNotificationTalkgroupsClicked"
+                                                AutomationId="RefreshNotificationTalkgroups" />
+                                    </Grid>
+                                </VerticalStackLayout>
+                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                                    <Label Text="Group notifications by talkgroup" VerticalOptions="Center" />
+                                    <controls:CompactToggleSwitch Grid.Column="1" Style="{StaticResource CompactToggleStyle}"
+                                        AutomationId="GroupNotifications" IsToggled="{Binding GroupNotifications, Mode=TwoWay}" />
+                                </Grid>
+                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                                    <Label Text="Connection failure notifications" VerticalOptions="Center" />
+                                    <controls:CompactToggleSwitch Grid.Column="1" Style="{StaticResource CompactToggleStyle}"
+                                        AutomationId="ConnectionFailureNotifications" IsToggled="{Binding ConnectionFailureNotifications, Mode=TwoWay}" />
+                                </Grid>
+                                <Label Text="Notification sound" FontSize="12" />
+                                <Picker ItemsSource="{Binding NotificationSoundChoices}"
+                                        SelectedIndex="{Binding NotificationSoundIndex, Mode=TwoWay}"
+                                        AutomationId="NotificationSound" />
+                                <Label Text="{Binding NotificationAccessText}" IsVisible="{Binding ShowsNotificationAccessText}" FontSize="12" />
+                                <Button Text="Allow notifications" Clicked="OnAllowNotificationsClicked"
+                                        IsVisible="{Binding ShowsNotificationAccessButton}" HorizontalOptions="Start" />
+                                <Label Text="{Binding DeviceOptionsNote}" IsVisible="{Binding HasDeviceOptionsNote}" FontSize="12" />
+                                <Label IsVisible="{OnPlatform iOS=True, Default=False}" FontSize="12"
+                                       Text="iOS can pause monitoring during extended silence. Alerts require the app to receive the call." />
+                            </VerticalStackLayout>
+                        </VerticalStackLayout>
+                    </Border>
+
+                    <Border Style="{StaticResource SettingsCardStyle}">
+                        <VerticalStackLayout Style="{StaticResource SettingsCardContentStyle}">
+                            <Grid Style="{StaticResource SettingsCardHeaderStyle}" ColumnDefinitions="*,Auto"
+                                  AutomationId="OvernightMonitoringHeader">
+                                <Grid.GestureRecognizers>
+                                    <TapGestureRecognizer Tapped="OnOvernightHeaderTapped" />
+                                </Grid.GestureRecognizers>
+                                <Label Text="Overnight monitoring" Style="{StaticResource SettingsCardTitleStyle}" />
+                                <Label x:Name="OvernightChevron" Text="▾" Grid.Column="1"
+                                       Style="{StaticResource SettingsCardChevronStyle}" />
+                            </Grid>
+                            <VerticalStackLayout x:Name="OvernightBody" IsVisible="False" Spacing="8">
+                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                                    <Label Text="Keep screen awake while monitoring" VerticalOptions="Center" />
+                                    <controls:CompactToggleSwitch Grid.Column="1" Style="{StaticResource CompactToggleStyle}"
+                                        IsEnabled="{Binding ScreenAwakeSupported}" AutomationId="KeepScreenAwake"
+                                        IsToggled="{Binding KeepScreenAwake, Mode=TwoWay}" />
+                                </Grid>
+                                <Label Text="Keeps the display on while the app is in front and monitoring." FontSize="12" />
+                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10" IsEnabled="{Binding KeepScreenAwake}">
+                                    <Label Text="Only while charging" VerticalOptions="Center" />
+                                    <controls:CompactToggleSwitch Grid.Column="1" Style="{StaticResource CompactToggleStyle}"
+                                        AutomationId="OnlyWhileCharging" IsToggled="{Binding OnlyWhileCharging, Mode=TwoWay}" />
+                                </Grid>
+                                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10" IsEnabled="{Binding KeepScreenAwake}">
+                                    <Label Text="Low-light mode" VerticalOptions="Center" />
+                                    <controls:CompactToggleSwitch Grid.Column="1" Style="{StaticResource CompactToggleStyle}"
+                                        AutomationId="LowLightMonitoring" IsToggled="{Binding LowLightMonitoring, Mode=TwoWay}" />
+                                </Grid>
+                                <VerticalStackLayout IsVisible="{Binding ShowsMonitoringBrightness}" Spacing="5">
+                                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                                        <HorizontalStackLayout Spacing="6" VerticalOptions="Center">
+                                            <Label Text="Brightness" />
+                                            <Label Text="{Binding MonitoringBrightnessText}" AutomationId="MonitoringBrightnessValue" />
+                                        </HorizontalStackLayout>
+                                        <Stepper Grid.Column="1" Minimum="5" Maximum="100" Increment="5"
+                                                 Value="{Binding MonitoringBrightness, Mode=TwoWay}"
+                                                 SemanticProperties.Description="Low-light brightness" AutomationId="MonitoringBrightness" />
+                                    </Grid>
+                                    <Label Text="Dimming applies inside the app window." FontSize="12" IsVisible="{Binding WindowsWindowDimming}" />
+                                </VerticalStackLayout>
+                                <Label Text="{Binding DeviceOptionsNote}" IsVisible="{Binding HasDeviceOptionsNote}" FontSize="12" />
+                            </VerticalStackLayout>
+                        </VerticalStackLayout>
+                    </Border>
+
                     <!-- ADDRESS DETECTION CARD -->
                     <Border Style="{StaticResource SettingsCardStyle}">
 

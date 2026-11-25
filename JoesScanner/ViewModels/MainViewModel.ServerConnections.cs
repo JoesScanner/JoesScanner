@@ -266,6 +266,7 @@ public partial class MainViewModel
             if (_connections.IsCurrent(connection) && _monitoring.CanRecover(_monitoring.Current))
             {
                 PublishScannerConnectionRows();
+                MonitoringDevice.OnRecorderStatus(connection.Profile.Id, connection.Generation, connection.Status, connection.Token);
                 if (connection.Status == ServerConnectionStatus.Monitoring)
                 {
                     RequestQueueForLiveArrival("RecorderConnected");
@@ -356,6 +357,7 @@ public partial class MainViewModel
             _ = SaveRecorderStopAsync(retired.Queue);
         MainThread.BeginInvokeOnMainThread(() =>
         {
+            MonitoringDevice.EndRecorderFailure(connection.Profile.Id, connection.Generation);
             RetireRecorderPlaybackLag(connection.Generation);
             if (_retryPlaybackCall?.LivePlaybackOwner != connection.Generation)
                 return;

@@ -699,7 +699,8 @@ private void AttachAddressAlertHandlers()
                 {
                     try
                     {
-                        await Shell.Current.Navigation.PopModalAsync();
+                        if (UiDialogs.GetHostPage()?.Navigation is { } navigation)
+                            await navigation.PopModalAsync();
                     }
                     catch
                     {
@@ -726,7 +727,8 @@ private void AttachAddressAlertHandlers()
                 {
                     try
                     {
-                        await Shell.Current.Navigation.PopModalAsync();
+                        if (UiDialogs.GetHostPage()?.Navigation is { } navigation)
+                            await navigation.PopModalAsync();
                     }
                     catch
                     {
@@ -773,7 +775,8 @@ private void AttachAddressAlertHandlers()
                     Content = root
                 };
 
-                await Shell.Current.Navigation.PushModalAsync(new NavigationPage(page));
+                if (UiDialogs.GetHostPage()?.Navigation is { } navigation)
+                    await navigation.PushModalAsync(new NavigationPage(page));
             }
             catch
             {

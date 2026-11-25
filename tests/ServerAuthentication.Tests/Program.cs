@@ -18,6 +18,12 @@ if (args is ["--wordpress-favorites", var fixture])
 
 var cases = new (string Name, Func<Task> Run)[]
 {
+    ("Transmission settings honor the active Live view, saved recorder-scoped talkgroups, and Favorites changes", MonitoringDeviceTests.ScopesAndFavorites),
+    ("Notification grouping uses a fixed 60-second window and separates unrelated recorders and talkgroups", MonitoringDeviceTests.FixedWindowsAndIsolation),
+    ("Durable admission suppresses recovered and duplicate alerts without changing playback or completion", MonitoringDeviceTests.DurableAdmissionAndRecovery),
+    ("Only Red outages and setup failures alert, once per independent connection episode", MonitoringDeviceTests.RedFailureEpisodes),
+    ("Notification permission and Local Only fence delivery without blocking independent recorders", MonitoringDeviceTests.PermissionAndPrivacy),
+    ("Overnight display restores power and brightness on unplug, background, Stop, and disable", MonitoringDeviceTests.DisplayTransitions),
     ("Built-in and directory requests use only endpoint-issued credentials", HostedSelection),
     ("Missing session, inactive subscription, or empty issuance blocks requests", MissingCredentials),
     ("A denied POST refreshes and replays the same body once", RotatedCredentials),

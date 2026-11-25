@@ -44,6 +44,7 @@ namespace JoesScanner.Models
         internal bool IsLiveUpdate { get; init; }
         internal string? RecoveryWindowId { get; set; }
         internal bool IsListeningBaseline { get; set; }
+        internal bool IsCurrentTransmission { get; set; }
         internal bool WasDurablyAdmitted { get; private set; }
         internal Action<bool>? LiveAdmission { private get; set; }
 

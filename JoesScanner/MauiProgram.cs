@@ -58,6 +58,7 @@ public static class MauiProgram
         builder.Services.AddSingleton<IAudioFilterService, AudioFilterService>();
         builder.Services.AddSingleton<IAudioPlaybackService, AudioPlaybackService>();
         builder.Services.AddSingleton<PlaybackOwnership>();
+        builder.Services.AddSingleton<MonitoringDeviceService>();
         builder.Services.AddSingleton<ISystemMediaService, SystemMediaService>();
         builder.Services.AddSingleton<ISubscriptionService, SubscriptionService>();
         builder.Services.AddSingleton<ITelemetryService, TelemetryService>();

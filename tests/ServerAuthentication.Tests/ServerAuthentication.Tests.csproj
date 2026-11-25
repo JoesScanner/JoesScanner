@@ -61,6 +61,10 @@
     <Compile Include="../../JoesScanner/Services/CallStreamService.cs" Link="CallStreamService.cs" />
     <Compile Include="../../JoesScanner/Services/ICallStreamService.cs" Link="ICallStreamService.cs" />
     <Compile Include="../../JoesScanner/Services/ServerConnectionManager.cs" Link="ServerConnectionManager.cs" />
+    <Compile Include="../../JoesScanner/Services/MonitoringDeviceOptions.cs" Link="MonitoringDeviceOptions.cs" />
+    <Compile Include="../../JoesScanner/Services/MonitoringNotificationPolicy.cs" Link="MonitoringNotificationPolicy.cs" />
+    <Compile Include="../../JoesScanner/Services/MonitoringNotificationDelivery.cs" Link="MonitoringNotificationDelivery.cs" />
+    <Compile Include="../../JoesScanner/Services/ScreenAwakeController.cs" Link="ScreenAwakeController.cs" />
     <Compile Include="../../JoesScanner/Services/ScannerConnectionStore.cs" Link="ScannerConnectionStore.cs" />
     <Compile Include="../../JoesScanner/Services/ServerDirectoryClient.cs" Link="ServerDirectoryClient.cs" />
     <Compile Include="../../JoesScanner/Services/DirectoryRecorderPolicy.cs" Link="DirectoryRecorderPolicy.cs" />

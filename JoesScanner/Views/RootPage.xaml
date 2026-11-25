@@ -49,5 +49,13 @@
 
         </Grid>
 
+        <BoxView
+            x:Name="MonitoringDimmer"
+            Grid.RowSpan="3"
+            Color="Black"
+            ZIndex="10"
+            IsVisible="False"
+            InputTransparent="True" />
+
     </Grid>
 </ContentPage>

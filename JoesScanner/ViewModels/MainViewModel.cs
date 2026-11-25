@@ -178,7 +178,6 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 
 #if ANDROID
         private const string MonitoringExplicitlyStoppedKey = "android_monitoring_explicitly_stopped";
-        private Task? _androidNotificationPermissionPrompt;
 #elif IOS
         private const string MonitoringExplicitlyStoppedKey = "ios_monitoring_explicitly_stopped";
 #else
@@ -224,7 +223,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             IToneAlertService toneAlertService,
             DurableLiveQueue durableQueue,
             PlaybackOwnership playbackOwnership, ScannerConnectionStore connectionStore, FavoritesService favorites,
-            PlaybackAudioCache audioCache)
+            PlaybackAudioCache audioCache, MonitoringDeviceService monitoringDevice)
         {
             _callStreamService = callStreamService ?? throw new ArgumentNullException(nameof(callStreamService));
             _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
@@ -240,6 +239,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             _durableQueue = durableQueue;
             _playbackOwnership = playbackOwnership;
             _audioCache = audioCache;
+            MonitoringDevice = monitoringDevice;
             _ = _audioCache.InitializeAsync();
             _connectionStore = connectionStore;
             Favorites = favorites;
@@ -479,6 +479,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                     return;
 
                 _isRunning = value;
+                MonitoringDevice.SetMonitoring(value);
                 OnPropertyChanged();
                 NotifyMonitoringControls();
                 OnPropertyChanged(nameof(IsMediaButtonsEnabled));
@@ -1172,9 +1173,6 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 
         private async Task EnsureSystemMediaSessionStartedAsync(MonitoringLifecycle.Run run)
         {
-#if ANDROID
-            await EnsureAndroidNotificationPermissionAsync(run);
-#endif
             run.Token.ThrowIfCancellationRequested();
             try
             {
@@ -1195,46 +1193,6 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             return string.Equals(username, AppleIosTestAccountEmail, StringComparison.OrdinalIgnoreCase)
                 || string.Equals(username, AppleIosTestAccountEmailLegacy, StringComparison.OrdinalIgnoreCase);
         }
-
-#if ANDROID
-        private async Task EnsureAndroidNotificationPermissionAsync(MonitoringLifecycle.Run run)
-        {
-            if (!OperatingSystem.IsAndroidVersionAtLeast(33))
-                return;
-
-            if (_androidNotificationPermissionPrompt is not { IsCompleted: false })
-            {
-                PermissionStatus status;
-                try
-                {
-                    status = await Permissions.CheckStatusAsync<Permissions.PostNotifications>().WaitAsync(run.Token);
-                }
-                catch (Exception ex) when (!run.Token.IsCancellationRequested)
-                {
-                    AppLog.DebugWriteLine(() => $"Could not check notification permission ({ex.GetType().Name}).");
-                    return;
-                }
-                run.Token.ThrowIfCancellationRequested();
-                if (status == PermissionStatus.Granted)
-                    return;
-                _androidNotificationPermissionPrompt = RequestAndroidNotificationPermissionAsync();
-            }
-
-            await run.WaitForInitializationAsync(_androidNotificationPermissionPrompt);
-        }
-
-        private static async Task RequestAndroidNotificationPermissionAsync()
-        {
-            try
-            {
-                await Permissions.RequestAsync<Permissions.PostNotifications>();
-            }
-            catch (Exception ex)
-            {
-                AppLog.DebugWriteLine(() => $"Could not request notification permission ({ex.GetType().Name}).");
-            }
-        }
-#endif
 
         private async Task ReceiveRecorderCallAsync(DurableLiveQueue.Run durable, CallItem call, CancellationToken token)
         {
@@ -1312,6 +1270,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                 LastQueueEvent = $"Inserted call at {DateTime.Now:T}";
                 UpdateQueueDerivedState();
                 RequestQueueForLiveArrival("NewCallInserted");
+                ObserveTransmission(durable, call, snapshot, saved, token);
             });
         }
 

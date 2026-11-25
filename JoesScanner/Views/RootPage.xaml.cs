@@ -15,6 +15,7 @@ public partial class RootPage : ContentPage
 {
     private readonly IServiceProvider _services;
     private readonly IDispatcher _viewDispatcher;
+    private readonly MonitoringDeviceService _monitoringDevice;
 
     private readonly Dictionary<AppTab, ContentPage> _pages = new();
     private readonly Dictionary<AppTab, View> _views = new();
@@ -45,6 +46,7 @@ public partial class RootPage : ContentPage
     public RootPage(IServiceProvider services)
     {
         _services = services ?? throw new ArgumentNullException(nameof(services));
+        _monitoringDevice = _services.GetRequiredService<MonitoringDeviceService>();
         InitializeComponent();
         if (Application.Current is App { RecoveryNotice: { } notice })
         {
@@ -58,6 +60,10 @@ public partial class RootPage : ContentPage
     {
         base.OnAppearing();
         _rootVisible = true;
+        _monitoringDevice.SetLiveVisible(_current == AppTab.Main);
+        _monitoringDevice.WindowDimChanged -= OnMonitoringDimChanged;
+        _monitoringDevice.WindowDimChanged += OnMonitoringDimChanged;
+        OnMonitoringDimChanged(_monitoringDevice.WindowDim);
 
         TabNavigationService.Instance.TabRequested -= OnTabRequested;
         TabNavigationService.Instance.TabRequested += OnTabRequested;
@@ -137,10 +143,18 @@ public partial class RootPage : ContentPage
     protected override void OnDisappearing()
     {
         _rootVisible = false;
+        _monitoringDevice.SetLiveVisible(false);
+        _monitoringDevice.WindowDimChanged -= OnMonitoringDimChanged;
         ++_navigationRequestVersion;
         StopWaitingForMainLayout();
         TabNavigationService.Instance.TabRequested -= OnTabRequested;
         base.OnDisappearing();
+    }
+
+    private void OnMonitoringDimChanged(double opacity)
+    {
+        MonitoringDimmer.Opacity = opacity;
+        MonitoringDimmer.IsVisible = opacity > 0;
     }
 
     private void QueueSettingsWarmupAfterLayout(View view)
@@ -507,6 +521,7 @@ public partial class RootPage : ContentPage
         _activePage = page;
         _activeView = view;
         _current = tab;
+        _monitoringDevice.SetLiveVisible(_rootVisible && tab == AppTab.Main);
         TabStrip.SelectedTab = tab;
 
         var settingsPage = page as SettingsPage;

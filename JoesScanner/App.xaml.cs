@@ -44,6 +44,7 @@ public partial class App : Application
         window.MinimumWidth = 430;
         window.MinimumHeight = 500;
 #endif
+        _services.GetRequiredService<MonitoringDeviceService>().Attach(window);
         window.Created += (_, _) => window.Dispatcher.Dispatch(() => _ = OpenAsync());
         retry.Clicked += (_, _) => _ = OpenAsync();
         return window;
@@ -85,7 +86,7 @@ public partial class App : Application
                 _servicesStarted = true;
                 StartBackgroundServices(settings);
             }
-#if IOS
+#if IOS || ANDROID
             window.Page = _services.GetRequiredService<Views.RootPage>();
 #else
             window.Page = new AppShell(_services);
@@ -125,6 +126,7 @@ public partial class App : Application
                 var credentialWarning = settings.SavedCredentialWarning;
                 RecoveryNotice = DatabaseRecovery.StartupNotice(recoveredMain, recoveredFavorites, invalidSettings, credentialWarning);
                 _ = _services.GetRequiredService<FavoritesService>();
+                _services.GetRequiredService<MonitoringDeviceService>().LoadOptions();
                 if (invalidSettings)
                     AppLog.Basic("Ignored unreadable saved settings while retaining other local data.");
 #if WINDOWS

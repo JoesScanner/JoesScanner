@@ -23,7 +23,7 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
         internal bool Owns(RecordingAccessContext? access) =>
             Protected == (access?.Protected == true) && (access?.Account ?? string.Empty) == AccountScope;
     }
-    internal readonly record struct Observation(long? ArrivalSequence, bool Changed, bool IsRecoveryBacklog = false);
+    internal readonly record struct Observation(long? ArrivalSequence, bool Changed, bool IsRecoveryBacklog = false, bool FirstAdmission = false);
     internal sealed record JumpResult(Recording Target, bool PlayTarget);
     internal sealed record Selection(Run Scope, Recording Row);
     internal sealed record CombinedJump(Selection Target, bool PlayTarget);
@@ -366,7 +366,8 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
             var sequence = save.ExecuteScalar() as long?;
             token.ThrowIfCancellationRequested();
             transaction.Commit();
-            return new(sequence, sequence != null, isRecoveryBacklog && sequence != null);
+            return new(sequence, sequence != null, isRecoveryBacklog && sequence != null,
+                FirstAdmission: previous == null && sequence.HasValue);
         });
     }
 

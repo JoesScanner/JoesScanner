@@ -37,9 +37,11 @@ internal static partial class MobileRecoveryTests
             "A repeated full socket update cannot re-queue a prior-session identity.");
         ws.Send(Row("first-live", Now.AddMinutes(5), "first.mp3"));
         ws.Send(Row("second-live", Now.AddDays(-2), "second.mp3"));
-        Check(await reader.MoveNextAsync() && reader.Current.BackendId == "first-live", "Expected first new observation.");
+        Check(await reader.MoveNextAsync() && reader.Current is { BackendId: "first-live", IsCurrentTransmission: true },
+            "Current socket recordings must remain eligible for local alerts.");
         var a = await SaveIngestionAsync(queue, run, reader.Current, token);
-        Check(await reader.MoveNextAsync() && reader.Current.BackendId == "second-live", "Expected second new observation.");
+        Check(await reader.MoveNextAsync() && reader.Current is { BackendId: "second-live", IsCurrentTransmission: false },
+            "A replay timestamped before the socket opened must remain playable without sending an alert.");
         var b = await SaveIngestionAsync(queue, run, reader.Current, token);
         Check(a.ArrivalSequence < b.ArrivalSequence && (await queue.NextAsync(run, 0, token))?.Id == "first-live",
             "New WebSocket observations must be FIFO even when their recording clocks run backward.");
@@ -98,7 +100,7 @@ internal static partial class MobileRecoveryTests
               reader.Current.RecoveryWindowId == window.Id, "Expected the inherited window after establishing the baseline.");
         Check((await SaveIngestionAsync(queue, run, reader.Current, token)).IsRecoveryBacklog &&
               await queue.NextAsync(run, 0, token) == null, "Late inherited recovery is retained for History.");
-        Check(await reader.MoveNextAsync() && reader.Current is { BackendId: "new-poll", IsListeningBaseline: false, RecoveryWindowId: null },
+        Check(await reader.MoveNextAsync() && reader.Current is { BackendId: "new-poll", IsListeningBaseline: false, RecoveryWindowId: null, IsCurrentTransmission: false },
             "A regular post-baseline poll can admit new calls even while inherited recovery is retrying.");
         var saved = await SaveIngestionAsync(queue, run, reader.Current, token);
         Check(!saved.IsRecoveryBacklog && (await queue.NextAsync(run, 0, token))?.Id == "new-poll" &&
@@ -122,7 +124,7 @@ internal static partial class MobileRecoveryTests
         await using var reader = stream.GetCallStreamAsync([], token, recovery).GetAsyncEnumerator(token);
         Check(await reader.MoveNextAsync() && reader.Current.Talkgroup == "HEARTBEAT" &&
             await queue.NextAsync(run, 0, token) == null, "A fresh install should wait for Live traffic.");
-        Check(await reader.MoveNextAsync() && reader.Current is { BackendId: "first-new", IsListeningBaseline: false },
+        Check(await reader.MoveNextAsync() && reader.Current is { BackendId: "first-new", IsListeningBaseline: false, IsCurrentTransmission: true },
             "An empty baseline must not suppress the first call that arrives later.");
         Check(!(await SaveIngestionAsync(queue, run, reader.Current, token)).IsRecoveryBacklog &&
             (await queue.NextAsync(run, 0, token))?.Id == "first-new", "First new call should become the FIFO head.");
