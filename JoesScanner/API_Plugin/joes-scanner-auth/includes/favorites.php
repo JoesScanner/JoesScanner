@@ -48,6 +48,24 @@ function joes_scanner_auth_favorites_error( $code, $status ) {
 }
 
 function joes_scanner_auth_favorites_authorize( WP_REST_Request $request ) {
+    $owner = joes_scanner_auth_favorites_request_owner( $request );
+    return is_wp_error( $owner ) ? $owner : true;
+}
+
+function joes_scanner_auth_favorites_request_owner( WP_REST_Request $request ) {
+    // WordPress calls the permission callback again when building Allow.
+    // Authenticate and count failures once for each REST request object.
+    static $owners = null;
+    if ( $owners === null ) {
+        $owners = new SplObjectStorage();
+    }
+    if ( ! isset( $owners[$request] ) ) {
+        $owners[$request] = joes_scanner_auth_favorites_authenticate( $request );
+    }
+    return $owners[$request];
+}
+
+function joes_scanner_auth_favorites_authenticate( WP_REST_Request $request ) {
     if ( ! is_ssl() ) {
         return joes_scanner_auth_favorites_error( 'https_required', 403 );
     }
@@ -82,11 +100,7 @@ function joes_scanner_auth_favorites_authorize( WP_REST_Request $request ) {
         return joes_scanner_auth_favorites_error( 'authentication_required', 401 );
     }
 
-    // Overwrite the URL parameter slot that only this route reads for ownership.
-    $url = $request->get_url_params();
-    $url['_favorites_authenticated_user'] = (int) $user->ID;
-    $request->set_url_params( $url );
-    return true;
+    return (int) $user->ID;
 }
 
 function joes_scanner_auth_favorites_key_valid( $key ) {
@@ -143,9 +157,9 @@ function joes_scanner_auth_favorites_value( $value, $deleted ) {
 
 function joes_scanner_auth_favorites_sync( WP_REST_Request $request ) {
     global $wpdb;
-    $user_id = $request->get_url_params()['_favorites_authenticated_user'] ?? 0;
-    if ( $user_id <= 0 ) {
-        return joes_scanner_auth_favorites_error( 'authentication_required', 401 );
+    $user_id = joes_scanner_auth_favorites_request_owner( $request );
+    if ( is_wp_error( $user_id ) ) {
+        return $user_id;
     }
     if ( ! joes_scanner_auth_is_json_request( $request ) || joes_scanner_auth_body_too_large( $request, 262144 ) ) {
         return joes_scanner_auth_favorites_error( 'invalid_payload', 400 );

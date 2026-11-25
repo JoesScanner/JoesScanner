@@ -24,6 +24,8 @@ Integration compatibility
   still runs its complete authentication policy.
 - Favorites mutations must be a JSON array. The complete batch is validated
   before its first write.
+- Favorites authentication counts each failed HTTP request once, including
+  when WordPress evaluates permissions again for the Allow response header.
 
 Validate on a test WordPress installation with synthetic accounts. Check free
 account sign-in, account isolation, concurrent writes, retrying a lost
