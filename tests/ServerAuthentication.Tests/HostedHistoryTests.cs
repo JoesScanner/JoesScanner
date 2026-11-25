@@ -137,7 +137,7 @@ internal static partial class MobileRecoveryTests
             metadataRequests++;
             var date = await DateFilter(request, cancellation);
             if (subscription.Tier == 1 && request.RequestUri!.Host != "custom.example")
-                Check(date == RecordingPlaybackAccess.DateSearch(Now.AddHours(-24), Now),
+                Check(date == $"{Now.AddHours(-23).UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}|{Now.UtcDateTime:yyyy-MM-ddTHH:mm:ssZ}",
                     "Standard directory History must carry the Date constraint on every request.");
             using var document = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(cancellation));
             var offset = document.RootElement.GetProperty("start").GetInt32();
@@ -147,17 +147,23 @@ internal static partial class MobileRecoveryTests
         }));
         var history = new CallHistoryService(settings, new RecordedCalls(), new NoHistoryLookups(), subscription, http, clock);
         var downloads = new CallDownloadService(settings, subscription, http, clock);
-        var filters = new HistorySearchFilters();
-        var premium = await history.SearchAroundAsync(Now.AddHours(-1).LocalDateTime, filters, 5, null, null, token.Token);
+        var recorder = new HistoryRecorder(Guid.NewGuid(), stub.ServerUrl);
+        var day = DateOnly.FromDateTime(Now.LocalDateTime);
+        var dates = new HistoryDateRange(day.AddDays(-3), day, TimeSpan.Zero);
+        var filters = new HistorySearchFilters { Site = new HistoryLookupItem { Value = "site", RecorderId = recorder.Id } };
+        // A future local clock time refers to the same time yesterday for Standard.
+        var standardStart = Now.AddHours(1).LocalDateTime.TimeOfDay;
+        var standardDates = dates with { StartTime = standardStart };
+        var premium = await history.SearchAsync(recorder, filters, dates, token.Token);
         Check(premium.Calls.Count == 2 && premium.Calls.All(call => call.RecordingAccess?.Protected == true),
             "Verified Premium directory History must admit both rows with protected provenance.");
         var oldCall = premium.Calls.Single(call => call.BackendId == "older");
         var recentCall = premium.Calls.Single(call => call.BackendId == "recent");
         subscription.Tier = 1;
-        var standard = await history.SearchAroundAsync(Now.AddHours(-1).LocalDateTime, filters, 5, null, null, token.Token);
-        var nextPage = await history.GetCallsPageAsync(1, 1, filters, token.Token);
+        var standard = await history.SearchAsync(recorder, filters, standardDates, token.Token);
+        var nextPage = await history.LoadMoreAsync(standard, token.Token);
         Check(standard.Calls.Select(call => call.BackendId).SequenceEqual(["recent"]) &&
-              standard.TotalMatches == 1 && nextPage.Calls.Count == 0,
+              !standard.HasMore && nextPage.Calls.Count == 0,
             "History search and subsequent pages must refuse old rows even if the endpoint returns them.");
 
         var directory = Directory.CreateTempSubdirectory("JoesScanner.HistoryExport-");
@@ -176,20 +182,22 @@ internal static partial class MobileRecoveryTests
 
             var before = metadataRequests;
             stub.SubscriptionExpiry = Now.UtcDateTime;
-            await RejectHistory(() => history.GetCallsPageAsync(0, 5, filters, token.Token));
+            await RejectHistory(() => history.SearchAsync(recorder, filters, standardDates, token.Token));
             await downloads.DownloadSingleAsync(recentCall, token.Token);
             stub.SubscriptionExpiry = null;
             subscription.Tier = null; // cached/offline success without a verified tier
-            await RejectHistory(() => history.SearchAroundAsync(Now.LocalDateTime, filters, 5, null, null, token.Token));
+            await RejectHistory(() => history.SearchAsync(recorder, filters, standardDates, token.Token));
             await downloads.DownloadRangeZipAsync([recentCall], token.Token);
             subscription.Tier = 0;
-            await RejectHistory(() => history.GetCallsPageAsync(0, 5, filters, token.Token));
+            await RejectHistory(() => history.SearchAsync(recorder, filters, standardDates, token.Token));
             Check(metadataRequests == before && media.Count == 2 && Share.Default.Shared.Count == 2,
                 "Expired, offline, and Level 0 accounts must be denied before a protected request.");
 
             stub.ServerUrl = "https://custom.example";
             before = subscription.Checks;
-            var custom = await history.GetCallsPageAsync(0, 5, filters, token.Token);
+            var customRecorder = new HistoryRecorder(Guid.NewGuid(), stub.ServerUrl);
+            var customFilters = new HistorySearchFilters { Site = filters.Site! with { RecorderId = customRecorder.Id } };
+            var custom = await history.SearchAsync(customRecorder, customFilters, dates, token.Token);
             Check(custom.Calls.Count == 2 && custom.Calls.All(call => call.RecordingAccess?.Protected == false),
                 "Custom-server history was restricted.");
             await downloads.DownloadSingleAsync(custom.Calls.Single(call => call.BackendId == "older"), token.Token);

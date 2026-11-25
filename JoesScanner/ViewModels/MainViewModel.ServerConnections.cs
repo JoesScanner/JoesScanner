@@ -30,6 +30,7 @@ public partial class MainViewModel
     private volatile IReadOnlyList<SavedScannerConnection> _profiles = Array.Empty<SavedScannerConnection>();
 
     public ObservableCollection<ScannerConnectionRow> ScannerConnections { get; } = [];
+    internal Guid? VisibleLiveRecorderId => _visibleLiveServer;
     internal event Action? ScannerConnectionLayoutChanged;
 
     private bool HasEnabledScannerConnections() => LoadScannerConnections().Any(profile => profile.Enabled);

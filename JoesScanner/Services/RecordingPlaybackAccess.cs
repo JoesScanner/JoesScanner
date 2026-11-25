@@ -109,6 +109,10 @@ internal static class RecordingPlaybackAccess
         return AccountKeyForUsername(user);
     }
 
+    internal static string? RecorderAccountKey(ISettingsService settings, Guid recorderId, string endpoint) =>
+        settings.TryGetRecorderCredentials(recorderId, endpoint, out var username, out _)
+            ? AccountKeyForUsername(username) : null;
+
     internal static string? AccountKeyForUsername(string? username) =>
         string.IsNullOrWhiteSpace(username) ? null :
             Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(username.Trim().ToUpperInvariant())));

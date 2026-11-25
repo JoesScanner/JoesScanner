@@ -17,7 +17,7 @@ namespace JoesScanner.Services
     // History lookups and searches against a Trunking Recorder server.
     // Lookup lists are fetched from dedicated JSON endpoints:
     // receiversjson, sitesjson, talkgroupsjson.
-    public sealed class CallHistoryService : ICallHistoryService
+    public sealed partial class CallHistoryService : ICallHistoryService
     {
         private readonly ISettingsService _settingsService;
         private readonly ILocalCallsRepository _localCallsRepository;
@@ -27,7 +27,7 @@ namespace JoesScanner.Services
         private readonly JsonSerializerOptions _jsonOptions;
         private readonly TimeProvider _clock;
 
-        private int _draw = 1;
+        private int _draw;
 
         
         private static readonly SemaphoreSlim _persistSemaphore = new SemaphoreSlim(1, 1);
@@ -76,467 +76,159 @@ namespace JoesScanner.Services
             };
         }
 
-        public async Task<HistoryLookupData> GetLookupDataAsync(HistorySearchFilters? currentFilters, CancellationToken cancellationToken = default)
+        public async Task<HistoryLookupData> GetLookupDataAsync(HistorySearchFilters? currentFilters,
+            CancellationToken cancellationToken = default)
         {
-            // User preference: always return the full list for each dropdown.
-            // Talkgroups also provide a grouped view (TalkgroupGroups) so the UI can
-            // optionally filter children by the selected Site.
+            var endpoint = NormalizeBaseUrl(_settingsService.ServerUrl);
+            if (endpoint.Length == 0)
+                return new HistoryLookupData();
 
-            var baseUrl = NormalizeBaseUrl(_settingsService.ServerUrl);
-            AppLog.Add(() => $"History: lookups baseUrl={baseUrl}");
-            if (string.IsNullOrWhiteSpace(baseUrl))
+            var data = await ReadLookupsAsync(endpoint, null, cancellationToken).ConfigureAwait(false);
+            await SaveLookupCacheAsync(ServerKeyHelper.Normalize(endpoint), data, cancellationToken).ConfigureAwait(false);
+            return data;
+        }
+
+        public async Task<HistoryLookupData> GetRecorderLookupsAsync(HistoryRecorder recorder, bool refresh,
+            CancellationToken cancellationToken = default)
+        {
+            var access = ReadRecorderAccess(recorder);
+            var key = recorder.LookupCacheKey(access.Account);
+            HistoryLookupData? cached = null;
+            DateTime? fetched = null;
+            try { (cached, fetched) = await _lookupsRepository.GetAsync(key, cancellationToken).ConfigureAwait(false); }
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
             {
-                return new HistoryLookupData
-                {
-                    Receivers = PrependAll(Array.Empty<HistoryLookupItem>()),
-                    Sites = PrependAll(Array.Empty<HistoryLookupItem>()),
-                    Talkgroups = PrependAll(Array.Empty<HistoryLookupItem>()),
-                    TalkgroupGroups = new Dictionary<string, IReadOnlyList<HistoryLookupItem>>(StringComparer.OrdinalIgnoreCase)
-                };
+                AppLog.Add(() => $"History lookup cache read failed ({ex.GetType().Name}).");
             }
 
-            var receiversEndpoint = new Uri(baseUrl + "/receiversjson");
-            var sitesEndpoint = new Uri(baseUrl + "/sitesjson");
-            var talkgroupsEndpoint = new Uri(baseUrl + "/talkgroupsjson");
+            ValidateRecorderAccess(access, cancellationToken);
+            if (!refresh && cached != null && fetched >= _clock.GetUtcNow().UtcDateTime.AddHours(-6))
+                return ScopeLookups(cached, recorder.Id);
 
-            AppLog.Add(() => $"History: lookup endpoints receivers={receiversEndpoint} sites={sitesEndpoint} talkgroups={talkgroupsEndpoint}");
+            var latest = await ReadLookupsAsync(recorder.Endpoint, recorder.RequestScope, cancellationToken).ConfigureAwait(false);
+            ValidateRecorderAccess(access, cancellationToken);
+            var hasLookups = latest.Receivers.Any(item => item.Value.Length != 0) ||
+                latest.Sites.Any(item => item.Value.Length != 0) || latest.Talkgroups.Any(item => item.Value.Length != 0);
+            if (hasLookups)
+                await SaveLookupCacheAsync(key, latest, cancellationToken).ConfigureAwait(false);
 
-            var receivers = await FetchLookupAsync(receiversEndpoint, cancellationToken);
-            var sites = await FetchLookupAsync(sitesEndpoint, cancellationToken);
-            var (talkgroups, groups) = await FetchTalkgroupsAsync(talkgroupsEndpoint, cancellationToken);
+            ValidateRecorderAccess(access, cancellationToken);
+            return ScopeLookups(hasLookups || cached == null ? latest : cached, recorder.Id);
+        }
 
-            AppLog.Add(() => $"History: lookup counts receivers={receivers.Count} sites={sites.Count} talkgroups={talkgroups.Count} groups={groups.Count}");
-
-            var result = new HistoryLookupData
+        private async Task<HistoryLookupData> ReadLookupsAsync(string endpoint, RecorderRequestScope? scope, CancellationToken token)
+        {
+            var receivers = await FetchLookupAsync(new Uri(endpoint + "/receiversjson"), scope, token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            var sites = await FetchLookupAsync(new Uri(endpoint + "/sitesjson"), scope, token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            var (talkgroups, groups) = await FetchTalkgroupsAsync(new Uri(endpoint + "/talkgroupsjson"), scope, token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            return new HistoryLookupData
             {
                 Receivers = PrependAll(receivers),
                 Sites = PrependAll(sites),
                 Talkgroups = PrependAll(talkgroups),
                 TalkgroupGroups = groups
             };
-
-            // Best-effort cache write per server. Never blocks the UI if it fails.
-            try
-            {
-                var serverKey = ServerKeyHelper.Normalize(_settingsService.ServerUrl);
-                if (!string.IsNullOrWhiteSpace(serverKey))
-                    await _lookupsRepository.UpsertAsync(serverKey, result, DateTime.UtcNow, cancellationToken);
-            }
-            catch (Exception ex)
-            {
-                AppLog.Add(() => $"History: lookup cache write failed. ex={ex.GetType().Name}: {ex.Message}");
-            }
-
-            return result;
         }
 
-        public Task<HistorySearchResult> SearchAroundAsync(
-            DateTime targetLocalTime,
-            HistorySearchFilters filters,
-            int windowSize,
-            CancellationToken cancellationToken = default)
+        private async Task SaveLookupCacheAsync(string key, HistoryLookupData data, CancellationToken token)
         {
-            return SearchAroundAsync(targetLocalTime, filters, windowSize, null, null, cancellationToken);
+            if (string.IsNullOrWhiteSpace(key))
+                return;
+            try { await _lookupsRepository.UpsertAsync(key, data, _clock.GetUtcNow().UtcDateTime, token).ConfigureAwait(false); }
+            catch (Exception ex) when (!token.IsCancellationRequested)
+            {
+                AppLog.Add(() => $"History lookup cache write failed ({ex.GetType().Name}).");
+            }
         }
 
-        public async Task<HistorySearchResult> SearchAroundAsync(
-            DateTime targetLocalTime,
-            HistorySearchFilters filters,
-            int windowSize,
-            DateTime? dateFromLocal,
-            DateTime? dateToLocal,
-            CancellationToken cancellationToken = default)
+        private static HistoryLookupData ScopeLookups(HistoryLookupData data, Guid id)
         {
-            windowSize = Math.Clamp(windowSize, 5, 100);
-            var grant = await VerifyHistoryAsync(cancellationToken).ConfigureAwait(false);
-
-            var head = await FetchCallsPageAsync(
-                start: 0,
-                length: 1,
-                filters: filters,
-                dateFromLocal: dateFromLocal,
-                dateToLocal: dateToLocal,
-                grant: grant,
-                cancellationToken: cancellationToken);
-
-            var total = head.TotalMatches;
-            if (total <= 0)
+            HistoryLookupItem[] Scoped(IEnumerable<HistoryLookupItem> items) => items.Select(item => item with { RecorderId = id }).ToArray();
+            return new HistoryLookupData
             {
-                return new HistorySearchResult
-                {
-                    Calls = Array.Empty<CallItem>(),
-                    AnchorIndex = 0,
-                    TotalMatches = 0
-                };
-            }
-
-            // calljson is newest first. Index increases as calls get older.
-            var low = 0;
-            var high = total - 1;
-
-            while (low <= high)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                var mid = low + ((high - low) / 2);
-                var midCall = await FetchCallAtIndexAsync(mid, filters, dateFromLocal, dateToLocal, grant, cancellationToken);
-                if (midCall == null)
-                    break;
-
-                var ts = midCall.Timestamp;
-                if (ts > targetLocalTime)
-                {
-                    low = mid + 1;
-                }
-                else if (ts < targetLocalTime)
-                {
-                    high = mid - 1;
-                }
-                else
-                {
-                    low = mid;
-                    break;
-                }
-            }
-
-            var candidateA = low;
-            var candidateB = low - 1;
-
-            CallItem? callA = null;
-            CallItem? callB = null;
-
-            if (candidateA >= 0 && candidateA < total)
-                callA = await FetchCallAtIndexAsync(candidateA, filters, dateFromLocal, dateToLocal, grant, cancellationToken);
-
-            if (candidateB >= 0 && candidateB < total)
-                callB = await FetchCallAtIndexAsync(candidateB, filters, dateFromLocal, dateToLocal, grant, cancellationToken);
-
-            var bestIndex = 0;
-            if (callA != null && callB != null)
-            {
-                var deltaA = Math.Abs((callA.Timestamp - targetLocalTime).TotalSeconds);
-                var deltaB = Math.Abs((callB.Timestamp - targetLocalTime).TotalSeconds);
-                bestIndex = deltaA <= deltaB ? candidateA : candidateB;
-            }
-            else if (callA != null)
-            {
-                bestIndex = candidateA;
-            }
-            else if (callB != null)
-            {
-                bestIndex = candidateB;
-            }
-
-            var aboveCount = windowSize / 2;
-            var start = bestIndex - aboveCount;
-            if (start < 0)
-                start = 0;
-
-            var maxStart = Math.Max(0, total - windowSize);
-            if (start > maxStart)
-                start = maxStart;
-
-            var page = await FetchCallsPageAsync(start, windowSize, filters, dateFromLocal, dateToLocal, grant, cancellationToken);
-            var anchorIndex = bestIndex - start;
-            if (anchorIndex < 0)
-                anchorIndex = 0;
-            if (anchorIndex >= page.Calls.Count)
-                anchorIndex = Math.Max(0, page.Calls.Count - 1);
-
-            return new HistorySearchResult
-            {
-                Calls = page.Calls,
-                StartIndex = start,
-                AnchorGlobalIndex = bestIndex,
-                AnchorIndex = anchorIndex,
-                TotalMatches = page.TotalMatches
+                Receivers = Scoped(data.Receivers),
+                Sites = Scoped(data.Sites),
+                Talkgroups = Scoped(data.Talkgroups),
+                TalkgroupGroups = data.TalkgroupGroups.ToDictionary(pair => pair.Key,
+                    pair => (IReadOnlyList<HistoryLookupItem>)Scoped(pair.Value), StringComparer.OrdinalIgnoreCase)
             };
         }
-
-        public Task<HistoryCallsPage> GetCallsPageAsync(
-            int start,
-            int length,
-            HistorySearchFilters filters,
-            CancellationToken cancellationToken = default)
+        private async Task<CallsPage> FetchCallsPageAsync(HistorySearchSnapshot snapshot,
+            RecordingPlaybackAccess.HistoryGrant grant, int start, int length, CancellationToken cancellationToken)
         {
-            return GetCallsPageAsync(start, length, filters, null, null, cancellationToken);
-        }
-
-        public async Task<HistoryCallsPage> GetCallsPageAsync(
-            int start,
-            int length,
-            HistorySearchFilters filters,
-            DateTime? dateFromLocal,
-            DateTime? dateToLocal,
-            CancellationToken cancellationToken = default)
-        {
-            try
-            {
-                var grant = await VerifyHistoryAsync(cancellationToken).ConfigureAwait(false);
-                var page = await FetchCallsPageAsync(start, length, filters, dateFromLocal, dateToLocal, grant, cancellationToken);
-                return new HistoryCallsPage
-                {
-                    Calls = page.Calls,
-                    TotalMatches = page.TotalMatches
-                };
-            }
-            catch (Exception ex)
-            {
-            AppLog.Add(() => $"History: GetCallsPageAsync failed. start={start} length={length} search={filters.GlobalSearch ?? string.Empty} ex={ex.GetType().Name}: {ex.Message}");
-                throw;
-            }
-        }
-
-        
-private async Task<CallItem?> FetchCallAtIndexAsync(
-    int globalIndex,
-    HistorySearchFilters filters,
-    DateTime? dateFromLocal,
-    DateTime? dateToLocal,
-    RecordingPlaybackAccess.HistoryGrant grant,
-    CancellationToken cancellationToken)
-{
-    if (globalIndex < 0)
-    {
-        return null;
-    }
-
-    var page = await FetchCallsPageAsync(globalIndex, 1, filters, dateFromLocal, dateToLocal, grant, cancellationToken).ConfigureAwait(false);
-    return page.Calls.FirstOrDefault();
-}
-
-        private Task<RecordingPlaybackAccess.HistoryGrant> VerifyHistoryAsync(CancellationToken token) =>
-            RecordingPlaybackAccess.VerifyHistoryAsync(_settingsService, _subscriptionService,
-                NormalizeBaseUrl(_settingsService.ServerUrl), token, _clock);
-
-        private async Task<CallsPage> FetchCallsPageAsync(int start, int length, HistorySearchFilters filters,
-            DateTime? dateFromLocal, DateTime? dateToLocal, RecordingPlaybackAccess.HistoryGrant grant,
-            CancellationToken cancellationToken)
-        {
-            start = Math.Max(0, start);
-            length = Math.Clamp(length, 0, 200);
-
-            var baseUrl = grant.Server;
-            if (string.IsNullOrWhiteSpace(baseUrl))
-                return new CallsPage();
-
-            ValidateSearchGrant(grant, cancellationToken);
-            string? restrictedDateSearch = null;
-            if (grant.Cutoff is { } cutoff)
-            {
-                var lower = dateFromLocal is { } from && new DateTimeOffset(from) > cutoff
-                    ? new DateTimeOffset(from) : cutoff;
-                var now = _clock.GetUtcNow();
-                var upper = dateToLocal is { } to && new DateTimeOffset(to) < now
-                    ? new DateTimeOffset(to) : now;
-                if (RecordingPlaybackAccess.RoundStartToSecond(lower) > upper)
-                    return new CallsPage();
-                restrictedDateSearch = RecordingPlaybackAccess.DateSearch(lower, upper);
-                dateFromLocal = lower.LocalDateTime;
-                dateToLocal = upper.LocalDateTime;
-            }
-
-            var recordingAccess = new RecordingAccessContext(RecordingOrigin.History, grant.Tier != null, grant.Account);
-            var callsUrl = baseUrl + "/calljson";
-            var payload = BuildDataTablesPayload(_draw, start, length, filters, dateFromLocal, dateToLocal, restrictedDateSearch);
-            _draw++;
-
-            HttpStatusCode statusCode;
-            string body;
-
-            // Trunking Recorder /calljson expects a DataTables payload; on Joe's hosted setup we must also
-            // mimic the browser's request headers closely (Content-Type and Referer), otherwise Cloudflare can return 502.
-            var dateColumnSearch = string.Empty;
-            try
-            {
-                if (payload.Columns != null)
-                {
-                    // Payload.Columns may be IEnumerable; materialize so Count and indexing are reliable.
-                    var cols = payload.Columns as IList<DataTablesColumn> ?? payload.Columns.ToList();
-                    if (cols.Count > 2)
-                        dateColumnSearch = cols[2].Search?.Value ?? string.Empty;
-                }
-            }
-            catch
-            {
-                dateColumnSearch = string.Empty;
-            }
-
-            AppLog.Add(() => $"History: calljson request. url={callsUrl} start={start} length={length} dateColumnSearch='{dateColumnSearch}'");
-
-            using var request = new HttpRequestMessage(HttpMethod.Post, callsUrl);
-
-            // Force HTTP/1.1 for calljson on Android to avoid rare hangs with some HTTP/2 stacks.
+            ValidateSearch(snapshot.Access, grant, cancellationToken);
+            var recorder = snapshot.Access.Recorder;
+            var dateStart = FormatSearchDate(snapshot.FromUtc);
+            var dateEnd = FormatSearchDate(snapshot.UntilUtc);
+            var draw = Interlocked.Increment(ref _draw);
+            var payload = BuildDataTablesPayload(draw, start, length, snapshot.Filters, dateStart + "|" + dateEnd);
+            using var request = CreateRecorderRequest(HttpMethod.Post, new Uri(recorder.Endpoint + "/calljson"), recorder.RequestScope);
             request.Version = HttpVersion.Version11;
             request.VersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
             request.Headers.ConnectionClose = true;
+            request.Headers.Referrer = new Uri($"{recorder.Endpoint}/?DateStart={WebUtility.UrlEncode(dateStart)}&DateEnd={WebUtility.UrlEncode(dateEnd)}");
 
-            // Mirror browser headers that the hosted edge expects.
-            request.Headers.TryAddWithoutValidation("Accept", "application/json, text/javascript, */*; q=0.01");
-            request.Headers.TryAddWithoutValidation("X-Requested-With", "XMLHttpRequest");
+            // Match the recorder's web client, which posts JSON under the form content type.
+            request.Content = new StringContent(JsonSerializer.Serialize(payload, _jsonOptions), Encoding.UTF8,
+                "application/x-www-form-urlencoded");
 
-            if (restrictedDateSearch != null)
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            deadline.CancelAfter(TimeSpan.FromSeconds(15));
+            using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token)
+                .ConfigureAwait(false);
+            ValidateSearch(snapshot.Access, grant, cancellationToken);
+            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+                throw new RecordingAccessException($"The recorder denied History access (HTTP {(int)response.StatusCode}).");
+            response.EnsureSuccessStatusCode();
+
+            await using var stream = await response.Content.ReadAsStreamAsync(deadline.Token).ConfigureAwait(false);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: deadline.Token).ConfigureAwait(false);
+            ValidateSearch(snapshot.Access, grant, cancellationToken);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object ||
+                !TryGetPropertyIgnoreCase(root, "recordsFiltered", out var count) ||
+                !int.TryParse(count.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var total) || total < 0 ||
+                !TryGetPropertyIgnoreCase(root, "data", out var data) || data.ValueKind != JsonValueKind.Array ||
+                TryGetPropertyIgnoreCase(root, "draw", out var echoedDraw) && echoedDraw.ToString() != draw.ToString(CultureInfo.InvariantCulture))
+                throw new InvalidDataException("The recorder did not return a valid History page.");
+
+            return new CallsPage(total, data.EnumerateArray().Select(ParseRow).ToArray());
+        }
+
+        private void QueueHistoryPersistence(string endpoint, IReadOnlyList<DbCallRecord> records)
+        {
+            if (records.Count == 0)
+                return;
+
+            _ = Task.Run(async () =>
             {
-                var separator = restrictedDateSearch.IndexOf('|');
-                var dateStart = WebUtility.UrlEncode(restrictedDateSearch[..separator]);
-                var dateEnd = WebUtility.UrlEncode(restrictedDateSearch[(separator + 1)..]);
-                request.Headers.Referrer = new Uri($"{baseUrl}/?DateStart={dateStart}&DateEnd={dateEnd}");
-            }
-            else if (dateFromLocal.HasValue)
-            {
-                var from = dateFromLocal.Value.Date;
-                var to = dateToLocal?.Date ?? from.AddDays(1);
-                if (to <= from)
-                    to = from.AddDays(1);
-
-                var dateStart = from.ToString("yyyy-MM-dd 00:00:00", CultureInfo.InvariantCulture);
-                var dateEnd = to.ToString("yyyy-MM-dd 00:00:00", CultureInfo.InvariantCulture);
-
-                var referer = $"{baseUrl}/?DateStart={WebUtility.UrlEncode(dateStart)}&DateEnd={WebUtility.UrlEncode(dateEnd)}";
-                if (Uri.TryCreate(referer, UriKind.Absolute, out var refererUri))
-                    request.Headers.Referrer = refererUri;
-            }
-
-            var jsonPayload = JsonSerializer.Serialize(payload, _jsonOptions);
-
-            // TR's UI often posts JSON while declaring form encoding.
-            // Use the same content-type to keep the hosted edge happy.
-            var content = new StringContent(jsonPayload, Encoding.UTF8);
-            content.Headers.ContentType = new MediaTypeHeaderValue("application/x-www-form-urlencoded");
-            content.Headers.ContentType.CharSet = "UTF-8";
-            request.Content = content;
-
-            // Enforce a hard per-request timeout in addition to HttpClient.Timeout.
-            // This guards against rare platform-level hangs where HttpClient.Timeout is not honored.
-            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeoutCts.CancelAfter(TimeSpan.FromSeconds(15));
-
-            try
-            {
-                using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeoutCts.Token).ConfigureAwait(false);
-                statusCode = response.StatusCode;
-                AppLog.Add(() => $"History: calljson response headers received. url={callsUrl} status={(int)response.StatusCode}");
-                body = await response.Content.ReadAsStringAsync(timeoutCts.Token).ConfigureAwait(false);
-                AppLog.Add(() => $"History: calljson body read. url={callsUrl} bytes={body?.Length ?? 0}");
-            }
-            catch (OperationCanceledException)
-            {
-                AppLog.Add(() => $"History: calljson timed out/canceled. url={callsUrl} start={start} length={length}");
-                throw;
-            }
-
-            ValidateSearchGrant(grant, cancellationToken);
-            if ((int)statusCode is < 200 or >= 300)
-            {
-                var statusInt = (int)statusCode;
-
-                if (statusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
-                    throw new InvalidOperationException($"History auth failed (HTTP {statusInt}).");
-
-                AppLog.Add(() => $"History: calljson failed. status={statusInt}");
-
-                throw new InvalidOperationException(
-                    $"History calljson failed (HTTP {statusInt}).");
-            }
-
-            if (string.IsNullOrWhiteSpace(body))
-                return new CallsPage();
-
-            using var doc = JsonDocument.Parse(body);
-            var root = doc.RootElement;
-
-            var totalMatches = 0;
-            if (root.TryGetProperty("recordsFiltered", out var rf))
-            {
-                if (rf.ValueKind == JsonValueKind.Number)
-                    totalMatches = rf.GetInt32();
-                else
-                    int.TryParse(rf.ToString(), out totalMatches);
-            }
-
-            var result = new List<CallItem>();
-            if (root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array)
-            {
-                var rowsToPersist = new List<DbCallRecord>();
-
-                foreach (var e in data.EnumerateArray())
-                {
-                    var row = ParseRow(e);
-                    if (!grant.Allows(CallStreamService.TryParseTimestampUtc(row.StartTime, row.StartTimeUTC)))
-                    {
-                        // The server can return data outside the requested time range.
-                        // Do not expose those rows or offer pagination past them.
-                        totalMatches = Math.Min(totalMatches, start + result.Count);
-                        continue;
-                    }
-
-                    // Persist the raw call properties for offline history (per-server retention is enforced in the repository).
-                    var record = MapToDbRecord(row, baseUrl);
-                    if (record != null)
-                        rowsToPersist.Add(record);
-
-                    var call = ConvertRowToCallItem(row, baseUrl, recordingAccess);
-                    if (call != null)
-                        result.Add(call);
-                }
+                using var gateTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+                try { await _persistSemaphore.WaitAsync(gateTimeout.Token).ConfigureAwait(false); }
+                catch (OperationCanceledException) { return; }
 
                 try
                 {
-                    if (rowsToPersist.Count > 0)
-                    {
-                        var persistUrl = baseUrl;
-                        var persistRows = rowsToPersist;
-
-                        _ = Task.Run(async () =>
-                        {
-                            try
-                            {
-                                using var waitCts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
-                                await _persistSemaphore.WaitAsync(waitCts.Token).ConfigureAwait(false);
-                            }
-                            catch
-                            {
-                                // Skip persistence if we cannot acquire the lock quickly.
-                                return;
-                            }
-
-                            try
-                            {
-                                using var persistCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-                                await _localCallsRepository.UpsertCallsAsync(persistUrl, persistRows, persistCts.Token).ConfigureAwait(false);
-                            }
-                            catch
-                            {
-                                // Best effort only.
-                            }
-                            finally
-                            {
-                                try { _persistSemaphore.Release(); } catch { }
-                            }
-                        });
-                    }
+                    using var writeTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                    await _localCallsRepository.UpsertCallsAsync(endpoint, records, writeTimeout.Token).ConfigureAwait(false);
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // Never let local persistence break history browsing.
+                    AppLog.Add(() => $"History cache write failed ({ex.GetType().Name}).");
                 }
-            }
-
-            return new CallsPage
-            {
-                Calls = result,
-                TotalMatches = totalMatches
-            };
+                finally { _persistSemaphore.Release(); }
+            });
         }
 
-        private void ValidateSearchGrant(RecordingPlaybackAccess.HistoryGrant grant, CancellationToken token)
+        private static HttpRequestMessage CreateRecorderRequest(HttpMethod method, Uri uri, RecorderRequestScope? recorder)
         {
-            token.ThrowIfCancellationRequested();
-            if (!RecordingPlaybackAccess.IsSelected(_settingsService, grant.Server))
-                throw new InvalidOperationException("The selected recorder changed during History search.");
-            grant.Validate(_settingsService);
+            var request = new HttpRequestMessage(method, uri);
+            if (recorder is { } scope)
+                request.Options.Set(ServerAuthenticationHandler.Recorder, scope);
+            return request;
         }
-
         private static string NormalizeBaseUrl(string? url)
         {
             var baseUrl = (url ?? string.Empty).Trim();
@@ -547,17 +239,18 @@ private async Task<CallItem?> FetchCallAtIndexAsync(
         {
             var list = items?.ToList() ?? new List<HistoryLookupItem>();
 
-            if (list.Count == 0 || !string.Equals(list[0].Label, "All", StringComparison.OrdinalIgnoreCase))
+            if (list.Count == 0 || list[0].Value.Length != 0)
                 list.Insert(0, new HistoryLookupItem { Label = "All", Value = string.Empty });
 
             return list;
         }
 
-        private async Task<IReadOnlyList<HistoryLookupItem>> FetchLookupAsync(Uri uri, CancellationToken cancellationToken)
+        private async Task<IReadOnlyList<HistoryLookupItem>> FetchLookupAsync(Uri uri, RecorderRequestScope? scope, CancellationToken cancellationToken)
         {
             try
             {
-                using var response = await _httpClient.GetAsync(uri, cancellationToken);
+                using var request = CreateRecorderRequest(HttpMethod.Get, uri, scope);
+                using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
                 var body = await response.Content.ReadAsStringAsync(cancellationToken);
 
                 if (!response.IsSuccessStatusCode)
@@ -583,12 +276,13 @@ private async Task<CallItem?> FetchCallAtIndexAsync(
         }
 
         private async Task<(IReadOnlyList<HistoryLookupItem> Talkgroups, Dictionary<string, IReadOnlyList<HistoryLookupItem>> Groups)> FetchTalkgroupsAsync(
-            Uri uri,
+            Uri uri, RecorderRequestScope? scope,
             CancellationToken cancellationToken)
         {
             try
             {
-                using var response = await _httpClient.GetAsync(uri, cancellationToken);
+                using var request = CreateRecorderRequest(HttpMethod.Get, uri, scope);
+                using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
                 var body = await response.Content.ReadAsStringAsync(cancellationToken);
 
@@ -1016,26 +710,8 @@ private async Task<CallItem?> FetchCallAtIndexAsync(
                 .ToList();
         }
 
-        private static DataTablesPayload BuildDataTablesPayload(int draw, int start, int length, HistorySearchFilters filters,
-            DateTime? dateFromLocal, DateTime? dateToLocal, string? restrictedDateSearch)
+        private static DataTablesPayload BuildDataTablesPayload(int draw, int start, int length, HistorySearchFilters filters, string dateRange)
         {
-            // Match the Trunking Recorder /calljson DataTables column schema.
-            // Filters are applied via per-column search values, which is what TR expects.
-
-            var receiverValue = (filters.Receiver?.Value ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(receiverValue))
-                receiverValue = (filters.Receiver?.Label ?? string.Empty).Trim();
-
-            var siteValue = (filters.Site?.Value ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(siteValue))
-                siteValue = (filters.Site?.Label ?? string.Empty).Trim();
-
-            var globalSearch = string.Empty;
-
-            var talkgroupValue = (filters.Talkgroup?.Value ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(talkgroupValue))
-                talkgroupValue = (filters.Talkgroup?.Label ?? string.Empty).Trim();
-
             var columns = new List<DataTablesColumn>
             {
                 Col(null, "Details", false),
@@ -1063,146 +739,28 @@ private async Task<CallItem?> FetchCallAtIndexAsync(
                 Col("AudioFilename", "Filename", false)
             };
 
-            
-            // Date filter: Trunking Recorder expects this via the Date column's per-column search value.
-            // The server-side schema uses the formatted Date string (e.g. 2/22/2026) rather than StartTime.
-            if (restrictedDateSearch != null)
-            {
-                columns[2].Search.Value = restrictedDateSearch;
-            }
-            else if (dateFromLocal.HasValue)
-            {
-                var from = dateFromLocal.Value;
-                var to = dateToLocal ?? from.AddDays(1);
-
-                if (to <= from)
-                    to = from.AddSeconds(1);
-
-                // Trunking Recorder accepts a date range in the format:
-                //   yyyy-MM-dd HH:mm:ss|yyyy-MM-dd HH:mm:ss
-                // Using the full timestamp lets History freeze results at the moment search is performed.
-                var dateLower = from.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
-                var dateUpper = to.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
-
-                columns[2].Search.Value = $"{dateLower}|{dateUpper}";
-                columns[2].Search.Regex = false;
-            }
-// Default sort: Date then Time (descending)
-            var order = new[]
-            {
-                new DataTablesOrder { Column = 2, Dir = "desc" },
-                new DataTablesOrder { Column = 1, Dir = "desc" }
-            };
-
-            // Apply dropdown filters via column search values.
-            // Talkgroup: TR example uses TargetID search = "14410-ICAWIN".
-            if (!string.IsNullOrWhiteSpace(talkgroupValue))
-                columns[3].Search.Value = talkgroupValue;
-
-            // Receiver: filter by VoiceReceiver.
-            if (!string.IsNullOrWhiteSpace(receiverValue))
-                columns[20].Search.Value = receiverValue;
-
-            // Site: some TR builds filter on SiteID, others on SiteLabel.
-            // Set both so the dropdown works across backends.
-            if (!string.IsNullOrWhiteSpace(siteValue))
-            {
-                var siteId = (filters.Site?.Value ?? string.Empty).Trim();
-                var siteLabel = (filters.Site?.Label ?? string.Empty).Trim();
-
-                if (string.IsNullOrWhiteSpace(siteId))
-                    siteId = siteValue;
-                if (string.IsNullOrWhiteSpace(siteLabel))
-                    siteLabel = siteValue;
-
-                columns[12].Search.Value = siteId;
-                columns[13].Search.Value = siteLabel;
-
-                // If Value and Label differ, also allow either to match.
-                if (!string.Equals(siteId, siteLabel, StringComparison.OrdinalIgnoreCase))
-                {
-                    columns[12].Search.Value = siteId;
-                    columns[13].Search.Value = siteLabel;
-                }
-
-                // Fallback: some Trunking Recorder builds ignore per-column site search.
-                // Also set the global DataTables search value to the site label so the Site dropdown still constrains results.
-                globalSearch = !string.IsNullOrWhiteSpace(siteLabel) ? siteLabel : siteId;
-            }
+            columns[2].Search.Value = dateRange;
+            // Trunking Recorder beta 3.7.6039.9360 reads a comma-separated
+            // string of complete talkgroup lookup IDs in Target.search.value.
+            columns[3].Search.Value = string.Join(',', filters.Talkgroups.Select(item => item.Value));
+            columns[12].Search.Value = filters.Site?.Value ?? string.Empty;
+            columns[20].Search.Value = filters.Receiver?.Value ?? string.Empty;
 
             return new DataTablesPayload
             {
                 Draw = draw,
                 Start = start,
                 Length = length,
-                Search = new DataTablesSearch { Value = globalSearch, Regex = false },
-                Order = order,
+                Order = [new() { Column = 2, Dir = "desc" }, new() { Column = 1, Dir = "desc" }],
                 Columns = columns.ToArray(),
                 SmartSort = false
             };
-
         }
 
-        // Flattens the DataTables payload into classic form-encoded key/value pairs.
-        private static IEnumerable<KeyValuePair<string, string>> FlattenDataTablesPayload(DataTablesPayload payload)
-        {
-            var list = new List<KeyValuePair<string, string>>
-            {
-                new("draw", payload.Draw.ToString(CultureInfo.InvariantCulture)),
-                new("start", payload.Start.ToString(CultureInfo.InvariantCulture)),
-                new("length", payload.Length.ToString(CultureInfo.InvariantCulture)),
-                new("search[value]", payload.Search?.Value ?? string.Empty),
-                new("search[regex]", (payload.Search?.Regex ?? false) ? "true" : "false"),
-                new("SmartSort", payload.SmartSort ? "true" : "false")
-            };
+        private static DataTablesColumn Col(string? data, string name, bool orderable) =>
+            new() { Data = data, Name = name, Orderable = orderable, Searchable = true, Search = new() };
 
-            if (payload.Order != null)
-            {
-                for (var i = 0; i < payload.Order.Length; i++)
-                {
-                    list.Add(new($"order[{i}][column]", payload.Order[i].Column.ToString(CultureInfo.InvariantCulture)));
-                    list.Add(new($"order[{i}][dir]", payload.Order[i].Dir ?? "desc"));
-                }
-            }
-
-            if (payload.Columns != null)
-            {
-                for (var i = 0; i < payload.Columns.Length; i++)
-                {
-                    var c = payload.Columns[i];
-                    list.Add(new($"columns[{i}][data]", c.Data?.ToString() ?? string.Empty));
-                    list.Add(new($"columns[{i}][name]", c.Name ?? string.Empty));
-                    list.Add(new($"columns[{i}][searchable]", c.Searchable ? "true" : "false"));
-                    list.Add(new($"columns[{i}][orderable]", c.Orderable ? "true" : "false"));
-                    list.Add(new($"columns[{i}][search][value]", c.Search?.Value ?? string.Empty));
-                    list.Add(new($"columns[{i}][search][regex]", (c.Search?.Regex ?? false) ? "true" : "false"));
-                }
-            }
-
-            return list;
-        }
-
-        // Class-scope helper (in addition to the local function above) so builds succeed even if
-        // local functions are disabled by language settings.
-        private static DataTablesColumn Col(object? data, string name, bool orderable)
-        {
-            return new DataTablesColumn
-            {
-                Data = data,
-                Name = name,
-                Searchable = true,
-                Orderable = orderable,
-                Search = new DataTablesSearch { Value = string.Empty, Regex = false }
-            };
-        }
-
-
-        private sealed class CallsPage
-        {
-            public List<CallItem> Calls { get; init; } = new();
-            public int TotalMatches { get; init; }
-        }
-
+        private sealed record CallsPage(int TotalMatches, IReadOnlyList<CallRow> Rows);
         private sealed class DataTablesPayload
         {
             [JsonPropertyName("draw")]
@@ -1365,33 +923,6 @@ private async Task<CallItem?> FetchCallAtIndexAsync(
             return WebUtility.HtmlDecode(s).Trim();
         }
 
-        private static DateTime? ParseTimestamp(string? startTime, string? startTimeUtc)
-        {
-            var value = !string.IsNullOrWhiteSpace(startTimeUtc) ? startTimeUtc : startTime;
-            if (string.IsNullOrWhiteSpace(value))
-                return null;
-
-            try
-            {
-                if (value.Contains("T", StringComparison.Ordinal))
-                {
-                    var dto = DateTimeOffset.Parse(value.Replace("Z", "+00:00"), null);
-                    return dto.ToLocalTime().DateTime;
-                }
-
-                if (double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds))
-                {
-                    var dto = DateTimeOffset.FromUnixTimeSeconds((long)seconds).ToLocalTime();
-                    return dto.DateTime;
-                }
-            }
-            catch
-            {
-            }
-
-            return null;
-        }
-
         private static string? CapTextRaw(string? text)
         {
             if (string.IsNullOrWhiteSpace(text))
@@ -1470,15 +1001,12 @@ private async Task<CallItem?> FetchCallAtIndexAsync(
             };
         }
 
-        private static CallItem? ConvertRowToCallItem(CallRow r, string baseUrl, RecordingAccessContext access)
+        private static CallItem? ConvertRowToCallItem(CallRow r, HistoryRecorderAccess access, DateTimeOffset recordedAt)
         {
             try
             {
-                var rawId = r.DT_RowId?.Trim();
-                if (string.IsNullOrWhiteSpace(rawId))
-                    rawId = Guid.NewGuid().ToString("N");
-
-                var metadata = r.ToCardMetadata(ParseTimestamp(r.StartTime, r.StartTimeUTC), omitUnknownSite: true);
+                var baseUrl = access.Recorder.Endpoint;
+                var metadata = r.ToCardMetadata(recordedAt.LocalDateTime, omitUnknownSite: true);
 
                 var transcript = (r.CallText ?? r.Transcription ?? r.Transcript ?? string.Empty).Trim();
 
@@ -1515,10 +1043,11 @@ private async Task<CallItem?> FetchCallAtIndexAsync(
 
                 return new CallItem
                 {
-                    BackendId = rawId,
+                    BackendId = r.DT_RowId!.Trim(),
+                    ServerId = access.Recorder.Id,
                     RecordingServer = baseUrl,
-                    RecordingTimeUtc = CallStreamService.TryParseTimestampUtc(r.StartTime, r.StartTimeUTC),
-                    RecordingAccess = access,
+                    RecordingTimeUtc = recordedAt,
+                    RecordingAccess = new RecordingAccessContext(RecordingOrigin.History, access.Protected, access.Account),
                     Timestamp = metadata.Timestamp ?? DateTime.Now,
                     CallDurationSeconds = metadata.DurationSeconds ?? 0,
                     Talkgroup = metadata.Talkgroup ?? string.Empty,

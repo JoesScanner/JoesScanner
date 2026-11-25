@@ -84,7 +84,9 @@ LIMIT 1;";
         public async Task UpsertAsync(string serverKey, HistoryLookupData data, DateTime fetchedUtc, CancellationToken cancellationToken = default,
             Func<Action, bool>? publish = null)
         {
-            if (RecordingStorageReference.ServerKey(serverKey) is not { } normalizedServerKey || data == null)
+            var normalizedServerKey = serverKey.StartsWith(HistoryRecorder.LookupCachePrefix, StringComparison.Ordinal)
+                ? serverKey : RecordingStorageReference.ServerKey(serverKey);
+            if (normalizedServerKey == null || data == null)
                 return;
 
             await EnsureSchemaAsync(cancellationToken);

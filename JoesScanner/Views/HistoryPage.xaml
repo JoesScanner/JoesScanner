@@ -41,10 +41,16 @@
                         <RoundRectangle CornerRadius="10" />
                     </Border.StrokeShape>
 
-	                    <Grid Padding="8,6" RowDefinitions="Auto,Auto" RowSpacing="8">
+	                    <Grid Padding="8,6" RowDefinitions="Auto,Auto,Auto" RowSpacing="8">
+                        <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
+                            <Label Text="Recorder" FontSize="12" TextColor="White" VerticalOptions="Center" />
+                            <Picker Grid.Column="1" Title="Choose a saved recorder" AutomationId="HistoryRecorder"
+                                    ItemsSource="{Binding HistoryRecorders}" SelectedItem="{Binding SelectedRecorder, Mode=TwoWay}"
+                                    ItemDisplayBinding="{Binding Name, x:DataType=vm:ScannerConnectionRow}"
+                                    BackgroundColor="White" TextColor="Black" TitleColor="#4b5563" />
+                        </Grid>
 
-
-<Grid Grid.Row="0" ColumnDefinitions="*,*,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto" ColumnSpacing="8">
+                        <Grid Grid.Row="1" ColumnDefinitions="*,*,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto" ColumnSpacing="8">
 	                            <VerticalStackLayout Spacing="2">
 	                                <Label Text="Receiver" FontSize="12" TextColor="White" HorizontalTextAlignment="Center" HorizontalOptions="Fill" />
 	                                <Border
@@ -98,7 +104,7 @@
 	                            </VerticalStackLayout>
 
 	                            <VerticalStackLayout Grid.Column="2" Spacing="2">
-	                                <Label Text="Talkgroup" FontSize="12" TextColor="White" HorizontalTextAlignment="Center" HorizontalOptions="Fill" />
+	                                <Label Text="Talkgroups" FontSize="12" TextColor="White" HorizontalTextAlignment="Center" HorizontalOptions="Fill" />
 	                                <Border
 	                                    BackgroundColor="White"
 	                                    Stroke="#1f2937"
@@ -124,7 +130,7 @@
 	                            </VerticalStackLayout>
 	                        </Grid>
 
-                        <Grid Grid.Row="1" ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto" ColumnSpacing="8" RowSpacing="6" VerticalOptions="Center">
+                        <Grid Grid.Row="2" ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto" ColumnSpacing="8" RowSpacing="6" VerticalOptions="Center">
 
                             <HorizontalStackLayout Grid.Row="0" Grid.Column="0" Spacing="4" VerticalOptions="Center" HorizontalOptions="Center">
                                 <Label
@@ -276,34 +282,11 @@
                                 </Border>
                             </HorizontalStackLayout>
 
-                            <Border
-                                Grid.Row="0"
-                                Grid.Column="1"
-                                Grid.RowSpan="2"
-                                BackgroundColor="Transparent"
-                                Stroke="White"
-                                StrokeThickness="1"
-                                Padding="12,6"
-                                HeightRequest="32"
-                                WidthRequest="86"
-                                HorizontalOptions="End"
-                                VerticalOptions="Center">
-
-                                <Border.StrokeShape>
-                                    <RoundRectangle CornerRadius="12" />
-                                </Border.StrokeShape>
-
-                                <Border.GestureRecognizers>
-                                    <TapGestureRecognizer Command="{Binding SearchCommand}" />
-                                </Border.GestureRecognizers>
-
-                                <Label
-                                    Text="Search"
-                                    FontSize="12"
-                                    TextColor="White"
-                                    HorizontalTextAlignment="Center"
-                                    VerticalTextAlignment="Center" />
-                            </Border>
+                            <Button Grid.Row="0" Grid.Column="1" Grid.RowSpan="2" Text="Search"
+                                Command="{Binding SearchCommand}" IsEnabled="{Binding CanSearch}" AutomationId="HistorySearch"
+                                BackgroundColor="Transparent" BorderColor="White" BorderWidth="1"
+                                TextColor="White" FontSize="12" HeightRequest="34" WidthRequest="86"
+                                CornerRadius="12" Padding="0" HorizontalOptions="End" VerticalOptions="Center" />
                         </Grid>
 
                     </Grid>
@@ -401,13 +384,21 @@
                     Text="{Binding StatusText}"
                     FontSize="12"
                     TextColor="{AppThemeBinding Light=#374151, Dark=#e5e7eb}"
-                    LineBreakMode="WordWrap" /><!-- Calls -->
+                    LineBreakMode="TailTruncation" MaxLines="1" />
+
+                <Button Grid.Row="3" Text="Load More" AutomationId="HistoryLoadMore"
+                        Command="{Binding LoadMoreOlderCommand}" IsEnabled="{Binding CanLoadMoreOlder}"
+                        IsVisible="{Binding HasHistoryResults}" HorizontalOptions="End" FontSize="12"
+                        Padding="12,4" />
+
+                <!-- Calls -->
                 <CollectionView
                     x:Name="CallsList"
                     Grid.Row="4"
                     ItemsSource="{Binding Calls}"
                     SelectionMode="None"
-                    Scrolled="OnCallsScrolled"
+                    AutomationId="HistoryResults"
+                    ItemsUpdatingScrollMode="KeepScrollOffset"
                     VerticalScrollBarVisibility="Never">
 
                     <CollectionView.ItemTemplate>

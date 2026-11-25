@@ -50,7 +50,6 @@
     <Compile Include="../../JoesScanner/Services/LiveQueueWake.cs" Link="LiveQueueWake.cs" />
     <Compile Include="../../JoesScanner/Services/PlaybackOwnership.cs" Link="PlaybackOwnership.cs" />
     <Compile Include="../../JoesScanner/Services/IAudioPlaybackService.cs" Link="IAudioPlaybackService.cs" />
-    <Compile Include="../../JoesScanner/Services/ICallHistoryService.cs" Link="ICallHistoryService.cs" />
     <Compile Include="../../JoesScanner/ViewModels/MainViewModel.PlaybackOwnership.cs" Link="MainViewModel.PlaybackOwnership.cs" />
     <Compile Include="../../JoesScanner/ViewModels/MainViewModel.ListeningSession.cs" Link="MainViewModel.ListeningSession.cs" />
     <Compile Include="../../JoesScanner/ViewModels/HistoryViewModel.PlaybackOwnership.cs" Link="HistoryViewModel.PlaybackOwnership.cs" />

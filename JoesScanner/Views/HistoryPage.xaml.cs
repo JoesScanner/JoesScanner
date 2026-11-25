@@ -18,7 +18,6 @@ namespace JoesScanner.Views
         private readonly HistoryViewModel _viewModel;
         private readonly ICallDownloadService _downloadService;
         private readonly ISettingsService _settingsService;
-        private int _ignoreNextScrollEvents;
         private int _appearanceGeneration;
         private bool _isAppearing;
         private bool _isDropdownOpen;
@@ -140,8 +139,8 @@ namespace JoesScanner.Views
                     return;
                 try
                 {
-                    _ignoreNextScrollEvents = 3;
-                    CallsList.ScrollTo(call, position: position, animate: false);
+                    if (_viewModel.Calls.Contains(call))
+                        CallsList.ScrollTo(call, position: position, animate: false);
                 }
                 catch
                 {
@@ -361,10 +360,10 @@ private async Task ShowCallOptionsAsync(CallItem call)
                     return i;
 
                 if (!string.IsNullOrWhiteSpace(target.BackendId) &&
-                    string.Equals(cur.BackendId, target.BackendId, StringComparison.Ordinal))
+                    cur.ServerId == target.ServerId && string.Equals(cur.BackendId, target.BackendId, StringComparison.Ordinal))
                     return i;
 
-                if (cur.Timestamp == target.Timestamp &&
+                if (cur.ServerId == target.ServerId && cur.Timestamp == target.Timestamp &&
                     string.Equals(cur.Talkgroup, target.Talkgroup, StringComparison.Ordinal) &&
                     string.Equals(cur.Site, target.Site, StringComparison.Ordinal))
                     return i;
@@ -424,7 +423,7 @@ private async Task ShowCallOptionsAsync(CallItem call)
                 }
 
                 // Fallback to ID match if we got a different instance
-                if (!string.IsNullOrWhiteSpace(source[i]?.BackendId) && string.Equals(source[i].BackendId, center.BackendId, StringComparison.Ordinal))
+                if (!string.IsNullOrWhiteSpace(source[i]?.BackendId) && source[i].ServerId == center.ServerId && string.Equals(source[i].BackendId, center.BackendId, StringComparison.Ordinal))
                 {
                     idx = i;
                     break;
@@ -543,32 +542,6 @@ private void OnAlertDismissInvoked(object? sender, EventArgs e)
     }
 }
 
-        private void OnCallsScrolled(object sender, ItemsViewScrolledEventArgs e)
-        {
-            try
-            {
-                if (BindingContext is not HistoryViewModel vm)
-                    return;
-
-                // While playback is running we do not trigger any paging or list maintenance.
-                // Users can scroll freely, but the dataset is frozen for the active search.
-                if (vm.IsHistoryPlaybackRunning)
-                    return;
-
-                if (_ignoreNextScrollEvents > 0)
-                {
-                    _ignoreNextScrollEvents--;
-                    return;
-                }
-
-                // Do not block UI thread. VM throttles and serializes paging internally.
-                _ = vm.OnCallsListScrolledAsync(e.FirstVisibleItemIndex, e.LastVisibleItemIndex);
-            }
-            catch
-            {
-            }
-        }
-
         private async void OnReceiverTapped(object sender, TappedEventArgs e)
         {
             await ShowLookupAsync(
@@ -589,22 +562,45 @@ private void OnAlertDismissInvoked(object? sender, EventArgs e)
 
         private async void OnTalkgroupTapped(object sender, TappedEventArgs e)
         {
-            await ShowLookupAsync(
-                title: "Talkgroup",
-                getItems: () => _viewModel.Talkgroups,
-                getCurrent: () => _viewModel.SelectedTalkgroup,
-                setSelected: item => _viewModel.SelectedTalkgroup = item);
-        }
+            if (_isDropdownOpen || _viewModel.CurrentHistoryRecorder is not { } recorder)
+                return;
+            _isDropdownOpen = true;
+            try
+            {
+                if (HistoryViewModel.LookupHasOnlyDefault(_viewModel.Talkgroups))
+                    await _viewModel.EnsureLookupsLoadedAsync(forceReload: true);
+                if (recorder != _viewModel.CurrentHistoryRecorder || GetActiveNavigation() is not { } navigation)
+                    return;
 
+                var selected = _viewModel.SelectedTalkgroups;
+                var items = _viewModel.Talkgroups.Concat(selected)
+                    .Where(item => item.Value.Length != 0 && !item.Value.Contains(','))
+                    .DistinctBy(item => item.Value, StringComparer.Ordinal).ToArray();
+                if (items.Length == 0)
+                {
+                    await UiDialogs.AlertAsync("Talkgroups", "This recorder has no available talkgroup filters.", "Close");
+                    return;
+                }
+                var picker = new HistoryTalkgroupPicker(items, selected);
+                await navigation.PushModalAsync(picker, animated: true);
+                if (await picker.Result is { } choices)
+                    _viewModel.SelectTalkgroupFilters(recorder, choices);
+            }
+            catch (Exception ex)
+            {
+                AppLog.Add(() => $"History talkgroup picker failed ({ex.GetType().Name}).");
+            }
+            finally { _isDropdownOpen = false; }
+        }
         private async Task ShowLookupAsync(
             string title,
             Func<System.Collections.Generic.IEnumerable<HistoryLookupItem>> getItems,
             Func<HistoryLookupItem?> getCurrent,
-            Action<HistoryLookupItem?> setSelected)
+            Action<HistoryLookupItem> setSelected)
         {
             try
             {
-                if (_isDropdownOpen)
+                if (_isDropdownOpen || _viewModel.CurrentHistoryRecorder is not { } recorder)
                     return;
 
                 var items = getItems()?.ToList() ?? new List<HistoryLookupItem>();
@@ -652,7 +648,7 @@ private void OnAlertDismissInvoked(object? sender, EventArgs e)
                 }
 
                 var selected = choiceEntries.FirstOrDefault(x => string.Equals(x.Display, choice, StringComparison.Ordinal))?.Item;
-                if (selected == null)
+                if (selected == null || recorder != _viewModel.CurrentHistoryRecorder)
                     return;
 
                 var current = getCurrent();

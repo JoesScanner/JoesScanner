@@ -10,13 +10,12 @@ internal static class HistoryPlaybackDispatcherTests
 
     internal static async Task RunAsync()
     {
-        await ContendedPlaybackAndPagingAsync();
+        await ContendedPlaybackAndOlderResultsAsync();
         await StopWithPendingNotificationsAsync();
         await NavigateDuringPlaybackStartupAsync();
-        await NavigateDuringPagingAsync();
     }
 
-    private static async Task ContendedPlaybackAndPagingAsync()
+    private static async Task ContendedPlaybackAndOlderResultsAsync()
     {
         using var dispatcher = new HistoryTestDispatcher();
         var ownership = new PlaybackOwnership();
@@ -34,31 +33,36 @@ internal static class HistoryPlaybackDispatcherTests
             return finishFirstClip.Task;
         };
         var violations = ObserveBoundState(history, dispatcher);
-        var newer = new CallItem { BackendId = "newer", Timestamp = new DateTime(2026, 11, 19) };
-        await history.HoldPagingGateForTestAsync();
+        var newer = new CallItem { BackendId = "newer" };
+        var older = new CallItem { BackendId = "older" };
         Task playback = Task.CompletedTask;
         await dispatcher.DispatchAsync(() =>
         {
             history.UseHistoryDispatcher(dispatcher);
             history.OpenForTest();
-            history.EnablePagingForTest(_ => Task.Run(() => new HistoryCallsPage { Calls = [newer], TotalMatches = 2 }));
+            history.CallsForTest.Insert(0, newer);
             playback = history.PlayForTestAsync();
-            LiveHistoryHandoffTests.Check(history.CallsForTest[0].IsPlaying && player.Started.IsEmpty,
+            LiveHistoryHandoffTests.Check(history.CallsForTest[1].IsPlaying && player.Started.IsEmpty,
                 "History must publish selection on its dispatcher while waiting for the native gate.");
         });
         finishLive.SetResult();
         await firstClipStarted.Task.WaitAsync(Timeout);
+        await dispatcher.DispatchAsync(() =>
+        {
+            history.CallsForTest.Add(older);
+            LiveHistoryHandoffTests.Check(history.CallsForTest[1].IsPlaying,
+                "Loading older results must retain the active card.");
+        });
         finishFirstClip.SetResult();
         await live.WaitAsync(Timeout);
-        history.ReleasePagingGateForTest();
         await playback.WaitAsync(Timeout);
         await dispatcher.DispatchAsync(() =>
         {
             LiveHistoryHandoffTests.Check(player.Completed.SequenceEqual(["history", "newer"]) &&
-                history.CallsForTest.Count == 2 && !history.IsRunningForTest && !newer.IsPlaying && violations.IsEmpty,
-                "History must append and play the newer call and publish every bound change on the owning dispatcher.");
+                history.CallsForTest.Count == 3 && !history.IsRunningForTest && !newer.IsPlaying && violations.IsEmpty,
+                "Loading older recordings must preserve chronological playback and dispatcher ownership.");
         });
-        Console.WriteLine("PASS History playback and automatic paging publish bound changes on the owning dispatcher after contended native and paging locks");
+        Console.WriteLine("PASS History plays loaded recordings chronologically while older results arrive and keeps UI changes on the dispatcher");
     }
 
     private static async Task StopWithPendingNotificationsAsync()
@@ -153,38 +157,6 @@ internal static class HistoryPlaybackDispatcherTests
         finishCurrent.SetResult();
         await current.WaitAsync(Timeout);
         Console.WriteLine("PASS Navigation cancels History startup waiting for Live teardown and rapid reentry preserves new playback state");
-    }
-
-    private static async Task NavigateDuringPagingAsync()
-    {
-        using var dispatcher = new HistoryTestDispatcher();
-        var player = new HandoffAudio();
-        var history = new HistoryViewModel(new PlaybackOwnership(), player);
-        var requestStarted = LiveHistoryHandoffTests.Signal();
-        var result = new TaskCompletionSource<HistoryCallsPage>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var violations = ObserveBoundState(history, dispatcher);
-        await OpenAsync(dispatcher, history);
-        await dispatcher.DispatchAsync(() => history.EnablePagingForTest(_ =>
-        {
-            requestStarted.SetResult();
-            return result.Task;
-        }));
-        var retired = Task.Run(history.PlayForTestAsync);
-        await requestStarted.Task.WaitAsync(Timeout);
-        await dispatcher.DispatchAsync(history.OnPageClosedAsync).Unwrap();
-        await dispatcher.DispatchAsync(history.OpenForTest);
-        result.SetResult(new HistoryCallsPage
-        {
-            Calls = [new CallItem { BackendId = "stale", Timestamp = new DateTime(2026, 11, 19) }]
-        });
-        await retired.WaitAsync(Timeout);
-        await dispatcher.DispatchAsync(() =>
-        {
-            LiveHistoryHandoffTests.Check(history.CallsForTest.Count == 1 && !history.IsRunningForTest &&
-                player.Completed.SequenceEqual(["history"]) && violations.IsEmpty,
-                "A delayed History page from a retired playback request must not append into the new visit.");
-        });
-        Console.WriteLine("PASS Late History results from a closed visit cannot mutate the visible collection after reentry");
     }
 
     private static Task OpenAsync(HistoryTestDispatcher dispatcher, HistoryViewModel history) =>

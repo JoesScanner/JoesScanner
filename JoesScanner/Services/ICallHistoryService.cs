@@ -1,100 +1,91 @@
+using System.Collections.Immutable;
 using JoesScanner.Models;
 
-namespace JoesScanner.Services
+namespace JoesScanner.Services;
+
+public sealed record HistoryRecorder
 {
-    public sealed class HistoryLookupItem
+    internal HistoryRecorder(Guid id, string endpoint)
     {
-        public string Label { get; init; } = string.Empty;
-        public string Value { get; init; } = string.Empty;
+        Id = id;
+        Endpoint = ScannerConnectionStore.Normalize(endpoint) ?? throw new ArgumentException("Invalid recorder address.", nameof(endpoint));
     }
 
-    public sealed class HistoryLookupData
-    {
-        public IReadOnlyList<HistoryLookupItem> Systems { get; init; } = Array.Empty<HistoryLookupItem>();
-        public IReadOnlyList<HistoryLookupItem> Receivers { get; init; } = Array.Empty<HistoryLookupItem>();
-        public IReadOnlyList<HistoryLookupItem> Sites { get; init; } = Array.Empty<HistoryLookupItem>();
-        public IReadOnlyList<HistoryLookupItem> Talkgroups { get; init; } = Array.Empty<HistoryLookupItem>();
+    public Guid Id { get; }
+    public string Endpoint { get; }
+    internal const string LookupCachePrefix = "history-recorder:";
+    internal RecorderRequestScope RequestScope => new(new Uri(Endpoint), Id);
+    internal string LookupCacheKey(string? account) => LookupCachePrefix + Id.ToString("N") + "|" + Endpoint + "|" + account;
+}
 
-        // Some Trunking Recorder endpoints (talkgroupsjson) return grouped results.
-        // Key: group label (normalized). Value: child talkgroups within that group.
-        // The History tab can optionally narrow Talkgroups based on the selected Site.
-        public IReadOnlyDictionary<string, IReadOnlyList<HistoryLookupItem>> TalkgroupGroups { get; init; }
-            = new Dictionary<string, IReadOnlyList<HistoryLookupItem>>(StringComparer.OrdinalIgnoreCase);
+public sealed record HistoryLookupItem
+{
+    public string Label { get; init; } = string.Empty;
+    public string Value { get; init; } = string.Empty;
+    internal Guid? RecorderId { get; init; }
+}
+
+public sealed class HistoryLookupData
+{
+    public IReadOnlyList<HistoryLookupItem> Systems { get; init; } = [];
+    public IReadOnlyList<HistoryLookupItem> Receivers { get; init; } = [];
+    public IReadOnlyList<HistoryLookupItem> Sites { get; init; } = [];
+    public IReadOnlyList<HistoryLookupItem> Talkgroups { get; init; } = [];
+    public IReadOnlyDictionary<string, IReadOnlyList<HistoryLookupItem>> TalkgroupGroups { get; init; }
+        = new Dictionary<string, IReadOnlyList<HistoryLookupItem>>(StringComparer.OrdinalIgnoreCase);
+}
+
+public sealed class HistorySearchFilters
+{
+    public HistoryLookupItem? Receiver { get; init; }
+    public HistoryLookupItem? Site { get; init; }
+    public IReadOnlyList<HistoryLookupItem> Talkgroups { get; init; } = [];
+
+    internal bool IsValidFor(Guid recorderId)
+    {
+        var selected = Talkgroups.Append(Receiver).Append(Site).Where(item => !string.IsNullOrWhiteSpace(item?.Value)).ToArray();
+        return selected.Length != 0 && selected.All(item => item!.RecorderId == recorderId) &&
+            Talkgroups.All(item => !string.IsNullOrWhiteSpace(item.Value) && !item.Value.Contains(','));
+    }
+}
+
+public sealed record HistoryDateRange(DateOnly From, DateOnly To, TimeSpan StartTime);
+
+internal sealed record HistoryRecorderAccess(HistoryRecorder Recorder, bool Protected, string? Account, long? AccountVersion);
+internal sealed record HistorySearchSnapshot(HistoryRecorderAccess Access, HistorySearchFilters Filters,
+    DateTimeOffset FromUtc, DateTimeOffset UntilUtc, int? Tier);
+internal sealed record HistoryPageCursor(int Offset, string? LastId, int? TotalMatches,
+    ImmutableHashSet<(Guid RecorderId, string RecordingId)> Seen)
+{
+    internal static HistoryPageCursor Start { get; } = new(0, null, null, []);
+}
+
+public sealed class HistorySearchResult
+{
+    internal HistorySearchResult(HistorySearchSnapshot snapshot, HistoryPageCursor cursor, IReadOnlyList<CallItem> calls, bool hasMore)
+    {
+        Snapshot = snapshot;
+        Cursor = cursor;
+        Calls = calls;
+        HasMore = hasMore;
     }
 
-    public sealed class HistorySearchFilters
-    {
-        public string? GlobalSearch { get; init; }
-        public HistoryLookupItem? System { get; init; }
-        public HistoryLookupItem? Receiver { get; init; }
-        public HistoryLookupItem? Site { get; init; }
-        public HistoryLookupItem? Talkgroup { get; init; }
-    }
+    internal HistorySearchSnapshot Snapshot { get; }
+    internal HistoryPageCursor Cursor { get; }
+    public IReadOnlyList<CallItem> Calls { get; }
+    public int TotalMatches => Cursor.TotalMatches ?? 0;
+    public bool HasMore { get; }
+    public bool LimitedToLast24Hours => Snapshot.Tier == 1;
+}
 
-    public sealed class HistorySearchResult
-    {
-        public IReadOnlyList<CallItem> Calls { get; init; } = Array.Empty<CallItem>();
+internal sealed class HistoryResultsChangedException()
+    : InvalidOperationException("The recorder changed these results. Search again to browse the current archive.");
 
-        // Global start index within the full filtered result set.
-        // Index 0 is the newest call.
-        public int StartIndex { get; init; }
-
-        // Global index within the full filtered result set for the anchor call.
-        // Index 0 is the newest call.
-        public int AnchorGlobalIndex { get; init; }
-
-        // Index into Calls that represents the anchor item (closest to the requested time).
-        public int AnchorIndex { get; init; }
-
-        public int TotalMatches { get; init; }
-    }
-
-    public sealed class HistoryCallsPage
-    {
-        public IReadOnlyList<CallItem> Calls { get; init; } = Array.Empty<CallItem>();
-        public int TotalMatches { get; init; }
-    }
-
-    public interface ICallHistoryService
-    {
-        // Loads available lookup values for History filtering.
-        // When system, receiver, and or site are provided, the server may return a narrowed list.
-        Task<HistoryLookupData> GetLookupDataAsync(HistorySearchFilters? currentFilters, CancellationToken cancellationToken = default);
-
-        // Finds the call closest to targetLocalTime, then returns a fixed window of calls around it.
-        // Calls are returned in the same order as the main queue (newest first).
-        Task<HistorySearchResult> SearchAroundAsync(
-            DateTime targetLocalTime,
-            HistorySearchFilters filters,
-            int windowSize,
-            CancellationToken cancellationToken = default);
-
-        // Same as SearchAroundAsync, but constrains results to the given local date range when provided.
-        Task<HistorySearchResult> SearchAroundAsync(
-            DateTime targetLocalTime,
-            HistorySearchFilters filters,
-            int windowSize,
-            DateTime? dateFromLocal,
-            DateTime? dateToLocal,
-            CancellationToken cancellationToken = default);
-
-
-        // Fetches a slice of calls from the full filtered result set.
-        // Calls are returned newest first.
-        Task<HistoryCallsPage> GetCallsPageAsync(
-            int start,
-            int length,
-            HistorySearchFilters filters,
-            CancellationToken cancellationToken = default);
-
-        // Same as GetCallsPageAsync, but constrains results to the given local date range when provided.
-        Task<HistoryCallsPage> GetCallsPageAsync(
-            int start,
-            int length,
-            HistorySearchFilters filters,
-            DateTime? dateFromLocal,
-            DateTime? dateToLocal,
-            CancellationToken cancellationToken = default);
-
-    }
+public interface ICallHistoryService
+{
+    Task<HistoryLookupData> GetLookupDataAsync(HistorySearchFilters? currentFilters, CancellationToken cancellationToken = default);
+    Task<HistoryLookupData> GetRecorderLookupsAsync(HistoryRecorder recorder, bool refresh, CancellationToken cancellationToken = default);
+    Task<HistorySearchResult> SearchAsync(HistoryRecorder recorder, HistorySearchFilters filters, HistoryDateRange dates,
+        CancellationToken cancellationToken = default);
+    Task<HistorySearchResult> LoadMoreAsync(HistorySearchResult previous, CancellationToken cancellationToken = default);
 }

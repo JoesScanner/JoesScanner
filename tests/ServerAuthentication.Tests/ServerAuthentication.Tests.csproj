@@ -56,6 +56,9 @@
     <Compile Include="../../JoesScanner/Services/ScannerConnectionStore.cs" Link="ScannerConnectionStore.cs" />
     <Compile Include="../../JoesScanner/ViewModels/LiveCallDisplay.cs" Link="LiveCallDisplay.cs" />
     <Compile Include="../../JoesScanner/Services/CallHistoryService.cs" Link="CallHistoryService.cs" />
+    <Compile Include="../../JoesScanner/Services/CallHistoryService.Search.cs" Link="CallHistoryService.Search.cs" />
+    <Compile Include="../../JoesScanner/Services/HistoryResultOrder.cs" Link="HistoryResultOrder.cs" />
+    <Compile Include="../../JoesScanner/Services/HistorySearchPreferences.cs" Link="HistorySearchPreferences.cs" />
     <Compile Include="../../JoesScanner/Services/ICallHistoryService.cs" Link="ICallHistoryService.cs" />
     <Compile Include="../../JoesScanner/Services/CallDownloadService.cs" Link="CallDownloadService.cs" />
     <Compile Include="../../JoesScanner/Services/ICallDownloadService.cs" Link="ICallDownloadService.cs" />

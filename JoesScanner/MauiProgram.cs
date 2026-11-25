@@ -45,6 +45,7 @@ public static class MauiProgram
         builder.Services.AddSingleton<FavoritesRepository>();
         builder.Services.AddSingleton<FavoritesService>();
         builder.Services.AddSingleton<ICallHistoryService, CallHistoryService>();
+        builder.Services.AddSingleton<HistorySearchPreferences>();
         builder.Services.AddSingleton<IHistoryLookupsCacheService, HistoryLookupsCacheService>();
         builder.Services.AddSingleton<IAudioFilterService, AudioFilterService>();
         builder.Services.AddSingleton<IAudioPlaybackService, AudioPlaybackService>();
