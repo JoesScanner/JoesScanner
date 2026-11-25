@@ -433,7 +433,7 @@ def exercise(compose, directory, arguments):
     check_payload_validation(site, alpha, owners[0], marker)
     check_rate_limit(site)
     tokens = check_legacy(site, compose, admin, admin_password, alpha, beta, owners)
-    directory_secret = check_directory(site, compose, admin, admin_password, alpha, beta, tokens[0])
+    directory_secret = check_directory(site, compose, admin, admin_password, beta, tokens[0])
     check_client(site, ca_path, alpha, beta, directory, arguments.hold)
 
     redact = [marker, admin_password, directory_secret, *tokens]

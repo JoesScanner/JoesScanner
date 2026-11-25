@@ -138,6 +138,10 @@ switch ( $mode ) {
         break;
 
     case 'directory-pages':
+        $recipient = $input['recipient'];
+        $recipient_id = wp_insert_user( array( 'user_login' => $recipient['username'],
+            'user_pass' => $recipient['password'], 'user_email' => $recipient['email'], 'role' => 'subscriber' ) );
+        fixture_check( is_int( $recipient_id ) && $recipient_id > 0, 'Could not create a directory recipient account.' );
         foreach ( array( 'my-servers' => '[joes_scanner_my_servers]', 'submit-server' => '[joes_scanner_server_submit]',
             'public-servers' => '[joes_scanner_server_directory]' ) as $slug => $shortcode ) {
             $post_id = wp_insert_post( array( 'post_title' => $slug, 'post_name' => $slug, 'post_type' => 'page',

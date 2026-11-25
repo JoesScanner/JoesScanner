@@ -665,7 +665,9 @@ function joes_scanner_auth_servers_endpoint( $request ) {
         $suspended = array_map( static function ( $id ) {
             return array( 'id' => (int) $id, 'status' => 'suspended' );
         }, $ids );
-        return new WP_REST_Response( array( 'ok' => true, 'servers' => $out, 'suspended' => $suspended ), 200 );
+        $response = new WP_REST_Response( array( 'ok' => true, 'servers' => $out, 'suspended' => $suspended ), 200 );
+        $response->header( 'Cache-Control', 'no-cache, must-revalidate' );
+        return $response;
     } catch ( Throwable $ex ) {
         return new WP_REST_Response( array( 'ok' => false, 'error' => 'server_directory_not_available' ), 500 );
     }

@@ -83,8 +83,7 @@ function joes_scanner_auth_install_directory() {
     $legacy_upgrade = version_compare( get_option( JOES_SCANNER_AUTH_DB_VERSION_KEY, '' ), '1.5.10', '<' );
     $rows_ready = joes_scanner_auth_dir_write( static function () use ( $wpdb, $directory, $legacy_upgrade ) {
         // Legacy contact emails were editable. Migrate only numeric account links.
-        $fallback = get_users( array( 'capability' => 'manage_options', 'fields' => 'ID', 'number' => 1, 'orderby' => 'ID' ) );
-        $custodian = (int) ( $fallback[0] ?? 0 );
+        $custodian = null;
         $rows = $wpdb->get_results( "SELECT * FROM {$directory}" );
         if ( $wpdb->last_error ) {
             return joes_scanner_auth_dir_db_error();
@@ -101,8 +100,16 @@ function joes_scanner_auth_install_directory() {
                         break;
                     }
                 }
-                if ( ! $owner && ! $custodian ) {
-                    return joes_scanner_auth_dir_db_error();
+                if ( ! $owner ) {
+                    if ( $custodian === null ) {
+                        // A web upgrade can run on plugins_loaded before WP initializes roles.
+                        wp_roles();
+                        $fallback = get_users( array( 'capability' => 'manage_options', 'fields' => 'ID', 'number' => 1, 'orderby' => 'ID' ) );
+                        $custodian = (int) ( $fallback[0] ?? 0 );
+                    }
+                    if ( ! $custodian ) {
+                        return joes_scanner_auth_dir_db_error();
+                    }
                 }
                 $data['owner_user_id'] = $owner ?: $custodian;
                 $data['was_public'] = (int) in_array( $row->status, array( 'approved', 'disabled' ), true );

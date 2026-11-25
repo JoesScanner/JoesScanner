@@ -85,8 +85,10 @@ def review_form(site, admin, listing_id):
 
 
 def published(site):
-    response = json.loads(site.request(API + "/servers", 200)[1])
+    headers, content = site.request(API + "/servers", 200)
+    response = json.loads(content)
     check(response.get("ok") is True, "The anonymous directory must remain available.")
+    check("must-revalidate" in headers["Cache-Control"], "Caches must revalidate public directory status.")
     return {str(row["id"]): row for row in response["servers"]}, response["suspended"]
 
 
@@ -268,12 +270,14 @@ def test_verification(site, compose, alpha_email):
     print("PASS Controlled email, account reuse and creation, expiry, browser binding, one-time codes, and issuance and verification limits", flush=True)
 
 
-def check_directory(site, compose, admin_login, admin_password, alpha_user, beta_user, session_token):
-    compose.fixture("directory-pages", {"existingEmail": alpha_user["email"]})
+def check_directory(site, compose, admin_login, admin_password, owner, session_token):
+    recipient = {"username": "directory_recipient", "email": "directory_recipient@example.invalid",
+                 "password": secrets.token_urlsafe(24)}
+    compose.fixture("directory-pages", {"existingEmail": owner["email"], "recipient": recipient})
     admin = browser_login(site, admin_login, admin_password, ADMIN)
-    alpha = browser_login(site, alpha_user["username"], alpha_user["password"], MY_SERVERS)
-    beta = browser_login(site, beta_user["username"], beta_user["password"], MY_SERVERS)
-    public_id, approved = test_visibility(site, admin, alpha, beta, beta_user["username"])
+    alpha = browser_login(site, owner["username"], owner["password"], MY_SERVERS)
+    beta = browser_login(site, recipient["username"], recipient["password"], MY_SERVERS)
+    public_id, approved = test_visibility(site, admin, alpha, beta, recipient["username"])
     secret = "directory-fixture-" + secrets.token_hex(18)
     for url in ("file:///data", "http://127.0.0.1", "https://[::1]", "https://server.example.net:0",
                 "https://user:" + secret + "@server.example.net", "https://server.example.net?api_key=" + secret):
@@ -281,7 +285,7 @@ def check_directory(site, compose, admin_login, admin_password, alpha_user, beta
     owner_post(site, alpha, "save", 400, **fields("Invalid credentials", "https://invalid.example.net", firewall_password=secret))
     check("Invalid recorder" not in json.dumps(published(site)[0]), "An invalid submission became public.")
     print("PASS Invalid schemes, local addresses, invalid ports, and embedded or posted directory credentials are rejected", flush=True)
-    test_revisions_and_suspension(site, compose, admin, alpha, beta, alpha_user["email"], session_token,
+    test_revisions_and_suspension(site, compose, admin, alpha, beta, owner["email"], session_token,
                                   public_id, approved, secret)
-    test_verification(site, compose, alpha_user["email"])
+    test_verification(site, compose, owner["email"])
     return secret
