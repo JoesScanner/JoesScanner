@@ -22,6 +22,30 @@ namespace JoesScanner.ViewModels
         private long _livePlaybackFloor;
         private readonly LiveAudioPreloader _automaticPreloads = new();
         private PlaybackCompletion? _nativeLiveCompletion;
+        private PlaybackCompletion? _activeLiveAttempt;
+        internal CallItem? ActiveLiveCard { get; private set; }
+
+        private void PublishActiveLiveCard(CallItem item, PlaybackCompletion completion)
+        {
+            _activeLiveAttempt = completion;
+            if (ReferenceEquals(ActiveLiveCard, item))
+                return;
+            if (ActiveLiveCard is { } previous)
+                previous.IsPlaying = false;
+            ActiveLiveCard = item;
+            item.IsPlaying = true;
+            OnPropertyChanged(nameof(ActiveLiveCard));
+        }
+
+        private void ClearActiveLiveCard(PlaybackCompletion? completion = null)
+        {
+            if (ActiveLiveCard is not { } active || (completion != null && !ReferenceEquals(_activeLiveAttempt, completion)))
+                return;
+            _activeLiveAttempt = null;
+            ActiveLiveCard = null;
+            active.IsPlaying = false;
+            OnPropertyChanged(nameof(ActiveLiveCard));
+        }
 
         private void ResetLiveTraversal()
         {
@@ -693,14 +717,17 @@ namespace JoesScanner.ViewModels
                     try
                     {
                         enteringNative?.Invoke();
-                        if (forecastFrom is { } choice)
-                            completion.OnStarted(() => MainThread.BeginInvokeOnMainThread(() =>
-                            {
-                                if (ReferenceEquals(_nativeLiveRequest, request) && request.CanContinue &&
-                                    sourceRevision == _automaticAudioRevision && preloadRevision == _automaticPreloads.Revision &&
-                                    !token.IsCancellationRequested)
-                                    StartAutomaticPreloads(choice, token, preloadRevision);
-                            }));
+                        completion.OnEnded(RetirePresentation);
+                        completion.OnStarted(() => MainThread.BeginInvokeOnMainThread(() =>
+                        {
+                            if (!ReferenceEquals(_nativeLiveCompletion, completion) || !request.CanContinue ||
+                                !_playbackOwnership.IsCurrent(live) || token.IsCancellationRequested || completion.IsFinished)
+                                return;
+                            PublishActiveLiveCard(item, completion);
+                            if (forecastFrom is { } choice && sourceRevision == _automaticAudioRevision &&
+                                preloadRevision == _automaticPreloads.Revision)
+                                StartAutomaticPreloads(choice, token, preloadRevision);
+                        }));
                         await _audioPlaybackService.PlayAsync(url, rate, token, completion);
                     }
                     catch (Exception ex) when (!token.IsCancellationRequested && !completion.Confirmed &&
@@ -714,6 +741,8 @@ namespace JoesScanner.ViewModels
                         _automaticPreloads.Retire();
                         _nativeLiveCompletion = null;
                         _nativeLiveRequest = null;
+                        if (!completion.IsFinished)
+                            RetirePresentation();
 #if IOS
                         OnIosAudioInterruption();
 #endif
@@ -731,6 +760,8 @@ namespace JoesScanner.ViewModels
 
             if (saveCompletion != null)
                 await saveCompletion;
+
+            void RetirePresentation() => MainThread.BeginInvokeOnMainThread(() => ClearActiveLiveCard(completion));
         }
 
         private async Task FlushLiveCompletionAsync(CancellationToken token = default)

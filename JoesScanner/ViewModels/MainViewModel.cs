@@ -1208,7 +1208,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                 {
                     if (!IsCurrentLiveScope(durable))
                         return;
-                    if (update.AudioUrl != null && FindLiveCard(notification, durable.ServerId) is { } card)
+                    if (update.AudioUrl != null && FindLiveCard(notification, durable.ServerId, durable) is { } card)
                         ApplyLiveUpdate(notification, existing: card);
                     if (observation.PlaybackChanged)
                         RequestQueueForLiveArrival("SavedRecordingNotification");
@@ -1231,7 +1231,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                 if (!IsCurrentLiveScope(durable) || saved.IsRecoveryBacklog)
                     return;
 
-                var existing = FindLiveCard(incoming, durable.ServerId);
+                var existing = FindLiveCard(incoming, durable.ServerId, durable);
                 // The first HTTP snapshot is already in History. It can update a
                 // card still on screen when that recorder was disabled and re-enabled.
                 if (call.IsListeningBaseline && existing == null)
@@ -1776,7 +1776,6 @@ private static string SpeedStepToLabel(double step)
             var rate = await GetEffectivePlaybackRateAsync(item, token);
             token.ThrowIfCancellationRequested();
             _currentPlayingCall = item;
-            item.IsPlaying = true;
             RequestReadyCount();
             PlaybackAudioLease? acquired = null;
             try
@@ -1923,11 +1922,14 @@ private static string SpeedStepToLabel(double step)
 
         private List<CallItem> SnapshotLiveCalls() => Calls.ToList();
 
-        private CallItem? FindLiveCard(LiveCallState state, Guid? serverId)
+        private CallItem? FindLiveCard(LiveCallState state, Guid? serverId, DurableLiveQueue.Run? updateScope = null)
         {
             var server = DurableLiveQueue.ServerKey(state.ServerUrl);
-            return Calls.FirstOrDefault(item => item.ServerId == serverId && item.LiveState is { } live &&
-                (ReferenceEquals(live, state) || live.Id == state.Id && DurableLiveQueue.ServerKey(live.ServerUrl) == server));
+            bool Matches(CallItem item) => item.ServerId == serverId && item.LiveState is { } live &&
+                (ReferenceEquals(live, state) || live.Id == state.Id && DurableLiveQueue.ServerKey(live.ServerUrl) == server);
+            return Calls.FirstOrDefault(Matches) ??
+                (updateScope != null && ActiveLiveCard is { } active && updateScope.Owns(active.RecordingAccess) && Matches(active)
+                    ? active : null);
         }
 
         private void ApplyLiveUpdate(LiveCallState state, CallItem? update = null, CallItem? existing = null)
@@ -1936,7 +1938,7 @@ private static string SpeedStepToLabel(double step)
             if (existing == null)
                 return;
             if (existing.LiveState is { } restored && !ReferenceEquals(restored, state))
-                restored.Observe(state.Read(), LiveCallState.NextVersion());
+                restored.MergeRecorderState(state);
             var alreadyPlayable = !string.IsNullOrWhiteSpace(existing.AudioUrl);
             var transcriptionChanged = existing.ApplyLiveUpdate();
             if (!alreadyPlayable && !string.IsNullOrWhiteSpace(existing.AudioUrl))
@@ -2186,6 +2188,7 @@ public void DismissAddressAlert(CallItem call)
 
         private void ClearPlayingSelection()
         {
+            ClearActiveLiveCard();
             if (_currentPlayingCall is { } active)
                 active.IsPlaying = false;
             foreach (var call in Calls)

@@ -32,6 +32,7 @@ await DurableLiveTransportTests.RunAsync();
 await LiveInterruptionTests.RunAsync();
 await RecordingDatabaseMaintenanceTests.RunAsync();
 await LiveHistoryHandoffTests.RunAsync();
+await LivePlaybackPinTests.RunAsync();
 await IntelligentLivePlaybackTests.RunAsync();
 await VerifiedPlaybackLagTests.RunAsync();
 await LiveAudioSourceTests.RunAsync();

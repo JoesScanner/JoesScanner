@@ -485,7 +485,11 @@ namespace JoesScanner.ViewModels
         private static CallItem? GetNextQueuedCall() => null;
         private static int GetBacklogCountForStartingCall(CallItem item) => 0;
         private static void ClearPrefetchedPlayableUrl(bool deleteCompletedTempFile) { }
-        private void ClearPlayingSelection() => _currentPlayingCall = null;
+        private void ClearPlayingSelection()
+        {
+            ClearActiveLiveCard();
+            _currentPlayingCall = null;
+        }
         private static void UpdateQueueDerivedState() { }
 
         internal sealed class DelayedSelection

@@ -74,6 +74,7 @@
     <Compile Include="../../JoesScanner/ViewModels/LiveCallDisplay.cs" Link="LiveCallDisplay.cs" />
     <Compile Include="../../JoesScanner/ViewModels/LiveReadingState.cs" Link="LiveReadingState.cs" />
     <Compile Include="../../JoesScanner/Views/LiveReadingViewport.cs" Link="LiveReadingViewport.cs" />
+    <Compile Include="../../JoesScanner/Views/Controls/TranscriptFeedbackState.cs" Link="TranscriptFeedbackState.cs" />
     <Compile Include="../../JoesScanner/Services/CallHistoryService.cs" Link="CallHistoryService.cs" />
     <Compile Include="../../JoesScanner/Services/CallHistoryService.Search.cs" Link="CallHistoryService.Search.cs" />
     <Compile Include="../../JoesScanner/Services/HistoryResultOrder.cs" Link="HistoryResultOrder.cs" />

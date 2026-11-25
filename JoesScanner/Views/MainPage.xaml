@@ -228,6 +228,8 @@
                                HorizontalOptions="Center" VerticalOptions="Center" IsVisible="False" />
                     </Grid>
 
+                <Grid x:Name="UnifiedLiveHost" Grid.Row="1" RowDefinitions="Auto,*">
+                <controls:LivePlaybackPinView x:Name="UnifiedPlaybackPin" />
                 <CollectionView x:Name="FavoritesCallsView" Grid.Row="1" AutomationId="FavoritesLiveCalls"
                                 IsVisible="False" SelectionMode="None" ItemsUpdatingScrollMode="KeepScrollOffset"
                                 ItemSizingStrategy="MeasureAllItems"
@@ -338,7 +340,9 @@
                                         </HorizontalStackLayout>
                                     </Grid>
 
-                                    <Label
+                                    <controls:LiveTranscriptLabel
+                                        Loaded="OnLiveTranscriptLoaded"
+                                        Unloaded="OnLiveTranscriptUnloaded"
                                         Margin="0,2,0,0"
                                         FontSize="{OnPlatform WinUI=12, MacCatalyst=12, Android=11, iOS=11}"
                                         FontAutoScalingEnabled="False"
@@ -484,6 +488,7 @@
                         </DataTemplate>
                     </CollectionView.ItemTemplate>
                 </CollectionView>
+                </Grid>
                 </Grid>
 
                 <!-- FOOTER: client info and donate button -->

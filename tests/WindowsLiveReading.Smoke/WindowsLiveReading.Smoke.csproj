@@ -22,5 +22,8 @@
     <Compile Include="../../JoesScanner/ViewModels/LiveReadingState.cs" Link="LiveReadingState.cs" />
     <Compile Include="../../JoesScanner/Views/LiveReadingViewport.cs" Link="LiveReadingViewport.cs" />
     <Compile Include="../../JoesScanner/Views/LiveReadingViewport.Native.cs" Link="LiveReadingViewport.Native.cs" />
+    <Compile Include="../../JoesScanner/Views/Controls/LivePlaybackPinView.cs" Link="LivePlaybackPinView.cs" />
+    <Compile Include="../../JoesScanner/Views/Controls/LiveTranscriptLabel.cs" Link="LiveTranscriptLabel.cs" />
+    <Compile Include="../../JoesScanner/Views/Controls/TranscriptFeedbackState.cs" Link="TranscriptFeedbackState.cs" />
   </ItemGroup>
 </Project>

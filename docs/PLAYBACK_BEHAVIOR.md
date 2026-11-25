@@ -30,8 +30,10 @@ This document and the playback integration tests define JoesScanner's playback c
 - Combined, Favorites and each recorder panel retain their own reading position and **New Calls** count. Count first admissions while reading if the card is still in that projection. Metadata updates and Favorite edits can change displayed content without creating new admissions.
 - **New Calls** scrolls just its own list to the newest card and clears its count, as does deliberately scrolling back to the edge. Monitoring, audio playback and the durable queue continue at their current positions.
 - **Waiting** and the backlog warning reflect eligible automatic audio. **Jump to Live** still applies the audio and queue boundary described above. Stop retires deferred scroll work while retaining displayed cards, and a fresh listening session resets the reading positions and counts.
+- The compact Live pin identifies the canonical recording after native playback starts. Combined shows the active clip, a recorder panel shows its own clip, and Favorites shows active clips that match its recorder-scoped membership. The pin can show an off-window recording in its fixed slot. The list keeps its order, viewport and New Calls count as the pin appears or clears.
+- A meaningful Live transcript revised after its initial text receives a 650 ms blue tint in the transcript area. Reduced motion uses a steady tint for the same interval. An equivalent or stale observation gives no feedback. Recycling a card, switching views or leaving Live retires pending feedback.
 
-Run the native smoke test in an interactive Windows session with `dotnet run --project tests/WindowsLiveReading.Smoke -c Debug`. The unpackaged fixture uses synthetic cards and measures the real CollectionView anchor through arrivals and transcript resizing.
+Run the native smoke test in an interactive Windows session with `dotnet run --project tests/WindowsLiveReading.Smoke -c Debug`. The unpackaged fixture uses synthetic cards and measures the real CollectionView anchor through arrivals, pin changes and transcript corrections.
 
 ## D. Listening sessions
 

@@ -49,7 +49,25 @@ internal sealed class LiveCallState(string serverUrl, string id)
     internal void ObserveRecoveredAudio(LiveCallSnapshot update, long version, string? priorUrl) =>
         Observe(update, version, out _, recoveringAudio: true, priorUrl);
 
-    private bool Observe(LiveCallSnapshot update, long version, out string? changedTranscription, bool recoveringAudio, string? priorUrl)
+    internal void RestoreSnapshot(LiveCallSnapshot snapshot) =>
+        Observe(snapshot, NextVersion(), out _, recoveringAudio: false, priorUrl: null, transcriptionVersion: 0);
+
+    internal void MergeRecorderState(LiveCallState source)
+    {
+        LiveCallSnapshot snapshot;
+        long transcriptionVersion;
+        lock (source._gate)
+        {
+            snapshot = source._snapshot;
+            transcriptionVersion = source._transcriptionVersion;
+        }
+        // A separately reconstructed card can receive a deferred HTTP result.
+        // Keep the recorder observation's text version across that handoff.
+        Observe(snapshot, NextVersion(), out _, recoveringAudio: false, priorUrl: null, transcriptionVersion: transcriptionVersion);
+    }
+
+    private bool Observe(LiveCallSnapshot update, long version, out string? changedTranscription, bool recoveringAudio,
+        string? priorUrl, long? transcriptionVersion = null)
     {
         lock (_gate)
         {
@@ -79,9 +97,10 @@ internal sealed class LiveCallState(string serverUrl, string id)
             };
 
             var transcript = _snapshot.Transcription;
-            if (!CallItem.IsMissingTranscription(update.Transcription) && version >= _transcriptionVersion)
+            var textVersion = transcriptionVersion ?? version;
+            if (!CallItem.IsMissingTranscription(update.Transcription) && textVersion >= _transcriptionVersion)
             {
-                _transcriptionVersion = version;
+                _transcriptionVersion = textVersion;
                 transcript = update.Transcription;
             }
 

@@ -34,6 +34,7 @@ namespace JoesScanner.Models
         internal bool AudioReferenceChanged { get; init; }
         internal bool IsCompletedReplay { get; set; }
         internal bool HasUnplayedLateAudio { get; private set; }
+        internal long TranscriptionCorrectionVersion { get; private set; }
 
         internal bool ConsumeLateAudio()
         {
@@ -106,7 +107,14 @@ namespace JoesScanner.Models
 
             var previous = Transcription;
             Transcription = transcript;
-            return Transcription != previous;
+            if (Transcription == previous)
+                return false;
+            if (!IsMissingTranscription(previous) && !IsMissingTranscription(Transcription))
+            {
+                TranscriptionCorrectionVersion++;
+                OnPropertyChanged(nameof(TranscriptionCorrectionVersion));
+            }
+            return true;
         }
 
         private string _detectedAddress = string.Empty;

@@ -2,6 +2,7 @@ using System.ComponentModel;
 using JoesScanner.Models;
 using JoesScanner.Services;
 using JoesScanner.ViewModels;
+using JoesScanner.Views.Controls;
 
 namespace JoesScanner.Views;
 
@@ -13,6 +14,8 @@ public partial class MainPage
     private LiveCallDisplay _liveDisplay = null!;
     private LiveReadingViewport _combinedViewport = null!;
     private LiveReadingViewport _favoritesViewport = null!;
+    private CallItem? _observedPin;
+    private readonly HashSet<LiveTranscriptLabel> _transcriptLabels = [];
     private long _readerGeneration;
     private readonly Dictionary<Guid, LivePanel> _serverPanels = [];
     private readonly Dictionary<Guid, (View Tab, Button Button)> _serverTabs = [];
@@ -45,7 +48,7 @@ public partial class MainPage
         _liveDisplay.Observe();
         _viewModel.LiveCardAdmitted += _liveDisplay.RecordVisibleAdmission;
         _viewModel.RequestJumpToLiveScroll += OnRequestJumpToLiveScroll;
-        _viewModel.PropertyChanged += OnLiveMonitoringChanged;
+        _viewModel.PropertyChanged += OnLiveViewModelChanged;
         _viewModel.ScannerConnectionLayoutChanged += OnScannerConnectionLayoutChanged;
         _viewModel.Favorites.Changed += OnFavoriteMembershipChanged;
         _viewModel.RefreshScannerConnectionRows();
@@ -56,18 +59,25 @@ public partial class MainPage
     {
         _viewModel.LiveCardAdmitted -= _liveDisplay.RecordVisibleAdmission;
         _viewModel.RequestJumpToLiveScroll -= OnRequestJumpToLiveScroll;
-        _viewModel.PropertyChanged -= OnLiveMonitoringChanged;
+        _viewModel.PropertyChanged -= OnLiveViewModelChanged;
         _viewModel.ScannerConnectionLayoutChanged -= OnScannerConnectionLayoutChanged;
         _viewModel.Favorites.Changed -= OnFavoriteMembershipChanged;
         _combinedViewport.Show(false);
         _favoritesViewport.Show(false);
         foreach (var panel in _serverPanels.Values)
             panel.Viewport.Show(false);
+        RefreshPlaybackPins();
+        RefreshTranscriptFeedback();
         _liveDisplay.Detach();
     }
 
-    private void OnLiveMonitoringChanged(object? sender, PropertyChangedEventArgs e)
+    private void OnLiveViewModelChanged(object? sender, PropertyChangedEventArgs e)
     {
+        if (e.PropertyName == nameof(MainViewModel.ActiveLiveCard))
+        {
+            RefreshPlaybackPins();
+            return;
+        }
         if (e.PropertyName != nameof(MainViewModel.IsRunning))
             return;
         _readerGeneration = _viewModel.LiveDisplayGeneration;
@@ -75,6 +85,57 @@ public partial class MainPage
         _favoritesViewport.CancelPendingScroll();
         foreach (var panel in _serverPanels.Values)
             panel.Viewport.CancelPendingScroll();
+        foreach (var label in _transcriptLabels)
+            label.CancelCorrection();
+    }
+
+    private void RefreshPlaybackPins()
+    {
+        var active = _handlersAttached ? _viewModel.ActiveLiveCard : null;
+        if (!ReferenceEquals(_observedPin, active))
+        {
+            if (_observedPin != null)
+                _observedPin.PropertyChanged -= OnPinnedCardChanged;
+            _observedPin = active;
+            if (active != null)
+                active.PropertyChanged += OnPinnedCardChanged;
+        }
+        var unified = UnifiedLiveHost.IsVisible ? _liveDisplay.PinFor(active, favoritesOnly: _favoritesLive) : null;
+        var recorderName = unified?.ServerId is { } recorderId
+            ? _viewModel.ScannerConnections.FirstOrDefault(row => row.Id == recorderId)?.Name : null;
+        UnifiedPlaybackPin.Present(unified, recorderName);
+        foreach (var (id, panel) in _serverPanels)
+            panel.Pin.Present(_shownPanels.Contains(id) ? _liveDisplay.PinFor(active, recorder: id) : null);
+    }
+
+    private void OnPinnedCardChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (ReferenceEquals(sender, _observedPin) && e.PropertyName == nameof(CallItem.CardMetadata))
+            RefreshPlaybackPins();
+    }
+
+    private void OnLiveTranscriptLoaded(object? sender, EventArgs e)
+    {
+        if (sender is not LiveTranscriptLabel label)
+            return;
+        _transcriptLabels.Add(label);
+        // A native template can load before MAUI attaches its logical parent.
+        // The label verifies the active list when it receives a correction.
+        label.ShowCorrectionFeedback(_handlersAttached);
+    }
+
+    private void OnLiveTranscriptUnloaded(object? sender, EventArgs e)
+    {
+        if (sender is not LiveTranscriptLabel label)
+            return;
+        _transcriptLabels.Remove(label);
+        label.ShowCorrectionFeedback(false);
+    }
+
+    private void RefreshTranscriptFeedback()
+    {
+        foreach (var label in _transcriptLabels)
+            label.ShowCorrectionFeedback(_handlersAttached && label.IsInVisibleList());
     }
 
     private void OnLiveCardSizeChanged(object? sender, EventArgs e)
@@ -133,7 +194,10 @@ public partial class MainPage
     private void OnFavoriteMembershipChanged() => MainThread.BeginInvokeOnMainThread(() =>
     {
         if (_handlersAttached)
+        {
             _liveDisplay.RefreshFavorites();
+            RefreshPlaybackPins();
+        }
     });
 
     private void OnFavoritesLiveClicked(object? sender, EventArgs e)
@@ -183,6 +247,7 @@ public partial class MainPage
             if (_serverPanels.Remove(id, out var panel))
             {
                 panel.Viewport.Show(false);
+                panel.Pin.Present(null);
                 ServerPanels.Children.Remove(panel.Root);
             }
             _liveDisplay.ForgetServer(id);
@@ -246,6 +311,7 @@ public partial class MainPage
         _combinedViewport.Show(_handlersAttached && !_favoritesLive && !separate);
         FavoritesCallsView.IsVisible = _favoritesLive;
         CallsView.IsVisible = !_favoritesLive && !separate;
+        UnifiedLiveHost.IsVisible = !separate;
         SeparateLiveHost.IsVisible = separate;
         ApplyLiveButtonStyle(CombinedLiveButton, CallsView.IsVisible);
         ApplyLiveButtonStyle(SeparateLiveButton, separate);
@@ -299,6 +365,8 @@ public partial class MainPage
         {
             foreach (var id in shown)
                 _serverPanels[id].Viewport.Show(true);
+            RefreshPlaybackPins();
+            RefreshTranscriptFeedback();
             return;
         }
 
@@ -324,6 +392,8 @@ public partial class MainPage
                 ServerPanels.Children.Add(panel.Root);
             panel.Viewport.Show(true);
         }
+        RefreshPlaybackPins();
+        RefreshTranscriptFeedback();
     }
 
     private LivePanel GetLivePanel(Guid id)
@@ -365,10 +435,13 @@ public partial class MainPage
         var root = new Grid
         {
             BindingContext = row,
-            RowDefinitions = [new RowDefinition(GridLength.Auto), new RowDefinition(GridLength.Star)]
+            RowDefinitions = [new RowDefinition(GridLength.Auto), new RowDefinition(GridLength.Auto),
+                new RowDefinition(GridLength.Star)]
         };
+        var pin = new LivePlaybackPinView();
         root.Add(header);
-        root.Add(calls, 0, 1);
+        root.Add(pin, 0, 1);
+        root.Add(calls, 0, 2);
 #if ANDROID || IOS
         foreach (var direction in new[] { SwipeDirection.Left, SwipeDirection.Right })
         {
@@ -378,7 +451,7 @@ public partial class MainPage
         }
 #endif
 
-        panel = new LivePanel(root, new(calls, newCalls, _liveDisplay.ReaderForServer(id)));
+        panel = new LivePanel(root, new(calls, newCalls, _liveDisplay.ReaderForServer(id)), pin);
         _serverPanels.Add(id, panel);
         return panel;
     }
@@ -403,5 +476,5 @@ public partial class MainPage
         _combinedViewport.Reveal(call);
     }
 
-    private sealed record LivePanel(Grid Root, LiveReadingViewport Viewport);
+    private sealed record LivePanel(Grid Root, LiveReadingViewport Viewport, LivePlaybackPinView Pin);
 }

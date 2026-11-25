@@ -85,6 +85,17 @@ internal sealed class LiveCallDisplay(ObservableCollection<CallItem> calls, bool
 
     internal void ForgetServer(Guid id) => _projections.Remove(id);
 
+    internal CallItem? PinFor(CallItem? active, Guid? recorder = null, bool favoritesOnly = false)
+    {
+        if (active == null)
+            return null;
+        if (recorder is { } id && (active.ServerId != id || !_servers.Contains(id)))
+            return null;
+        if (favoritesOnly && (active.ServerId is not { } server || !_servers.Contains(server) || favorite?.Invoke(active) != true))
+            return null;
+        return active;
+    }
+
     internal void RecordVisibleAdmission(CallItem card)
     {
         if (!calls.Contains(card))

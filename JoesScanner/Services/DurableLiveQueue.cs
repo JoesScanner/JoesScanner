@@ -41,7 +41,7 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
         {
             var state = new LiveCallState(server, Id);
             if (Snapshot is { } observed)
-                state.Observe(observed, LiveCallState.NextVersion());
+                state.RestoreSnapshot(observed);
             DateTimeOffset? timestamp = RecordedUtc is { } ticks ? new DateTimeOffset(ticks, TimeSpan.Zero) : null;
             var metadata = state.Read().Metadata with { Timestamp = timestamp?.LocalDateTime };
             return new CallItem
