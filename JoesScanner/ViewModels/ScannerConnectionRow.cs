@@ -8,6 +8,7 @@ public sealed class ScannerConnectionRow : BindableObject
     private ServerConnectionStatus _status;
     private bool _canMoveUp;
     private bool _canMoveDown;
+    private bool _directoryActionsAllowed;
 
     internal ScannerConnectionRow(SavedScannerConnection profile, ServerConnectionStatus status)
     {
@@ -24,6 +25,8 @@ public sealed class ScannerConnectionRow : BindableObject
     public string Name => _profile.Name;
     public string Endpoint => _profile.Endpoint;
     public bool Enabled => _profile.Enabled;
+    public bool CanShare => _directoryActionsAllowed && !Managed;
+    public bool HasDirectoryUpdate => _directoryActionsAllowed && _profile.DirectoryCandidate != null;
 
     public string StatusText => ServerConnectionPresentation.Text(_status);
     public Color StatusColor => Color.FromArgb(ServerConnectionPresentation.Color(_status));
@@ -50,6 +53,8 @@ public sealed class ScannerConnectionRow : BindableObject
             OnPropertyChanged(nameof(Name));
             OnPropertyChanged(nameof(Endpoint));
             OnPropertyChanged(nameof(Enabled));
+            OnPropertyChanged(nameof(CanShare));
+            OnPropertyChanged(nameof(HasDirectoryUpdate));
         }
         if (_status != status)
         {
@@ -57,5 +62,14 @@ public sealed class ScannerConnectionRow : BindableObject
             OnPropertyChanged(nameof(StatusText));
             OnPropertyChanged(nameof(StatusColor));
         }
+    }
+
+    internal void UpdateDirectoryActions(bool allowed)
+    {
+        if (_directoryActionsAllowed == allowed)
+            return;
+        _directoryActionsAllowed = allowed;
+        OnPropertyChanged(nameof(CanShare));
+        OnPropertyChanged(nameof(HasDirectoryUpdate));
     }
 }

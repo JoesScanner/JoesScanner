@@ -234,7 +234,7 @@
                                         <Switch Grid.Column="1" IsToggled="{Binding Enabled, Mode=OneWay}"
                                                 VerticalOptions="Center" Toggled="OnScannerConnectionToggled"
                                                 SemanticProperties.Description="{Binding Name, StringFormat='Monitor {0}'}" />
-                                        <HorizontalStackLayout Grid.Row="1" Grid.ColumnSpan="2" Spacing="4">
+                                        <FlexLayout Grid.Row="1" Grid.ColumnSpan="2" Wrap="Wrap" AlignItems="Center">
                                             <Button Text="↑" FontSize="12" Style="{StaticResource SecondaryPillButtonStyle}"
                                                     IsEnabled="{Binding CanMoveUp}" Clicked="OnScannerConnectionMoveUp"
                                                     SemanticProperties.Description="{Binding Name, StringFormat='Move {0} up'}" />
@@ -243,16 +243,26 @@
                                                     SemanticProperties.Description="{Binding Name, StringFormat='Move {0} down'}" />
                                             <Button Text="Edit" FontSize="12" Style="{StaticResource SecondaryPillButtonStyle}"
                                                     Clicked="OnScannerConnectionEdit" />
+                                            <Button Text="Share / Manage Listing" FontSize="12" IsVisible="{Binding CanShare}"
+                                                    Clicked="OnScannerConnectionShare" Style="{StaticResource SecondaryPillButtonStyle}" />
+                                            <Button Text="Review Directory Update" FontSize="12" IsVisible="{Binding HasDirectoryUpdate}"
+                                                    Clicked="OnScannerConnectionReviewDirectory" Style="{StaticResource SecondaryPillButtonStyle}" />
                                             <Button Text="Remove" FontSize="12" Style="{StaticResource SecondaryPillButtonStyle}"
                                                     Clicked="OnScannerConnectionRemove" />
-                                        </HorizontalStackLayout>
+                                        </FlexLayout>
                                     </Grid>
                                 </DataTemplate>
                             </BindableLayout.ItemTemplate>
                         </VerticalStackLayout>
 
-                        <Button Text="Add server" AutomationId="AddScannerConnection" HorizontalOptions="Start"
-                                Clicked="OnScannerConnectionAdd" Style="{StaticResource PillButtonStyle}" />
+                        <FlexLayout Wrap="Wrap">
+                            <Button Text="Add server" AutomationId="AddScannerConnection" Margin="0,0,6,0"
+                                    Clicked="OnScannerConnectionAdd" Style="{StaticResource PillButtonStyle}" />
+                            <Button Text="Refresh directory" IsEnabled="{Binding CanRefreshDirectory}"
+                                    Command="{Binding RefreshDirectoryServersCommand}" Style="{StaticResource SecondaryPillButtonStyle}" />
+                        </FlexLayout>
+                        <Label Text="{Binding DirectoryStatusText}"
+                               TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" FontSize="11" />
 
                         <VerticalStackLayout IsVisible="{Binding ScannerEditorOpen}" Spacing="6">
                             <Label Text="{Binding ScannerEditorTitle}" FontSize="13" FontAttributes="Bold" />
@@ -282,6 +292,9 @@
                             </Grid>
 
                             <FlexLayout Wrap="Wrap" AlignItems="Center">
+                                <Button Text="Save locally" AutomationId="SaveLocalScannerConnection" Margin="0,0,5,4"
+                                        IsVisible="{Binding CanEditScannerAddress}" Clicked="OnScannerConnectionSaveLocal"
+                                        Style="{StaticResource PillButtonStyle}" />
                                 <Button Text="Validate" Margin="0,0,5,4" Clicked="OnValidateClicked"
                                         Style="{StaticResource PillButtonStyle}">
                                     <Button.Triggers>
@@ -296,8 +309,6 @@
                                 <Button Text="Cancel" Margin="0,0,0,4" Clicked="OnScannerConnectionCancel"
                                         Style="{StaticResource SecondaryPillButtonStyle}" />
                             </FlexLayout>
-                            <Label Text="{Binding DirectoryStatusText}" IsVisible="{Binding CanChooseScannerSource}"
-                                   TextColor="{AppThemeBinding Light=#6b7280, Dark=#9ca3af}" FontSize="11" />
                         </VerticalStackLayout>
                     </VerticalStackLayout>
                 </DataTemplate>

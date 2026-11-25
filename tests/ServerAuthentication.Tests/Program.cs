@@ -97,6 +97,9 @@ var cases = new (string Name, Func<Task> Run)[]
     ("Concurrent lookup requests keep their original authority and reject stale results", WordPressOwnershipTests.LookupSwitch),
     ("Communications discards old-session responses and restarts the cursor for a new account", WordPressOwnershipTests.CommunicationsSwitch),
     ("WordPress clients refuse cross-authority redirects that preserve request bodies", WordPressOwnershipTests.Redirect),
+    ("Local save and signed-out sharing make no requests and public submission receives Pending Approval", ServerDirectoryTests.Sharing),
+    ("The HTTPS My Servers handoff validates its origin and respects Local Only", ServerDirectoryTests.Handoff),
+    ("Verified directory suspension and endpoint changes preserve independent monitoring and recorder identity", ServerDirectoryTests.DirectoryConnections),
     ("Local Favorites persist, update the shared Live view and prioritize correctly across recorders", FavoritesTests.LocalMembership),
     ("A free account shares directory Favorites across devices and links custom recorders explicitly", FavoritesTests.MatchingAcrossDevices),
     ("Offline Favorites merge disjoint changes and retain conflicts and deletion tombstones", FavoritesTests.OfflineConflictsAndTombstones),
@@ -132,7 +135,7 @@ static async Task HostedSelection()
     using var directory = await client.GetAsync("https://directory.test:8443/history");
     using var cached = await client.GetAsync(HostedServerRules.DefaultServerUrl + "/talkgroupsjson");
     Check(fixture.IssuanceCount == 2 && fixture.DirectoryId == 42 &&
-          fixture.DirectoryOrigin == "https://directory.test:8443", "Wrong firewall issuance scope.");
+          fixture.DirectoryOrigin == "https://directory.test:8443/scanner", "The approved full recorder URL must identify firewall issuance.");
 }
 
 static async Task MissingCredentials()

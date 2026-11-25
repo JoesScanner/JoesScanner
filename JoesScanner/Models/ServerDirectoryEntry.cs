@@ -1,29 +1,47 @@
 using System;
+using System.Text.Json.Serialization;
 
 namespace JoesScanner.Models
 {
     public sealed class ServerDirectoryEntry : IEquatable<ServerDirectoryEntry>
     {
+        [JsonPropertyName("id")]
         public int DirectoryId { get; set; }
 
         public string Name { get; set; } = string.Empty;
 
         public string Url { get; set; } = string.Empty;
 
+        [JsonPropertyName("info_url")]
         public string InfoUrl { get; set; } = string.Empty;
 
+        [JsonPropertyName("area_label")]
         public string AreaLabel { get; set; } = string.Empty;
 
+        [JsonPropertyName("map_anchor")]
         public string MapAnchor { get; set; } = string.Empty;
 
+        [JsonPropertyName("is_official")]
         public bool IsOfficial { get; set; }
 
+        [JsonIgnore]
         public bool IsCustom { get; set; }
 
+        [JsonIgnore]
+        internal string? Source { get; set; }
+
+        [JsonPropertyName("uses_api_firewall_credentials")]
         public bool UsesApiFirewallCredentials { get; set; }
+
+        [JsonPropertyName("requires_scanner_login")]
+        public bool RequiresScannerLogin { get; set; }
+
+        [JsonPropertyName("requires_firewall_auth")]
+        public bool RequiresFirewallAuth { get; set; }
 
         public string Badge { get; set; } = string.Empty;
 
+        [JsonPropertyName("badge_label")]
         public string BadgeLabel { get; set; } = string.Empty;
 
 
@@ -43,6 +61,8 @@ namespace JoesScanner.Models
 
             if (IsCustom || other.IsCustom)
                 return IsCustom == other.IsCustom;
+            if (DirectoryId > 0 || other.DirectoryId > 0)
+                return DirectoryId == other.DirectoryId;
 
             return string.Equals(
                 NormalizeUrl(Url),
@@ -59,6 +79,8 @@ namespace JoesScanner.Models
         {
             if (IsCustom)
                 return HashCode.Combine(true, "custom");
+            if (DirectoryId > 0)
+                return DirectoryId.GetHashCode();
 
             return StringComparer.OrdinalIgnoreCase.GetHashCode(NormalizeUrl(Url));
         }

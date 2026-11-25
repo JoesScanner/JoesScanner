@@ -3,6 +3,7 @@
 from html.parser import HTMLParser
 import json
 import secrets
+from urllib.parse import urlencode
 
 
 API = "/wp-json/joes-scanner/v1"
@@ -270,10 +271,67 @@ def test_verification(site, compose, alpha_email):
     print("PASS Controlled email, account reuse and creation, expiry, browser binding, one-time codes, and issuance and verification limits", flush=True)
 
 
+def test_app_directory(site, admin, browser, account, pages, secret):
+    routes = API + "/server-directory/"
+    config_form = form_data(page(site, admin, ADMIN), "joes_scanner_auth_my_servers_page")
+    post(site, admin, config_form, 400, page_id=str(pages["submit-server"]))
+    post(site, admin, config_form, page_id=str(pages["my-servers"]))
+    config = json.loads(site.request(routes + "config", 200)[1])
+    check(config["my_servers_url"] == site.https + MY_SERVERS and config["terms_version"] and config["terms"],
+          "Configuration must return the selected HTTPS My Servers page and listing terms.")
+
+    before = published(site)[0]
+    for visibility in ("private", "restricted", "public"):
+        params = urlencode({"directory_visibility": visibility, "directory_address": "https://safe-handoff.example.net/path"})
+        prefilled = page(site, browser, MY_SERVERS + "?" + params)
+        check(b'value="https://safe-handoff.example.net/path"' in prefilled and
+              ('value="' + visibility + '" selected').encode() in prefilled,
+              "The website must prefill the requested directory visibility and safe address.")
+        guest = page(site, site.opener(cookies=True), MY_SERVERS + "?" + params)
+        check(b"Send verification code" in guest, "The handoff must preserve directory-only email verification.")
+    unsafe = urlencode({"directory_visibility": "private", "directory_address": "https://user:synthetic@unsafe-handoff.example.net"})
+    check(b'value="https://unsafe-handoff.example.net"' not in page(site, browser, MY_SERVERS + "?" + unsafe),
+          "An unsafe address must not prefill a form.")
+    check(published(site)[0] == before, "Opening a prefilled website page must not create a listing.")
+    site.request(routes + "submission-grant", 401, body={"account": account["email"], "password": secret})
+
+    def issue():
+        headers, body = site.request(routes + "submission-grant", 200,
+                                     body={"account": account["email"], "password": account["password"]})
+        valid = json.loads(body)
+        check(valid["user_id"] > 0 and "no-store" in headers["Cache-Control"],
+              "A grant must name a verified account and disable caching.")
+        return valid["grant"]
+
+    draft = {"server_name": "Recorder submitted by app", "server_url": "https://app-listing.example.net",
+             "map_anchor": "Boise, ID", "requires_scanner_login": "1", "requires_firewall_auth": "0"}
+    request = {"terms_version": config["terms_version"], "listing": draft}
+    site.request(routes + "submissions", 401, body=request)
+    grant = issue()
+    site.request(routes + "submissions", 400, body=request | {"grant": grant, "terms_version": "unexpected"})
+    site.request(routes + "submissions", 400, body=request | {"grant": grant, "session_token": secret})
+    site.request(routes + "submissions", 400,
+                 body=request | {"grant": grant, "listing": draft | {"firewall_password": secret}})
+    site.request(routes + "submissions", 400,
+                 body=request | {"grant": grant, "listing": draft | {"server_url": "https://app-listing.example.net/api_key=" + secret}})
+    _, new = site.request(routes + "submissions", 201, body=request | {"grant": grant})
+    result = json.loads(new)
+    listing_id = listing(site, browser, draft["server_name"])["id"]
+    check(result == {"id": int(listing_id), "status": "pending"} and listing_id not in published(site)[0],
+          "The app must get a pending receipt for the authenticated owner's listing.")
+    site.request(routes + "submissions", 401, body=request | {"grant": grant})
+    site.request(routes + "submissions", 409, body=request | {"grant": issue()})
+    post(site, admin, review_form(site, admin, listing_id), op="approve")
+    listing_data = published(site)[0][listing_id]
+    check(listing_data["requires_scanner_login"] is True and listing_data["requires_firewall_auth"] is False,
+          "The approved listing must retain both authentication declarations.")
+    print("PASS App account grants, pending submissions, duplicate and credential rejection, canonical My Servers page, and safe prefill", flush=True)
+
+
 def check_directory(site, compose, admin_login, admin_password, owner, session_token):
     recipient = {"username": "directory_recipient", "email": "directory_recipient@example.invalid",
                  "password": secrets.token_urlsafe(24)}
-    compose.fixture("directory-pages", {"existingEmail": owner["email"], "recipient": recipient})
+    pages = json.loads(compose.fixture("directory-pages", {"existingEmail": owner["email"], "recipient": recipient}))
     admin = browser_login(site, admin_login, admin_password, ADMIN)
     alpha = browser_login(site, owner["username"], owner["password"], MY_SERVERS)
     beta = browser_login(site, recipient["username"], recipient["password"], MY_SERVERS)
@@ -288,4 +346,5 @@ def check_directory(site, compose, admin_login, admin_password, owner, session_t
     test_revisions_and_suspension(site, compose, admin, alpha, beta, owner["email"], session_token,
                                   public_id, approved, secret)
     test_verification(site, compose, owner["email"])
+    test_app_directory(site, admin, alpha, owner, pages, secret)
     return secret

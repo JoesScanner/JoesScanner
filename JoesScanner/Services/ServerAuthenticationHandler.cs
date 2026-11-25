@@ -11,6 +11,7 @@ internal sealed class ServerAuthenticationHandler(ServerAuthentication authentic
 {
     // Settings can probe an unsaved custom server with or without its proposed credentials.
     internal static readonly HttpRequestOptionsKey<bool> CustomProbe = new("JoesScanner.CustomServerProbe");
+    internal static readonly HttpRequestOptionsKey<bool> IndependentProbe = new("JoesScanner.IndependentServerProbe");
 
     internal static readonly HttpRequestOptionsKey<RecorderRequestScope> Recorder = new("JoesScanner.RecorderOrigin");
 
@@ -27,13 +28,18 @@ internal sealed class ServerAuthenticationHandler(ServerAuthentication authentic
 
         request.Headers.Host = null;
         var configured = recorder ?? (request.Options.TryGetValue(Recorder, out var origin) ? origin : null);
+        if (authentication.IsDirectoryBlocked(configured?.Endpoint ?? destination, configured?.ServerId))
+            throw new HttpRequestException("Review this recorder's directory status in Server Connections.");
         var belongsToRecorder = configured == null || HostedServerRules.SameOrigin(destination, configured.Value.Endpoint);
-        var firewall = belongsToRecorder && authentication.RequiresFirewall(destination);
+        var credentialEndpoint = configured?.Endpoint ?? destination;
+        var customProbe = request.Options.TryGetValue(CustomProbe, out var probe) && probe;
+        var independentProbe = request.Options.TryGetValue(IndependentProbe, out var independent) && independent;
+        var firewall = belongsToRecorder && !independentProbe && authentication.RequiresFirewall(credentialEndpoint);
         if (!belongsToRecorder)
             request.Headers.Authorization = null;
         else if (firewall)
-            request.Headers.Authorization = await authentication.GetFirewallAuthorizationAsync(destination, cancellationToken).ConfigureAwait(false);
-        else if (!request.Options.TryGetValue(CustomProbe, out var isProbe) || !isProbe)
+            request.Headers.Authorization = await authentication.GetFirewallAuthorizationAsync(credentialEndpoint, cancellationToken).ConfigureAwait(false);
+        else if (!customProbe)
             request.Headers.Authorization = configured == null
                 ? authentication.GetCustomAuthorization(destination)
                 : authentication.GetCustomAuthorization(destination, configured.Value);
@@ -43,7 +49,7 @@ internal sealed class ServerAuthenticationHandler(ServerAuthentication authentic
         {
             response.Dispose();
             var updated = await authentication.GetFirewallAuthorizationAsync(
-                destination, cancellationToken, request.Headers.Authorization).ConfigureAwait(false);
+                credentialEndpoint, cancellationToken, request.Headers.Authorization).ConfigureAwait(false);
             using var retry = CopyRequest(request, destination);
             retry.Headers.Authorization = updated;
             response = await base.SendAsync(retry, cancellationToken).ConfigureAwait(false);
@@ -51,7 +57,7 @@ internal sealed class ServerAuthenticationHandler(ServerAuthentication authentic
             {
                 var status = response.StatusCode;
                 response.Dispose();
-                await authentication.MarkRejectedAsync(destination, updated, cancellationToken).ConfigureAwait(false);
+                await authentication.MarkRejectedAsync(credentialEndpoint, updated, cancellationToken).ConfigureAwait(false);
                 throw new FirewallAuthenticationException($"The scanner server rejected its refreshed firewall credentials (HTTP {(int)status}).", status);
             }
         }
@@ -73,7 +79,7 @@ internal sealed class ServerAuthenticationHandler(ServerAuthentication authentic
             }
 
             sameOrigin &= HostedServerRules.SameOrigin(destination, target);
-            if (!sameOrigin && authentication.RequiresFirewall(target))
+            if (authentication.IsDirectoryBlocked(target) || !sameOrigin && authentication.RequiresFirewall(target))
                 break;
 
             using var redirect = CopyRequest(request, target);

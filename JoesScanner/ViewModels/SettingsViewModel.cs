@@ -605,6 +605,8 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
 
             _httpClient = WordPressSession.CreateClient(_settings);
             _httpClient.Timeout = TimeSpan.FromSeconds(3);
+            _serverDirectory = new ServerDirectoryClient(_settings);
+            _settings.LocalOnlyModeChanged += (_, _) => MainThread.BeginInvokeOnMainThread(OnDirectoryPrivacyChanged);
             Favorites.Changed += OnFavoritesSettingsChanged;
 
             // Use managed networking for custom HTTP server validation on Apple.
@@ -1229,8 +1231,6 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
             if (url.Length > 0)
                 ServerUrl = url;
 
-            if (value != null && !value.IsCustom)
-                _ = WarmFirewallCredentialsAsync(value);
         }
 
         public async Task EnsureDirectoryServersFreshAsync(bool force)
@@ -2603,7 +2603,8 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                 return;
 
             _connectionValidations.Begin();
-            _mainViewModel.SaveScannerConnection(entry.Url, entry.Name, entry.DirectoryId > 0 ? entry.DirectoryId : null, null);
+            _mainViewModel.SaveScannerConnection(entry.Url, entry.Name, entry.DirectoryId > 0 ? entry.DirectoryId : null, null,
+                directorySource: entry.Source, directoryFirewall: entry.UsesApiFirewallCredentials);
             RecordSavedScannerSelection();
             CloseScannerEditor();
         }
@@ -2659,11 +2660,13 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                     ? (recorder.Username, recorder.Password)
                     : null;
                 var credentialsChanged = previouslySaved != (_settings.BasicAuthUsername, _settings.BasicAuthPassword);
-                _mainViewModel.SaveScannerConnection(savedEndpoint, directory?.Name ?? (editor?.Managed == true ? editor.Name : ScannerName),
+                var newCustom = _mainViewModel.SaveScannerConnection(savedEndpoint, directory?.Name ?? (editor?.Managed == true ? editor.Name : ScannerName),
                     directory is { DirectoryId: > 0 } ? directory.DirectoryId : editor?.DirectoryId, editor?.Id,
-                    customCredentials, credentialsChanged);
+                    customCredentials, credentialsChanged, directory?.Source, directory?.UsesApiFirewallCredentials);
                 RecordSavedScannerSelection();
                 CloseScannerEditor();
+                if (newCustom != null)
+                    await OfferDirectorySharingAsync(newCustom, newlySaved: true);
             }
             catch (Exception ex)
             {
@@ -2712,6 +2715,8 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             }
 
             var isDefaultServer = HostedServerRules.IsHostedStreamServerUrl(url);
+            var independentProbe = !isDefaultServer &&
+                (_editingScannerConnection is { Managed: false } || _editingScannerConnection == null && selectedCustomAtStart);
 
             try
             {
@@ -2729,9 +2734,9 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                     throw new HttpRequestException("Enter a valid HTTP or HTTPS scanner server address.");
                 url = safeUrl;
                 var destination = new Uri(safeUrl);
-                if (!_mainViewModel.AllowsExternalLink(destination))
+                if (!_mainViewModel.AllowsRecorderProbe(destination, independentProbe))
                     throw new HttpRequestException("Turn off Local Only Mode to connect to this server.");
-                if (embedded != null && HostedServerRules.RequiresApiFirewallCredentials(_settings, destination))
+                if (embedded != null && !independentProbe && HostedServerRules.RequiresApiFirewallCredentials(_settings, destination))
                     throw new FirewallAuthenticationException("Hosted server addresses must not contain embedded credentials.");
                 var probeUsername = embedded?.Username ?? BasicAuthUsername.Trim();
                 var probePassword = embedded?.Password ?? BasicAuthPassword;
@@ -2991,10 +2996,10 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                     await ServerAuthentication.For(_settings).GetFirewallAuthorizationAsync(
                         new Uri(DefaultServerUrl), CancellationToken.None);
                 }
-                else if (HostedServerRules.RequiresApiFirewallCredentials(_settings, destination) ||
+                else if (!independentProbe && (HostedServerRules.RequiresApiFirewallCredentials(_settings, destination) ||
                          (selectedDirectoryServerAtStart?.UsesApiFirewallCredentials == true &&
                           Uri.TryCreate(selectedDirectoryServerUrlAtStart, UriKind.Absolute, out var selectedUri) &&
-                          HostedServerRules.SameOrigin(destination, selectedUri)))
+                          HostedServerRules.SameOrigin(destination, selectedUri))))
                 {
                     if (!HostedServerRules.RequiresApiFirewallCredentials(_settings, destination))
                         throw new FirewallAuthenticationException("Could not load the server's firewall configuration. Refresh the server directory and try again.");
@@ -3034,6 +3039,7 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                     {
                         using var req = new HttpRequestMessage(HttpMethod.Head, destination);
                         req.Options.Set(ServerAuthenticationHandler.CustomProbe, true);
+                        req.Options.Set(ServerAuthenticationHandler.IndependentProbe, independentProbe);
 
                         try
                         {
@@ -3342,17 +3348,26 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             try
             {
                 _directoryServers.Clear();
-                _directoryServers.Add(BuiltinJoeDirectoryEntry);
-                foreach (var entry in entries)
+                var source = ServerDirectoryClient.Source(WordPressSession.Capture(_settings));
+                var blocked = ScannerConnections.Where(row => row.Profile.Hold == DirectoryHold.Suspended &&
+                    row.Profile.DirectoryCandidate == null && row.DirectoryId.HasValue).Select(row => row.DirectoryId!.Value).ToHashSet();
+                var current = entries.Where(entry => (entry.Source == null || entry.Source == source) && !blocked.Contains(entry.DirectoryId)).ToArray();
+                var archive = current.FirstOrDefault(entry => entry.IsOfficial && HostedServerRules.IsProvidedDefaultServerUrl(entry.Url));
+                if (archive != null)
+                    _directoryServers.Add(archive);
+                else if (!_settings.IsCurrentDirectorySnapshotCached(source) &&
+                    !ScannerConnections.Any(row => row.Managed && row.Profile.DirectoryBlocked && HostedServerRules.IsProvidedDefaultServerUrl(row.Endpoint)))
+                    _directoryServers.Add(BuiltinJoeDirectoryEntry);
+                foreach (var entry in current)
                 {
                     if (!HostedServerRules.IsProvidedDefaultServerUrl(entry.Url))
                         _directoryServers.Add(entry);
                 }
                 _directoryServers.Add(CustomServerDirectoryEntry);
                 SyncSelectedDirectoryServerFromCurrentUrl();
-                DirectoryStatusText = _directoryServers.Count <= 2
-                    ? "No servers loaded yet."
-                    : $"Loaded {_directoryServers.Count - 2} server(s).";
+                DirectoryStatusText = current.Length == 0
+                    ? "No public listings are available."
+                    : $"Loaded {current.Length} server(s).";
             }
             finally
             {
@@ -3369,7 +3384,8 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
 
                 ServerDirectoryEntry? match;
 
-                if (string.IsNullOrWhiteSpace(current) && ScannerEditorOpen && CanChooseScannerSource)
+                if (ScannerEditorOpen && (_editingScannerConnection is { Managed: false } ||
+                    CanChooseScannerSource && (_selectedDirectoryServer?.IsCustom == true || string.IsNullOrWhiteSpace(current))))
                 {
                     match = CustomServerDirectoryEntry;
                 }
@@ -3404,177 +3420,6 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             catch
             {
             }
-        }
-
-        private async Task RefreshDirectoryServersAsync()
-        {
-            if (LocalOnlyMode)
-            {
-                DirectoryStatusText = "Directory refresh is paused in Local Only Mode.";
-                return;
-            }
-            if (Interlocked.Exchange(ref _directoryRefreshInProgress, 1) == 1)
-                return;
-
-            try
-            {
-                IsDirectoryLoading = true;
-                DirectoryStatusText = "Loading servers...";
-
-                var url = BuildAuthServerUrl("/wp-json/joes-scanner/v1/servers");
-
-                using var resp = await _httpClient.GetAsync(url);
-                var body = await resp.Content.ReadAsStringAsync();
-
-                if (!resp.IsSuccessStatusCode)
-                {
-                    DirectoryStatusText = $"Server list load failed: HTTP {(int)resp.StatusCode}.";
-                    return;
-                }
-
-                ServerDirectoryResponseDto? parsed = null;
-                try
-                {
-                    parsed = JsonSerializer.Deserialize<ServerDirectoryResponseDto>(
-                        body,
-                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                }
-                catch
-                {
-                }
-
-                if (parsed == null || !parsed.Ok || parsed.Servers == null)
-                {
-                    DirectoryStatusText = "Server list returned an unexpected response.";
-                    return;
-                }
-
-                var list = new List<ServerDirectoryEntry>();
-                foreach (var s in parsed.Servers)
-                {
-                    if (s == null)
-                        continue;
-
-                    var entry = new ServerDirectoryEntry
-                    {
-                        DirectoryId = s.Id,
-                        Name = s.Name ?? string.Empty,
-                        Url = s.Url ?? string.Empty,
-                        InfoUrl = s.InfoUrl ?? string.Empty,
-                        AreaLabel = s.AreaLabel ?? string.Empty,
-                        MapAnchor = s.MapAnchor ?? string.Empty,
-                        IsOfficial = s.IsOfficial,
-                        Badge = s.Badge ?? string.Empty,
-                        BadgeLabel = s.BadgeLabel ?? string.Empty,
-                        UsesApiFirewallCredentials = s.UsesApiFirewallCredentials
-                    };
-
-                    if (string.IsNullOrWhiteSpace(entry.Url))
-                        continue;
-
-                    list.Add(entry);
-                }
-
-                // Persist cache first.
-                await Task.Run(() => _settings.UpsertCachedDirectoryServers(list));
-
-                PublishDirectoryServers(list);
-
-                try
-                {
-                    var selected = _selectedDirectoryServer;
-                    if (selected != null && !selected.IsCustom)
-                        await WarmFirewallCredentialsAsync(selected);
-                }
-                catch
-                {
-                }
-            }
-            catch (Exception ex)
-            {
-                DirectoryStatusText = "Directory load failed.";
-                AppLog.Add(() => $"Settings: directory refresh failed ({ex.GetType().Name}).");
-            }
-            finally
-            {
-                _lastDirectoryRefreshUtc = DateTime.UtcNow;
-                IsDirectoryLoading = false;
-                Interlocked.Exchange(ref _directoryRefreshInProgress, 0);
-            }
-        }
-
-
-        private async Task WarmFirewallCredentialsAsync(ServerDirectoryEntry entry)
-        {
-            if (!entry.UsesApiFirewallCredentials || !Uri.TryCreate(entry.Url, UriKind.Absolute, out var uri))
-                return;
-
-            try
-            {
-                await Task.Run(() => ServerAuthentication.For(_settings).GetFirewallAuthorizationAsync(uri, CancellationToken.None));
-            }
-            catch (Exception ex)
-            {
-                AppLog.Add(() => $"Firewall credential prefetch failed ({ex.GetType().Name}).");
-            }
-        }
-
-        private sealed class ServerDirectoryResponseDto
-        {
-            [JsonPropertyName("ok")]
-            public bool Ok { get; set; }
-
-            [JsonPropertyName("servers")]
-            public List<ServerDirectoryServerDto>? Servers { get; set; }
-        }
-
-        private sealed class ServerDirectoryServerDto
-        {
-            [JsonPropertyName("id")]
-            public int Id { get; set; }
-
-            [JsonPropertyName("name")]
-            public string? Name { get; set; }
-
-            [JsonPropertyName("url")]
-            public string? Url { get; set; }
-
-            [JsonPropertyName("info_url")]
-            public string? InfoUrl { get; set; }
-
-            [JsonPropertyName("area_label")]
-            public string? AreaLabel { get; set; }
-
-            [JsonPropertyName("map_anchor")]
-            public string? MapAnchor { get; set; }
-
-            [JsonPropertyName("is_official")]
-            public bool IsOfficial { get; set; }
-
-            [JsonPropertyName("badge")]
-            public string? Badge { get; set; }
-
-            [JsonPropertyName("badge_label")]
-            public string? BadgeLabel { get; set; }
-
-            [JsonPropertyName("uses_api_firewall_credentials")]
-            public bool UsesApiFirewallCredentials { get; set; }
-        }
-
-        private string BuildAuthServerUrl(string path)
-        {
-            var baseUrl = (AuthServerBaseUrl ?? string.Empty).Trim();
-
-            if (string.IsNullOrWhiteSpace(baseUrl))
-                baseUrl = "https://joesscanner.com";
-
-            baseUrl = baseUrl.TrimEnd('/');
-
-            var cleanPath = (path ?? string.Empty).Trim();
-            if (!cleanPath.StartsWith("/", StringComparison.OrdinalIgnoreCase))
-                cleanPath = "/" + cleanPath;
-
-            return baseUrl + cleanPath;
         }
 
         class AuthResponseDto

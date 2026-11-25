@@ -747,6 +747,7 @@ CREATE INDEX IF NOT EXISTS idx_servers_enabled_sort ON servers(enabled, sort_ord
             EnsureColumnExists(conn, TableServers, "badge_label", "TEXT NOT NULL DEFAULT ''");
             EnsureColumnExists(conn, TableServers, "source", "TEXT NOT NULL DEFAULT ''");
             EnsureColumnExists(conn, TableServers, "uses_api_firewall_credentials", "INTEGER NOT NULL DEFAULT 0");
+            EnsureColumnExists(conn, TableServers, "directory_source", "TEXT NULL");
 
             // Upgrade older installs that had a minimal auth state table.
             EnsureColumnExists(conn, TableServerAuthState, "validated_online", "INTEGER NOT NULL DEFAULT 0");
@@ -903,7 +904,8 @@ WHERE server_key IN ($joe, $custom);";
             using var conn = OpenConnection();
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
-SELECT directory_id, display_name, base_url, info_url, area_label, map_anchor, is_official, badge, badge_label, uses_api_firewall_credentials
+SELECT directory_id, display_name, base_url, info_url, area_label, map_anchor, is_official, badge, badge_label,
+  uses_api_firewall_credentials, directory_source
 FROM servers
 WHERE source = 'directory'
 ORDER BY is_official DESC, sort_order ASC, display_name ASC;";
@@ -922,7 +924,8 @@ ORDER BY is_official DESC, sort_order ASC, display_name ASC;";
                     IsOfficial = SafeGetInt(reader, 6) != 0,
                     Badge = SafeGetString(reader, 7),
                     BadgeLabel = SafeGetString(reader, 8),
-                    UsesApiFirewallCredentials = SafeGetInt(reader, 9) != 0
+                    UsesApiFirewallCredentials = SafeGetInt(reader, 9) != 0,
+                    Source = reader.IsDBNull(10) ? null : reader.GetString(10)
                 };
 
                 // Skip entries that do not have a usable URL.
@@ -936,6 +939,14 @@ ORDER BY is_official DESC, sort_order ASC, display_name ASC;";
         }
 
         public void UpsertCachedDirectoryServers(IEnumerable<ServerDirectoryEntry> servers)
+            => WriteDirectory(servers, null);
+
+        public void PersistDirectorySnapshot(IReadOnlyList<ServerDirectoryEntry> servers, IReadOnlySet<int>? suspended, string source)
+            => WriteDirectory(servers, new(source, servers, suspended));
+
+        public bool IsCurrentDirectorySnapshotCached(string source) => GetString("directory_snapshot_source", "") == source;
+
+        private void WriteDirectory(IEnumerable<ServerDirectoryEntry> servers, DirectorySnapshot? snapshot)
         {
             EnsureInitialized();
             lock (_gate)
@@ -957,8 +968,7 @@ ORDER BY is_official DESC, sort_order ASC, display_name ASC;";
 
                 s.Url = url;
 
-                // Directory entries use a stable key based on the URL.
-                var key = "dir::" + ServerKeyHelper.Normalize(url);
+                var key = s.DirectoryId > 0 ? "dir-id::" + s.DirectoryId : "dir::" + ServerKeyHelper.Normalize(url);
                 if (string.IsNullOrWhiteSpace(key) || key == "dir::")
                     continue;
 
@@ -966,6 +976,8 @@ ORDER BY is_official DESC, sort_order ASC, display_name ASC;";
             }
 
             using var conn = OpenConnection();
+            if (snapshot != null)
+                DbBootstrapper.EnsureInitialized(conn);
             using var tx = conn.BeginTransaction();
 
             var now = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
@@ -979,11 +991,11 @@ ORDER BY is_official DESC, sort_order ASC, display_name ASC;";
                 cmd.CommandText = @"
 INSERT INTO servers (
   server_key, display_name, base_url, enabled, sort_order, is_builtin, created_utc, updated_utc, last_used_utc,
-  info_url, area_label, map_anchor, is_official, directory_id, badge, badge_label, source, uses_api_firewall_credentials
+  info_url, area_label, map_anchor, is_official, directory_id, badge, badge_label, source, uses_api_firewall_credentials, directory_source
 )
 VALUES (
   $k, $n, $u, 1, $s, 0, $c, $m, NULL,
-  $info, $area, $anchor, $official, $dirId, $badge, $badgeLabel, 'directory', $usesApiFw
+  $info, $area, $anchor, $official, $dirId, $badge, $badgeLabel, 'directory', $usesApiFw, $directorySource
 )
 ON CONFLICT(server_key) DO UPDATE SET
   display_name = excluded.display_name,
@@ -999,6 +1011,7 @@ ON CONFLICT(server_key) DO UPDATE SET
   badge = excluded.badge,
   badge_label = excluded.badge_label,
   uses_api_firewall_credentials = excluded.uses_api_firewall_credentials,
+  directory_source = excluded.directory_source,
   source = excluded.source;";
 
                 cmd.Parameters.AddWithValue("$k", serverKey);
@@ -1015,6 +1028,7 @@ ON CONFLICT(server_key) DO UPDATE SET
                 cmd.Parameters.AddWithValue("$dirId", entry.DirectoryId);
                 cmd.Parameters.AddWithValue("$badge", (entry.Badge ?? string.Empty).Trim());
                 cmd.Parameters.AddWithValue("$badgeLabel", (entry.BadgeLabel ?? string.Empty).Trim());
+                cmd.Parameters.AddWithValue("$directorySource", (object?)snapshot?.Source ?? DBNull.Value);
 
                 cmd.ExecuteNonQuery();
             }
@@ -1044,7 +1058,27 @@ ON CONFLICT(server_key) DO UPDATE SET
                 del.ExecuteNonQuery();
             }
 
+            if (snapshot != null)
+            {
+                ScannerConnectionStore.ApplyDirectory(conn, tx, snapshot);
+                if (snapshot.Suspended != null)
+                {
+                    using var mark = conn.CreateCommand();
+                    mark.Transaction = tx;
+                    mark.CommandText = """
+                        INSERT INTO app_settings(setting_key, setting_value, updated_utc)
+                        VALUES ('directory_snapshot_source', $source, $now)
+                        ON CONFLICT(setting_key) DO UPDATE SET setting_value = $source, updated_utc = $now;
+                        """;
+                    mark.Parameters.AddWithValue("$source", snapshot.Source);
+                    mark.Parameters.AddWithValue("$now", now);
+                    mark.ExecuteNonQuery();
+                }
+            }
             tx.Commit();
+            if (snapshot?.Suspended != null)
+                lock (_gate)
+                    _cache!["directory_snapshot_source"] = snapshot.Source;
         }
 
         public bool TryGetMapAnchorForServerUrl(string serverUrl, out string mapAnchor)

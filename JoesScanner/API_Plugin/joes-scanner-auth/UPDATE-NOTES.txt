@@ -1,3 +1,15 @@
+Joe's Scanner Auth API 2.7.6
+
+App directory integration
+- Select the published My Servers shortcode page in Server Directory settings.
+  The HTTPS directory config endpoint returns the page URL and current terms.
+- Signed-in app users exchange their verified account login over HTTPS for a
+  two-minute, single-use submission grant. Submissions accept only the listing
+  fields and agreement version. Success creates a pending Public listing.
+- My Servers accepts a safe recorder address and intended visibility for
+  website prefill. The visitor still submits the form explicitly.
+- The WordPress database schema remains 1.5.10.
+
 Joe's Scanner Auth API 2.7.5
 
 Server directory

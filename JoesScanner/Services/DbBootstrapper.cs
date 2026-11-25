@@ -132,7 +132,12 @@ CREATE TABLE IF NOT EXISTS scanner_connections (
   enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
   credentials_migrated INTEGER NOT NULL DEFAULT 1,
   legacy_filter_key TEXT NULL,
-  sort_order INTEGER NULL
+  sort_order INTEGER NULL,
+  directory_source TEXT NULL,
+  directory_hold INTEGER NOT NULL DEFAULT 0,
+  directory_candidate TEXT NULL,
+  directory_firewall INTEGER NULL,
+  candidate_firewall INTEGER NULL
 );
 
 CREATE TABLE IF NOT EXISTS scanner_connection_origins (
@@ -268,6 +273,11 @@ CREATE INDEX IF NOT EXISTS idx_unregistered_queue_created ON unregistered_sessio
         await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
 
         await EnsureColumnExistsAsync(connection, "scanner_connections", "sort_order", "INTEGER NULL", cancellationToken).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "scanner_connections", "directory_source", "TEXT NULL", cancellationToken).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "scanner_connections", "directory_hold", "INTEGER NOT NULL DEFAULT 0", cancellationToken).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "scanner_connections", "directory_candidate", "TEXT NULL", cancellationToken).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "scanner_connections", "directory_firewall", "INTEGER NULL", cancellationToken).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "scanner_connections", "candidate_firewall", "INTEGER NULL", cancellationToken).ConfigureAwait(false);
         await EnsureColumnExistsAsync(connection, "servers", "display_name", "TEXT NOT NULL DEFAULT ''", cancellationToken).ConfigureAwait(false);
         await EnsureColumnExistsAsync(connection, "servers", "enabled", "INTEGER NOT NULL DEFAULT 1", cancellationToken).ConfigureAwait(false);
         await EnsureColumnExistsAsync(connection, "servers", "sort_order", "INTEGER NOT NULL DEFAULT 0", cancellationToken).ConfigureAwait(false);
@@ -276,6 +286,7 @@ CREATE INDEX IF NOT EXISTS idx_unregistered_queue_created ON unregistered_sessio
         await EnsureColumnExistsAsync(connection, "servers", "updated_utc", "TEXT NOT NULL DEFAULT ''", cancellationToken).ConfigureAwait(false);
         await EnsureColumnExistsAsync(connection, "servers", "last_used_utc", "TEXT NULL", cancellationToken).ConfigureAwait(false);
         await EnsureColumnExistsAsync(connection, "servers", "uses_api_firewall_credentials", "INTEGER NOT NULL DEFAULT 0", cancellationToken).ConfigureAwait(false);
+        await EnsureColumnExistsAsync(connection, "servers", "directory_source", "TEXT NULL", cancellationToken).ConfigureAwait(false);
 
         // Auth state columns have grown over time; older installs may not have these.
         await EnsureColumnExistsAsync(connection, "server_auth_state", "subscription_amount_usd", "REAL NULL", cancellationToken).ConfigureAwait(false);

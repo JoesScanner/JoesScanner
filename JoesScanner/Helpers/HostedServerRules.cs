@@ -22,17 +22,32 @@ public static class HostedServerRules
         IsHostedServerUri(uri) || FindFirewallDirectoryId(settings, uri).HasValue;
 
     internal static int? FindFirewallDirectoryId(ISettingsService settings, Uri uri)
+        => FindFirewallDirectory(settings, uri)?.Id;
+
+    internal static (int Id, string Endpoint)? FindFirewallDirectory(ISettingsService settings, Uri uri)
     {
+        var profile = DirectoryRecorderPolicy.For(settings).Find(uri);
+        if (profile is { DirectoryId: null } or { DirectoryFirewall: false } || profile?.DirectoryBlocked == true)
+            return null;
+        if (profile is { DirectoryId: int id, DirectoryFirewall: true })
+            return (id, profile.Endpoint);
+
+        (int Id, string Endpoint)? best = null;
+        var bestMatch = -1;
         foreach (var entry in settings.GetCachedDirectoryServers())
         {
-            if (entry.UsesApiFirewallCredentials && Uri.TryCreate(entry.Url, UriKind.Absolute, out var candidate) &&
-                SameOrigin(uri, candidate))
-            {
-                return entry.DirectoryId;
-            }
+            if (entry.DirectoryId <= 0 || !entry.UsesApiFirewallCredentials ||
+                !Uri.TryCreate(entry.Url, UriKind.Absolute, out var endpoint) || !SameOrigin(endpoint, uri) ||
+                profile != null && (profile.DirectoryId != entry.DirectoryId || profile.Endpoint != ScannerConnectionStore.Normalize(entry.Url)))
+                continue;
+            var match = DirectoryRecorderPolicy.Contains(entry.Url, uri) ? entry.Url.Length : 0;
+            if (match <= bestMatch)
+                continue;
+            bestMatch = match;
+            best = (entry.DirectoryId, entry.Url);
         }
 
-        return null;
+        return best;
     }
 
     internal static bool SameOrigin(Uri first, Uri second) =>

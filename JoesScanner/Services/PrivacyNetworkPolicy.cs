@@ -64,15 +64,15 @@ internal sealed class PrivacyNetworkPolicy
         }
     }
 
-    internal bool Allows(Uri uri) => AllowsCloud || !IsJoeManaged(uri);
+    internal bool Allows(Uri uri, bool independentProbe = false) => AllowsCloud || !IsJoeManaged(uri, independentProbe);
 
-    internal bool IsJoeManaged(Uri uri)
+    internal bool IsJoeManaged(Uri uri, bool independentProbe = false)
     {
         var host = uri.IdnHost.TrimEnd('.');
         return host.Equals("joesscanner.com", StringComparison.OrdinalIgnoreCase)
             || host.EndsWith(".joesscanner.com", StringComparison.OrdinalIgnoreCase)
             || HostedServerRules.SameOrigin(uri, SavedConnectionUrl.AccountEndpoint(_settings.AuthServerBaseUrl))
-            || HostedServerRules.RequiresApiFirewallCredentials(_settings, uri);
+            || !independentProbe && HostedServerRules.RequiresApiFirewallCredentials(_settings, uri);
     }
 
     internal HttpClient CreateCloudClient(HttpMessageHandler? transport = null) =>
@@ -85,7 +85,8 @@ internal sealed class PrivacyNetworkPolicy
     {
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            if (!cloud && (request.RequestUri == null || !policy.IsJoeManaged(request.RequestUri)))
+            var independentProbe = request.Options.TryGetValue(ServerAuthenticationHandler.IndependentProbe, out var probe) && probe;
+            if (!cloud && (request.RequestUri == null || !policy.IsJoeManaged(request.RequestUri, independentProbe)))
                 return await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
             var generation = policy.CloudToken();

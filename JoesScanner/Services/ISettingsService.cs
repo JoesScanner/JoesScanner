@@ -135,6 +135,9 @@ namespace JoesScanner.Services
         // Used for server selection UI and per-server map anchor resolution.
         System.Collections.Generic.IReadOnlyList<JoesScanner.Models.ServerDirectoryEntry> GetCachedDirectoryServers();
         void UpsertCachedDirectoryServers(System.Collections.Generic.IEnumerable<JoesScanner.Models.ServerDirectoryEntry> servers);
+        void PersistDirectorySnapshot(System.Collections.Generic.IReadOnlyList<JoesScanner.Models.ServerDirectoryEntry> servers,
+            System.Collections.Generic.IReadOnlySet<int>? suspended, string source);
+        bool IsCurrentDirectorySnapshotCached(string source);
         bool TryGetMapAnchorForServerUrl(string serverUrl, out string mapAnchor);
 
 

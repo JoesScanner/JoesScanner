@@ -1,6 +1,9 @@
 namespace JoesScanner.Services;
 
-internal enum ServerConnectionStatus { Stopped, Disabled, Connecting, Monitoring, Reconnecting, Unavailable, SetupRequired }
+internal enum ServerConnectionStatus
+{
+    Stopped, Disabled, Connecting, Monitoring, Reconnecting, Unavailable, SetupRequired, SecuritySuspended, DirectoryUpdateRequired
+}
 
 internal static class ServerConnectionPresentation
 {
@@ -8,6 +11,8 @@ internal static class ServerConnectionPresentation
     {
         ServerConnectionStatus.Monitoring => "Connected",
         ServerConnectionStatus.SetupRequired => "Setup Required",
+        ServerConnectionStatus.SecuritySuspended => "Suspended for security",
+        ServerConnectionStatus.DirectoryUpdateRequired => "Review directory address change",
         _ => status.ToString()
     };
 
@@ -15,7 +20,8 @@ internal static class ServerConnectionPresentation
     {
         ServerConnectionStatus.Monitoring => "#15803d",
         ServerConnectionStatus.Connecting or ServerConnectionStatus.Reconnecting => "#daa520",
-        ServerConnectionStatus.Unavailable or ServerConnectionStatus.SetupRequired => "#ff0000",
+        ServerConnectionStatus.Unavailable or ServerConnectionStatus.SetupRequired or
+            ServerConnectionStatus.SecuritySuspended or ServerConnectionStatus.DirectoryUpdateRequired => "#ff0000",
         _ => "#6b7280"
     };
 }
@@ -127,14 +133,15 @@ internal sealed class ServerConnectionManager(TimeProvider clock,
     internal void Synchronize(IReadOnlyList<SavedScannerConnection> profiles, CancellationToken session,
         Func<Connection, Task> monitor, Guid? restart = null)
     {
-        var enabled = profiles.Where(profile => profile.Enabled).ToDictionary(profile => profile.Id);
+        var enabled = profiles.Where(profile => profile.Enabled && !profile.DirectoryBlocked).ToDictionary(profile => profile.Id);
         List<Connection> outgoing = [];
         lock (_gate)
         {
             foreach (var (id, connection) in _connections.ToArray())
             {
                 if (!enabled.TryGetValue(id, out var profile) || profile.Endpoint != connection.Profile.Endpoint ||
-                    profile.DirectoryId != connection.Profile.DirectoryId || restart == id)
+                    profile.DirectoryId != connection.Profile.DirectoryId || profile.DirectoryFirewall != connection.Profile.DirectoryFirewall ||
+                    restart == id)
                 {
                     _connections.Remove(id);
                     outgoing.Add(connection);

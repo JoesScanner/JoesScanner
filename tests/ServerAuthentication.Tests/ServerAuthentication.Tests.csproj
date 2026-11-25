@@ -60,6 +60,8 @@
     <Compile Include="../../JoesScanner/Services/ICallStreamService.cs" Link="ICallStreamService.cs" />
     <Compile Include="../../JoesScanner/Services/ServerConnectionManager.cs" Link="ServerConnectionManager.cs" />
     <Compile Include="../../JoesScanner/Services/ScannerConnectionStore.cs" Link="ScannerConnectionStore.cs" />
+    <Compile Include="../../JoesScanner/Services/ServerDirectoryClient.cs" Link="ServerDirectoryClient.cs" />
+    <Compile Include="../../JoesScanner/Services/DirectoryRecorderPolicy.cs" Link="DirectoryRecorderPolicy.cs" />
     <Compile Include="../../JoesScanner/ViewModels/LiveCallDisplay.cs" Link="LiveCallDisplay.cs" />
     <Compile Include="../../JoesScanner/Services/CallHistoryService.cs" Link="CallHistoryService.cs" />
     <Compile Include="../../JoesScanner/Services/CallHistoryService.Search.cs" Link="CallHistoryService.Search.cs" />

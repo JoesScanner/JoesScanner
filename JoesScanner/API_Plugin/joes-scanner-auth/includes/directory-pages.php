@@ -49,6 +49,10 @@ function joes_scanner_auth_dir_form_error( WP_Error $error ) {
 }
 
 function joes_scanner_auth_dir_read_form( $actor, $admin = false ) {
+    return joes_scanner_auth_dir_read_listing( $actor, wp_unslash( $_POST ), $admin );
+}
+
+function joes_scanner_auth_dir_read_listing( $actor, array $input, $admin = false ) {
     $allowed = array( 'action', '_wpnonce', '_wp_http_referer', 'directory_op', 'id', 'directory_version',
         'server_name', 'server_url', 'info_url', 'map_anchor', 'area_label', 'description', 'visibility',
         'requires_scanner_login', 'requires_firewall_auth', 'audience', 'agreement_accept' );
@@ -56,14 +60,14 @@ function joes_scanner_auth_dir_read_form( $actor, $admin = false ) {
         $allowed = array_merge( $allowed, array( 'return_status', 'is_official', 'use_api_firewall_credentials',
             'firewall_username', 'firewall_password', 'clear_firewall_credentials' ) );
     }
-    foreach ( $_POST as $key => $value ) {
+    foreach ( $input as $key => $value ) {
         if ( ! is_string( $value ) || ! in_array( $key, $allowed, true ) ) {
             return joes_scanner_auth_dir_error( 'The form contains an unsupported field. Omit credentials from directory submissions.' );
         }
     }
     $fields = array();
     foreach ( array( 'server_name', 'map_anchor', 'area_label', 'description' ) as $field ) {
-        $raw = joes_scanner_auth_dir_post_string( $field );
+        $raw = $input[$field] ?? '';
         $max = $field === 'description' ? 2000 : 120;
         $text = $field === 'description' ? sanitize_textarea_field( $raw ) : sanitize_text_field( $raw );
         if ( strlen( $text ) > $max || preg_match( '#https?://[^\s<>]*(?:@|\?)[^\s<>]*#i', $raw ) ) {
@@ -71,23 +75,23 @@ function joes_scanner_auth_dir_read_form( $actor, $admin = false ) {
         }
         $fields[$field] = $text;
     }
-    $fields['server_url'] = joes_scanner_auth_dir_url( joes_scanner_auth_dir_post_string( 'server_url' ) );
-    $info = trim( joes_scanner_auth_dir_post_string( 'info_url' ) );
+    $fields['server_url'] = joes_scanner_auth_dir_url( $input['server_url'] ?? '' );
+    $info = trim( $input['info_url'] ?? '' );
     $fields['info_url'] = joes_scanner_auth_dir_url( $info );
     if ( $fields['server_name'] === '' || $fields['map_anchor'] === '' || $fields['server_url'] === ''
         || ( $info !== '' && $fields['info_url'] === '' ) ) {
         return joes_scanner_auth_dir_error( 'Provide a name, a map anchor, and a valid HTTP or HTTPS server URL. URLs must omit logins, query parameters, and fragments.' );
     }
 
-    $fields['visibility'] = joes_scanner_auth_dir_post_string( 'visibility' ) ?: 'public';
+    $fields['visibility'] = ( $input['visibility'] ?? '' ) ?: 'public';
     if ( ! in_array( $fields['visibility'], array( 'public', 'private', 'restricted' ), true ) ) {
         return joes_scanner_auth_dir_error( 'Choose Public, Private, or Restricted visibility.' );
     }
-    $fields['requires_scanner_login'] = (int) ( joes_scanner_auth_dir_post_string( 'requires_scanner_login' ) === '1' );
-    $fields['requires_firewall_auth'] = (int) ( joes_scanner_auth_dir_post_string( 'requires_firewall_auth' ) === '1' );
+    $fields['requires_scanner_login'] = (int) ( ( $input['requires_scanner_login'] ?? '' ) === '1' );
+    $fields['requires_firewall_auth'] = (int) ( ( $input['requires_firewall_auth'] ?? '' ) === '1' );
     $fields['audience'] = array();
     if ( $fields['visibility'] === 'restricted' ) {
-        $logins = preg_split( '/[\r\n,]+/', trim( joes_scanner_auth_dir_post_string( 'audience' ) ), -1, PREG_SPLIT_NO_EMPTY );
+        $logins = preg_split( '/[\r\n,]+/', trim( $input['audience'] ?? '' ), -1, PREG_SPLIT_NO_EMPTY );
         if ( count( $logins ) > 25 ) {
             return joes_scanner_auth_dir_error( 'Enter at most 25 recipient usernames.' );
         }
@@ -197,7 +201,7 @@ function joes_scanner_auth_dir_verify_forms() {
     if ( ! is_ssl() || joes_scanner_auth_dir_browser() === '' ) {
         return '<p>Open My Servers over HTTPS to verify an email address.</p>';
     }
-    return '<p><a href="' . esc_url( wp_login_url( get_permalink() ) ) . '">Log in to WordPress</a> or verify your email for My Servers access.</p>'
+    return '<p><a href="' . esc_url( wp_login_url( add_query_arg( joes_scanner_auth_dir_prefill(), get_permalink() ) ) ) . '">Log in to WordPress</a> or verify your email for My Servers access.</p>'
         . '<p><a href="' . esc_url( wp_lostpassword_url() ) . '">Reset WordPress password</a></p>'
         . joes_scanner_auth_dir_form_start( 'issue' )
         . '<p><label>Email address <input type="email" name="email" maxlength="100" required /></label> '
@@ -206,6 +210,22 @@ function joes_scanner_auth_dir_verify_forms() {
         . '<p><label>Email address <input type="email" name="email" maxlength="100" required /></label> '
         . '<label>Verification code <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" required /></label> '
         . '<button type="submit">Verify email</button></p></form>';
+}
+
+function joes_scanner_auth_dir_prefill() {
+    $address = $_GET['directory_address'] ?? '';
+    $visibility = $_GET['directory_visibility'] ?? '';
+    $address = is_string( $address ) ? joes_scanner_auth_dir_handoff_address( wp_unslash( $address ) ) : '';
+    if ( $address === '' || ! in_array( $visibility, array( 'private', 'restricted', 'public' ), true ) ) {
+        return array();
+    }
+    return array( 'directory_address' => $address, 'directory_visibility' => $visibility );
+}
+
+function joes_scanner_auth_dir_handoff_address( $value ) {
+    $address = joes_scanner_auth_dir_url( $value );
+    $path = rawurldecode( wp_parse_url( $address, PHP_URL_PATH ) ?? '' );
+    return strpbrk( $path, "=@?#\\" ) !== false ? '' : $address;
 }
 
 function joes_scanner_auth_dir_labels() {
@@ -261,6 +281,10 @@ function joes_scanner_auth_dir_listing_fields( array $data ) {
 
 function joes_scanner_auth_dir_listing_form( $row = null ) {
     $fields = joes_scanner_auth_dir_fields( $row );
+    if ( ! $row && ( $prefill = joes_scanner_auth_dir_prefill() ) ) {
+        $fields['server_url'] = $prefill['directory_address'];
+        $fields['visibility'] = $prefill['directory_visibility'];
+    }
     if ( $row && $row->status === 'pending' ) {
         $proposal = joes_scanner_auth_dir_revision( (int) $row->id, 'pending' );
         if ( $proposal ) {

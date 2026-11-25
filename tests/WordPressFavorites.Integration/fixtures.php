@@ -142,17 +142,20 @@ switch ( $mode ) {
         $recipient_id = wp_insert_user( array( 'user_login' => $recipient['username'],
             'user_pass' => $recipient['password'], 'user_email' => $recipient['email'], 'role' => 'subscriber' ) );
         fixture_check( is_int( $recipient_id ) && $recipient_id > 0, 'Could not create a directory recipient account.' );
+        $pages = array();
         foreach ( array( 'my-servers' => '[joes_scanner_my_servers]', 'submit-server' => '[joes_scanner_server_submit]',
             'public-servers' => '[joes_scanner_server_directory]' ) as $slug => $shortcode ) {
             $post_id = wp_insert_post( array( 'post_title' => $slug, 'post_name' => $slug, 'post_type' => 'page',
                 'post_status' => 'publish', 'post_content' => $shortcode ), true );
             fixture_check( ! is_wp_error( $post_id ) && $post_id > 0, 'Could not create the shortcode fixture page.' );
+            $pages[$slug] = $post_id;
         }
         $existing = get_user_by( 'email', $input['existingEmail'] );
         fixture_check( $existing instanceof WP_User, 'The existing user fixture was not found.' );
         update_option( 'jsfav_directory_existing_user', array( 'id' => $existing->ID,
             'password' => $existing->user_pass, 'roles' => $existing->roles,
             'surecart' => get_option( JOES_SCANNER_AUTH_OPTIONS_KEY ) ), false );
+        echo wp_json_encode( $pages );
         break;
 
     case 'directory-mail':

@@ -772,6 +772,29 @@ namespace JoesScanner.Views
                 vm.EditScannerConnection(row);
         }
 
+        private async void OnScannerConnectionShare(object? sender, EventArgs e)
+        {
+            if (sender is Button { BindingContext: ScannerConnectionRow row } && BindingContext is SettingsViewModel vm)
+                await vm.OfferDirectorySharingAsync(row.Profile, newlySaved: false);
+        }
+
+        private async void OnScannerConnectionReviewDirectory(object? sender, EventArgs e)
+        {
+            if (sender is Button { BindingContext: ScannerConnectionRow row } && BindingContext is SettingsViewModel vm)
+                await vm.ReviewDirectoryUpdateAsync(row);
+        }
+
+        private async void OnScannerConnectionSaveLocal(object? sender, EventArgs e)
+        {
+            if (BindingContext is not SettingsViewModel vm)
+                return;
+            ConnectionFieldsGrid.Content?.FindByName<Entry>("ServerUrlEntry")?.Unfocus();
+            ConnectionFieldsGrid.Content?.FindByName<Entry>("BasicAuthUsernameEntry")?.Unfocus();
+            ConnectionFieldsGrid.Content?.FindByName<Entry>("BasicAuthPasswordEntry")?.Unfocus();
+            await Task.Delay(50);
+            await vm.SaveLocalScannerAsync();
+        }
+
         private void OnScannerConnectionToggled(object? sender, ToggledEventArgs e)
         {
             if (sender is Microsoft.Maui.Controls.Switch { BindingContext: ScannerConnectionRow row } toggle &&

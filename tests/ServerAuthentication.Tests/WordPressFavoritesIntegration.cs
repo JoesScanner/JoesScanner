@@ -88,6 +88,18 @@ internal static class WordPressFavoritesIntegration
         a.CheckStorage(secrets);
         b.CheckStorage(secrets);
         Console.WriteLine("PASS Account switches, Local Only request blocking, Normal Mode reconciliation, and credential isolation");
+
+        var directory = new ServerDirectoryClient(a.Settings, a.Wire);
+        var operation = directory.Begin();
+        var site = await directory.GetSiteAsync(operation, token);
+        const string pendingAddress = "https://dotnet-directory-fixture.example.net/recorder";
+        Check(site.MyServers != null && await directory.SubmitAsync(operation, site,
+            new("Managed client submission", pendingAddress, "Boise, ID", true, false), token) == DirectorySubmissionStatus.Pending,
+            "The managed client must submit as its verified free account.");
+        var directorySnapshot = await directory.FetchAsync(operation, token);
+        Check(directorySnapshot.Suspended?.Contains(21) == true &&
+            directorySnapshot.Entries.All(entry => entry.Url != pendingAddress), "The managed client must separate pending and suspended listings.");
+        Console.WriteLine("PASS The managed directory client discovers My Servers and submits a pending listing against real WordPress");
     }
 
     private static async Task VerifyPrivacyAsync(Device a, Device b, Account alpha, string groupId, Uri recorder,

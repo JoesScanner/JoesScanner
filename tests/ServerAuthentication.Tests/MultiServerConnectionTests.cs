@@ -26,9 +26,15 @@ internal static partial class MobileRecoveryTests
             "Editing or reloading one URL must preserve identity, enablement and the other recorder.");
 
         var directory = store.Save("https://listing-recorder.test", "Listed recorder", 42, null);
-        var directoryUpdate = store.Save("https://new-listing-recorder.test", "Listed recorder", 42, null);
-        Check(directoryUpdate.Id == directory.Id && directoryUpdate.DirectoryId == 42,
-            "An approved directory endpoint change must preserve the configured server ID.");
+        try
+        {
+            store.Save("https://new-listing-recorder.test", "Listed recorder", 42, null);
+            throw new Exception("An ordinary save cannot change a managed endpoint.");
+        }
+        catch (InvalidOperationException)
+        {
+            Check(store.Load(null).Contains(directory), "A managed endpoint needs a verified update and user confirmation.");
+        }
         return Task.CompletedTask;
     }
 

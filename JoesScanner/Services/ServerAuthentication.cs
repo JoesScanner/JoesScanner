@@ -24,6 +24,9 @@ internal sealed class ServerAuthentication(ISettingsService settings, HttpClient
 
     internal bool RequiresFirewall(Uri uri) => HostedServerRules.RequiresApiFirewallCredentials(settings, uri);
 
+    internal bool IsDirectoryBlocked(Uri uri, Guid? id = null) =>
+        DirectoryRecorderPolicy.For(settings).Find(uri, id)?.DirectoryBlocked == true;
+
     internal AuthenticationHeaderValue? GetCustomAuthorization(Uri destination)
     {
         if (!Uri.TryCreate(settings.ServerUrl, UriKind.Absolute, out var configured) ||
@@ -57,7 +60,8 @@ internal sealed class ServerAuthentication(ISettingsService settings, HttpClient
         Uri destination, CancellationToken cancellationToken, AuthenticationHeaderValue? rejected = null)
     {
         var isDefault = HostedServerRules.IsHostedServerUri(destination);
-        var directoryId = isDefault ? null : HostedServerRules.FindFirewallDirectoryId(settings, destination);
+        var entryInfo = isDefault ? null : HostedServerRules.FindFirewallDirectory(settings, destination);
+        var directoryId = entryInfo?.Id;
         if ((!isDefault && !directoryId.HasValue) ||
             HostedServerRules.HttpScheme(destination) != Uri.UriSchemeHttps ||
             (isDefault && !HostedServerRules.SameOrigin(destination, new Uri(HostedServerRules.DefaultServerUrl))))
@@ -66,8 +70,7 @@ internal sealed class ServerAuthentication(ISettingsService settings, HttpClient
         }
 
         var session = ReadSession(directoryId);
-        var serverUrl = new UriBuilder(Uri.UriSchemeHttps, destination.IdnHost, destination.Port)
-            .Uri.GetLeftPart(UriPartial.Authority);
+        var serverUrl = entryInfo?.Endpoint ?? HostedServerRules.DefaultServerUrl;
         var entry = _cache.GetOrAdd(serverUrl, static _ => new CacheEntry());
 
         await entry.Gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -121,8 +124,10 @@ internal sealed class ServerAuthentication(ISettingsService settings, HttpClient
 
     internal async Task MarkRejectedAsync(Uri destination, AuthenticationHeaderValue authorization, CancellationToken cancellationToken)
     {
-        var serverUrl = new UriBuilder(Uri.UriSchemeHttps, destination.IdnHost, destination.Port)
-            .Uri.GetLeftPart(UriPartial.Authority);
+        var serverUrl = HostedServerRules.IsHostedServerUri(destination) ? HostedServerRules.DefaultServerUrl :
+            HostedServerRules.FindFirewallDirectory(settings, destination)?.Endpoint;
+        if (serverUrl == null)
+            return;
         if (!_cache.TryGetValue(serverUrl, out var entry))
             return;
 

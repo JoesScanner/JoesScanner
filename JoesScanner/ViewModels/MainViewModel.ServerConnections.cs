@@ -17,7 +17,8 @@ public partial class MainViewModel
     private readonly PrivacyNetworkPolicy _privacyNetwork;
     internal FavoritesService Favorites { get; }
 
-    private bool MayUseNetwork(SavedScannerConnection profile) => _privacyNetwork.Allows(new Uri(profile.Endpoint));
+    private bool MayUseNetwork(SavedScannerConnection profile) =>
+        !profile.DirectoryBlocked && _privacyNetwork.Allows(new Uri(profile.Endpoint));
 
     private void OnPrivacyNetworkChanged(object? sender, EventArgs e)
     {
@@ -28,6 +29,9 @@ public partial class MainViewModel
     }
 
     internal bool AllowsExternalLink(Uri uri) => _privacyNetwork.Allows(uri);
+    internal bool AllowsRecorderProbe(Uri uri, bool independent) => _privacyNetwork.Allows(uri, independent);
+    internal bool IsSavedRecorder(SavedScannerConnection saved) =>
+        _profiles.Any(profile => profile.Id == saved.Id && profile.Endpoint == saved.Endpoint && profile.Managed == saved.Managed);
     private volatile IReadOnlyList<SavedScannerConnection> _profiles = Array.Empty<SavedScannerConnection>();
 
     public ObservableCollection<ScannerConnectionRow> ScannerConnections { get; } = [];
@@ -45,16 +49,18 @@ public partial class MainViewModel
         {
             var selected = ScannerConnectionStore.Normalize(legacyEndpoint ?? _settingsService.ServerUrl);
             ServerDirectoryEntry? listed = null;
-            if (selected != null)
+            if (selected != null && HostedServerRules.IsProvidedDefaultServerUrl(selected))
             {
                 try
                 {
                     listed = _settingsService.GetCachedDirectoryServers()
-                        .FirstOrDefault(entry => entry.DirectoryId > 0 && ScannerConnectionStore.Normalize(entry.Url) == selected);
+                        .FirstOrDefault(entry => entry.DirectoryId > 0 && entry.IsOfficial &&
+                            ScannerConnectionStore.Normalize(entry.Url) == selected);
                 }
                 catch (Exception ex) { AppLog.Add(() => $"Cached directory could not be read ({ex.GetType().Name})."); }
             }
             _profiles = _connectionStore.Load(selected, listed?.DirectoryId, listed?.Name);
+            DirectoryRecorderPolicy.For(_settingsService).Update(_profiles);
             _filterService.ConfigureRecorderScopes(_profiles.Select(profile => (profile.Id, profile.Endpoint, profile.FilterKey)),
                 _settingsService.ServerUrl);
             foreach (var profile in _profiles.Where(profile => !profile.CredentialsMigrated))
@@ -87,13 +93,15 @@ public partial class MainViewModel
         PublishScannerConnectionRows();
     }
 
-    internal void SaveScannerConnection(string endpoint, string? name, int? directoryId, Guid? editId,
-        (string Username, string Password)? customCredentials = null, bool credentialsChanged = false)
+    internal SavedScannerConnection? SaveScannerConnection(string endpoint, string? name, int? directoryId, Guid? editId,
+        (string Username, string Password)? customCredentials = null, bool credentialsChanged = false,
+        string? directorySource = null, bool? directoryFirewall = null)
     {
         if (editId is { } id && _profiles.Any(profile => profile.Id == id &&
             profile.Endpoint != ScannerConnectionStore.Normalize(endpoint)))
             InvalidateRecorderLagEvidence(id);
 
+        var existing = _profiles;
         var saved = _connectionStore.Save(endpoint, name, directoryId, editId, profile =>
             {
                 if (customCredentials is { } credentials)
@@ -104,10 +112,34 @@ public partial class MainViewModel
                         InvalidateRecorderLagEvidence(profile.Id);
                     _settingsService.SetRecorderCredentials(profile.Id, profile.Endpoint, credentials.Username, credentials.Password);
                 }
-            });
+            }, directorySource, directoryFirewall);
         LoadScannerConnections();
         try { SelectScannerForLegacyViews(saved); }
         finally { ReconcileScannerConnections(credentialsChanged ? saved.Id : null); }
+        return !saved.Managed && existing.All(profile => profile.Id != saved.Id) ? saved : null;
+    }
+
+    internal void ApplyScannerDirectory(DirectorySnapshot snapshot)
+    {
+        _settingsService.PersistDirectorySnapshot(snapshot.Entries, snapshot.Suspended, snapshot.Source);
+        LoadScannerConnections();
+        ReconcileScannerConnections();
+    }
+
+    internal bool ConfirmScannerDirectory(Guid id, string endpoint, string source)
+    {
+        var previous = _profiles.FirstOrDefault(profile => profile.Id == id);
+        if (previous == null || _connectionStore.ConfirmDirectory(id, endpoint, source) is not { } profile)
+            return false;
+        InvalidateRecorderLagEvidence(id);
+        LoadScannerConnections();
+        try
+        {
+            if (ScannerConnectionStore.Normalize(_settingsService.ServerUrl) == previous.Endpoint)
+                SelectScannerForLegacyViews(profile);
+        }
+        finally { ReconcileScannerConnections(); }
+        return true;
     }
 
     internal bool TryGetConfiguredRecorderCredentials(string endpoint, out string username, out string password)
@@ -271,6 +303,7 @@ public partial class MainViewModel
                     ScannerConnections.Move(oldIndex, i);
             }
             row.UpdateOrder(i > 0, i < saved.Count - 1);
+            row.UpdateDirectoryActions(_privacyNetwork.AllowsCloud);
         }
 
         if (!current.SequenceEqual(saved.Select(profile => (profile.Id, profile.Enabled))))
@@ -288,6 +321,10 @@ public partial class MainViewModel
 
     private ServerConnectionStatus GetScannerRowStatus(SavedScannerConnection profile, ServerConnectionStatus status)
     {
+        if (profile.Hold == DirectoryHold.Suspended)
+            return ServerConnectionStatus.SecuritySuspended;
+        if (profile.Hold == DirectoryHold.EndpointChanged)
+            return ServerConnectionStatus.DirectoryUpdateRequired;
         if (!profile.Enabled)
             return ServerConnectionStatus.Disabled;
         if (!MayUseNetwork(profile))

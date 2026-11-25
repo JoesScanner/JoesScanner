@@ -8,6 +8,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 add_action( 'admin_post_joes_scanner_auth_review_server_directory', 'joes_scanner_auth_admin_post_review_server_directory' );
 add_action( 'admin_post_joes_scanner_auth_add_default_server', 'joes_scanner_auth_admin_post_save_directory' );
 add_action( 'admin_post_joes_scanner_auth_update_server_directory_entry', 'joes_scanner_auth_admin_post_save_directory' );
+add_action( 'admin_post_joes_scanner_auth_my_servers_page', 'joes_scanner_auth_admin_post_my_servers_page' );
 add_action( 'wp_ajax_joes_scanner_auth_save_server_directory_order', 'joes_scanner_auth_ajax_save_server_directory_order' );
 
 function joes_scanner_auth_dir_admin_url( array $arguments = array() ) {
@@ -18,6 +19,18 @@ function joes_scanner_auth_dir_check_admin() {
     if ( ! current_user_can( 'manage_options' ) || ! is_ssl() || ( $_SERVER['REQUEST_METHOD'] ?? '' ) !== 'POST' ) {
         joes_scanner_auth_dir_form_error( joes_scanner_auth_dir_error( 'Administrator authorization is required.', 403 ) );
     }
+}
+
+function joes_scanner_auth_admin_post_my_servers_page() {
+    joes_scanner_auth_dir_check_admin();
+    check_admin_referer( 'joes_scanner_auth_my_servers_page' );
+    $id = joes_scanner_auth_dir_post_id( 'page_id' );
+    if ( $id && ! joes_scanner_auth_dir_my_servers_page( $id ) ) {
+        joes_scanner_auth_dir_form_error( joes_scanner_auth_dir_error( 'Select a published page containing the My Servers shortcode.' ) );
+    }
+    update_option( 'joes_scanner_my_servers_page_id', $id );
+    wp_safe_redirect( joes_scanner_auth_dir_admin_url() );
+    exit;
 }
 
 function joes_scanner_auth_admin_post_review_server_directory() {
@@ -235,6 +248,13 @@ function joes_scanner_auth_render_server_directory_tab() {
     $page = min( $pages, $page );
     $rows = $wpdb->get_results( $wpdb->prepare( "SELECT d.* FROM {$table} d WHERE {$where} ORDER BY {$order} LIMIT %d OFFSET %d", $page_size, ( $page - 1 ) * $page_size ) );
     echo '<h2>Server Directory</h2>';
+    echo '<form method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '"><p>';
+    echo '<input type="hidden" name="action" value="joes_scanner_auth_my_servers_page" />';
+    wp_nonce_field( 'joes_scanner_auth_my_servers_page' );
+    echo '<label>My Servers page ';
+    wp_dropdown_pages( array( 'name' => 'page_id', 'show_option_none' => 'Select a page', 'option_none_value' => '0',
+        'selected' => (int) get_option( 'joes_scanner_my_servers_page_id', 0 ) ) );
+    echo '</label> <button class="button" type="submit">Save page</button></p></form>';
     if ( isset( $_GET['updated_server'] ) ) {
         echo '<div class="notice notice-success is-dismissible"><p>Server updated.</p></div>';
     }
