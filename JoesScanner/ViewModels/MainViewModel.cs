@@ -1489,7 +1489,7 @@ private static string SpeedStepToLabel(double step)
         _ => "1x"
     };
 }
-        private CallItem ResolveDurableCard(DurableLiveQueue.Run durable, DurableLiveQueue.Recording row)
+        private CallItem ResolveDurableCard(DurableLiveQueue.Run durable, DurableLiveQueue.Recording row, CallItem? capturedReplay = null)
         {
             bool Matches(CallItem? item) => item?.LiveState is { } state && state.Id == row.Id &&
                 item.ServerId == durable.ServerId && DurableLiveQueue.ServerKey(state.ServerUrl) == durable.Server && durable.Owns(item.RecordingAccess);
@@ -1497,7 +1497,8 @@ private static string SpeedStepToLabel(double step)
             var card = Calls.FirstOrDefault(Matches);
             if (card == null)
             {
-                card = Matches(_currentPlayingCall) ? _currentPlayingCall :
+                card = Matches(capturedReplay) ? capturedReplay :
+                    Matches(_currentPlayingCall) ? _currentPlayingCall :
                     Matches(_retryPlaybackCall) ? _retryPlaybackCall :
                     Matches(_lastPlayedCall) ? _lastPlayedCall : null;
             }

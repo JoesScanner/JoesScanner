@@ -5,13 +5,15 @@ namespace JoesScanner.ViewModels
 {
     public partial class MainViewModel
     {
-        private sealed class ManualLiveTraversal(long session, long position, Guid? serverId, long[] visibleReplays)
+        private sealed class ManualLiveTraversal(long session, Guid? serverId, bool favoritesOnly, CallItem[] visibleReplays)
         {
             internal long Session { get; } = session;
-            internal long Position { get; set; } = position;
+            internal long Position { get; set; }
             internal Guid? ServerId { get; } = serverId;
-            internal bool HasReplayAfter(long position) => visibleReplays.Any(sequence => sequence > position);
-            internal long[] ReplaysAfter(long position) => visibleReplays.Where(sequence => sequence > position).ToArray();
+            internal bool FavoritesOnly { get; } = favoritesOnly;
+            internal CallItem[] VisibleReplays { get; } = visibleReplays;
+
+            internal CallItem? FindReplay(long sequence) => VisibleReplays.FirstOrDefault(card => card.LiveArrivalSequence == sequence);
         }
 
         private ManualLiveTraversal? _manualLiveTraversal;
@@ -186,6 +188,21 @@ namespace JoesScanner.ViewModels
                             continue;
                         if (traversal != null)
                         {
+                            if (traversal.FavoritesOnly)
+                            {
+                                // Keep bypassed calls in SQLite. Resume automatic playback
+                                // beyond this pass instead of replaying intervening ordinary calls.
+                                using var finish = _playbackRequests.Begin(manual: false, token);
+                                try
+                                {
+                                    await _durableQueue.AdvancePlaybackFloorAsync(LiveQueueScopes(), traversal.Position + 1, finish.Token);
+                                }
+                                catch (OperationCanceledException) when (finish.Token.IsCancellationRequested) { }
+                                if (!OwnsSelection())
+                                    break;
+                                if (!finish.CanContinue || sourceRevision != _automaticAudioRevision || ShouldRecheck(beforeRead))
+                                    continue;
+                            }
                             _manualLiveTraversal = null;
                             _scheduler.Reset();
                             continue;
@@ -202,7 +219,8 @@ namespace JoesScanner.ViewModels
                     if (sourceRevision != _automaticAudioRevision)
                     {
                         if (traversal != null && ReferenceEquals(_manualLiveTraversal, traversal) &&
-                            outcome.AdvancesQueue() && next.LiveArrivalSequence is { } position)
+                            (outcome.AdvancesQueue() || outcome == PlaybackOutcome.Withheld) &&
+                            next.LiveArrivalSequence is { } position)
                             traversal.Position = position;
                         continue;
                     }
@@ -292,12 +310,10 @@ namespace JoesScanner.ViewModels
             var favoriteFilter = _visibleFavoriteFilter;
             if (favoriteFilter != null && !favoriteFilter(item))
                 return;
-            var server = _visibleLiveServer.HasValue ? item.ServerId ?? _visibleLiveServer : null;
-            var visibleReplays = favoriteFilter == null
-                ? Calls.Where(card => (server == null || card.ServerId == server) && card.LiveArrivalSequence.HasValue &&
-                        !string.IsNullOrWhiteSpace(card.AudioUrl) && !IsFilteredForPlayback(card))
-                    .Select(card => card.LiveArrivalSequence!.Value).Distinct().ToArray()
-                : [];
+            var server = favoriteFilter == null && _visibleLiveServer.HasValue ? item.ServerId ?? _visibleLiveServer : null;
+            var visibleReplays = Calls.Where(card => (server == null || card.ServerId == server) &&
+                (favoriteFilter?.Invoke(card) ?? true) && card.LiveArrivalSequence.HasValue &&
+                !string.IsNullOrWhiteSpace(card.AudioUrl) && !IsFilteredForPlayback(card)).ToArray();
 
             RetirePlaybackLag();
             _backlog.CancelPendingJump();
@@ -320,6 +336,11 @@ namespace JoesScanner.ViewModels
                 if (!request.CanContinue)
                     return;
                 _manualPlaybackTarget = item;
+                var traversal = AudioEnabled && _monitoring.CanRecover(run)
+                    ? new ManualLiveTraversal(run!.Id, server, favoriteFilter != null, visibleReplays) : null;
+                // The first Favorite's catch-up rate can use its captured scope
+                // while the durable seek is still being saved.
+                _manualLiveTraversal = traversal?.FavoritesOnly == true ? traversal : null;
                 _scheduler.Reset();
                 ClearPlayingSelection();
 #if ANDROID
@@ -327,14 +348,9 @@ namespace JoesScanner.ViewModels
 #endif
                 try
                 {
-                    var durable = ScopeOf(item);
-                    // A Favorite selection is scoped to the card. The regular
-                    // automatic queue resumes without changing any recorder's floor.
-                    if (favoriteFilter != null)
-                        _manualLiveTraversal = null;
-                    var seek = favoriteFilter == null && AudioEnabled && _monitoring.CanRecover(run)
-                        ? EstablishManualTraversalAsync(run!.Id, server, durable, item, visibleReplays, request)
-                        : Task.FromResult<ManualLiveTraversal?>(null);
+                    var seek = traversal != null
+                        ? EstablishManualTraversalAsync(traversal, ScopeOf(item), item, request)
+                        : Task.FromResult(false);
 
                     item.IsCompletedReplay = false;
                     PlaybackOutcome outcome;
@@ -343,8 +359,13 @@ namespace JoesScanner.ViewModels
                     if (!request.CanContinue || !outcome.AdvancesQueue() || !AudioEnabled || !_monitoring.CanRecover(run))
                         return;
 
-                    if (seek.Result is { } traversal && item.LiveArrivalSequence is { } sequence)
-                        traversal.Position = sequence;
+                    if (traversal != null && ReferenceEquals(_manualLiveTraversal, traversal))
+                    {
+                        if (seek.Result && item.LiveArrivalSequence is { } sequence)
+                            traversal.Position = sequence;
+                        else
+                            _manualLiveTraversal = null;
+                    }
                     _userRunShouldDriveQueue = true;
                     _lastPlayedCall = item;
                     UpdateQueueDerivedState();
@@ -358,7 +379,11 @@ namespace JoesScanner.ViewModels
                 finally
                 {
                     if (request.IsCurrent)
+                    {
                         _manualPlaybackTarget = null;
+                        if (traversal?.FavoritesOnly == true && ReferenceEquals(_manualLiveTraversal, traversal))
+                            _manualLiveTraversal = null;
+                    }
                 }
             }
             catch (OperationCanceledException ex) when (LivePlaybackRequests.IsExpectedCancellation(ex, token)) { }
@@ -374,8 +399,8 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        private async Task<ManualLiveTraversal?> EstablishManualTraversalAsync(long session, Guid? server,
-            DurableLiveQueue.Run? durable, CallItem item, long[] visibleReplays, LivePlaybackRequests.Request request)
+        private async Task<bool> EstablishManualTraversalAsync(ManualLiveTraversal traversal,
+            DurableLiveQueue.Run? durable, CallItem item, LivePlaybackRequests.Request request)
         {
             var token = request.Token;
             var sourceGeneration = _audioSourceGeneration;
@@ -383,21 +408,53 @@ namespace JoesScanner.ViewModels
             if (durable != null && TryGetDurableRecording(item, durable, out var id))
             {
                 position ??= await _durableQueue.GetArrivalSequenceAsync(durable, id, token);
-                var scopes = LiveQueueScopes().Where(scope => server == null || scope.ServerId == server).ToArray();
+                var scopes = TraversalScopes(traversal);
                 if (position == null || !await _durableQueue.SetPlaybackFloorAsync(scopes, durable,
                         LocalRecoveryFloor(durable), position.Value, token))
-                    return null;
+                    return false;
             }
             if (position is not { } sequence || !request.CanContinue || sourceGeneration != _audioSourceGeneration)
-                return null;
+                return false;
 
             item.LiveArrivalSequence = sequence;
             _liveEdgeBoundary = null;
-            if (server == null)
+            if (traversal.ServerId == null)
                 _livePlaybackFloor = sequence;
             _userRunShouldDriveQueue = true;
-            return _manualLiveTraversal = new(session, sequence - 1, server, visibleReplays);
+            traversal.Position = sequence - 1;
+            _manualLiveTraversal = traversal;
+            return true;
         }
+
+        private DurableLiveQueue.Run[] TraversalScopes(ManualLiveTraversal traversal) =>
+            LiveQueueScopes().Where(scope => traversal.ServerId == null || scope.ServerId == traversal.ServerId).ToArray();
+
+        private Task<LivePlaybackScheduler.Scheduled?> ReadNextLiveRecordingAsync(CancellationToken token,
+            ManualLiveTraversal? traversal, long? after = null)
+        {
+            if (traversal == null)
+                return _scheduler.SelectAsync(_durableQueue, AutomaticQueueScopes(), LocalRecoveryFloor,
+                    _livePlaybackPreferences, token, automatic: _automaticAudioFilter);
+
+            var position = after ?? traversal.Position;
+            var membership = traversal.FavoritesOnly ? ReadFavoriteAudioMembership() : null;
+            var candidates = traversal.VisibleReplays.Where(card => card.LiveArrivalSequence > position);
+            if (membership != null)
+                candidates = candidates.Where(card => card.ServerId is { } id &&
+                    FavoriteTalkgroupIdentity.From(card.CardMetadata) is { } identity && membership.Contains((id, identity)) &&
+                    !IsFilteredForPlayback(card));
+            var replays = candidates.Select(card => card.LiveArrivalSequence!.Value).Distinct().ToArray();
+            // Completed payloads may already be compacted. The capture supplies
+            // their identity, while the journal matches membership for pending rows.
+            var filter = membership == null ? null : new LiveAutomaticAudioFilter(
+                FavoriteEdges: membership.ToDictionary(identity => identity, _ => 0L));
+            return _scheduler.SelectAsync(_durableQueue, TraversalScopes(traversal), LocalRecoveryFloor,
+                _livePlaybackPreferences, token, position, replays, filter);
+        }
+
+        private CallItem ResolveLivePlaybackCard(LivePlaybackScheduler.Scheduled next, ManualLiveTraversal? traversal) =>
+            ResolveDurableCard(next.Row.Scope, next.Row.Row, next.Row.Row.IsCompletedReplay && traversal?.FavoritesOnly == true
+                ? traversal.FindReplay(next.Row.Row.ArrivalSequence) : null);
 
         private async Task JumpToLiveAsync()
         {
@@ -575,12 +632,16 @@ namespace JoesScanner.ViewModels
             if (item.LiveArrivalSequence is { } sequence && ScopeOf(item) != null)
             {
                 var traversal = _manualLiveTraversal;
-                var scopes = traversal == null ? AutomaticQueueScopes() :
-                    LiveQueueScopes().Where(scope => traversal.ServerId == null || scope.ServerId == traversal.ServerId).ToArray();
-                catchingUp = traversal?.HasReplayAfter(sequence) == true;
-                if (!catchingUp)
-                    catchingUp = await _durableQueue.CountReadyAsync(scopes, LocalRecoveryFloor, sequence, token,
-                        traversal == null ? _automaticAudioFilter : null) > 0;
+                if (traversal?.FavoritesOnly == true)
+                    catchingUp = await ReadNextLiveRecordingAsync(token, traversal, sequence) != null;
+                else
+                {
+                    var scopes = traversal == null ? AutomaticQueueScopes() : TraversalScopes(traversal);
+                    catchingUp = traversal?.VisibleReplays.Any(card => card.LiveArrivalSequence > sequence) == true;
+                    if (!catchingUp)
+                        catchingUp = await _durableQueue.CountReadyAsync(scopes, LocalRecoveryFloor, sequence, token,
+                            traversal == null ? _automaticAudioFilter : null) > 0;
+                }
             }
 
             if (!catchingUp)

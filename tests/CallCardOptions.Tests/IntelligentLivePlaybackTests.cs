@@ -3,7 +3,7 @@ using JoesScanner.Services;
 using JoesScanner.ViewModels;
 using Microsoft.Data.Sqlite;
 
-internal static class IntelligentLivePlaybackTests
+internal static partial class IntelligentLivePlaybackTests
 {
     private static readonly Guid ServerA = Guid.Parse("c7c67640-0b4a-427c-8b26-70e2a0b8e3b1");
     private static readonly Guid ServerB = Guid.Parse("a2e5046e-b264-46d3-a71a-fac384c75b4d");
@@ -24,6 +24,7 @@ internal static class IntelligentLivePlaybackTests
             await LateAudioAsync(Path.Combine(directory.FullName, "late.db"));
             await ScopedManualReplayAsync(Path.Combine(directory.FullName, "scope.db"));
             await FavoritesManualNavigationAsync(Path.Combine(directory.FullName, "favorites-navigation.db"));
+            await RunFavoritesTraversalAsync(directory.FullName);
             await AutomaticJumpAtBoundaryAsync(Path.Combine(directory.FullName, "boundary.db"));
             await ManualReplayExemptsJumpAsync(Path.Combine(directory.FullName, "manual.db"));
             await ManualPreparationFailureAsync(Path.Combine(directory.FullName, "failed.db"));

@@ -76,6 +76,7 @@ namespace JoesScanner.ViewModels
         internal Task ResumedQueue { get; private set; } = Task.CompletedTask;
         internal Func<Task>? BeforeCommitForTest { get; set; }
         internal Func<string, CancellationToken, Task>? PrepareForTest { get; set; }
+        internal Func<CallItem, string>? AudioIdentityForTest { get; set; }
         internal string? RetryForTest => _retryPlaybackCall?.BackendId;
         internal bool AutoPlayForTest { get => _settingsService.AutoPlay; set => _settingsService.AutoPlay = value; }
         internal string? HiddenForTest { set => _filterService.Hidden = value; }
@@ -92,6 +93,7 @@ namespace JoesScanner.ViewModels
         private bool ShowPausedPlaybackActions => IsRunning && _interruption?.RequiresPlay == true;
         private void NotifyPlaybackResumeState() { }
         private bool AudioEnabled { get; set; } = true;
+        internal bool IsAudioEnabledForTest => AudioEnabled;
         internal int CallsWaiting => _durableQueue.CountReadyAsync(AutomaticQueueScopes(), LocalRecoveryFloor,
             _currentPlayingCall?.LiveArrivalSequence, default, _automaticAudioFilter).GetAwaiter().GetResult();
         private Action? RequestJumpToLiveScroll { get; set; }
@@ -209,7 +211,8 @@ namespace JoesScanner.ViewModels
             await ResumedQueue;
         }
 
-        internal Task MarkCompletedForTestAsync(string id) => _durableQueue.CommitCompletionAsync(_durableRun!, id);
+        internal Task MarkCompletedForTestAsync(string id, Guid? recorder = null) =>
+            _durableQueue.CommitCompletionAsync(RecorderForTest(recorder), id);
 
         internal Task SetAudioForTestAsync(bool enabled)
         {
@@ -224,7 +227,11 @@ namespace JoesScanner.ViewModels
             return WaitForLiveEdgeAsync(CancellationToken.None);
         }
 
-        internal Task<bool> IsPendingForTestAsync(string id) => _durableQueue.IsPendingAsync(_durableRun!, id, 0, default);
+        internal Task<bool> IsPendingForTestAsync(string id, Guid? recorder = null) =>
+            _durableQueue.IsPendingAsync(RecorderForTest(recorder), id, 0, default);
+
+        private DurableLiveQueue.Run RecorderForTest(Guid? recorder) =>
+            recorder != null && _secondRecorder?.ServerId == recorder ? _secondRecorder : _durableRun!;
 
         internal async Task AssertPendingAfterRestartAsync(string id)
         {
@@ -263,7 +270,9 @@ namespace JoesScanner.ViewModels
         internal bool InterruptionIsBlockingForTest => IsLiveInterruptionBlockingPlayback;
         internal bool HasInterruptCheckpointForTest => _interruption?.Since.HasValue == true;
         internal Task PressVisibleCardForTestAsync(CallItem item) => PlayVisibleCallAsync(item);
-        internal CallItem CardForTest(string id) => Calls.Single(card => card.BackendId == id);
+        internal CallItem CardForTest(string id, Guid? recorder = null) =>
+            Calls.Single(card => card.BackendId == id && (recorder == null || card.ServerId == recorder));
+        internal void EvictCardForTest(CallItem card) => Calls.Remove(card);
         internal Func<Task>? RequestNativeResumeForTest { get; set; }
 
         private Task ResumeMobilePlaybackAsync()
@@ -281,7 +290,9 @@ namespace JoesScanner.ViewModels
                 RecordingAccess = new RecordingAccessContext(RecordingOrigin.Live, false)
             });
         internal Task NavigateForTestAsync(int direction) => NavigateToAdjacentCallAsync(direction);
-        internal void UseFavoritesViewForTest(Func<CallItem, bool> filter) => _visibleFavoriteFilter = filter;
+        internal void UseFavoritesViewForTest(Func<CallItem, bool>? filter) => _visibleFavoriteFilter = filter;
+        internal bool IsFavoriteForTest(CallItem card) => card.ServerId is { } id &&
+            FavoriteTalkgroupIdentity.From(card.CardMetadata) is { } identity && _favoritesForAudio.Contains((id, identity));
         internal Task JumpForTestAsync() => JumpToLiveAsync();
 
         internal Task SelectAddressForTestAsync(string id) => SelectForTestAsync(id);
@@ -306,10 +317,7 @@ namespace JoesScanner.ViewModels
             CancellationToken token, int version, ManualLiveTraversal? traversal)
         {
             var delay = Interlocked.Exchange(ref _nextSelection, null);
-            var scopes = traversal == null ? AutomaticQueueScopes() :
-                LiveQueueScopes().Where(scope => traversal.ServerId == null || traversal.ServerId == scope.ServerId).ToArray();
-            var next = await _scheduler.SelectAsync(_durableQueue, scopes, LocalRecoveryFloor, PlaybackOptionsForTest,
-                token, traversal?.Position, traversal?.ReplaysAfter(traversal.Position), traversal == null ? _automaticAudioFilter : null);
+            var next = await ReadNextLiveRecordingAsync(token, traversal);
             if (delay != null)
             {
                 delay.Reached.TrySetResult();
@@ -318,7 +326,7 @@ namespace JoesScanner.ViewModels
             }
             if (next == null)
                 return null;
-            var card = ResolveDurableCard(next.Row.Scope, next.Row.Row);
+            var card = ResolveLivePlaybackCard(next, traversal);
             card.IsCompletedReplay = next.Row.Row.IsCompletedReplay;
             card.LiveAudioRevision = next.Row.Row.AudioRevision;
             return (card, next.Choice);
@@ -358,7 +366,8 @@ namespace JoesScanner.ViewModels
                     if (preparedAudio == null && PrepareForTest is { } prepare)
                         await prepare(item.BackendId, request.Token);
                     var rate = await GetEffectivePlaybackRateAsync(item, request.Token);
-                    await PlayOnDeviceAsync(item, item.BackendId, rate, request, request.Token, completion, forecastFrom: forecastFrom);
+                    await PlayOnDeviceAsync(item, AudioIdentityForTest?.Invoke(item) ?? item.BackendId,
+                        rate, request, request.Token, completion, forecastFrom: forecastFrom);
                 }, request.Token, failure => ReportPlaybackFailure(failure, request), completion);
                 if (request.CanContinue && outcome == PlaybackOutcome.Failed && !request.IsManual)
                 {
@@ -440,8 +449,9 @@ namespace JoesScanner.ViewModels
             TryGetDurableRecording(item, scope, out _));
         private bool IsCurrentLiveScope(DurableLiveQueue.Run run) => LiveQueueScopes().Contains(run);
         private static long LocalRecoveryFloor(DurableLiveQueue.Run run) => 0;
-        private CallItem ResolveDurableCard(DurableLiveQueue.Run run, DurableLiveQueue.Recording row) =>
+        private CallItem ResolveDurableCard(DurableLiveQueue.Run run, DurableLiveQueue.Recording row, CallItem? capturedReplay = null) =>
             Calls.FirstOrDefault(card => card.BackendId == row.Id && card.LiveArrivalSequence == row.ArrivalSequence) ??
+            (capturedReplay != null && TryGetDurableRecording(capturedReplay, run, out var id) && id == row.Id ? capturedReplay : null) ??
             row.ToCallItem(run.Server, run.ServerId);
         private static Task RefreshTransportCardAsync(CallItem item, CancellationToken token) => Task.CompletedTask;
         private void ShowDurableCard(CallItem item)

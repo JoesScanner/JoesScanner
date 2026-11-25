@@ -5,21 +5,23 @@ This document and the playback integration tests define JoesScanner's playback c
 ## A. Live queue
 
 - Assign a permanent SQLite arrival sequence when the app first admits a recording. Use that sequence for playback, transport, and Live boundaries. Recorder timestamps are used for display, History, and recording access checks.
-- Automatic playback starts with the oldest eligible pending call. Keep the playing card stable while incoming recordings accumulate. A new arrival wakes the queue and leaves active audio alone.
-- Keep the waiting indicator and catch-up speed relative to the listening position. The waiting indicator counts playable cards represented in the Live view and its pending card buffer. SQLite can retain additional recordings beyond those buffers. Catch-up speed uses durable pending arrivals, including off-screen calls, and returns to normal speed at the Live edge.
+- The automatic scheduler selects eligible pending calls for the active audio source using its grouping and Favorites settings. A new arrival wakes the queue and leaves active audio alone.
+- The waiting indicator counts eligible ready recordings for the automatic audio source. Catch-up speed uses the active playback scope, including durable off-screen calls, and returns to normal speed at its edge.
 - A pending recording with unavailable audio keeps its place. A relevant audio update can make it playable, and the user can Retry, Skip, or Jump to Live.
 
 ## B. Manual selection
 
-- A Live card tap cancels the old playback request immediately, including preparation and native playback. Prepare the latest selected call as soon as possible. Wait for the previous native player to release its resources before starting the replacement. A confirmed completion write from the old request must not block preparation or the new native start.
-- Continue forward from the selected arrival. A forward seek past pending calls makes those calls ineligible for automatic playback from the new position. Their recordings remain available through authorized History and an explicit backward seek. A canceled call retains its pending disposition unless its native end was already confirmed.
-- A backward seek can deliberately replay eligible, newer completed calls that were visible when the user selected the anchor. Merge those replays with pending calls in arrival order. The selected card may also be replayed directly. Preserve terminal dispositions and the original arrival sequence. At the end of the pass, wait for later arrivals.
-- An explicit tap can play muted audio. Disabled or hidden calls remain hidden and cannot take playback. An explicit tap can drive playback for this listening session even when AutoPlay is off. It leaves the saved preference unchanged.
+- Prepare a Live card successfully before retiring the current playback request. Failed or superseded preparations leave the current clip and its traversal intact. The new selection can take the native owner once the old clip releases it.
+- When monitoring is Running and Audio is On, continue in original client-arrival order within the originating view. Combined covers the active recorders, a recorder view stays within that recorder, and Favorites continues with Favorites across active recorders. A display-only switch preserves the captured scope. A change of the actual automatic audio source in Selected Only mode finishes the current native clip and retires the pass at the existing source boundary.
+- A backward seek can replay eligible completed recordings captured in that view at selection time. Keep their original disposition and sequence. Previously visible completed Favorites stay available if their cards are evicted during the pass.
+- Favorites membership is read when choosing each next recording. The current clip finishes. An added Favorite can join with pending audio ahead of the cursor. Removing a Favorite excludes it from subsequent choices, and a completed card outside the original capture stays outside the replay set.
+- A Favorites pass selects each eligible arrival at most once. Missing audio can join if it is ready and still ahead of the cursor at the next selection. At the end, advance the durable floor through the last processed arrival and resume normal scheduling. For Favorite F1, ordinary O1, Favorite F2, and ordinary O2 in arrival order, tapping F1 plays F1 and F2 in the pass. O1 remains pending below the floor for explicit review, and normal scheduling can then play O2.
+- An explicit tap can play a filtered recording. Subsequent automatic selections honor Mute and Disable. A tap while Stopped or with Audio Off plays one clip. A manual selection can drive the current run while the saved AutoPlay preference remains unchanged.
 - For example, with arrivals A, B, C, D, E and B playing, tap D to hear D, E, and the next arrivals. From D, tap B to hear B, C, D, E when those newer calls are eligible for the pass.
 
 ## C. Live transport
 
-- Previous moves toward older arrivals and Next moves toward newer arrivals. Both can find recordings outside the visible card window, skip unavailable or filtered transport candidates, and change the playback position when a target is selected.
+- Previous and Next select adjacent cards in the currently visible projection, including Favorites. A prepared selection starts a new pass using that view.
 - Jump to Live changes both the playback and visible position. It discards the older playback backlog at a reserved arrival boundary. Admissions after that reservation remain eligible. Authorized History still has access to older recordings.
 
 ## D. Listening sessions
@@ -42,7 +44,7 @@ This document and the playback integration tests define JoesScanner's playback c
 
 ## G. Audio and filters
 
-- Honor talkgroup Disable and Mute for automatic playback. Allow explicit playback of muted calls where supported. Keep hidden recordings out of the display and replay set.
+- Honor talkgroup Disable and Mute for automatic playback while retaining cards for explicit review.
 - Preserve the speed controls, including backlog catch-up and normal speed at Live.
 - Preserve Mix normally, Mix and duck, and Exclusive on mobile. Brief ducking is limited to three seconds. Release native player resources, session or focus leases, and temporary playback files at the appropriate boundary.
 - Honor the configured Pause or Continue behavior on wired or Bluetooth route disconnection. A route configured to pause requires explicit resume.
@@ -59,8 +61,6 @@ This document and the playback integration tests define JoesScanner's playback c
 - A fresh session or jump can suppress old recovery results from autoplay while durable HTTP reconciliation retains its own window and checkpoint. Keep that window across retries and app restarts. SQLite-only pending recordings can still receive late metadata and audio updates.
 - Preserve the disposition of migrated queues. Legacy rows without arrival data have a deterministic migration order. Their original local arrival order cannot be reconstructed.
 
-## J. Historical backlog limits
+## J. Backlog and display limits
 
-Earlier requirements described a warning at about 80 calls behind and forced return to Live at 100 calls, with older recordings available in History. The repository's older card-anchor implementation bounded the in-memory list. The current 100-card caps limit the visible list and pending card buffer. The durable queue retains records beyond those caps.
-
-The current implementation has no 80-call warning or count-triggered forced jump at 100. Reinstating that rule would require deciding whether the threshold counts all durable pending recordings, eligible ones, or just cards, and would make valid pending calls ineligible for automatic playback. The limits above document the current behavior. Explicit Jump to Live and configured interruption recovery remain the ways to skip a backlog.
+The defaults warn at 80 eligible ready waiting calls and arm automatic Jump at 100. A manual traversal keeps the warning visible and suppresses automatic Jump while active. Explicit Jump and Stop can still retire the traversal. The shared 500-card display limit leaves durable playback records available.

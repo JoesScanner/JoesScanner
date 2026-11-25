@@ -448,6 +448,17 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
     internal Task<long> SetPlaybackFloorAtLiveEdgeAsync(Run run, CancellationToken token, bool skipOutstandingRecovery = false) =>
         SetPlaybackFloorAtLiveEdgeAsync(new[] { run }, token, skipOutstandingRecovery);
 
+    internal Task AdvancePlaybackFloorAsync(IReadOnlyList<Run> runs, long floor, CancellationToken token) =>
+        InArrivalOrderAsync(() => WithConnectionAsync(token, db =>
+        {
+            using var transaction = db.BeginTransaction();
+            foreach (var run in runs)
+                UpdatePlaybackFloor(db, transaction, run, floor, forwardOnly: true);
+            token.ThrowIfCancellationRequested();
+            transaction.Commit();
+            return true;
+        }), token);
+
     internal Task<long> SetPlaybackFloorAtLiveEdgeAsync(IReadOnlyList<Run> runs, CancellationToken token,
         bool skipOutstandingRecovery = false, Func<Task>? prepareBoundary = null, Action<SqliteTransaction>? commitPlayback = null) =>
         InArrivalOrderAsync(async () =>
@@ -474,12 +485,13 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
             }).ConfigureAwait(false);
         }, token);
 
-    private static void UpdatePlaybackFloor(SqliteConnection db, SqliteTransaction tx, Run run, long floor)
+    private static void UpdatePlaybackFloor(SqliteConnection db, SqliteTransaction tx, Run run, long floor, bool forwardOnly = false)
     {
         using var command = Command(db, run, """
             UPDATE live_queue_servers SET playback_floor = $sequence, resume_id = NULL
-            WHERE server = $server AND account_scope = $account AND owner = $owner AND stopped = 0;
-            """, ("$sequence", floor));
+            WHERE server = $server AND account_scope = $account AND owner = $owner AND stopped = 0
+              AND ($forwardOnly = 0 OR playback_floor < $sequence);
+            """, ("$sequence", floor), ("$forwardOnly", forwardOnly ? 1 : 0));
         command.Transaction = tx;
         command.ExecuteNonQuery();
     }

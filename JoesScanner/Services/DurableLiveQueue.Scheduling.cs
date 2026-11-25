@@ -17,6 +17,8 @@ public sealed partial class DurableLiveQueue
         {
             using var transaction = db.BeginTransaction(deferred: true);
             var choices = new List<Selection>();
+            // The caller scopes visible replays. Only pending rows need the
+            // SQLite audio filter, since completed payloads can be compacted.
             var replayClause = visibleReplays is { Count: > 0 }
                 ? $"OR (q.disposition = 1 AND q.recovery_backlog = 0 AND q.arrival_sequence IN ({string.Join(", ", Enumerable.Range(0, visibleReplays.Count).Select(i => "$replay" + i))}))"
                 : string.Empty;
@@ -28,7 +30,7 @@ public sealed partial class DurableLiveQueue
                     SELECT q.recorded_utc, q.payload, q.origin, q.protected, q.account_scope, q.first_owner, q.arrival_sequence,
                            q.recording_id, q.disposition, q.audio_revision, q.audio_recovered, coalesce(q.recording_id = s.resume_id, 0)
                     FROM live_queue_recordings q JOIN live_queue_servers s USING (server, account_scope)
-                    WHERE {EligibleRecording} AND q.arrival_sequence > $after AND (({ReadyPending}) {replayClause}) {source}
+                    WHERE {EligibleRecording} AND q.arrival_sequence > $after AND (({ReadyPending} {source}) {replayClause})
                     ORDER BY q.arrival_sequence LIMIT $limit;
                     """, ("$after", after), ("$limit", limit));
                 AddAutomaticAudioParameters(query, automatic);

@@ -50,16 +50,12 @@ public partial class MainViewModel
     {
         await _pendingFilterProcessing.WaitAsync(token);
         var sourceRevision = _automaticAudioRevision;
-        var scopes = traversal == null ? AutomaticQueueScopes() : LiveQueueScopes();
-        if (traversal?.ServerId is { } selected)
-            scopes = scopes.Where(scope => scope.ServerId == selected).ToArray();
-        var next = await _scheduler.SelectAsync(_durableQueue, scopes, LocalRecoveryFloor, _livePlaybackPreferences,
-            token, traversal?.Position, traversal?.ReplaysAfter(traversal.Position), traversal == null ? _automaticAudioFilter : null);
+        var next = await ReadNextLiveRecordingAsync(token, traversal);
         if (version != _queuePlaybackVersion || token.IsCancellationRequested || _playbackRequests.HasManualSelection ||
             sourceRevision != _automaticAudioRevision || next == null || !IsCurrentLiveScope(next.Row.Scope))
             return null;
 
-        var card = ResolveDurableCard(next.Row.Scope, next.Row.Row);
+        var card = ResolveLivePlaybackCard(next, traversal);
         card.IsCompletedReplay = next.Row.Row.IsCompletedReplay;
         // Keep filtered and stale candidates out of the native owner even when
         // a rule changes after the journal snapshot has been read.
