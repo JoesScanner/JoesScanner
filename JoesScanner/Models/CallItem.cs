@@ -22,6 +22,7 @@ namespace JoesScanner.Models
         private string _backendId = string.Empty;
         internal LiveCallState? LiveState { get; init; }
         internal DateTimeOffset? RecordingTimeUtc { get; init; }
+        internal int? HistoryArchiveOffset { get; init; }
         internal string? RecordingServer { get; init; }
         internal RecordingAccessContext? RecordingAccess { get; set; }
         internal bool IsRecordingNotification { get; init; }

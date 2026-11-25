@@ -2,7 +2,6 @@ using System.Collections.ObjectModel;
 using JoesScanner.Helpers;
 using JoesScanner.Models;
 using JoesScanner.Services;
-using Microsoft.Maui.ApplicationModel;
 
 namespace JoesScanner.ViewModels;
 
@@ -10,15 +9,12 @@ public sealed partial class HistoryViewModel
 {
     private readonly MainViewModel _mainViewModel;
     private readonly HistorySearchPreferences _historyPreferences;
-    private readonly LivePlaybackRequests _historySearchRequests = new();
     private readonly LivePlaybackRequests _historyLookupRequests = new();
     private ScannerConnectionRow? _selectedRecorder;
     private HistoryRecorder? _historyRecorder;
-    private HistorySearchResult? _historyResults;
     private Task? _lookupTask;
     private bool _lookupsLoaded;
     private bool _restoringHistoryFilters;
-    private bool _isPaging;
     private IReadOnlyList<HistoryLookupItem> _selectedTalkgroups = [];
 
     public ObservableCollection<ScannerConnectionRow> HistoryRecorders => _mainViewModel.ScannerConnections;
@@ -29,12 +25,6 @@ public sealed partial class HistoryViewModel
     }
 
     internal HistoryRecorder? CurrentHistoryRecorder => _historyRecorder;
-
-    public bool CanSearch => OwnsHistoryPage(_historyOwnership) && !IsLoading && !_isPaging &&
-        _historyRecorder is { } recorder && CurrentFilters().IsValidFor(recorder.Id);
-    public bool HasHistoryResults => _historyResults != null && Calls.Count != 0;
-    public bool CanLoadMoreOlder => HasHistoryResults && _historyResults!.HasMore && !IsLoading && !_isPaging &&
-        OwnsHistoryPage(_historyOwnership);
 
     public HistoryLookupItem? SelectedReceiver => _selectedReceiver;
     public HistoryLookupItem? SelectedSite => _selectedSite;
@@ -72,7 +62,7 @@ public sealed partial class HistoryViewModel
         var recorder = row == null ? null : new HistoryRecorder(row.Id, row.Endpoint);
         if (ReferenceEquals(_selectedRecorder, row) && recorder == _historyRecorder)
         {
-            if (recorder == null)
+            if (recorder == null || _historyResults is { } results && !HasHistoryRecorderAccess(results.Snapshot.Access))
                 ClearSearchResults();
             return;
         }
@@ -139,10 +129,11 @@ public sealed partial class HistoryViewModel
         OnPropertyChanged(nameof(CanPickDateRange));
     }
 
-    private void OnHistoryAccountChanged(object? sender, EventArgs args) => MainThread.BeginInvokeOnMainThread(() =>
+    private void OnHistoryAccountChanged(object? sender, EventArgs args) => _ = RunOnMainThreadAsync(() =>
     {
         if (_historyRecorder is not { } recorder ||
-            !HostedServerRules.RequiresApiFirewallCredentials(_settingsService, recorder.Endpoint))
+            !(_historyResults?.Snapshot.Access.Protected == true ||
+              HostedServerRules.RequiresApiFirewallCredentials(_settingsService, recorder.Endpoint)))
             return;
         RetireHistorySearchRequests();
         Receivers.Clear();
@@ -208,7 +199,7 @@ public sealed partial class HistoryViewModel
         if (_restoringHistoryFilters || _historyRecorder is not { } recorder)
             return;
 
-        _historySearchRequests.RetireCurrent();
+        ClearSearchResults();
         try
         {
             _historyPreferences.SaveFilters(recorder.Id, new(CurrentDates(), SavedHistoryChoice.From(_selectedReceiver),
@@ -218,7 +209,6 @@ public sealed partial class HistoryViewModel
         {
             AppLog.Add(() => $"History filters could not be saved ({ex.GetType().Name}).");
         }
-        ClearSearchResults();
     }
 
     private void NotifyLookupSelections()
@@ -285,111 +275,16 @@ public sealed partial class HistoryViewModel
 
     private void RetireHistorySearchRequests()
     {
-        _historySearchRequests.RetireCurrent();
+        RetireHistoryPageRequest();
         _historyLookupRequests.RetireCurrent();
         _lookupTask = null;
-        _isPaging = false;
-        IsLoading = false;
     }
 
-    private void ClearSearchResults()
+    private void ClearHistoryResultAnnotations()
     {
-        if (OwnsHistoryPage(_historyOwnership))
-            StopHistoryPlayback();
-        _historyResults = null;
-        _activeCall = null;
-        OnPropertyChanged(nameof(ActiveCall));
-        Calls.Clear();
         AddressAlerts.Clear();
         _hiddenAddressAlerts.Clear();
         IsDownloadRangeSelecting = false;
         DownloadRangePrompt = string.Empty;
-        IsLoading = false;
-        _isPaging = false;
-        var recorder = _historyRecorder;
-        StatusText = recorder == null ? "Add a recorder in Settings to search History." :
-            CurrentFilters().IsValidFor(recorder.Id) ? string.Empty : "Select a site, receiver, or talkgroup to search.";
-        RefreshCommandStates();
     }
-
-    private Task SearchAsync() => ReadHistoryPageAsync(loadMore: false);
-
-    private Task LoadMoreOlderAsync() => ReadHistoryPageAsync(loadMore: true);
-
-    private async Task ReadHistoryPageAsync(bool loadMore)
-    {
-        if (_historyOwnership is not { } lease || _historyRecorder is not { } recorder ||
-            !(loadMore ? CanLoadMoreOlder : CanSearch))
-            return;
-
-        var previous = _historyResults;
-        var filters = CurrentFilters();
-        var dates = CurrentDates();
-        if (!loadMore)
-            ClearSearchResults();
-
-        var request = _historySearchRequests.Begin(manual: false, lease.Token);
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(request.Token);
-        deadline.CancelAfter(TimeSpan.FromSeconds(40));
-        bool OwnsRequest() => request.CanContinue && OwnsHistoryPage(lease) && recorder == _historyRecorder;
-
-        _isPaging = loadMore;
-        IsLoading = !loadMore;
-        if (!_isQueuePlaybackRunning)
-            StatusText = loadMore ? "Loading older recordings…" : "Searching…";
-        RefreshCommandStates();
-
-        try
-        {
-            var page = await (loadMore ? _callHistoryService.LoadMoreAsync(previous!, deadline.Token)
-                : _callHistoryService.SearchAsync(recorder, filters, dates, deadline.Token)).WaitAsync(deadline.Token)
-                .ConfigureAwait(false);
-
-            await RunOnMainThreadAsync(() =>
-            {
-                if (!OwnsRequest() || deadline.IsCancellationRequested)
-                    return;
-                _historyResults = page;
-                HistoryResultOrder.Add(Calls, page.Calls);
-                StartAddressDetectionForHistoryCalls(page.Calls);
-                RefreshHistoryDateAccess();
-                if (!_isQueuePlaybackRunning)
-                    StatusText = HistoryResultStatus();
-            }).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (!OwnsRequest()) { }
-        catch (Exception ex)
-        {
-            await RunOnMainThreadAsync(() =>
-            {
-                if (!OwnsRequest())
-                    return;
-                if (ex is HistoryResultsChangedException && previous != null)
-                    _historyResults = new(previous.Snapshot, previous.Cursor, [], false);
-                StatusText = ex switch
-                {
-                    OperationCanceledException => "History request timed out.",
-                    ArgumentException or RecordingAccessException or FirewallAuthenticationException or HistoryResultsChangedException => ex.Message,
-                    _ => "History request failed. Try again."
-                };
-            }).ConfigureAwait(false);
-        }
-        finally
-        {
-            await RunOnMainThreadAsync(() =>
-            {
-                if (OwnsRequest())
-                {
-                    IsLoading = false;
-                    _isPaging = false;
-                    RefreshCommandStates();
-                }
-                request.Dispose();
-            }).ConfigureAwait(false);
-        }
-    }
-
-    private string HistoryResultStatus() => Calls.Count == 0 ? "No recordings match these filters." :
-        $"{Calls.Count} of {_historyResults?.TotalMatches ?? Calls.Count} recordings" +
-        (_historyResults?.LimitedToLast24Hours == true ? " · Last 24 hours" : string.Empty);
 }

@@ -11,7 +11,10 @@ internal static class HistoryResultOrder
         if (byTime != 0)
             return byTime;
 
-        return string.CompareOrdinal(second.BackendId, first.BackendId);
+        // The recorder's archive order is stable across the snapshot and
+        // disambiguates calls with the same timestamp, including page ties.
+        var byArchive = Nullable.Compare(first.HistoryArchiveOffset, second.HistoryArchiveOffset);
+        return byArchive != 0 ? byArchive : string.CompareOrdinal(second.BackendId, first.BackendId);
     }
 
     // Most pages append. Imported recordings can have timestamps out of file

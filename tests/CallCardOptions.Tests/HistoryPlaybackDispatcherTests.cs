@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Threading.Channels;
 using JoesScanner.Models;
 using JoesScanner.Services;
 using JoesScanner.ViewModels;
@@ -13,6 +14,11 @@ internal static class HistoryPlaybackDispatcherTests
         await ContendedPlaybackAndOlderResultsAsync();
         await StopWithPendingNotificationsAsync();
         await NavigateDuringPlaybackStartupAsync();
+        await SelectedPlaybackSkipsFailedRecordingsAsync();
+        await PreviousSharesTheOlderPageAsync();
+        await LatestPreparationWinsAsync();
+        await OlderPageFailuresPreservePlaybackAsync();
+        await ScopeChangesRetirePendingWorkAsync();
     }
 
     private static async Task ContendedPlaybackAndOlderResultsAsync()
@@ -157,6 +163,304 @@ internal static class HistoryPlaybackDispatcherTests
         finishCurrent.SetResult();
         await current.WaitAsync(Timeout);
         Console.WriteLine("PASS Navigation cancels History startup waiting for Live teardown and rapid reentry preserves new playback state");
+    }
+
+    private static async Task SelectedPlaybackSkipsFailedRecordingsAsync()
+    {
+        using var dispatcher = new HistoryTestDispatcher();
+        var ownership = new PlaybackOwnership();
+        var player = new HandoffAudio();
+        var history = new HistoryViewModel(ownership, player) { RateForTest = 2 };
+        await OpenAsync(dispatcher, history);
+        var newest = history.MakeCallForTest("newest", -1);
+        var corrupt = history.MakeCallForTest("corrupt", -2);
+        var unavailable = history.MakeCallForTest("unavailable", -3);
+        var first = history.MakeCallForTest("selected", -4);
+        var unused = history.MakeCallForTest("older", -5);
+        var preparations = new ConcurrentQueue<string>();
+        history.PrepareForTest = (call, _) =>
+        {
+            preparations.Enqueue(call.BackendId);
+            return call == unavailable ? Task.FromException<HistoryAudioFile>(new IOException("No audio.")) :
+                Task.FromResult(new HistoryAudioFile(call.BackendId));
+        };
+        player.Playing = (id, _) => id == "corrupt" ?
+            Task.FromException(new InvalidDataException("Cannot decode.")) : Task.CompletedTask;
+        await dispatcher.DispatchAsync(() => history.SearchForTestAsync([newest, corrupt, unavailable, first, unused], true)).Unwrap();
+        await history.SelectForTestAsync(first).WaitAsync(Timeout);
+
+        await dispatcher.DispatchAsync(() =>
+        {
+            LiveHistoryHandoffTests.Check(player.Started.SequenceEqual(["selected", "corrupt", "newest"]) &&
+                player.Completed.SequenceEqual(["selected", "newest"]) && player.Rates.All(rate => rate == 2) &&
+                preparations.SequenceEqual(["selected", "unavailable", "corrupt", "newest"]) &&
+                history.PagesForTest.PageRequests == 0 && ReferenceEquals(history.ActiveCallForTest, newest) &&
+                !history.IsRunningForTest && history.CallsForTest.All(call => !call.IsPlaying) && ownership.Live == null,
+                "Selected History playback must skip failed clips once, reach the newest item and stop inside History.");
+        });
+        Console.WriteLine("PASS Selected History playback advances at the chosen rate, skips failures once, and stops at the newest result");
+    }
+
+    private static async Task PreviousSharesTheOlderPageAsync()
+    {
+        using var dispatcher = new HistoryTestDispatcher();
+        var player = new HandoffAudio();
+        var starts = HoldNativePlayback(player);
+        var history = new HistoryViewModel(new PlaybackOwnership(), player);
+        await OpenAsync(dispatcher, history);
+        var newest = history.MakeCallForTest("newest", -1);
+        var oldest = history.MakeCallForTest("row_10", -2, archiveOffset: 249);
+        var older = history.MakeCallForTest("row_9", -2, archiveOffset: 250);
+        var last = history.MakeCallForTest("row_8", -3);
+        var response = new TaskCompletionSource<HistorySearchResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        HistorySearchResult? observed = null;
+        history.PagesForTest.Older = (prior, _) => { observed = prior; return response.Task; };
+
+        var cache = Directory.CreateTempSubdirectory("JoesScanner.HistoryPlayback-");
+        try
+        {
+            var acquired = new ConcurrentQueue<string>();
+            history.PrepareForTest = (call, _) =>
+            {
+                acquired.Enqueue(call.BackendId);
+                var path = Path.Combine(cache.FullName, Guid.NewGuid().ToString("N") + ".wav");
+                File.WriteAllBytes(path, [1, 2, 3]);
+                return Task.FromResult(new HistoryAudioFile(call.BackendId, path, 3));
+            };
+            await dispatcher.DispatchAsync(() => history.SearchForTestAsync([newest, oldest], true)).Unwrap();
+            var original = history.SelectForTestAsync(oldest);
+            await ExpectStartAsync(starts, "row_10");
+            var manual = await dispatcher.DispatchAsync(history.LoadOlderForTestAsync);
+            var crossing = history.PreviousForTestAsync();
+            await dispatcher.DispatchAsync(() =>
+            {
+                LiveHistoryHandoffTests.Check(history.PagesForTest.PageRequests == 1 && oldest.IsPlaying &&
+                    ReferenceEquals(history.ActiveCallForTest, oldest) && history.CallsForTest.Count == 2,
+                    "Previous must share the pending Load More and keep the current card playing while it waits.");
+            });
+            response.SetResult(new(observed!.Snapshot, observed.Cursor, [older, last], false));
+            await manual.WaitAsync(Timeout);
+            await ExpectStartAsync(starts, "row_9");
+            await original.WaitAsync(Timeout);
+            await dispatcher.DispatchAsync(() =>
+            {
+                LiveHistoryHandoffTests.Check(history.CallsForTest.SequenceEqual([newest, oldest, older, last]) &&
+                    ReferenceEquals(history.ActiveCallForTest, older) && older.IsPlaying && !oldest.IsPlaying,
+                    "The adjacent older recording must use stable ordering and existing card identities for tied timestamps.");
+            });
+
+            var newer = history.NextForTestAsync();
+            await ExpectStartAsync(starts, "row_10");
+            await crossing.WaitAsync(Timeout);
+            var again = history.PreviousForTestAsync();
+            await ExpectStartAsync(starts, "row_9");
+            await newer.WaitAsync(Timeout);
+            await history.StopForTestAsync();
+            await again.WaitAsync(Timeout);
+            await history.OnPageClosedAsync();
+            LiveHistoryHandoffTests.Check(acquired.SequenceEqual(["row_10", "row_9"]) &&
+                history.PagesForTest.PageRequests == 1 && cache.GetFiles().Length == 0,
+                "Adjacent navigation must reuse the recent prepared audio and release temporary files on close.");
+        }
+        finally
+        {
+            cache.Delete(recursive: true);
+        }
+        Console.WriteLine("PASS Previous crosses a shared older page during playback, then Next and Previous preserve tie order and reuse audio");
+    }
+
+    private static async Task LatestPreparationWinsAsync()
+    {
+        using var dispatcher = new HistoryTestDispatcher();
+        var player = new HandoffAudio();
+        var starts = HoldNativePlayback(player);
+        var history = new HistoryViewModel(new PlaybackOwnership(), player);
+        await OpenAsync(dispatcher, history);
+        var active = history.MakeCallForTest("active", -1);
+        var slow = history.MakeCallForTest("slow", -2);
+        var bad = history.MakeCallForTest("bad", -3);
+        var latest = history.MakeCallForTest("latest", -4);
+        var slowStarted = LiveHistoryHandoffTests.Signal();
+        var late = new TaskCompletionSource<HistoryAudioFile>(TaskCreationOptions.RunContinuationsAsynchronously);
+        CancellationToken slowToken = default;
+        history.PrepareForTest = (call, token) =>
+        {
+            if (call == slow)
+            {
+                slowToken = token;
+                slowStarted.SetResult();
+                return late.Task;
+            }
+            if (call == bad)
+                return Task.FromException<HistoryAudioFile>(new IOException("Failed to download."));
+            return Task.FromResult(new HistoryAudioFile(call.BackendId));
+        };
+        await dispatcher.DispatchAsync(() => history.SearchForTestAsync([active, slow, bad, latest], false)).Unwrap();
+        var original = history.SelectForTestAsync(active);
+        await ExpectStartAsync(starts, "active");
+        var old = history.SelectForTestAsync(slow);
+        await slowStarted.Task.WaitAsync(Timeout);
+        await history.SelectForTestAsync(bad).WaitAsync(Timeout);
+        await dispatcher.DispatchAsync(() =>
+        {
+            LiveHistoryHandoffTests.Check(slowToken.IsCancellationRequested && active.IsPlaying &&
+                ReferenceEquals(history.ActiveCallForTest, active) && player.Started.SequenceEqual(["active"]) &&
+                history.StatusForTest.Contains("unavailable", StringComparison.OrdinalIgnoreCase),
+                "A failed replacement must leave the current recording selected and audible.");
+        });
+
+        var selected = history.SelectForTestAsync(latest);
+        await ExpectStartAsync(starts, "latest");
+        late.SetResult(new("slow"));
+        await Task.WhenAll(original, old).WaitAsync(Timeout);
+        LiveHistoryHandoffTests.Check(player.Started.SequenceEqual(["active", "latest"]),
+            "A late obsolete preparation must never enter the native player.");
+        await history.StopForTestAsync();
+        await selected.WaitAsync(Timeout);
+        Console.WriteLine("PASS History preparations follow newest-request-wins and leave current playback intact when preparation fails");
+    }
+
+    private static async Task OlderPageFailuresPreservePlaybackAsync()
+    {
+        using var dispatcher = new HistoryTestDispatcher();
+        var player = new HandoffAudio();
+        var starts = HoldNativePlayback(player);
+        var history = new HistoryViewModel(new PlaybackOwnership(), player);
+        await OpenAsync(dispatcher, history);
+        var active = history.MakeCallForTest("oldest", -1);
+        var older = history.MakeCallForTest("older", -2);
+        await dispatcher.DispatchAsync(() => history.SearchForTestAsync([active], true)).Unwrap();
+        var playing = history.SelectForTestAsync(active);
+        await ExpectStartAsync(starts, "oldest");
+
+        HistorySearchResult? failedCursor = null;
+        history.PagesForTest.Older = (previous, _) =>
+        {
+            failedCursor = previous;
+            return Task.FromException<HistorySearchResult>(new HttpRequestException("Temporary recorder error."));
+        };
+        await history.PreviousForTestAsync().WaitAsync(Timeout);
+        await dispatcher.DispatchAsync(() =>
+        {
+            LiveHistoryHandoffTests.Check(history.CallsForTest.SequenceEqual([active]) && active.IsPlaying &&
+                history.CanLoadMoreOlder && history.StatusForTest.Contains("Try again", StringComparison.Ordinal),
+                "An older-page failure must preserve the active card and keep retry available.");
+        });
+        history.PagesForTest.Older = (previous, _) =>
+        {
+            LiveHistoryHandoffTests.Check(ReferenceEquals(previous, failedCursor), "Retry must resume the same snapshot and cursor.");
+            return Task.FromResult(new HistorySearchResult(previous.Snapshot, previous.Cursor, [older], true));
+        };
+        await dispatcher.DispatchAsync(history.LoadOlderForTestAsync).Unwrap().WaitAsync(Timeout);
+        LiveHistoryHandoffTests.Check(active.IsPlaying && history.CallsForTest.SequenceEqual([active, older]),
+            "A successful manual retry must append without changing playback.");
+        var olderPlayback = history.PreviousForTestAsync();
+        await ExpectStartAsync(starts, "older");
+        await playing.WaitAsync(Timeout);
+        history.PagesForTest.Older = (_, _) =>
+            Task.FromException<HistorySearchResult>(new HistoryResultsChangedException());
+        await history.PreviousForTestAsync().WaitAsync(Timeout);
+        await dispatcher.DispatchAsync(() =>
+        {
+            LiveHistoryHandoffTests.Check(older.IsPlaying && ReferenceEquals(history.ActiveCallForTest, older) &&
+                history.CallsForTest.SequenceEqual([active, older]) && !history.CanLoadMoreOlder &&
+                history.StatusForTest.Contains("Start a new search", StringComparison.Ordinal),
+                "An invalidated archive cursor must require a new search and leave existing audio alone.");
+        });
+        await history.StopForTestAsync();
+        await olderPlayback.WaitAsync(Timeout);
+        Console.WriteLine("PASS History paging errors preserve results, retry the same cursor, and flag archive changes without replacing audio");
+    }
+
+    private static async Task ScopeChangesRetirePendingWorkAsync()
+    {
+        foreach (var change in new[] { "recorder", "filters", "account", "stop", "tab" })
+        {
+            using var dispatcher = new HistoryTestDispatcher();
+            var ownership = new PlaybackOwnership();
+            var player = new HandoffAudio();
+            var starts = HoldNativePlayback(player);
+            var history = new HistoryViewModel(ownership, player);
+            await OpenAsync(dispatcher, history);
+            var pending = history.MakeCallForTest("preparing", -1);
+            var active = history.MakeCallForTest("old", -2);
+            var delayedRow = history.MakeCallForTest("late page", -3);
+            await dispatcher.DispatchAsync(() => history.SearchForTestAsync([pending, active], true, hosted: change == "account")).Unwrap();
+            var playing = history.SelectForTestAsync(active);
+            await ExpectStartAsync(starts, "old");
+
+            var page = new TaskCompletionSource<HistorySearchResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var audio = new TaskCompletionSource<HistoryAudioFile>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var preparationStarted = LiveHistoryHandoffTests.Signal();
+            CancellationToken pagingToken = default;
+            CancellationToken preparationToken = default;
+            HistorySearchResult? pageStart = null;
+            history.PagesForTest.Older = (initial, token) =>
+            {
+                pagingToken = token;
+                pageStart = initial;
+                return page.Task;
+            };
+            history.PrepareForTest = (call, token) =>
+            {
+                if (call != pending)
+                    return Task.FromResult(new HistoryAudioFile(call.BackendId));
+                preparationToken = token;
+                preparationStarted.SetResult();
+                return audio.Task;
+            };
+            var paging = await dispatcher.DispatchAsync(history.LoadOlderForTestAsync);
+            var preparing = history.SelectForTestAsync(pending);
+            await preparationStarted.Task.WaitAsync(Timeout);
+
+            switch (change)
+            {
+                case "recorder": await dispatcher.DispatchAsync(history.ChangeRecorderForTest); break;
+                case "filters": await dispatcher.DispatchAsync(history.ChangeFiltersForTest); break;
+                case "account": await dispatcher.DispatchAsync(history.ChangeAccountForTest); break;
+                case "stop": await history.StopForTestAsync(); break;
+                case "tab":
+                    await history.OnPageClosedAsync();
+                    LiveHistoryHandoffTests.Check(ownership.Live != null, "Closing History must return ownership to Live.");
+                    await dispatcher.DispatchAsync(history.OpenForTest);
+                    break;
+            }
+            await Task.WhenAll(paging, playing).WaitAsync(Timeout);
+            var replacementCall = history.MakeCallForTest("replacement", -1);
+            await dispatcher.DispatchAsync(() => history.SearchForTestAsync([replacementCall], false)).Unwrap();
+            var replacement = history.SelectForTestAsync(replacementCall);
+            await ExpectStartAsync(starts, "replacement");
+            page.SetResult(new(pageStart!.Snapshot, pageStart.Cursor, [delayedRow], false));
+            audio.SetResult(new("preparing"));
+            await preparing.WaitAsync(Timeout);
+            await dispatcher.DispatchAsync(() =>
+            {
+                LiveHistoryHandoffTests.Check(pagingToken.IsCancellationRequested && preparationToken.IsCancellationRequested &&
+                    history.CallsForTest.SequenceEqual([replacementCall]) && replacementCall.IsPlaying &&
+                    player.Started.SequenceEqual(["old", "replacement"]) && ownership.Live == null,
+                    $"A {change} must retire both requests and fence late results from the current History search and player.");
+            });
+            await history.StopForTestAsync();
+            await replacement.WaitAsync(Timeout);
+        }
+        Console.WriteLine("PASS Recorder, filter, account, Stop, and tab changes fence late History pages and audio preparations");
+    }
+
+    private static ChannelReader<string> HoldNativePlayback(HandoffAudio player)
+    {
+        var starts = Channel.CreateUnbounded<string>();
+        player.Playing = (id, token) =>
+        {
+            starts.Writer.TryWrite(id);
+            return Task.Delay(System.Threading.Timeout.InfiniteTimeSpan, token);
+        };
+        return starts.Reader;
+    }
+
+    private static async Task ExpectStartAsync(ChannelReader<string> starts, string expected)
+    {
+        var actual = await starts.ReadAsync().AsTask().WaitAsync(Timeout);
+        LiveHistoryHandoffTests.Check(actual == expected, $"Expected {expected}, got {actual}.");
     }
 
     private static Task OpenAsync(HistoryTestDispatcher dispatcher, HistoryViewModel history) =>

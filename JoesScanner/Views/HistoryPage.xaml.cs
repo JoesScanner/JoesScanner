@@ -21,6 +21,8 @@ namespace JoesScanner.Views
         private int _appearanceGeneration;
         private bool _isAppearing;
         private bool _isDropdownOpen;
+        private CallItem? _firstVisibleHistoryCard;
+        private (CallItem Card, int Index)? _historyScrollAnchor;
 
         private bool _addressAlertHandlersAttached;
         public CallCardOptionsService CallCardOptions { get; }
@@ -63,6 +65,8 @@ namespace JoesScanner.Views
 
             _viewModel.ScrollRequested -= OnScrollRequested;
             _viewModel.ScrollRequested += OnScrollRequested;
+            _viewModel.OlderHistoryResultsAdding += CaptureHistoryScrollAnchor;
+            _viewModel.OlderHistoryResultsAdded += RestoreHistoryScrollAnchor;
 
             try
             {
@@ -118,6 +122,9 @@ namespace JoesScanner.Views
             _isAppearing = false;
             Interlocked.Increment(ref _appearanceGeneration);
             _viewModel.ScrollRequested -= OnScrollRequested;
+            _viewModel.OlderHistoryResultsAdding -= CaptureHistoryScrollAnchor;
+            _viewModel.OlderHistoryResultsAdded -= RestoreHistoryScrollAnchor;
+            _historyScrollAnchor = null;
 
             try
             {
@@ -129,6 +136,29 @@ namespace JoesScanner.Views
             }
         }
 
+
+        private void OnHistoryResultsScrolled(object? sender, ItemsViewScrolledEventArgs args)
+        {
+            if (!_isAppearing)
+                return;
+            var index = args.FirstVisibleItemIndex;
+            _firstVisibleHistoryCard = index >= 0 && index < _viewModel.Calls.Count ? _viewModel.Calls[index] : null;
+        }
+
+        private void CaptureHistoryScrollAnchor()
+        {
+            var card = _firstVisibleHistoryCard;
+            var index = card == null ? -1 : _viewModel.Calls.IndexOf(card);
+            _historyScrollAnchor = card != null && index >= 0 ? (card, index) : null;
+        }
+
+        private void RestoreHistoryScrollAnchor()
+        {
+            var anchor = _historyScrollAnchor;
+            _historyScrollAnchor = null;
+            if (anchor is { } located && _viewModel.Calls.IndexOf(located.Card) > located.Index)
+                OnScrollRequested(located.Card, ScrollToPosition.Start);
+        }
 
         private void OnScrollRequested(CallItem call, ScrollToPosition position)
         {

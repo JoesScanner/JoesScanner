@@ -122,7 +122,7 @@ internal static partial class MobileRecoveryTests
         var clock = new FixedClock(Now);
         var recorder = new HistoryRecorder(Guid.NewGuid(), "https://archive.example");
         var archive = Enumerable.Range(1, 357).Reverse()
-            .Select(index => ("row_" + index.ToString("D4"), Now.AddSeconds(index - 500))).ToList();
+            .Select(index => ($"row_{index}", Now.AddSeconds(index / 3 - 500))).ToList();
         var expected = archive.Select(row => row.Item1).ToArray();
         archive.Insert(197, archive[196]);
         var requests = new List<HistoryRequest>();

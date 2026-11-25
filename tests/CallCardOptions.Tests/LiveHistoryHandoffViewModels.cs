@@ -5,6 +5,13 @@ using JoesScanner.Services;
 namespace JoesScanner.Services
 {
     internal sealed class RecordingAccessException(string message) : InvalidOperationException(message);
+    internal sealed class FirewallAuthenticationException(string message) : HttpRequestException(message);
+    internal readonly record struct RecorderRequestScope(Uri Endpoint, Guid? ServerId = null);
+
+    internal static class ScannerConnectionStore
+    {
+        internal static string? Normalize(string url) => RecordingStorageReference.ServerKey(url);
+    }
 }
 
 // These partial fixtures provide the UI state and the test-controlled I/O
@@ -395,19 +402,22 @@ namespace JoesScanner.ViewModels
 
     public sealed partial class HistoryViewModel : BindableObject
     {
+        private static readonly DateTimeOffset HistoryTime = new(2026, 11, 18, 18, 0, 0, TimeSpan.Zero);
         private readonly IAudioPlaybackService _audioPlaybackService;
-        private readonly ObservableCollection<CallItem> Calls = [new CallItem { BackendId = "history" }];
+        private readonly HistoryPageTransport _callHistoryService = new();
+        private readonly ObservableCollection<CallItem> Calls = new();
+        private HistoryRecorder? _historyRecorder = new(Guid.NewGuid(), "https://history.example");
+        private long _accountVersion = 1;
         private bool _isQueuePlaybackRunning;
-
         private CallItem? _activeCall;
         private string _statusText = string.Empty;
+
         private CallItem? ActiveCall => _activeCall;
         private bool IsHistoryPlaybackRunning => _isQueuePlaybackRunning;
         private bool IsHistoryMediaButtonsEnabled => _isQueuePlaybackRunning || Calls.Count > 0;
-        private bool IsPlayEnabled => !_isQueuePlaybackRunning;
-        private bool IsStopEnabled => _isQueuePlaybackRunning;
-        private bool ShowHistoryPlayButton => IsPlayEnabled;
-        private bool ShowHistoryStopButton => IsStopEnabled;
+        private bool ShowHistoryPlayButton => !ShowHistoryStopButton;
+        private bool ShowHistoryStopButton => _isQueuePlaybackRunning || _historySelectionRequests.HasManualSelection;
+        private bool IsLoading { get; set; }
         private string StatusText
         {
             get => _statusText;
@@ -419,47 +429,122 @@ namespace JoesScanner.ViewModels
         }
 
         internal ObservableCollection<CallItem> CallsForTest => Calls;
+        internal CallItem? ActiveCallForTest => ActiveCall;
+        internal string StatusForTest => StatusText;
         internal bool IsRunningForTest => IsHistoryPlaybackRunning;
+        internal double RateForTest { get; set; } = 1;
+        internal Func<CallItem, CancellationToken, Task<HistoryAudioFile>>? PrepareForTest { get; set; }
+        internal HistoryPageTransport PagesForTest => _callHistoryService;
 
         internal HistoryViewModel(PlaybackOwnership ownership, HandoffAudio player)
         {
             _playbackOwnership = ownership;
             _audioPlaybackService = player;
+            var first = MakeCallForTest("history", -1);
+            _historyResults = new(NewSnapshot(false), HistoryPageCursor.Start, [first], false);
+            Calls.Add(first);
             Calls.CollectionChanged += OnHistoryCallsChanged;
         }
 
         internal void OpenForTest() => TakeHistoryPlaybackOwnership();
-        internal Task PlayForTestAsync() => PlayHistoryQueueAsync(() => Calls.Count - 1);
+        internal Task PlayForTestAsync() => SelectHistoryRecordingAsync(HistoryNavigation.Play);
+        internal Task SelectForTestAsync(CallItem call) => SelectHistoryRecordingAsync(HistoryNavigation.Recording, call);
+        internal Task PreviousForTestAsync() => SelectHistoryRecordingAsync(HistoryNavigation.Previous);
+        internal Task NextForTestAsync() => SelectHistoryRecordingAsync(HistoryNavigation.Next);
         internal Task StopForTestAsync() => StopAsync();
+        internal Task LoadOlderForTestAsync() => LoadMoreOlderAsync();
 
-        private static void RetireHistorySearchRequests() { }
-
-        private async Task<PlaybackOutcome> PlayAudioAsync(CallItem item, double rate, PlaybackOwnership.Lease lease,
-            LivePlaybackRequests.Request request)
+        internal Task SearchForTestAsync(CallItem[] calls, bool hasMore, bool hosted = false)
         {
-            var completion = new PlaybackCompletion();
-            return await PlaybackAttempt.RunAsync(
-                () => PlayHistoryOnDeviceAsync(lease, item.BackendId, rate, request.Token, completion),
-                request.Token, failure => throw new InvalidOperationException("History handoff failed.", failure), completion);
+            var snapshot = NewSnapshot(hosted);
+            _callHistoryService.Initial = new(snapshot, HistoryPageCursor.Start, calls, hasMore);
+            return SearchAsync();
         }
 
-        private static double GetPlaybackRate() => 1;
+        internal CallItem MakeCallForTest(string id, int seconds, int? archiveOffset = null) =>
+            new()
+            {
+                BackendId = id,
+                ServerId = _historyRecorder!.Id,
+                RecordingTimeUtc = HistoryTime.AddSeconds(seconds),
+                HistoryArchiveOffset = archiveOffset
+            };
+
+        internal void ChangeRecorderForTest()
+        {
+            RetireHistorySearchRequests();
+            _historyRecorder = new(Guid.NewGuid(), "https://other.example");
+            ClearSearchResults();
+        }
+
+        internal void ChangeFiltersForTest() => ClearSearchResults();
+
+        internal void ChangeAccountForTest()
+        {
+            _accountVersion++;
+            RetireHistorySearchRequests();
+            ClearSearchResults();
+        }
+
+        private HistorySearchSnapshot NewSnapshot(bool hosted) =>
+            new(new(_historyRecorder!, hosted, hosted ? "test" : null, hosted ? _accountVersion : null),
+                CurrentFilters(), HistoryTime.AddDays(-1), HistoryTime, hosted ? 2 : null);
+
+        private HistorySearchFilters CurrentFilters() => new()
+        {
+            Site = new() { Value = "test-site", RecorderId = _historyRecorder?.Id }
+        };
+
+        private static HistoryDateRange CurrentDates() =>
+            new(new DateOnly(2026, 11, 18), new DateOnly(2026, 11, 18), TimeSpan.Zero);
+
+        private void RetireHistorySearchRequests() => RetireHistoryPageRequest();
+        private static void ClearHistoryResultAnnotations() { }
+        private static void RefreshHistoryDateAccess() { }
+        private static void StartAddressDetectionForHistoryCalls(IReadOnlyList<CallItem> calls) { }
+
+        private void RequireHistoryRecordingAccess(HistorySearchSnapshot snapshot, CallItem call)
+        {
+            if (snapshot.Access.AccountVersion is { } version && version != _accountVersion)
+                throw new RecordingAccessException("The recorder sign-in changed. Search again.");
+        }
+
+        private Task AuthorizeHistoryRecordingAsync(HistorySearchSnapshot snapshot, CallItem call, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            RequireHistoryRecordingAccess(snapshot, call);
+            return Task.CompletedTask;
+        }
+
+        private Task<HistoryAudioFile> DownloadHistoryRecordingAsync(HistorySearchSnapshot snapshot, CallItem call,
+            CancellationToken token) => PrepareForTest?.Invoke(call, token) ?? Task.FromResult(new HistoryAudioFile(call.BackendId));
+
+        private double GetPlaybackRate() => RateForTest;
         private static void AddAddressAlertIfNew(CallItem call) { }
         private static void ScrollToIndex(int index, ScrollToPosition position) { }
-        private void ClearHistoryPlayingCards()
-        {
-            foreach (var call in Calls)
-                call.IsPlaying = false;
-        }
-
         private void RefreshCommandStates() => OnPropertyChanged(nameof(IsHistoryMediaButtonsEnabled));
+    }
 
-        private void SetHistoryPlaybackStopped()
+    internal sealed class HistoryPageTransport : ICallHistoryService
+    {
+        internal HistorySearchResult? Initial { get; set; }
+        internal Func<HistorySearchResult, CancellationToken, Task<HistorySearchResult>>? Older { get; set; }
+        internal int PageRequests { get; private set; }
+
+        public Task<HistorySearchResult> SearchAsync(HistoryRecorder recorder, HistorySearchFilters filters,
+            HistoryDateRange dates, CancellationToken token = default) => Task.FromResult(Initial!);
+
+        public Task<HistorySearchResult> LoadMoreAsync(HistorySearchResult previous, CancellationToken token = default)
         {
-            _isQueuePlaybackRunning = false;
-            ClearHistoryPlayingCards();
-            OnPropertyChanged(nameof(IsHistoryPlaybackRunning));
+            PageRequests++;
+            return Older?.Invoke(previous, token) ?? throw new InvalidOperationException("Unexpected older-page request.");
         }
+
+        public Task<HistoryLookupData> GetLookupDataAsync(HistorySearchFilters? filters, CancellationToken token = default) =>
+            throw new NotSupportedException();
+
+        public Task<HistoryLookupData> GetRecorderLookupsAsync(HistoryRecorder recorder, bool refresh,
+            CancellationToken token = default) => throw new NotSupportedException();
     }
 
     internal enum ScrollToPosition { Start }

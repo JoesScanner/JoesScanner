@@ -97,7 +97,7 @@ public sealed partial class CallHistoryService
                 if (!seen.Add((snapshot.Access.Recorder.Id, id)))
                     continue;
 
-                if (ConvertRowToCallItem(row, snapshot.Access, time) is { } call)
+                if (ConvertRowToCallItem(row, snapshot.Access, time, offset + (index - marker)) is { } call)
                 {
                     calls.Add(call);
                     if (MapToDbRecord(row, snapshot.Access.Recorder.Endpoint) is { } record)

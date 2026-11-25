@@ -315,6 +315,7 @@
                             HeightRequest="38"
                             WidthRequest="38"
                             Padding="0"
+                            AutomationId="HistoryPrevious"
                             ToolTipProperties.Text="Previous" />
 
                         <ImageButton
@@ -347,6 +348,7 @@
                             HeightRequest="38"
                             WidthRequest="38"
                             Padding="0"
+                            AutomationId="HistoryNext"
                             ToolTipProperties.Text="Next" />
 
                         <ImageButton
@@ -399,6 +401,7 @@
                     SelectionMode="None"
                     AutomationId="HistoryResults"
                     ItemsUpdatingScrollMode="KeepScrollOffset"
+                    Scrolled="OnHistoryResultsScrolled"
                     VerticalScrollBarVisibility="Never">
 
                     <CollectionView.ItemTemplate>

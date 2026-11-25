@@ -52,6 +52,10 @@
     <Compile Include="../../JoesScanner/Services/IAudioPlaybackService.cs" Link="IAudioPlaybackService.cs" />
     <Compile Include="../../JoesScanner/ViewModels/MainViewModel.PlaybackOwnership.cs" Link="MainViewModel.PlaybackOwnership.cs" />
     <Compile Include="../../JoesScanner/ViewModels/MainViewModel.ListeningSession.cs" Link="MainViewModel.ListeningSession.cs" />
+    <Compile Include="../../JoesScanner/Services/HistoryAudioFile.cs" Link="HistoryAudioFile.cs" />
+    <Compile Include="../../JoesScanner/Services/HistoryResultOrder.cs" Link="HistoryResultOrder.cs" />
+    <Compile Include="../../JoesScanner/Services/ICallHistoryService.cs" Link="ICallHistoryService.cs" />
+    <Compile Include="../../JoesScanner/ViewModels/HistoryViewModel.Paging.cs" Link="HistoryViewModel.Paging.cs" />
     <Compile Include="../../JoesScanner/ViewModels/HistoryViewModel.PlaybackOwnership.cs" Link="HistoryViewModel.PlaybackOwnership.cs" />
     <Compile Include="../../JoesScanner/Services/TrunkingRecorderCallFields.cs" Link="TrunkingRecorderCallFields.cs" />
   </ItemGroup>

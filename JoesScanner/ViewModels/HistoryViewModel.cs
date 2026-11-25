@@ -131,10 +131,9 @@ namespace JoesScanner.ViewModels
 #elif IOS
             JoesScanner.Platforms.iOS.Services.IosAudioEnvironment.ResumeStateChanged += OnMobileResumeStateChanged;
 #endif
-            // Allow transport/speed controls while playback is running even if the visible Calls list
-            // is temporarily cleared/replaced by paging or background refresh.
-            NextCommand = new Command(async () => await SafeRunAsync(SkipNextAsync, "History.Next"), () => !IsLoading && (Calls.Count > 0 || _isQueuePlaybackRunning));
-            PreviousCommand = new Command(async () => await SafeRunAsync(SkipPreviousAsync, "History.Previous"), () => !IsLoading && (Calls.Count > 0 || _isQueuePlaybackRunning));
+            // Keep transport available during an older-page request.
+            NextCommand = new Command(async () => await SafeRunAsync(SkipNextAsync, "History.Next"), () => CanGoHistoryNext);
+            PreviousCommand = new Command(async () => await SafeRunAsync(SkipPreviousAsync, "History.Previous"), () => CanGoHistoryPrevious);
 
             PlaybackSpeedDownCommand = new Command(DecreasePlaybackSpeedStep, () => !IsLoading && (Calls.Count > 0 || _isQueuePlaybackRunning));
             PlaybackSpeedUpCommand = new Command(IncreasePlaybackSpeedStep, () => !IsLoading && (Calls.Count > 0 || _isQueuePlaybackRunning));
@@ -447,7 +446,7 @@ namespace JoesScanner.ViewModels
 
         // Keep transport/speed buttons usable while audio is playing even if the list is paged/cleared.
         public bool IsHistoryMediaButtonsEnabled => _isQueuePlaybackRunning || Calls.Count > 0;
-        public bool IsStopEnabled => _isQueuePlaybackRunning;
+        public bool IsStopEnabled => _isQueuePlaybackRunning || _historySelectionRequests.HasManualSelection;
 
         private bool CanResumeMobilePlayback =>
 #if ANDROID
@@ -458,11 +457,11 @@ namespace JoesScanner.ViewModels
             false;
 #endif
 
-        public bool IsPlayEnabled => CanResumeMobilePlayback || (!_isQueuePlaybackRunning && Calls.Count > 0);
+        public bool IsPlayEnabled => CanResumeMobilePlayback || (!IsStopEnabled && CanNavigateHistory);
 
-        public bool ShowHistoryPlayButton => !_isQueuePlaybackRunning || CanResumeMobilePlayback;
+        public bool ShowHistoryPlayButton => !IsStopEnabled || CanResumeMobilePlayback;
 
-        public bool ShowHistoryStopButton => _isQueuePlaybackRunning;
+        public bool ShowHistoryStopButton => IsStopEnabled;
 
 #if ANDROID || IOS
         private void OnMobileResumeStateChanged()
@@ -559,13 +558,9 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        private Task PlayFromCallAsync(CallItem call) => PlayHistoryQueueAsync(() =>
-        {
-            var index = Calls.IndexOf(call);
-            return index >= 0 ? index : null;
-        });
+        private Task PlayFromCallAsync(CallItem call) => SelectHistoryRecordingAsync(HistoryNavigation.Recording, call);
 
-        private Task PlayAsync() => PlayHistoryQueueAsync(() =>
+        private Task PlayAsync()
         {
 #if ANDROID || IOS
             if (CanResumeMobilePlayback)
@@ -576,187 +571,126 @@ namespace JoesScanner.ViewModels
 #else
                 JoesScanner.Platforms.iOS.Services.IosAudioEnvironment.RequestPlay();
 #endif
-                return null;
+                return Task.CompletedTask;
             }
 #endif
-            if (_isQueuePlaybackRunning)
-                return null;
-            var index = _activeCall == null ? -1 : Calls.IndexOf(_activeCall);
-            return index >= 0 ? index : Calls.Count - 1;
-        });
-
-        private Task SkipNextAsync() => PlayHistoryQueueAsync(() =>
-        {
-            var index = _activeCall == null ? -1 : Calls.IndexOf(_activeCall);
-            return index > 0 ? index - 1 : null;
-        });
-
-        private Task SkipPreviousAsync() => PlayHistoryQueueAsync(() =>
-        {
-            var index = _activeCall == null ? -1 : Calls.IndexOf(_activeCall);
-            return index < Calls.Count - 1 ? index + 1 : null;
-        });
-        private void ClearHistoryPlayingCards()
-        {
-            foreach (var card in Calls)
-                if (card.IsPlaying)
-                    card.IsPlaying = false;
+            return SelectHistoryRecordingAsync(HistoryNavigation.Play);
         }
 
-        private void SetHistoryPlaybackStopped()
+        private Task SkipNextAsync() => SelectHistoryRecordingAsync(HistoryNavigation.Next);
+
+        private Task SkipPreviousAsync() => SelectHistoryRecordingAsync(HistoryNavigation.Previous);
+
+        private double GetPlaybackRate() => _historyPlaybackSpeedStep switch
         {
-            ClearHistoryPlayingCards();
-            _isQueuePlaybackRunning = false;
-            if (StatusText == "Playing" && _historyResults != null)
-                StatusText = HistoryResultStatus();
-            OnPropertyChanged(nameof(IsHistoryPlaybackRunning));
-            OnPropertyChanged(nameof(IsPlayEnabled));
-            OnPropertyChanged(nameof(IsStopEnabled));
-            OnPropertyChanged(nameof(ShowHistoryPlayButton));
-            OnPropertyChanged(nameof(ShowHistoryStopButton));
-            RefreshCommandStates();
+            1 => 1.25,
+            2 => 1.5,
+            3 => 1.75,
+            4 => 2.0,
+            _ => 1.0
+        };
+
+        private bool HasHistoryRecorderAccess(HistoryRecorderAccess access)
+        {
+            var recorder = access.Recorder;
+            var protectedServer = HostedServerRules.RequiresApiFirewallCredentials(_settingsService, recorder.Endpoint);
+            if (protectedServer != access.Protected)
+                return false;
+            if (protectedServer)
+                return _settingsService.ReadAccountSession().AccountVersion == access.AccountVersion &&
+                    RecordingPlaybackAccess.AccountKey(_settingsService, recorder.Endpoint, independent: true) == access.Account;
+            return RecordingPlaybackAccess.RecorderAccountKey(_settingsService, recorder.Id, recorder.Endpoint) == access.Account;
         }
 
-        private double GetPlaybackRate()
+        private void RequireHistoryRecordingAccess(HistorySearchSnapshot snapshot, CallItem item)
         {
-            return _historyPlaybackSpeedStep switch
-{
-    1 => 1.25,
-    2 => 1.5,
-    3 => 1.75,
-    4 => 2.0,
-    _ => 1.0
-};
+            var access = snapshot.Access;
+            if (item.ServerId != access.Recorder.Id || item.RecordingServer != access.Recorder.Endpoint ||
+                item.RecordingAccess is not { Origin: RecordingOrigin.History } context ||
+                context.Protected != access.Protected || context.Account != access.Account)
+                throw new RecordingAccessException("This recording belongs to a different History search.");
+
+            if (!HasHistoryRecorderAccess(access))
+                throw new RecordingAccessException("The recorder sign-in changed. Search again.");
         }
 
-        private async Task<PlaybackOutcome> PlayAudioAsync(CallItem item, double rate, PlaybackOwnership.Lease lease,
-            LivePlaybackRequests.Request request)
+        private async Task AuthorizeHistoryRecordingAsync(HistorySearchSnapshot snapshot, CallItem item, CancellationToken token)
         {
-            var token = request.Token;
             token.ThrowIfCancellationRequested();
-            string? acquiredAudio = null;
-
-            try
-            {
-                Exception? failure = null;
-                var completion = new PlaybackCompletion();
-                var outcome = await PlaybackAttempt.RunAsync(async () =>
-                {
-                    if (_historyRecorder is not { } recorder || recorder.Id != item.ServerId ||
-                        recorder.Endpoint != item.RecordingServer || item.RecordingAccess is not { } context)
-                        throw new RecordingAccessException("This recording belongs to a different recorder.");
-
-                    var server = recorder.Endpoint;
-                    var protectedServer = context.Protected || HostedServerRules.RequiresApiFirewallCredentials(_settingsService, server);
-                    void VerifyAccount()
-                    {
-                        if (protectedServer)
-                            RecordingPlaybackAccess.RequireAccount(_settingsService, server, context.Account, independent: true);
-                        else if (RecordingPlaybackAccess.RecorderAccountKey(_settingsService, recorder.Id, server) != context.Account)
-                            throw new RecordingAccessException("This recording belongs to a different recorder sign-in.");
-                    }
-
-                    VerifyAccount();
-                    await RecordingPlaybackAccess.VerifyAsync(_settingsService, _subscriptionService, server,
-                        item.RecordingTimeUtc, context, currentLive: false, requireAccount: protectedServer, token, independent: true)
-                        .ConfigureAwait(false);
-                    using var stream = _callStreamService.ForRecorder(server, recorder.Id);
-                    acquiredAudio = await RecordingAudioRecovery.AcquireAsync(item.AudioUrl,
-                        refreshToken => stream.RefreshRecordingAudioAsync(item, server, item.RecordingTimeUtc, refreshToken),
-                        (url, acquireToken) =>
-                        {
-                            VerifyAccount();
-                            return GetPlayableAudioUrlAsync(url, recorder, acquireToken);
-                        }, token).ConfigureAwait(false);
-                    VerifyAccount();
-                    await PlayHistoryOnDeviceAsync(lease, acquiredAudio, rate, token, completion).ConfigureAwait(false);
-                }, token, ex => failure = ex, completion).ConfigureAwait(false);
-
-                if (failure != null)
-                {
-                    AppLog.DebugWriteLine(() => $"History playback failed ({failure.GetType().Name}).");
-                    await PublishHistoryPlaybackAsync(lease, request, () =>
-                    {
-                        StatusText = failure is FirewallAuthenticationException or RecordingAccessException or RecordingAudioUnavailableException
-                                ? failure.Message
-                                : "Playback failed. Press Play to retry this recording.";
-                    }).ConfigureAwait(false);
-                }
-                return outcome;
-            }
-            finally
-            {
-                if (Uri.TryCreate(acquiredAudio, UriKind.Absolute, out var file) && file.IsFile &&
-                    Path.GetDirectoryName(file.LocalPath) == FileSystem.CacheDirectory &&
-                    Path.GetFileName(file.LocalPath).StartsWith("hist_", StringComparison.Ordinal))
-                    try { File.Delete(file.LocalPath); } catch (IOException) { }
-            }
+            RequireHistoryRecordingAccess(snapshot, item);
+            await RecordingPlaybackAccess.VerifyAsync(_settingsService, _subscriptionService, snapshot.Access.Recorder.Endpoint,
+                item.RecordingTimeUtc, item.RecordingAccess!, currentLive: false, requireAccount: snapshot.Access.Protected,
+                token, independent: true).ConfigureAwait(false);
+            RequireHistoryRecordingAccess(snapshot, item);
         }
 
-        private async Task<string?> GetPlayableAudioUrlAsync(string audioUrl, HistoryRecorder recorder, CancellationToken token)
+        private async Task<HistoryAudioFile> DownloadHistoryRecordingAsync(HistorySearchSnapshot snapshot, CallItem item,
+            CancellationToken token)
         {
+            var recorder = snapshot.Access.Recorder;
+            using var stream = _callStreamService.ForRecorder(recorder.Endpoint, recorder.Id);
+            var path = await RecordingAudioRecovery.AcquireAsync(item.AudioUrl,
+                refreshToken =>
+                {
+                    RequireHistoryRecordingAccess(snapshot, item);
+                    return stream.RefreshRecordingAudioAsync(item, recorder.Endpoint, item.RecordingTimeUtc, refreshToken);
+                },
+                (url, acquireToken) =>
+                {
+                    RequireHistoryRecordingAccess(snapshot, item);
+                    return DownloadHistoryAudioFileAsync(url, recorder, acquireToken);
+                }, token).ConfigureAwait(false);
             try
             {
-                // Some servers (including hosted history items) may send media URLs where
-                // percent signs have been percent-encoded (e.g. %2520 instead of %20). That
-                // produces 404s when requesting the file. Normalize '%25' back to '%'.
-                var normalizedAudioUrl = audioUrl.Contains('?') ? audioUrl : Regex.Replace(audioUrl, "(?i)%25", "%");
-                if (!Uri.TryCreate(normalizedAudioUrl, UriKind.Absolute, out var uri))
-                    return normalizedAudioUrl;
-
-                // Remove embedded credentials, always.
-                var sanitizedBuilder = new UriBuilder(uri)
-                {
-                    UserName = string.Empty,
-                    Password = string.Empty
-                };
-
-                var sanitized = sanitizedBuilder.Uri;
-
-                if (sanitized.Scheme is not ("http" or "https"))
-                    return sanitized.AbsoluteUri;
-
-                // Download to local temp to avoid credentialed URLs.
-                var cacheDir = FileSystem.CacheDirectory;
-                if (string.IsNullOrWhiteSpace(cacheDir))
-                {
-                    // Without cache, we cannot safely play hosted audio (would require auth on the stream).
-                    return null;
-                }
-
-                var fileName = "hist_" + Guid.NewGuid().ToString("N") + ".mp3";
-                var path = Path.Combine(cacheDir, fileName);
-
-                using var req = new HttpRequestMessage(HttpMethod.Get, sanitized);
-                req.Options.Set(ServerAuthenticationHandler.Recorder, recorder.RequestScope);
-
-                using var resp = await _audioHttpClient.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, token);
-                resp.EnsureSuccessStatusCode();
-                try
-                {
-                    await using var fs = File.Create(path);
-                    await resp.Content.CopyToAsync(fs, token);
-                }
-                catch
-                {
-                    try { File.Delete(path); } catch (IOException) { }
-                    throw;
-                }
-
-                // Return a file URI so Apple AVPlayer can resolve it reliably.
-                // Other platforms also accept file:// URIs.
-                return new Uri(path).AbsoluteUri;
+                token.ThrowIfCancellationRequested();
+                RequireHistoryRecordingAccess(snapshot, item);
+                return new(new Uri(path).AbsoluteUri, path, new FileInfo(path).Length);
             }
-            catch (Exception ex) when (ex is OperationCanceledException or FirewallAuthenticationException or HttpRequestException)
+            catch
             {
+                HistoryAudioFile.Delete(path);
                 throw;
             }
-            catch (Exception ex)
-            {
-                AppLog.Add(() => $"History audio download failed. {ex.Message}");
+        }
+
+        private async Task<string?> DownloadHistoryAudioFileAsync(string audioUrl, HistoryRecorder recorder, CancellationToken token)
+        {
+            // Normalizing legacy encoded spaces must leave signed URLs intact.
+            var normalized = audioUrl.Contains('?') ? audioUrl : Regex.Replace(audioUrl, "(?i)%25", "%");
+            if (!Uri.TryCreate(normalized, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
                 return null;
+            var sanitized = new UriBuilder(uri) { UserName = string.Empty, Password = string.Empty }.Uri;
+
+            using var request = new HttpRequestMessage(HttpMethod.Get, sanitized);
+            request.Options.Set(ServerAuthenticationHandler.Recorder, recorder.RequestScope);
+            using var response = await _audioHttpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token)
+                .ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+            var contentType = response.Content.Headers.ContentType?.MediaType;
+            if (contentType?.StartsWith("text/", StringComparison.OrdinalIgnoreCase) == true ||
+                contentType?.Equals("application/json", StringComparison.OrdinalIgnoreCase) == true)
+                throw new RecordingAudioUnavailableException(detail: "The recorder returned a text response for its audio.");
+
+            var extension = Path.GetExtension(sanitized.AbsolutePath);
+            if (extension.Length is < 2 or > 8 || extension.Skip(1).Any(c => !char.IsAsciiLetterOrDigit(c)))
+                extension = ".mp3";
+            var path = Path.Combine(FileSystem.CacheDirectory, $"hist_{Guid.NewGuid():N}{extension}");
+
+            try
+            {
+                await using var file = File.Create(path);
+                await response.Content.CopyToAsync(file, token).ConfigureAwait(false);
+                if (file.Length == 0)
+                    throw new RecordingAudioUnavailableException(detail: "The recording file was empty.");
+                return path;
+            }
+            catch
+            {
+                HistoryAudioFile.Delete(path);
+                throw;
             }
         }
+
         private void DecreasePlaybackSpeedStep()
         {
             if (HistoryPlaybackSpeedStep > 0)

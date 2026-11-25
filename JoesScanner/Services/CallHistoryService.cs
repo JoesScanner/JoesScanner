@@ -1001,7 +1001,8 @@ namespace JoesScanner.Services
             };
         }
 
-        private static CallItem? ConvertRowToCallItem(CallRow r, HistoryRecorderAccess access, DateTimeOffset recordedAt)
+        private static CallItem? ConvertRowToCallItem(CallRow r, HistoryRecorderAccess access, DateTimeOffset recordedAt,
+            int archiveOffset)
         {
             try
             {
@@ -1047,6 +1048,7 @@ namespace JoesScanner.Services
                     ServerId = access.Recorder.Id,
                     RecordingServer = baseUrl,
                     RecordingTimeUtc = recordedAt,
+                    HistoryArchiveOffset = archiveOffset,
                     RecordingAccess = new RecordingAccessContext(RecordingOrigin.History, access.Protected, access.Account),
                     Timestamp = metadata.Timestamp ?? DateTime.Now,
                     CallDurationSeconds = metadata.DurationSeconds ?? 0,
