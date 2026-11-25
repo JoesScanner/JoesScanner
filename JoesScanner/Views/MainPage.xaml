@@ -241,6 +241,7 @@
                 <CollectionView
                     Grid.Row="1"
                     x:Name="CallsView"
+                    AutomationId="CombinedLiveCalls"
                     ItemsSource="{Binding Calls}"
                     SelectionMode="None"
                     ItemsUpdatingScrollMode="KeepScrollOffset"
@@ -256,6 +257,7 @@
                         <DataTemplate x:DataType="models:CallItem">
                             <!-- Single call card -->
                             <Border
+                                SizeChanged="OnLiveCardSizeChanged"
                                 HorizontalOptions="Fill"
                                 Padding="{OnPlatform WinUI=6, MacCatalyst=6, Android=5, iOS=5}"
                                 BackgroundColor="{AppThemeBinding Light=White, Dark=#111827}"
@@ -489,7 +491,8 @@
                     Grid.Row="2"
                     Padding="20,5,20,5"
                     RowDefinitions="Auto"
-                    ColumnDefinitions="*,Auto">
+                    ColumnDefinitions="*,Auto,Auto"
+                    ColumnSpacing="6">
 
                     <!-- Desktop only label -->
                     <Label
@@ -506,9 +509,24 @@
                         </Label.GestureRecognizers>
                     </Label>
 
+                    <Button x:Name="CombinedNewCallsButton"
+                        Grid.Column="1"
+                        AutomationId="CombinedNewCalls"
+                        SemanticProperties.Hint="Return to the newest visible recordings"
+                        Style="{StaticResource PillButtonStyle}"
+                        FontSize="12"
+                        IsVisible="False" />
+                    <Button x:Name="FavoritesNewCallsButton"
+                        Grid.Column="1"
+                        AutomationId="FavoritesNewCalls"
+                        SemanticProperties.Hint="Return to the newest Favorite recordings"
+                        Style="{StaticResource PillButtonStyle}"
+                        FontSize="12"
+                        IsVisible="False" />
+
                     <!-- Donate button -->
                     <Button
-                        Grid.Column="1"
+                        Grid.Column="2"
                         Text="{OnPlatform iOS='About the developer', Default='Donate to the app developer'}"
                         Style="{StaticResource SecondaryPillButtonStyle}"
                         FontSize="10"

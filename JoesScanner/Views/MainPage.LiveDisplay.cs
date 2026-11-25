@@ -1,5 +1,4 @@
-using System.Collections.ObjectModel;
-using System.Collections.Specialized;
+using System.ComponentModel;
 using JoesScanner.Models;
 using JoesScanner.Services;
 using JoesScanner.ViewModels;
@@ -12,6 +11,9 @@ public partial class MainPage
     private const string FavoritesLiveKey = "live_favorites_view";
     private bool _favoritesLive;
     private LiveCallDisplay _liveDisplay = null!;
+    private LiveReadingViewport _combinedViewport = null!;
+    private LiveReadingViewport _favoritesViewport = null!;
+    private long _readerGeneration;
     private readonly Dictionary<Guid, LivePanel> _serverPanels = [];
     private readonly Dictionary<Guid, (View Tab, Button Button)> _serverTabs = [];
     private Guid[] _shownPanels = [];
@@ -28,12 +30,22 @@ public partial class MainPage
         _liveDisplay = new LiveCallDisplay(_viewModel.Calls, AppStateStore.GetBool(SeparateLiveKey, false), _viewModel.Favorites.IsSaved);
         FavoritesCallsView.ItemTemplate = CallsView.ItemTemplate;
         FavoritesCallsView.ItemsSource = _liveDisplay.Favorites;
+        _combinedViewport = new(CallsView, CombinedNewCallsButton, _liveDisplay.CombinedReader);
+        _favoritesViewport = new(FavoritesCallsView, FavoritesNewCallsButton, _liveDisplay.FavoritesReader);
         ServerPanels.SizeChanged += (_, _) => ShowServerPanels();
     }
 
     private void AttachLiveDisplay()
     {
+        if (_readerGeneration != _viewModel.LiveDisplayGeneration)
+        {
+            _readerGeneration = _viewModel.LiveDisplayGeneration;
+            _liveDisplay.ResetReaders();
+        }
         _liveDisplay.Observe();
+        _viewModel.LiveCardAdmitted += _liveDisplay.RecordVisibleAdmission;
+        _viewModel.RequestJumpToLiveScroll += OnRequestJumpToLiveScroll;
+        _viewModel.PropertyChanged += OnLiveMonitoringChanged;
         _viewModel.ScannerConnectionLayoutChanged += OnScannerConnectionLayoutChanged;
         _viewModel.Favorites.Changed += OnFavoriteMembershipChanged;
         _viewModel.RefreshScannerConnectionRows();
@@ -42,9 +54,50 @@ public partial class MainPage
 
     private void DetachLiveDisplay()
     {
+        _viewModel.LiveCardAdmitted -= _liveDisplay.RecordVisibleAdmission;
+        _viewModel.RequestJumpToLiveScroll -= OnRequestJumpToLiveScroll;
+        _viewModel.PropertyChanged -= OnLiveMonitoringChanged;
         _viewModel.ScannerConnectionLayoutChanged -= OnScannerConnectionLayoutChanged;
         _viewModel.Favorites.Changed -= OnFavoriteMembershipChanged;
+        _combinedViewport.Show(false);
+        _favoritesViewport.Show(false);
+        foreach (var panel in _serverPanels.Values)
+            panel.Viewport.Show(false);
         _liveDisplay.Detach();
+    }
+
+    private void OnLiveMonitoringChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(MainViewModel.IsRunning))
+            return;
+        _readerGeneration = _viewModel.LiveDisplayGeneration;
+        _combinedViewport.CancelPendingScroll();
+        _favoritesViewport.CancelPendingScroll();
+        foreach (var panel in _serverPanels.Values)
+            panel.Viewport.CancelPendingScroll();
+    }
+
+    private void OnLiveCardSizeChanged(object? sender, EventArgs e)
+    {
+        if (!_handlersAttached || sender is not VisualElement { BindingContext: CallItem call })
+            return;
+        if (_favoritesLive)
+            _favoritesViewport.CardSizeChanged(call);
+        else if (!_liveDisplay.Separate)
+            _combinedViewport.CardSizeChanged(call);
+        else if (call.ServerId is { } id && _serverPanels.TryGetValue(id, out var panel))
+            panel.Viewport.CardSizeChanged(call);
+    }
+
+    private void OnRequestJumpToLiveScroll()
+    {
+        if (_favoritesLive)
+            _favoritesViewport.FollowLatest();
+        else if (!_liveDisplay.Separate)
+            _combinedViewport.FollowLatest();
+        else
+            foreach (var id in _shownPanels)
+                _serverPanels[id].Viewport.FollowLatest();
     }
 
     private void OnCombinedLiveClicked(object? sender, EventArgs e) => SetLiveDisplay(separate: false);
@@ -127,7 +180,11 @@ public partial class MainPage
         _liveDisplay.SetServers(_viewModel.ScannerConnections.Where(row => row.Enabled).Select(row => row.Id));
         foreach (var id in _serverPanels.Keys.Where(id => !configured.ContainsKey(id)).ToArray())
         {
-            _serverPanels.Remove(id);
+            if (_serverPanels.Remove(id, out var panel))
+            {
+                panel.Viewport.Show(false);
+                ServerPanels.Children.Remove(panel.Root);
+            }
             _liveDisplay.ForgetServer(id);
         }
 
@@ -185,6 +242,8 @@ public partial class MainPage
         var separate = !_favoritesLive && _liveDisplay.Separate;
         _viewModel.SetVisibleLiveView(separate ? _liveDisplay.SelectedServer : null,
             _favoritesLive ? _viewModel.Favorites.Contains : null);
+        _favoritesViewport.Show(_handlersAttached && _favoritesLive);
+        _combinedViewport.Show(_handlersAttached && !_favoritesLive && !separate);
         FavoritesCallsView.IsVisible = _favoritesLive;
         CallsView.IsVisible = !_favoritesLive && !separate;
         SeparateLiveHost.IsVisible = separate;
@@ -237,7 +296,11 @@ public partial class MainPage
         ServerTabsScroll.IsVisible = _liveDisplay.Separate &&
             (UseSideBySide ? _liveDisplay.Servers.Count > shown.Length : _liveDisplay.Servers.Count > 1);
         if (shown.SequenceEqual(_shownPanels))
+        {
+            foreach (var id in shown)
+                _serverPanels[id].Viewport.Show(true);
             return;
+        }
 
         var previous = _shownPanels;
         _shownPanels = shown;
@@ -245,10 +308,10 @@ public partial class MainPage
         // panel is added, removed or moved alongside them.
         foreach (var id in previous.Except(shown))
         {
-            var panel = ServerPanels.Children.OfType<View>().FirstOrDefault(view =>
-                view.BindingContext is ScannerConnectionRow row && row.Id == id);
-            if (panel != null)
-                ServerPanels.Children.Remove(panel);
+            if (!_serverPanels.TryGetValue(id, out var panel))
+                continue;
+            panel.Viewport.Show(false);
+            ServerPanels.Children.Remove(panel.Root);
         }
         ServerPanels.ColumnDefinitions.Clear();
         for (var i = 0; i < shown.Length; i++)
@@ -258,10 +321,8 @@ public partial class MainPage
             var panel = GetLivePanel(id);
             Grid.SetColumn(panel.Root, i);
             if (!previous.Contains(id))
-            {
                 ServerPanels.Children.Add(panel.Root);
-                QueuePanelScroll(panel, panel.FollowLive ? null : panel.Anchor);
-            }
+            panel.Viewport.Show(true);
         }
     }
 
@@ -275,14 +336,20 @@ public partial class MainPage
         var name = new Label { FontAttributes = FontAttributes.Bold, FontSize = 12, LineBreakMode = LineBreakMode.TailTruncation };
         name.SetBinding(Label.TextProperty, nameof(ScannerConnectionRow.Name));
         var statusGroup = CreateServerStatusIndicator(11);
+        var newCalls = new Button { FontSize = 12, IsVisible = false, AutomationId = $"LiveNewCalls-{id:N}" };
+        ApplyLiveButtonStyle(newCalls, selected: true);
+        SemanticProperties.SetHint(newCalls, "Return to the newest recordings from this server");
         var header = new Grid
         {
-            ColumnDefinitions = [new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto)],
+            ColumnDefinitions = [new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto),
+                new ColumnDefinition(GridLength.Auto)],
             ColumnSpacing = 5,
+            MinimumHeightRequest = 26,
             Padding = new Thickness(4, 2)
         };
         header.Add(name);
         header.Add(statusGroup, 1, 0);
+        header.Add(newCalls, 2, 0);
 
         var calls = new CollectionView
         {
@@ -311,57 +378,16 @@ public partial class MainPage
         }
 #endif
 
-        panel = new LivePanel(id, root, calls, cards);
+        panel = new LivePanel(root, new(calls, newCalls, _liveDisplay.ReaderForServer(id)));
         _serverPanels.Add(id, panel);
-        calls.Scrolled += (_, e) =>
-        {
-            if (!_shownPanels.Contains(id) || DateTime.UtcNow < panel.IgnoreScrollUntil ||
-                e.FirstVisibleItemIndex < 0 || e.FirstVisibleItemIndex >= cards.Count)
-                return;
-            panel.FollowLive = e.FirstVisibleItemIndex <= 1;
-            panel.Anchor = cards[e.FirstVisibleItemIndex];
-        };
-        ((INotifyCollectionChanged)cards).CollectionChanged += (_, e) =>
-        {
-            if (panel.FollowLive && e is { Action: NotifyCollectionChangedAction.Add, NewStartingIndex: 0 })
-                QueuePanelScroll(panel);
-        };
         return panel;
-    }
-
-    private void QueuePanelScroll(LivePanel panel, CallItem? target = null, bool center = false)
-    {
-        if (!_handlersAttached || !_shownPanels.Contains(panel.Id))
-            return;
-        var revision = ++panel.ScrollRevision;
-        Dispatcher.DispatchDelayed(TimeSpan.FromMilliseconds(35), () =>
-        {
-            if (!_handlersAttached || !_shownPanels.Contains(panel.Id) || panel.Calls.Handler == null ||
-                revision != panel.ScrollRevision || panel.Cards.Count == 0 || target != null && !panel.Cards.Contains(target))
-                return;
-            if (target == null && !panel.FollowLive)
-                return;
-            panel.IgnoreScrollUntil = DateTime.UtcNow.AddMilliseconds(200);
-            panel.Calls.ScrollTo(target ?? panel.Cards[0], position: center ? ScrollToPosition.Center : ScrollToPosition.Start,
-                animate: center);
-        });
-    }
-
-    private void ScrollSeparatePanelsToLive()
-    {
-        foreach (var id in _shownPanels)
-        {
-            var panel = _serverPanels[id];
-            panel.FollowLive = true;
-            QueuePanelScroll(panel);
-        }
     }
 
     private void ScrollToAddressCall(CallItem call)
     {
         if (_favoritesLive && _liveDisplay.Favorites.Contains(call))
         {
-            FavoritesCallsView.ScrollTo(call, position: ScrollToPosition.Center, animate: true);
+            _favoritesViewport.Reveal(call);
             return;
         }
         if (_favoritesLive)
@@ -369,26 +395,13 @@ public partial class MainPage
         if (_liveDisplay.Separate && call.ServerId is { } id && _liveDisplay.Servers.Contains(id))
         {
             SelectLiveServer(id);
-            var panel = GetLivePanel(id);
-            panel.FollowLive = false;
-            panel.Anchor = call;
-            QueuePanelScroll(panel, call, center: true);
+            GetLivePanel(id).Viewport.Reveal(call);
             return;
         }
         if (_liveDisplay.Separate)
             SetLiveDisplay(separate: false, save: false);
-        CallsView.ScrollTo(call, position: ScrollToPosition.Center, animate: true);
+        _combinedViewport.Reveal(call);
     }
 
-    private sealed class LivePanel(Guid id, Grid root, CollectionView calls, ReadOnlyObservableCollection<CallItem> cards)
-    {
-        internal Guid Id { get; } = id;
-        internal Grid Root { get; } = root;
-        internal CollectionView Calls { get; } = calls;
-        internal ReadOnlyObservableCollection<CallItem> Cards { get; } = cards;
-        internal bool FollowLive { get; set; } = true;
-        internal CallItem? Anchor { get; set; }
-        internal DateTime IgnoreScrollUntil { get; set; }
-        internal int ScrollRevision { get; set; }
-    }
+    private sealed record LivePanel(Grid Root, LiveReadingViewport Viewport);
 }

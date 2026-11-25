@@ -21,6 +21,8 @@ internal sealed class LiveCallDisplay(ObservableCollection<CallItem> calls, bool
     internal const double PanelSpacing = 8;
     internal ObservableCollection<CallItem> Combined => calls;
     internal ReadOnlyObservableCollection<CallItem> Favorites => _favorites.Cards;
+    internal LiveReadingState CombinedReader { get; } = new(calls);
+    internal LiveReadingState FavoritesReader => _favorites.Reader;
     internal IReadOnlyList<Guid> Servers => _servers;
     internal bool Separate { get; private set; } = separate;
     internal Guid? SelectedServer { get; private set; }
@@ -68,17 +70,39 @@ internal sealed class LiveCallDisplay(ObservableCollection<CallItem> calls, bool
         return _servers.AsSpan(first, count).ToArray();
     }
 
-    internal ReadOnlyObservableCollection<CallItem> ForServer(Guid id)
+    internal ReadOnlyObservableCollection<CallItem> ForServer(Guid id) => GetProjection(id).Cards;
+    internal LiveReadingState ReaderForServer(Guid id) => GetProjection(id).Reader;
+
+    private ServerProjection GetProjection(Guid id)
     {
         if (!_projections.TryGetValue(id, out var projection))
         {
             projection = new ServerProjection(calls.Where(call => call.ServerId == id));
             _projections.Add(id, projection);
         }
-        return projection.Cards;
+        return projection;
     }
 
     internal void ForgetServer(Guid id) => _projections.Remove(id);
+
+    internal void RecordVisibleAdmission(CallItem card)
+    {
+        if (!calls.Contains(card))
+            return;
+        CombinedReader.RecordAdmission(card);
+        if (_favorites.Items.Contains(card))
+            FavoritesReader.RecordAdmission(card);
+        if (card.ServerId is { } id && _projections.TryGetValue(id, out var projection))
+            projection.Reader.RecordAdmission(card);
+    }
+
+    internal void ResetReaders()
+    {
+        CombinedReader.FollowLatest();
+        FavoritesReader.FollowLatest();
+        foreach (var projection in _projections.Values)
+            projection.Reader.FollowLatest();
+    }
 
     internal void Observe()
     {
@@ -86,6 +110,7 @@ internal sealed class LiveCallDisplay(ObservableCollection<CallItem> calls, bool
             return;
         _observing = true;
         calls.CollectionChanged += OnCallsChanged;
+        CombinedReader.RetainVisibleAdmissions();
         ReconcileProjections();
         ObserveFavoriteCards();
         RefreshFavorites();
@@ -139,7 +164,10 @@ internal sealed class LiveCallDisplay(ObservableCollection<CallItem> calls, bool
         var members = valid.ToHashSet();
         for (var i = current.Count - 1; i >= 0; i--)
             if (!members.Contains(current[i]))
+            {
+                FavoritesReader.ForgetCard(current[i]);
                 current.RemoveAt(i);
+            }
         for (var i = 0; i < valid.Count; i++)
         {
             if (i < current.Count && ReferenceEquals(current[i], valid[i]))
@@ -163,11 +191,14 @@ internal sealed class LiveCallDisplay(ObservableCollection<CallItem> calls, bool
                 foreach (var card in current)
                     projection.Items.Add(card);
             }
+            projection.Reader.RetainVisibleAdmissions();
         }
     }
 
     private void OnCallsChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
+        if (e.Action == NotifyCollectionChangedAction.Reset)
+            ResetReaders();
         ObserveFavoriteCards();
         RefreshFavorites();
         if (e.Action is NotifyCollectionChangedAction.Move or NotifyCollectionChangedAction.Reset)
@@ -178,8 +209,14 @@ internal sealed class LiveCallDisplay(ObservableCollection<CallItem> calls, bool
 
         if (e.OldItems != null)
             foreach (CallItem old in e.OldItems)
+            {
+                CombinedReader.ForgetCard(old);
                 if (old.ServerId is { } id && _projections.TryGetValue(id, out var projection))
+                {
+                    projection.Reader.ForgetCard(old);
                     projection.Items.Remove(old);
+                }
+            }
 
         if (e.NewItems == null)
             return;
@@ -220,9 +257,11 @@ internal sealed class LiveCallDisplay(ObservableCollection<CallItem> calls, bool
         {
             Items = new ObservableCollection<CallItem>(source);
             Cards = new ReadOnlyObservableCollection<CallItem>(Items);
+            Reader = new(Cards);
         }
 
         internal ObservableCollection<CallItem> Items { get; }
         internal ReadOnlyObservableCollection<CallItem> Cards { get; }
+        internal LiveReadingState Reader { get; }
     }
 }

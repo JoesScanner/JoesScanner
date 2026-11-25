@@ -24,6 +24,15 @@ This document and the playback integration tests define JoesScanner's playback c
 - Previous and Next select adjacent cards in the currently visible projection, including Favorites. A prepared selection starts a new pass using that view.
 - Jump to Live changes both the playback and visible position. It discards the older playback backlog at a reserved arrival boundary. Admissions after that reservation remain eligible. Authorized History still has access to older recordings.
 
+### Live reading
+
+- Visual Live-follow starts at the actual top of each list. Scrolling the first card partly out of view is enough to leave the edge. While reading, the display preserves a retained card and its viewport offset where native layout permits. Transcript growth or correction keeps the same recording card, and transcript-only updates leave playback alone.
+- Combined, Favorites and each recorder panel retain their own reading position and **New Calls** count. Count first admissions while reading if the card is still in that projection. Metadata updates and Favorite edits can change displayed content without creating new admissions.
+- **New Calls** scrolls just its own list to the newest card and clears its count, as does deliberately scrolling back to the edge. Monitoring, audio playback and the durable queue continue at their current positions.
+- **Waiting** and the backlog warning reflect eligible automatic audio. **Jump to Live** still applies the audio and queue boundary described above. Stop retires deferred scroll work while retaining displayed cards, and a fresh listening session resets the reading positions and counts.
+
+Run the native smoke test in an interactive Windows session with `dotnet run --project tests/WindowsLiveReading.Smoke -c Debug`. The unpackaged fixture uses synthetic cards and measures the real CollectionView anchor through arrivals and transcript resizing.
+
 ## D. Listening sessions
 
 - A clean launch and explicit Stop followed by Play start fresh. A fresh listening session excludes prior playback backlog, retains recording identities and History access, and leaves unfinished HTTP reconciliation available.

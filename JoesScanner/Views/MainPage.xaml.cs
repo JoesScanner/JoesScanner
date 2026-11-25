@@ -2,9 +2,7 @@ using JoesScanner.Models;
 using JoesScanner.Services;
 using JoesScanner.ViewModels;
 using System.Collections.Specialized;
-using System.ComponentModel;
 using System.Linq;
-using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Maui.ApplicationModel;
 
@@ -20,18 +18,6 @@ namespace JoesScanner.Views
         private readonly MainViewModel _viewModel = null!;
 
         private bool _handlersAttached;
-        private bool _followLive = true;
-
-        private bool _isAutoScrolling;
-        private int _lastFirstVisibleIndex;
-
-        private DateTime _suppressScrollFollowDetectionUntilUtc;
-
-        private CallItem? _trackedTopItem;
-
-        private CancellationTokenSource? _pendingScrollCts;
-
-        private bool _addressAlertHandlersAttached;
 
         public CallCardOptionsService CallCardOptions { get; }
 
@@ -81,7 +67,7 @@ namespace JoesScanner.Views
 
 
 
-            AttachAddressAlertHandlers();
+            Unloaded += OnPageUnloaded;
         }
         private bool _isAudioMenuOpen;
 
@@ -219,427 +205,31 @@ namespace JoesScanner.Views
             }
         }
 
-private void AttachAddressAlertHandlers()
-        {
-            if (_addressAlertHandlersAttached)
-                return;
-
-            _addressAlertHandlersAttached = true;
-
-            try
-            {
-                AppLog.Add(() => $"AddrAlert(UI): MainPage init. vm={_viewModel?.GetType().Name ?? "(null)"} visibleCount={_viewModel?.AddressAlerts?.Count ?? -1} hasVisibleFlag={_viewModel?.HasAddressAlerts}");
-            }
-            catch
-            {
-            }
-
-            try
-            {
-                if (_viewModel?.AddressAlerts != null)
-                {
-                    _viewModel.AddressAlerts.CollectionChanged += (_, __) =>
-                    {
-                        try
-                        {
-                            AppLog.Add(() => $"AddrAlert(UI): MainPage AddressAlerts changed. visibleCount={_viewModel.AddressAlerts.Count} hasVisibleFlag={_viewModel.HasAddressAlerts}");
-                        }
-                        catch
-                        {
-                        }
-                    };
-                }
-            }
-            catch
-            {
-            }
-        }
-
-        private void OnRequestJumpToLiveScroll()
-        {
-            if (_favoritesLive)
-            {
-                if (_liveDisplay.Favorites.Count > 0)
-                    FavoritesCallsView.ScrollTo(_liveDisplay.Favorites[0], position: ScrollToPosition.Start, animate: false);
-                return;
-            }
-            if (_liveDisplay.Separate)
-            {
-                ScrollSeparatePanelsToLive();
-                return;
-            }
-            try
-            {
-                // This is a deliberate override of the user's scroll position.
-                // Jump-to-live should always re-enable live-follow and snap to the newest call.
-                _followLive = true;
-                _lastFirstVisibleIndex = int.MaxValue;
-
-                // Some platforms will fire Scrolled events while we are forcing the list back
-                // to the top. If we apply our "user scrolled away" detection during that window,
-                // it can immediately flip _followLive back to false.
-                _suppressScrollFollowDetectionUntilUtc = DateTime.UtcNow.AddMilliseconds(900);
-
-                TrackTopItemIfNeeded();
-
-                // Explicit user action: bypass the "already at top" optimization and
-                // scroll twice to defeat layout/virtualization timing on some platforms.
-                ForceScrollToTopWithRetry(firstDelayMs: 10, retryDelayMs: 140);
-            }
-            catch
-            {
-            }
-        }
-
-
-        private void AttachAutoFollowHandlers()
+        private void AttachLiveHandlers()
         {
             if (_handlersAttached)
                 return;
 
             _handlersAttached = true;
-            _viewModel.RequestJumpToLiveScroll += OnRequestJumpToLiveScroll;
+            _viewModel.AddressAlerts.CollectionChanged += OnAddressAlertsChanged;
             AttachLiveDisplay();
-
-            try
-            {
-                CallsView.Scrolled += OnCallsViewScrolled;
-            }
-            catch
-            {
-            }
-
-            try
-            {
-                if (_viewModel?.Calls != null)
-                    _viewModel.Calls.CollectionChanged += OnCallsCollectionChanged;
-            }
-            catch
-            {
-            }
-
-            TrackTopItemIfNeeded();
         }
 
-        private void DetachAutoFollowHandlers()
+        private void DetachLiveHandlers()
         {
             if (!_handlersAttached)
                 return;
 
             _handlersAttached = false;
+            _viewModel.AddressAlerts.CollectionChanged -= OnAddressAlertsChanged;
             DetachLiveDisplay();
-
-            try
-            {
-                CallsView.Scrolled -= OnCallsViewScrolled;
-            }
-            catch
-            {
-            }
-
-            try
-            {
-                if (_viewModel?.Calls != null)
-                    _viewModel.Calls.CollectionChanged -= OnCallsCollectionChanged;
-            }
-            catch
-            {
-            }
-
-            try
-            {
-                _viewModel?.RequestJumpToLiveScroll -= OnRequestJumpToLiveScroll;
-            }
-            catch
-            {
-            }
-
-            CancelPendingScroll();
-            UntrackTopItem();
         }
 
-        private void OnCallsViewScrolled(object? sender, ItemsViewScrolledEventArgs e)
+        private void OnPageUnloaded(object? sender, EventArgs e) => DetachLiveHandlers();
+
+        private void OnAddressAlertsChanged(object? sender, NotifyCollectionChangedEventArgs e)
         {
-            try
-            {
-                if (_isAutoScrolling)
-                    return;
-
-                // While Jump-to-live is actively forcing the list position, ignore scrolled
-                // events so we do not incorrectly disable follow mode.
-                if (DateTime.UtcNow < _suppressScrollFollowDetectionUntilUtc)
-                    return;
-
-                _lastFirstVisibleIndex = e.FirstVisibleItemIndex;
-
-                var shouldFollow = e.FirstVisibleItemIndex <= 1;
-
-                if (shouldFollow == _followLive)
-                    return;
-
-                _followLive = shouldFollow;
-
-                if (_followLive)
-                {
-                    TrackTopItemIfNeeded();
-                    RequestScrollToTop(delayMs: 10);
-                }
-                else
-                {
-                    CancelPendingScroll();
-                    UntrackTopItem();
-                }
-            }
-            catch
-            {
-                _followLive = true;
-                TrackTopItemIfNeeded();
-            }
-        }
-
-        private void OnCallsCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
-        {
-            if (!_followLive)
-            {
-                UntrackTopItem();
-                return;
-            }
-
-            TrackTopItemIfNeeded();
-
-            if (e.Action == NotifyCollectionChangedAction.Add && e.NewStartingIndex == 0)
-            {
-                // Let the CollectionView finish its insert layout first, then scroll once.
-                RequestScrollToTop(delayMs: 35);
-                return;
-            }
-
-            if (e.Action == NotifyCollectionChangedAction.Reset)
-            {
-                RequestScrollToTop(delayMs: 35);
-                return;
-            }
-        }
-
-        private void TrackTopItemIfNeeded()
-        {
-            if (!_followLive)
-                return;
-
-            try
-            {
-                var calls = _viewModel?.Calls;
-                if (calls == null || calls.Count == 0)
-                {
-                    UntrackTopItem();
-                    return;
-                }
-
-                var newTop = calls[0];
-                if (ReferenceEquals(newTop, _trackedTopItem))
-                    return;
-
-                UntrackTopItem();
-
-                _trackedTopItem = newTop;
-                _trackedTopItem.PropertyChanged += OnTopItemPropertyChanged;
-            }
-            catch
-            {
-            }
-        }
-
-        private void UntrackTopItem()
-        {
-            try
-            {
-                if (_trackedTopItem != null)
-                    _trackedTopItem.PropertyChanged -= OnTopItemPropertyChanged;
-            }
-            catch
-            {
-            }
-            finally
-            {
-                _trackedTopItem = null;
-            }
-        }
-
-        private void OnTopItemPropertyChanged(object? sender, PropertyChangedEventArgs e)
-        {
-            if (!_followLive)
-                return;
-
-            if (e.PropertyName != nameof(CallItem.Transcription))
-                return;
-
-            // Keep this very small so it corrects offset drift without causing visible flashing.
-            RequestScrollToTop(delayMs: 10);
-        }
-
-        private void RequestScrollToTop(int delayMs)
-        {
-            if (!_followLive)
-                return;
-
-            CancelPendingScroll();
-
-            _pendingScrollCts = new CancellationTokenSource();
-            var token = _pendingScrollCts.Token;
-
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    if (delayMs > 0)
-                        await Task.Delay(delayMs, token);
-
-                    if (token.IsCancellationRequested)
-                        return;
-
-                    if (!_followLive)
-                        return;
-
-                    await MainThread.InvokeOnMainThreadAsync(() =>
-                    {
-                        try
-                        {
-                            if (token.IsCancellationRequested)
-                                return;
-
-                            if (!_followLive)
-                                return;
-
-                            // If we are already pinned to the top, do not force another scroll.
-                            if (_lastFirstVisibleIndex == 0)
-                                return;
-
-                            ScrollToTopNoAnimCore();
-                        }
-                        catch
-                        {
-                        }
-                    });
-                }
-                catch
-                {
-                }
-            });
-        }
-
-        private void ForceScrollToTopWithRetry(int firstDelayMs, int retryDelayMs)
-        {
-            // Explicit user action (Jump-to-live): override any pending auto-follow scroll
-            // and snap to the newest call even if the top item is already partially visible.
-            CancelPendingScroll();
-
-            _pendingScrollCts = new CancellationTokenSource();
-            var token = _pendingScrollCts.Token;
-
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    if (firstDelayMs > 0)
-                        await Task.Delay(firstDelayMs, token);
-
-                    if (token.IsCancellationRequested)
-                        return;
-
-                    await MainThread.InvokeOnMainThreadAsync(() =>
-                    {
-                        try
-                        {
-                            if (token.IsCancellationRequested)
-                                return;
-
-                            ScrollToTopNoAnimCore();
-                        }
-                        catch
-                        {
-                        }
-                    });
-
-                    if (retryDelayMs > 0)
-                        await Task.Delay(retryDelayMs, token);
-
-                    if (token.IsCancellationRequested)
-                        return;
-
-                    // Second pass helps when CollectionView virtualization/layout hasn't fully
-                    // settled yet (observed on iOS/Android occasionally).
-                    await MainThread.InvokeOnMainThreadAsync(() =>
-                    {
-                        try
-                        {
-                            if (token.IsCancellationRequested)
-                                return;
-
-                            ScrollToTopNoAnimCore();
-                        }
-                        catch
-                        {
-                        }
-                    });
-                }
-                catch
-                {
-                }
-            });
-        }
-        private void CancelPendingScroll()
-        {
-            try
-            {
-                _pendingScrollCts?.Cancel();
-                _pendingScrollCts?.Dispose();
-            }
-            catch
-            {
-            }
-            finally
-            {
-                _pendingScrollCts = null;
-            }
-        }
-
-        private void ScrollToTopNoAnimCore()
-        {
-            
-            if (!MainThread.IsMainThread)
-            {
-                MainThread.BeginInvokeOnMainThread(ScrollToTopNoAnimCore);
-                return;
-            }
-
-            if (_isAutoScrolling)
-                return;
-
-            _isAutoScrolling = true;
-
-            try
-            {
-                try
-                {
-                    // Use the item reference when possible. This tends to be less jarring than index scrolls.
-                    var calls = _viewModel?.Calls;
-                    if (calls != null && calls.Count > 0)
-                    {
-                        CallsView.ScrollTo(calls[0], position: ScrollToPosition.Start, animate: false);
-                    }
-                    else
-                    {
-                        CallsView.ScrollTo(0, position: ScrollToPosition.Start, animate: false);
-                    }
-                }
-                catch
-                {
-                }
-            }
-            finally
-            {
-                _isAutoScrolling = false;
-            }
+            AppLog.Add(() => $"AddrAlert(UI): MainPage AddressAlerts changed. visibleCount={_viewModel.AddressAlerts.Count} hasVisibleFlag={_viewModel.HasAddressAlerts}");
         }
 
         private async void OnSettingsTapped(object sender, EventArgs e)
@@ -981,14 +571,14 @@ private static async Task OpenWhat3WordsForCallAsync(JoesScanner.Models.CallItem
             }
         }
 
-        public void OnTabShowing() => AttachAutoFollowHandlers();
-        public void OnTabHiding() => DetachAutoFollowHandlers();
+        public void OnTabShowing() => AttachLiveHandlers();
+        public void OnTabHiding() => DetachLiveHandlers();
 
         protected override async void OnAppearing()
         {
             base.OnAppearing();
 
-            AttachAutoFollowHandlers();
+            AttachLiveHandlers();
 
             if (BindingContext is MainViewModel vm)
             {
@@ -1001,7 +591,7 @@ private static async Task OpenWhat3WordsForCallAsync(JoesScanner.Models.CallItem
         protected override void OnDisappearing()
         {
             base.OnDisappearing();
-            DetachAutoFollowHandlers();
+            DetachLiveHandlers();
         }
     
 

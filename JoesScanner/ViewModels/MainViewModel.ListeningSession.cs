@@ -6,6 +6,7 @@ namespace JoesScanner.ViewModels;
 public partial class MainViewModel
 {
     private bool _handledMonitoringLaunch;
+    internal long LiveDisplayGeneration { get; private set; }
 
     internal Task StartMonitoringWithAutoplayAsync(Func<Task>? waitForWindow = null) =>
         MainThread.InvokeOnMainThreadAsync(async () =>
@@ -39,6 +40,7 @@ public partial class MainViewModel
             return false;
 
         Interlocked.Increment(ref _audioToggleSerial);
+        LiveDisplayGeneration++;
         Calls.Clear();
         AddressAlerts.Clear();
         _hiddenAddressAlerts.Clear();

@@ -20,6 +20,7 @@ namespace JoesScanner.ViewModels
         // View hint: "Jump to live" is a user action and should force the main queue list
         // to visually snap back to the newest call even if the user had scrolled into history.
         public event Action? RequestJumpToLiveScroll;
+        internal event Action<CallItem>? LiveCardAdmitted;
 
         private const string AppleIosTestAccountEmail = "iostest@joesscanner.com";
         private const string AppleIosTestAccountEmailLegacy = "iostest@jeosscanner.com";
@@ -1209,7 +1210,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                         return;
                     if (update.AudioUrl != null && FindLiveCard(notification, durable.ServerId) is { } card)
                         ApplyLiveUpdate(notification, existing: card);
-                    if (observation.Changed)
+                    if (observation.PlaybackChanged)
                         RequestQueueForLiveArrival("SavedRecordingNotification");
                 });
                 return;
@@ -1247,7 +1248,8 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                 if (call.IsLiveUpdate || existing != null)
                 {
                     ApplyLiveUpdate(incoming, call, existing);
-                    RequestQueueForLiveArrival("UpdatedLiveRecording");
+                    if (saved.PlaybackChanged)
+                        RequestQueueForLiveArrival("UpdatedLiveRecording");
                     return;
                 }
 
@@ -1264,7 +1266,11 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
                 }
                 catch { }
 
-                InsertLiveCardInDisplayOrder(call);
+                if (InsertLiveCardInDisplayOrder(call) && saved.FirstAdmission)
+                {
+                    try { LiveCardAdmitted?.Invoke(call); }
+                    catch (Exception ex) { AppLog.DebugWriteLine(() => $"Live display observer failed ({ex.GetType().Name})."); }
+                }
                 TotalCallsInserted++;
                 LastQueueEvent = $"Inserted call at {DateTime.Now:T}";
                 UpdateQueueDerivedState();
@@ -1522,17 +1528,18 @@ private static string SpeedStepToLabel(double step)
                 InsertLiveCardInDisplayOrder(card);
         }
 
-        private void InsertLiveCardInDisplayOrder(CallItem card)
+        private bool InsertLiveCardInDisplayOrder(CallItem card)
         {
             var index = 0;
             while (index < Calls.Count && CompareCardOrder(Calls[index], card) >= 0)
                 index++;
             var shouldPrune = Calls.Count == MaxCallsToKeep;
             if (!LiveCallDisplay.InsertCard(Calls, card, index, _currentPlayingCall))
-                return;
+                return false;
             if (shouldPrune)
                 PurgeStaleAddressAlerts();
             UpdateQueueDerivedState();
+            return true;
         }
 
         private static int CompareCardOrder(CallItem left, CallItem right)
