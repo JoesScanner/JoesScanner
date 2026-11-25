@@ -18,6 +18,7 @@ namespace JoesScanner.ViewModels
         private Func<CallItem, bool>? _visibleFavoriteFilter;
         private Task<long?>? _liveEdgeBoundary;
         private long _livePlaybackFloor;
+        private readonly LiveAudioPreloader _automaticPreloads = new();
 
         private void ResetLiveTraversal()
         {
@@ -98,6 +99,7 @@ namespace JoesScanner.ViewModels
 
         private void InvalidateLivePlayback()
         {
+            _automaticPreloads.Retire();
             ++_queuePlaybackVersion;
             _isQueuePlaybackRunning = false;
             _playbackRequests.RetireCurrent();
@@ -112,6 +114,7 @@ namespace JoesScanner.ViewModels
             RequestReadyCount();
             if (!AudioEnabled || _playbackOwnership.Live == null)
                 return;
+            _automaticPreloads.Wake();
             if (_isQueuePlaybackRunning)
             {
                 _queueWake.Signal();
@@ -183,7 +186,7 @@ namespace JoesScanner.ViewModels
                     UpdateQueueDerivedState();
 
                     using var request = _playbackRequests.Begin(manual: false, live.Token);
-                    var outcome = await PlayAudioAsync(next, request);
+                    var outcome = await PlayAudioAsync(next, request, forecastFrom: traversal == null ? choice : null);
                     hadFailure = outcome == PlaybackOutcome.Failed;
                     if (sourceRevision != _automaticAudioRevision)
                     {
@@ -283,9 +286,10 @@ namespace JoesScanner.ViewModels
                 : [];
 
             _backlog.CancelPendingJump();
+            _automaticPreloads.Retire();
             using var preparation = _transportLookups.Begin(manual: true, live.Token);
             var token = preparation.Token;
-            string? prepared = null;
+            PlaybackAudioLease? prepared = null;
             try
             {
                 prepared = await PrepareManualAudioAsync(item, token);
@@ -345,8 +349,7 @@ namespace JoesScanner.ViewModels
             catch (Exception ex) { ReportPlaybackFailure(ex, preparation); }
             finally
             {
-                if (prepared != null)
-                    ReleasePreparedManualAudio(prepared);
+                prepared?.Dispose();
                 if (preparation.IsCurrent)
                 {
                     preparation.Dispose();
@@ -580,11 +583,13 @@ namespace JoesScanner.ViewModels
 
         private async Task PlayOnDeviceAsync(CallItem item, string url, double rate,
             LivePlaybackRequests.Request request, CancellationToken cancellationToken, PlaybackCompletion completion,
-            Action? enteringNative = null)
+            Action? enteringNative = null, LivePlaybackScheduler.Choice? forecastFrom = null, Action? invalidateAudio = null)
         {
             if (_playbackOwnership.Live is not { } live || !request.CanContinue || cancellationToken.IsCancellationRequested)
                 return;
 
+            var sourceRevision = _automaticAudioRevision;
+            var preloadRevision = _automaticPreloads.Revision;
             if (!request.IsManual)
                 await FlushLiveCompletionAsync(cancellationToken);
 
@@ -610,9 +615,27 @@ namespace JoesScanner.ViewModels
                     try
                     {
                         enteringNative?.Invoke();
+                        if (forecastFrom is { } choice)
+                            completion.OnStarted(() => MainThread.BeginInvokeOnMainThread(() =>
+                            {
+                                if (ReferenceEquals(_nativeLiveRequest, request) && request.CanContinue &&
+                                    sourceRevision == _automaticAudioRevision && preloadRevision == _automaticPreloads.Revision &&
+                                    !token.IsCancellationRequested)
+                                    StartAutomaticPreloads(choice, token, preloadRevision);
+                            }));
                         await _audioPlaybackService.PlayAsync(url, rate, token, completion);
                     }
-                    finally { _nativeLiveRequest = null; }
+                    catch (Exception ex) when (!token.IsCancellationRequested && !completion.Confirmed &&
+                        ex is not (OperationCanceledException or RecordingAccessException))
+                    {
+                        invalidateAudio?.Invoke();
+                        throw;
+                    }
+                    finally
+                    {
+                        _automaticPreloads.Retire();
+                        _nativeLiveRequest = null;
+                    }
                 }
                 catch (Exception ex) when (completion.Confirmed)
                 {

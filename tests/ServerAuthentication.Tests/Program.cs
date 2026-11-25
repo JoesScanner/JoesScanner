@@ -82,6 +82,8 @@ var cases = new (string Name, Func<Task> Run)[]
     ("SQLite WAL and a failed protected migration preserve integrity and permit a normal restart", BackupAndDiagnosticTests.WalMigration),
     ("Overlapping validation, late success and failure, and logout preserve the current account", WordPressOwnershipTests.ValidationOrdering),
     ("Subscription verification cannot publish into a switched account", WordPressOwnershipTests.SubscriptionSwitch),
+    ("Playback cache isolates recorder, endpoint and account identities with no readable credentials or signed URLs", AudioCacheEntitlementTests.IdentityAsync),
+    ("Protected cache reauthorizes playback and respects expiration, offline grace, tier and Local Only", AudioCacheEntitlementTests.AuthorizationAsync),
     ("Subsequent verification after 429, 503, timeout, and connection failure preserves saved credentials", WordPressOwnershipTests.SubscriptionFailuresAndRestart),
     ("Concurrent lookup requests keep their original authority and reject stale results", WordPressOwnershipTests.LookupSwitch),
     ("Communications discards old-session responses and restarts the cursor for a new account", WordPressOwnershipTests.CommunicationsSwitch),

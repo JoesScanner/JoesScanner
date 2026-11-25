@@ -26,6 +26,7 @@ namespace JoesScanner.ViewModels
         private readonly ICallStreamService _callStreamService;
         private readonly IToneAlertService _toneAlertService;
         private readonly HttpClient _audioHttpClient;
+        private readonly PlaybackAudioCache _audioCache;
 
         private bool _isDownloadRangeSelecting;
         private string _downloadRangePrompt = string.Empty;
@@ -66,13 +67,15 @@ namespace JoesScanner.ViewModels
             IToneAlertService toneAlertService,
             PlaybackOwnership playbackOwnership,
             MainViewModel mainViewModel,
-            HistorySearchPreferences historyPreferences)
+            HistorySearchPreferences historyPreferences,
+            PlaybackAudioCache audioCache)
         {
             _callHistoryService = callHistoryService ?? throw new ArgumentNullException(nameof(callHistoryService));
             _audioPlaybackService = audioPlaybackService ?? throw new ArgumentNullException(nameof(audioPlaybackService));
             _playbackOwnership = playbackOwnership;
             _mainViewModel = mainViewModel;
             _historyPreferences = historyPreferences;
+            _audioCache = audioCache;
             _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
             _settingsService.AccountIdentityChanged += OnHistoryAccountChanged;
             _addressDetectionService = addressDetectionService ?? throw new ArgumentNullException(nameof(addressDetectionService));
@@ -624,70 +627,57 @@ namespace JoesScanner.ViewModels
             RequireHistoryRecordingAccess(snapshot, item);
         }
 
-        private async Task<HistoryAudioFile> DownloadHistoryRecordingAsync(HistorySearchSnapshot snapshot, CallItem item,
+        private void RequireCachedHistoryEntitlement(HistorySearchSnapshot snapshot, CallItem item)
+        {
+            RequireHistoryRecordingAccess(snapshot, item);
+            if (snapshot.Access.Protected)
+                RecordingPlaybackAccess.RequireCachedEntitlement(_settingsService, snapshot.Access.Recorder.Endpoint,
+                    snapshot.Access.Account, item.RecordingTimeUtc, currentLive: false, independent: true);
+        }
+
+        private async Task<PlaybackAudioLease> AcquireHistoryRecordingAsync(HistorySearchSnapshot snapshot, CallItem item,
             CancellationToken token)
         {
             var recorder = snapshot.Access.Recorder;
-            using var stream = _callStreamService.ForRecorder(recorder.Endpoint, recorder.Id);
-            var path = await RecordingAudioRecovery.AcquireAsync(item.AudioUrl,
-                refreshToken =>
+            var authority = snapshot.Access.Protected ? _settingsService.ReadAccountSession().BaseUrl : null;
+            var key = RecordingCacheKey.Create(recorder.Id, recorder.Endpoint, item.BackendId, snapshot.Access.Account, authority);
+            return await _audioCache.AcquireAsync(key,
+                (cached, acquireToken) =>
                 {
-                    RequireHistoryRecordingAccess(snapshot, item);
-                    return stream.RefreshRecordingAudioAsync(item, recorder.Endpoint, item.RecordingTimeUtc, refreshToken);
+                    if (cached)
+                    {
+                        RequireCachedHistoryEntitlement(snapshot, item);
+                        return Task.CompletedTask;
+                    }
+                    RequireNetwork();
+                    return AuthorizeHistoryRecordingAsync(snapshot, item, acquireToken);
                 },
-                (url, acquireToken) =>
+                async (transfer, acquireToken) =>
                 {
                     RequireHistoryRecordingAccess(snapshot, item);
-                    return DownloadHistoryAudioFileAsync(url, recorder, acquireToken);
-                }, token).ConfigureAwait(false);
-            try
+                    using var stream = _callStreamService.ForRecorder(recorder.Endpoint, recorder.Id);
+                    var path = await RecordingAudioRecovery.AcquireAsync(item.AudioUrl,
+                        refreshToken =>
+                        {
+                            RequireNetwork();
+                            return stream.RefreshRecordingAudioAsync(item, recorder.Endpoint, item.RecordingTimeUtc, refreshToken);
+                        },
+                        (url, downloadToken) =>
+                        {
+                            RequireNetwork();
+                            // Normalizing legacy encoded spaces must leave signed URLs intact.
+                            var normalized = url.Contains('?') ? url : Regex.Replace(url, "(?i)%25", "%");
+                            return RecordingAudioRecovery.DownloadAsync(_audioHttpClient, normalized, transfer, downloadToken,
+                                request => request.Options.Set(ServerAuthenticationHandler.Recorder, recorder.RequestScope));
+                        }, acquireToken).ConfigureAwait(false);
+                    RequireHistoryRecordingAccess(snapshot, item);
+                    return path;
+                }, token).ConfigureAwait(false) ?? throw new RecordingAudioUnavailableException();
+
+            void RequireNetwork()
             {
-                token.ThrowIfCancellationRequested();
                 RequireHistoryRecordingAccess(snapshot, item);
-                return new(new Uri(path).AbsoluteUri, path, new FileInfo(path).Length);
-            }
-            catch
-            {
-                HistoryAudioFile.Delete(path);
-                throw;
-            }
-        }
-
-        private async Task<string?> DownloadHistoryAudioFileAsync(string audioUrl, HistoryRecorder recorder, CancellationToken token)
-        {
-            // Normalizing legacy encoded spaces must leave signed URLs intact.
-            var normalized = audioUrl.Contains('?') ? audioUrl : Regex.Replace(audioUrl, "(?i)%25", "%");
-            if (!Uri.TryCreate(normalized, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
-                return null;
-            var sanitized = new UriBuilder(uri) { UserName = string.Empty, Password = string.Empty }.Uri;
-
-            using var request = new HttpRequestMessage(HttpMethod.Get, sanitized);
-            request.Options.Set(ServerAuthenticationHandler.Recorder, recorder.RequestScope);
-            using var response = await _audioHttpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token)
-                .ConfigureAwait(false);
-            response.EnsureSuccessStatusCode();
-            var contentType = response.Content.Headers.ContentType?.MediaType;
-            if (contentType?.StartsWith("text/", StringComparison.OrdinalIgnoreCase) == true ||
-                contentType?.Equals("application/json", StringComparison.OrdinalIgnoreCase) == true)
-                throw new RecordingAudioUnavailableException(detail: "The recorder returned a text response for its audio.");
-
-            var extension = Path.GetExtension(sanitized.AbsolutePath);
-            if (extension.Length is < 2 or > 8 || extension.Skip(1).Any(c => !char.IsAsciiLetterOrDigit(c)))
-                extension = ".mp3";
-            var path = Path.Combine(FileSystem.CacheDirectory, $"hist_{Guid.NewGuid():N}{extension}");
-
-            try
-            {
-                await using var file = File.Create(path);
-                await response.Content.CopyToAsync(file, token).ConfigureAwait(false);
-                if (file.Length == 0)
-                    throw new RecordingAudioUnavailableException(detail: "The recording file was empty.");
-                return path;
-            }
-            catch
-            {
-                HistoryAudioFile.Delete(path);
-                throw;
+                RecordingPlaybackAccess.RequireRecorderNetwork(_settingsService, recorder.Endpoint);
             }
         }
 

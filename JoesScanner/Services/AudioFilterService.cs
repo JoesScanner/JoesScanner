@@ -2,26 +2,19 @@ using System.Diagnostics;
 using System.Collections.Concurrent;
 using System.Linq;
 using System.Threading;
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Microsoft.Maui.Storage;
 using NLayer;
 
 namespace JoesScanner.Services
 {
-    // Phase 2 implementation:
-    // - Reads Audio filter settings
-    // - If enabled, downloads http/https audio to a local cache file
-    // - Returns a file:// URL for platform players (safe for iOS/macOS)
-    // - No DSP is applied yet (Phase 3/4)
+    // Analyzes local playback media and retains results alongside leased cache entries.
     public sealed class AudioFilterService : IAudioFilterService
     {
         private readonly ISettingsService _settings;
-        private readonly HttpClient _http;
+        private readonly PlaybackAudioCache _cache;
 
-        private const int AnalysisSidecarVersion = 2;
+        private const int AnalysisSidecarVersion = 3;
 
         // Concurrency gates: tone/static analysis is CPU-heavy and should not run many times in parallel.
         // Keep these global to reduce spikes when the queue advances quickly.
@@ -44,19 +37,15 @@ namespace JoesScanner.Services
         private static readonly ConcurrentDictionary<string, DecodedAudio> DecodeCache = new();
 
 
-        public AudioFilterService(ISettingsService settings)
+        public AudioFilterService(ISettingsService settings, PlaybackAudioCache cache)
         {
             _settings = settings;
-            _http = ServerAuthenticationHandler.CreateClient(_settings);
+            _cache = cache;
         }
 
         public async Task<PreparedAudio> PrepareForPlaybackAsync(string audioUrl, CancellationToken cancellationToken = default)
         {
             var prepSw = Stopwatch.StartNew();
-            var downloadElapsedMs = 0L;
-            var downloadBytes = 0L;
-            var toneDetectionElapsedMs = 0L;
-            var toneScanWindowMs = 0;
             if (string.IsNullOrWhiteSpace(audioUrl))
                 return new PreparedAudio(audioUrl);
 
@@ -92,205 +81,18 @@ namespace JoesScanner.Services
                 ToneSensitivity = sensitivity,
             };
 
-            // Phase 3 (Static attenuator): detect static regions in PCM and attenuate only those regions.
-            // No start/end fallback is applied. If no static is detected, volume is unchanged.
-
-            // If already a local file URL, keep it.
-            if (IsFileUrl(audioUrl))
-            {
-                var localPath = TryGetLocalPathFromUrl(audioUrl);
-                var withLocal = prepared with
-                {
-                    LocalPath = localPath,
-                    PreparationElapsedMs = prepSw.ElapsedMilliseconds
-                };
-                var analysisInfo = await ApplyUnifiedToneAndStaticAnalysisIfEnabledAsync(withLocal, cancellationToken);
-                var toned = analysisInfo.prepared;
-                toneDetectionElapsedMs = analysisInfo.toneDetectionElapsedMs;
-                toneScanWindowMs = analysisInfo.toneScanWindowMs;
-                return toned with
-                {
-                    DownloadElapsedMs = downloadElapsedMs,
-                    DownloadBytes = downloadBytes,
-                    ToneDetectionElapsedMs = toneDetectionElapsedMs,
-                    ToneScanWindowMs = toneScanWindowMs,
-                    PreparationElapsedMs = prepSw.ElapsedMilliseconds
-                };
-            }
-
-            // If it looks like a raw local filesystem path, convert to file:// URL.
-            if (LooksLikeLocalPath(audioUrl))
-            {
-                try
-                {
-                    var localUri = new Uri(Path.GetFullPath(audioUrl));
-                    var withLocal = prepared with
-                    {
-                        Url = localUri.AbsoluteUri,
-                        LocalPath = Path.GetFullPath(audioUrl),
-                        PreparationElapsedMs = prepSw.ElapsedMilliseconds
-                    };
-                    var analysisInfo = await ApplyUnifiedToneAndStaticAnalysisIfEnabledAsync(withLocal, cancellationToken);
-                    var toned = analysisInfo.prepared;
-                    toneDetectionElapsedMs = analysisInfo.toneDetectionElapsedMs;
-                    toneScanWindowMs = analysisInfo.toneScanWindowMs;
-return toned with
-                    {
-                        DownloadElapsedMs = downloadElapsedMs,
-                        DownloadBytes = downloadBytes,
-                        ToneDetectionElapsedMs = toneDetectionElapsedMs,
-                        ToneScanWindowMs = toneScanWindowMs,
-                        PreparationElapsedMs = prepSw.ElapsedMilliseconds
-                    };
-                }
-                catch
-                {
-                    return prepared;
-                }
-            }
-
-            // Only download for http/https. For content:// (Android) we do not touch it.
-            if (!Uri.TryCreate(audioUrl, UriKind.Absolute, out var uri))
+            if (!Uri.TryCreate(audioUrl, UriKind.Absolute, out var uri) || !uri.IsFile)
                 return prepared;
 
-            if (!string.Equals(uri.Scheme, "http", StringComparison.OrdinalIgnoreCase)
-                && !string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase))
-                return prepared;
-
-            var cacheDir = Path.Combine(AppPaths.GetAppDataDirectorySafe(), "AudioFilterCache");
-            Directory.CreateDirectory(cacheDir);
-
-            // Settings hash is included so future DSP outputs do not collide.
-            // Phase 2: the "processed" file is just the downloaded file.
-            var settingsKey = BuildSettingsKey(staticEnabled, toneEnabled, staticVolume, strength, sensitivity);
-            var fileExt = TryGetExtensionFromUrl(uri) ?? ".mp3";
-
-            var cacheName = $"{Sha256Hex(uri.AbsoluteUri)}_{Sha256Hex(settingsKey)}{fileExt}";
-            var cachePath = Path.Combine(cacheDir, cacheName);
-
-            if (File.Exists(cachePath))
+            var withLocal = prepared with { Url = uri.AbsoluteUri, LocalPath = uri.LocalPath };
+            var analysis = await ApplyUnifiedToneAndStaticAnalysisIfEnabledAsync(withLocal, cancellationToken);
+            return analysis.prepared with
             {
-                try
-                {
-                    AppLog.Add(() => $"AudioFilter: cache hit. file={Path.GetFileName(cachePath)} prepMs={prepSw.ElapsedMilliseconds}");
-                }
-                catch { }
-                var withLocal = prepared with
-                {
-                    Url = new Uri(cachePath).AbsoluteUri,
-                    LocalPath = cachePath,
-                    PreparedFromCache = true,
-                    PreparationElapsedMs = prepSw.ElapsedMilliseconds
-                };
-
-                var analysisInfo = await ApplyUnifiedToneAndStaticAnalysisIfEnabledAsync(withLocal, cancellationToken);
-                var toned = analysisInfo.prepared;
-                toneDetectionElapsedMs = analysisInfo.toneDetectionElapsedMs;
-                toneScanWindowMs = analysisInfo.toneScanWindowMs;
-                return toned with
-                {
-                    DownloadElapsedMs = downloadElapsedMs,
-                    DownloadBytes = downloadBytes,
-                    ToneDetectionElapsedMs = toneDetectionElapsedMs,
-                    ToneScanWindowMs = toneScanWindowMs,
-                    PreparationElapsedMs = prepSw.ElapsedMilliseconds,
-                    PreparedFromCache = true
-                };
-            }
-
-            try
-            {
-                AppLog.Add(() => $"AudioFilter: preparing local audio. static={staticEnabled} tone={toneEnabled} urlHost={uri.Host}");
-            }
-            catch { }
-
-            var tmpPath = cachePath + ".tmp";
-            try
-            {
-                if (File.Exists(tmpPath))
-                    File.Delete(tmpPath);
-            }
-            catch
-            {
-            }
-
-            try
-            {
-                var dlSw = Stopwatch.StartNew();
-                using var resp = await _http.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-                resp.EnsureSuccessStatusCode();
-
-                await using (var src = await resp.Content.ReadAsStreamAsync(cancellationToken))
-                await using (var dst = File.Create(tmpPath))
-                {
-                    var buffer = new byte[81920];
-                    int read;
-                    while ((read = await src.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) > 0)
-                    {
-                        await dst.WriteAsync(buffer, 0, read, cancellationToken);
-                        downloadBytes += read;
-                    }
-                }
-
-                downloadElapsedMs = dlSw.ElapsedMilliseconds;
-
-                try
-                {
-                    AppLog.Add(() => $"AudioFilter: downloaded bytes={downloadBytes} ms={downloadElapsedMs} file={Path.GetFileName(cacheName)}");
-                }
-                catch { }
-
-                try
-                {
-                    if (File.Exists(cachePath))
-                        File.Delete(cachePath);
-                }
-                catch
-                {
-                }
-
-                File.Move(tmpPath, cachePath);
-                var withLocal = prepared with
-                {
-                    Url = new Uri(cachePath).AbsoluteUri,
-                    LocalPath = cachePath,
-                    PreparedFromCache = true,
-                    PreparationElapsedMs = prepSw.ElapsedMilliseconds
-                };
-
-                var analysisInfo = await ApplyUnifiedToneAndStaticAnalysisIfEnabledAsync(withLocal, cancellationToken);
-                var toned = analysisInfo.prepared;
-                toneDetectionElapsedMs = analysisInfo.toneDetectionElapsedMs;
-                toneScanWindowMs = analysisInfo.toneScanWindowMs;
-                return toned with
-                {
-                    DownloadElapsedMs = downloadElapsedMs,
-                    DownloadBytes = downloadBytes,
-                    ToneDetectionElapsedMs = toneDetectionElapsedMs,
-                    ToneScanWindowMs = toneScanWindowMs,
-                    PreparationElapsedMs = prepSw.ElapsedMilliseconds,
-                    PreparedFromCache = true
-                };
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                try
-                {
-                    AppLog.Add(() => $"AudioFilter: preparation failed, using original audio. {ex.Message}");
-                }
-                catch
-                {
-                }
-
-                try { if (File.Exists(tmpPath)) File.Delete(tmpPath); } catch { }
-                return prepared;
-            }
+                ToneDetectionElapsedMs = analysis.toneDetectionElapsedMs,
+                ToneScanWindowMs = analysis.toneScanWindowMs,
+                PreparationElapsedMs = prepSw.ElapsedMilliseconds
+            };
         }
-
 
 private async Task<(PreparedAudio prepared, long toneDetectionElapsedMs, int toneScanWindowMs)> ApplyUnifiedToneAndStaticAnalysisIfEnabledAsync(PreparedAudio prepared, CancellationToken cancellationToken)
 {
@@ -310,12 +112,15 @@ private async Task<(PreparedAudio prepared, long toneDetectionElapsedMs, int ton
     if (!localPath.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase))
         return (prepared, toneDetectionElapsedMs, toneScanWindowMs);
 
+    var settingsKey = BuildSettingsKey(staticEnabled, toneEnabled, prepared.StaticAttenuatorVolume,
+        prepared.ToneStrength, prepared.ToneSensitivity);
+
     // If this is a cached file and we already analyzed it, reuse the analysis results.
     if (IsInAudioFilterCache(localPath))
     {
         var sidecar = TryLoadSidecar(localPath);
 
-        if (sidecar != null)
+        if (sidecar?.Settings == settingsKey)
         {
             if (toneEnabled && sidecar.ToneDataPresent)
             {
@@ -347,7 +152,7 @@ private async Task<(PreparedAudio prepared, long toneDetectionElapsedMs, int ton
             }
 
             if ((!toneEnabled || sidecar.ToneDataPresent) && (!staticEnabled || sidecar.StaticDataPresent))
-                return (prepared, toneDetectionElapsedMs, toneScanWindowMs);
+                return (prepared with { PreparedFromCache = true }, toneDetectionElapsedMs, toneScanWindowMs);
         }
     }
 
@@ -362,7 +167,7 @@ private async Task<(PreparedAudio prepared, long toneDetectionElapsedMs, int ton
 
             try
             {
-                var sidecar = new AudioAnalysisSidecar();
+                var sidecar = new AudioAnalysisSidecar { Settings = settingsKey };
 
                 if (toneEnabled)
                 {
@@ -579,6 +384,7 @@ private async Task<(PreparedAudio prepared, long toneDetectionElapsedMs, int ton
 private sealed class AudioAnalysisSidecar
 {
     public int Version { get; set; } = AnalysisSidecarVersion;
+    public string? Settings { get; set; }
 
     // Tone
     public bool ToneDataPresent { get; set; }
@@ -598,68 +404,36 @@ private sealed class AudioAnalysisSidecar
     }
 }
 
-private static string GetSidecarPath(string localPath) => localPath + ".analysis.json";
-
-private static AudioAnalysisSidecar? TryLoadSidecar(string localPath)
+private AudioAnalysisSidecar? TryLoadSidecar(string localPath)
 {
     try
     {
-        var p = GetSidecarPath(localPath);
-        if (!File.Exists(p))
-            return null;
-
-        var json = File.ReadAllText(p);
-        if (string.IsNullOrWhiteSpace(json))
-            return null;
-
-        var model = JsonSerializer.Deserialize<AudioAnalysisSidecar>(json);
-        if (model == null || model.Version != AnalysisSidecarVersion)
-            return null;
-
-        return model;
+        var json = _cache.ReadAnalysis(localPath);
+        var model = json == null ? null : JsonSerializer.Deserialize<AudioAnalysisSidecar>(json);
+        return model?.Version == AnalysisSidecarVersion ? model : null;
     }
-    catch
+    catch (JsonException)
     {
         return null;
     }
 }
 
-private static void TrySaveSidecar(string localPath, AudioAnalysisSidecar model)
+private void TrySaveSidecar(string localPath, AudioAnalysisSidecar model)
 {
     try
     {
-        model.Version = AnalysisSidecarVersion;
-
-        var p = GetSidecarPath(localPath);
         var json = JsonSerializer.Serialize(model, new JsonSerializerOptions
         {
-            WriteIndented = false,
             DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
         });
-
-        File.WriteAllText(p, json);
+        _cache.StoreAnalysis(localPath, json);
     }
-    catch
+    catch (JsonException)
     {
     }
 }
 
-private static bool IsInAudioFilterCache(string localPath)
-{
-    try
-    {
-        var cacheDir = Path.Combine(AppPaths.GetAppDataDirectorySafe(), "AudioFilterCache");
-        var full = Path.GetFullPath(localPath);
-        var fullCache = Path.GetFullPath(cacheDir);
-
-        return full.StartsWith(fullCache, StringComparison.OrdinalIgnoreCase);
-    }
-    catch
-    {
-        return false;
-    }
-}
-
+private bool IsInAudioFilterCache(string localPath) => _cache.HasAnalysisLease(localPath);
 
         private enum ToneWindowKind
         {
@@ -2278,23 +2052,6 @@ return (false, 0, 0, hintExtendScan, analyzedMs);
             return s1 * s1 + s2 * s2 - coeff * s1 * s2;
         }
 
-        private static string? TryGetLocalPathFromUrl(string url)
-        {
-            if (!Uri.TryCreate(url, UriKind.Absolute, out var u))
-                return null;
-
-            if (!u.IsFile)
-                return null;
-
-            try
-            {
-                return u.LocalPath;
-            }
-            catch
-            {
-                return null;
-            }
-        }
 private static int Clamp01To100(int v)
         {
             if (v < 0) return 0;
@@ -2337,64 +2094,10 @@ private static int Clamp01To100(int v)
         }
 
 
-        private static bool IsFileUrl(string url)
-        {
-            if (!Uri.TryCreate(url, UriKind.Absolute, out var u))
-                return false;
-
-            return u.IsFile || string.Equals(u.Scheme, "file", StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static bool LooksLikeLocalPath(string s)
-        {
-            // Windows absolute path: C:\...
-            if (s.Length >= 3 && char.IsLetter(s[0]) && s[1] == ':' && (s[2] == '\\' || s[2] == '/'))
-                return true;
-
-            // Unix-like absolute path: /var/...
-            if (s.StartsWith("/", StringComparison.Ordinal))
-                return true;
-
-            return false;
-        }
-
         private static string BuildSettingsKey(bool staticEnabled, bool toneEnabled, int staticVolume, int strength, int sensitivity)
         {
             return $"static={staticEnabled};tone={toneEnabled};staticVolume={staticVolume};strength={strength};sens={Clamp01To100(sensitivity)}";
         }
 
-        private static string? TryGetExtensionFromUrl(Uri uri)
-        {
-            try
-            {
-                var path = uri.AbsolutePath;
-                if (string.IsNullOrWhiteSpace(path))
-                    return null;
-
-                var ext = Path.GetExtension(path);
-                if (string.IsNullOrWhiteSpace(ext))
-                    return null;
-
-                // Keep it conservative
-                if (ext.Length > 8)
-                    return null;
-
-                return ext;
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        private static string Sha256Hex(string text)
-        {
-            using var sha = SHA256.Create();
-            var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(text ?? string.Empty));
-            var sb = new StringBuilder(bytes.Length * 2);
-            for (var i = 0; i < bytes.Length; i++)
-                sb.Append(bytes[i].ToString("x2"));
-            return sb.ToString();
-        }
     }
 }

@@ -772,6 +772,7 @@ internal sealed class HandoffAudio : IAudioPlaybackService
         cancellationToken.ThrowIfCancellationRequested();
         Started.Enqueue(audioUrl);
         Rates.Enqueue(playbackRate);
+        completion.NotifyStarted(cancellationToken);
         if (Playing is { } play)
             await play(audioUrl, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();

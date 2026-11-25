@@ -21,6 +21,7 @@ public partial class MainViewModel
 
     private void OnPrivacyNetworkChanged(object? sender, EventArgs e)
     {
+        _automaticPreloads.Retire();
         if (!_privacyNetwork.AllowsCloud)
             _connections.Retire(profile => !MayUseNetwork(profile));
         MainThread.BeginInvokeOnMainThread(() => ReconcileScannerConnections());
@@ -297,6 +298,7 @@ public partial class MainViewModel
 
     private void RetireRecorder(ServerConnectionManager.Connection connection)
     {
+        _automaticPreloads.Retire();
         if (_recorderRuns.TryRemove(connection.Generation, out var retired))
             _ = SaveRecorderStopAsync(retired.Queue);
         MainThread.BeginInvokeOnMainThread(() =>
@@ -351,12 +353,8 @@ public partial class MainViewModel
             : account == CustomRecorderAccount(connection.Profile.Id, endpoint));
     }
 
-    private string? CustomRecorderAccount(Guid id, string endpoint)
-    {
-        if (!_settingsService.TryGetRecorderCredentials(id, endpoint, out var user, out _))
-            return null;
-        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(user)));
-    }
+    private string? CustomRecorderAccount(Guid id, string endpoint) =>
+        RecordingPlaybackAccess.RecorderAccountKey(_settingsService, id, endpoint);
 
     private bool CanUseRecorder(CallItem item, string server) =>
         item.ServerId is not { } id ? RecordingPlaybackAccess.IsSelected(_settingsService, server) :

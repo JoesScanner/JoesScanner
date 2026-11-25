@@ -286,17 +286,24 @@ namespace JoesScanner.ViewModels
             return (card, next.Choice);
         }
 
-        private async Task<string> PrepareManualAudioAsync(CallItem item, CancellationToken token)
+        private async Task<PlaybackAudioLease> PrepareManualAudioAsync(CallItem item, CancellationToken token)
         {
             if (PrepareForTest is { } prepare)
                 await prepare(item.BackendId, token);
-            return item.BackendId;
+            return new(item.BackendId);
         }
 
-        private static void ReleasePreparedManualAudio(string prepared) { }
+        internal Func<CancellationToken, Task<IReadOnlyList<LiveAudioPreloader.Candidate>>>? ForecastForTest { get; set; }
+
+        private void StartAutomaticPreloads(LivePlaybackScheduler.Choice current, CancellationToken token, long revision)
+        {
+            if (AudioEnabled && ForecastForTest is { } forecast)
+                _ = _automaticPreloads.Start(forecast, token, revision);
+        }
 
         private async Task<PlaybackOutcome> PlayAudioAsync(CallItem item, LivePlaybackRequests.Request request,
-            bool allowFilteredPlayback = false, string? preparedAudio = null)
+            bool allowFilteredPlayback = false, PlaybackAudioLease? preparedAudio = null,
+            LivePlaybackScheduler.Choice? forecastFrom = null)
         {
             if (IsFilteredForPlayback(item, allowFilteredPlayback))
             {
@@ -313,7 +320,7 @@ namespace JoesScanner.ViewModels
                     if (preparedAudio == null && PrepareForTest is { } prepare)
                         await prepare(item.BackendId, request.Token);
                     var rate = await GetEffectivePlaybackRateAsync(item, request.Token);
-                    await PlayOnDeviceAsync(item, item.BackendId, rate, request, request.Token, completion);
+                    await PlayOnDeviceAsync(item, item.BackendId, rate, request, request.Token, completion, forecastFrom: forecastFrom);
                 }, request.Token, failure => ReportPlaybackFailure(failure, request), completion);
                 if (request.CanContinue && outcome == PlaybackOutcome.Failed && !request.IsManual)
                 {
@@ -338,6 +345,7 @@ namespace JoesScanner.ViewModels
 
         private void ResetScheduler()
         {
+            _automaticPreloads.Retire();
             _backlog.Reset();
             _scheduler.Reset();
         }
@@ -498,7 +506,7 @@ namespace JoesScanner.ViewModels
         internal string StatusForTest => StatusText;
         internal bool IsRunningForTest => IsHistoryPlaybackRunning;
         internal double RateForTest { get; set; } = 1;
-        internal Func<CallItem, CancellationToken, Task<HistoryAudioFile>>? PrepareForTest { get; set; }
+        internal Func<CallItem, CancellationToken, Task<PlaybackAudioLease>>? PrepareForTest { get; set; }
         internal HistoryPageTransport PagesForTest => _callHistoryService;
 
         internal HistoryViewModel(PlaybackOwnership ownership, HandoffAudio player)
@@ -531,6 +539,7 @@ namespace JoesScanner.ViewModels
             {
                 BackendId = id,
                 ServerId = _historyRecorder!.Id,
+                RecordingServer = _historyRecorder.Endpoint,
                 RecordingTimeUtc = HistoryTime.AddSeconds(seconds),
                 HistoryArchiveOffset = archiveOffset
             };
@@ -574,15 +583,16 @@ namespace JoesScanner.ViewModels
                 throw new RecordingAccessException("The recorder sign-in changed. Search again.");
         }
 
-        private Task AuthorizeHistoryRecordingAsync(HistorySearchSnapshot snapshot, CallItem call, CancellationToken token)
+        private void RequireCachedHistoryEntitlement(HistorySearchSnapshot snapshot, CallItem call) =>
+            RequireHistoryRecordingAccess(snapshot, call);
+
+        private Task<PlaybackAudioLease> AcquireHistoryRecordingAsync(HistorySearchSnapshot snapshot, CallItem call,
+            CancellationToken token)
         {
             token.ThrowIfCancellationRequested();
             RequireHistoryRecordingAccess(snapshot, call);
-            return Task.CompletedTask;
+            return PrepareForTest?.Invoke(call, token) ?? Task.FromResult(new PlaybackAudioLease(call.BackendId));
         }
-
-        private Task<HistoryAudioFile> DownloadHistoryRecordingAsync(HistorySearchSnapshot snapshot, CallItem call,
-            CancellationToken token) => PrepareForTest?.Invoke(call, token) ?? Task.FromResult(new HistoryAudioFile(call.BackendId));
 
         private double GetPlaybackRate() => RateForTest;
         private static void AddAddressAlertIfNew(CallItem call) { }

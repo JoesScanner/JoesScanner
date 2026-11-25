@@ -12,7 +12,6 @@ namespace JoesScanner.ViewModels
         private readonly PlaybackOwnership _playbackOwnership;
         private readonly LivePlaybackRequests _historyPlaybackRequests = new();
         private readonly LivePlaybackRequests _historySelectionRequests = new();
-        private readonly List<(CallItem Call, HistoryAudioFile Audio)> _recentHistoryAudio = new();
         private PlaybackOwnership.Lease? _historyOwnership;
         private IDispatcher? _historyDispatcher;
         private int _historyStopRevision;
@@ -96,7 +95,6 @@ namespace JoesScanner.ViewModels
                 }
                 finally
                 {
-                    ReleaseHistoryAudio();
                     _playbackOwnership.LeaveHistory(closing!);
                 }
             });
@@ -211,7 +209,7 @@ namespace JoesScanner.ViewModels
 
             var preparation = selection.Playback;
             var token = preparation.Request.Token;
-            HistoryAudioFile? prepared = null;
+            PlaybackAudioLease? prepared = null;
             try
             {
                 var target = selection.Target;
@@ -289,21 +287,15 @@ namespace JoesScanner.ViewModels
             return new(selection.Lease, selection.Snapshot, request);
         }
 
-        private async Task<HistoryAudioFile> PrepareHistorySelectionAsync(HistoryPlayback playback, CallItem call)
+        private async Task<PlaybackAudioLease> PrepareHistorySelectionAsync(HistoryPlayback playback, CallItem call)
         {
             var token = playback.Request.Token;
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
             deadline.CancelAfter(TimeSpan.FromSeconds(30));
-            await AuthorizeHistoryRecordingAsync(playback.Snapshot, call, deadline.Token).ConfigureAwait(false);
-            var cached = await ReadHistoryUiAsync(() =>
-            {
-                if (!OwnsHistoryPlayback(playback))
-                    throw new OperationCanceledException(token);
+            if (!await ReadHistoryUiAsync(() => OwnsHistoryPlayback(playback)).ConfigureAwait(false))
+                throw new OperationCanceledException(token);
 
-                return _recentHistoryAudio.FirstOrDefault(item => ReferenceEquals(item.Call, call)).Audio
-                    is { CanReuse: true } audio ? audio.Retain() : null;
-            }).ConfigureAwait(false);
-            var prepared = cached ?? await DownloadHistoryRecordingAsync(playback.Snapshot, call, deadline.Token).ConfigureAwait(false);
+            var prepared = await AcquireHistoryRecordingAsync(playback.Snapshot, call, deadline.Token).ConfigureAwait(false);
             if (deadline.IsCancellationRequested)
             {
                 prepared.Dispose();
@@ -312,10 +304,10 @@ namespace JoesScanner.ViewModels
             return prepared;
         }
 
-        private async Task PlayHistoryQueueAsync(HistoryPlayback playback, CallItem first, HistoryAudioFile firstAudio)
+        private async Task PlayHistoryQueueAsync(HistoryPlayback playback, CallItem first, PlaybackAudioLease firstAudio)
         {
             var token = playback.Request.Token;
-            HistoryAudioFile? prepared = firstAudio;
+            PlaybackAudioLease? prepared = firstAudio;
             try
             {
                 CallItem? next = first;
@@ -357,7 +349,7 @@ namespace JoesScanner.ViewModels
             }
         }
 
-        private async Task<PlaybackOutcome> PlayHistoryRecordingAsync(HistoryPlayback playback, CallItem call, HistoryAudioFile? audio)
+        private async Task<PlaybackOutcome> PlayHistoryRecordingAsync(HistoryPlayback playback, CallItem call, PlaybackAudioLease? audio)
         {
             var token = playback.Request.Token;
             var completion = new PlaybackCompletion();
@@ -381,17 +373,27 @@ namespace JoesScanner.ViewModels
                         call.IsPlaying = true;
                         OnPropertyChanged(nameof(ActiveCall));
                         ScrollToIndex(Calls.IndexOf(call), ScrollToPosition.Start);
-                        RememberHistoryAudio(call, audio);
                         RefreshCommandStates();
                         return GetPlaybackRate();
                     }).ConfigureAwait(false);
                     if (rate == null)
                         throw new OperationCanceledException(token);
 
-                    await _playbackOwnership.RunNativeAsync(playback.Lease, token, nativeToken =>
+                    await _playbackOwnership.RunNativeAsync(playback.Lease, token, async nativeToken =>
                     {
                         RequireHistoryRecordingAccess(playback.Snapshot, call);
-                        return _audioPlaybackService.PlayAsync(audio.Url, rate.Value, nativeToken, completion);
+                        if (audio.CacheHit)
+                            RequireCachedHistoryEntitlement(playback.Snapshot, call);
+                        try
+                        {
+                            await _audioPlaybackService.PlayAsync(audio.Url, rate.Value, nativeToken, completion).ConfigureAwait(false);
+                        }
+                        catch (Exception ex) when (!nativeToken.IsCancellationRequested && !completion.Confirmed &&
+                            ex is not (OperationCanceledException or RecordingAccessException))
+                        {
+                            audio.Invalidate();
+                            throw;
+                        }
                     }).ConfigureAwait(false);
                 }, token, ex => failure = ex, completion).ConfigureAwait(false);
 
@@ -399,7 +401,6 @@ namespace JoesScanner.ViewModels
                 {
                     await PublishHistoryPlaybackAsync(playback, () =>
                     {
-                        ForgetHistoryAudio(call);
                         if (published && ReferenceEquals(_activeCall, call))
                         {
                             call.IsPlaying = false;
@@ -432,32 +433,6 @@ namespace JoesScanner.ViewModels
                 OperationCanceledException => "Recording preparation timed out. Try again.",
                 _ => _isQueuePlaybackRunning ? "Recording unavailable. Playback continues." : "Recording unavailable. Try another."
             };
-        }
-
-        private void RememberHistoryAudio(CallItem call, HistoryAudioFile audio)
-        {
-            if (!audio.CanReuse)
-                return;
-            ForgetHistoryAudio(call);
-            _recentHistoryAudio.Add((call, audio.Retain()));
-            if (_recentHistoryAudio.Count > 3)
-                ForgetHistoryAudio(_recentHistoryAudio[0].Call);
-        }
-
-        private void ForgetHistoryAudio(CallItem call)
-        {
-            var index = _recentHistoryAudio.FindIndex(item => ReferenceEquals(item.Call, call));
-            if (index < 0)
-                return;
-            _recentHistoryAudio[index].Audio.Dispose();
-            _recentHistoryAudio.RemoveAt(index);
-        }
-
-        private void ReleaseHistoryAudio()
-        {
-            foreach (var (_, audio) in _recentHistoryAudio)
-                audio.Dispose();
-            _recentHistoryAudio.Clear();
         }
     }
 }

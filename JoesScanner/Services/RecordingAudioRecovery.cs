@@ -7,6 +7,21 @@ internal sealed class RecordingAudioUnavailableException(Exception? cause = null
 
 internal static class RecordingAudioRecovery
 {
+    internal static async Task<string?> DownloadAsync(HttpClient client, string url, PlaybackAudioCache.Transfer transfer,
+        CancellationToken token, Action<HttpRequestMessage>? setScope = null)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
+            return null;
+        if (uri.UserInfo.Length != 0)
+            uri = new UriBuilder(uri) { UserName = string.Empty, Password = string.Empty }.Uri;
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+        setScope?.Invoke(request);
+        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+        return await transfer.StoreAsync(response, Path.GetExtension(uri.AbsolutePath), token).ConfigureAwait(false);
+    }
+
     internal static async Task<string> AcquireAsync(string? initialUrl, Func<CancellationToken, Task<string?>> refresh,
         Func<string, CancellationToken, Task<string?>> acquire, CancellationToken token, TimeProvider? clock = null)
     {

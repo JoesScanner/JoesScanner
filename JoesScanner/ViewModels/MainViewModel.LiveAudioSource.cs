@@ -183,6 +183,7 @@ public partial class MainViewModel
 
     private void InstallAutomaticAudioSource(LiveAudioSource source, long after = 0, long recoveredSince = 0)
     {
+        _automaticPreloads.Retire();
         _automaticAudioSource = source;
         _automaticAudioFilter = source.Kind == LiveAudioSourceKind.All && after == 0 && recoveredSince == 0 ? null :
             new(after, recoveredSince, source.Kind == LiveAudioSourceKind.Favorites
@@ -216,6 +217,7 @@ public partial class MainViewModel
 
     private void AdvanceAutomaticAudioEdge(long arrival, long ticks)
     {
+        _automaticPreloads.Retire();
         _automaticAudioFilter = (_automaticAudioFilter ?? new()) with { AfterArrival = arrival, RecoveredSinceUtcTicks = ticks };
         ++_automaticAudioRevision;
     }
@@ -249,6 +251,7 @@ public partial class MainViewModel
 
     private async Task RefreshFavoriteAudioSourceAsync()
     {
+        _automaticPreloads.Retire();
         if (_audioSourceBoundary != null || _automaticAudioSource.Kind != LiveAudioSourceKind.Favorites ||
             _automaticAudioFilter?.FavoriteEdges is not { } previous)
         {
@@ -303,6 +306,7 @@ public partial class MainViewModel
 
     private void ReplaceFavoriteAudioEdges(IReadOnlyDictionary<(Guid, FavoriteTalkgroupIdentity), long> edges)
     {
+        _automaticPreloads.Retire();
         _automaticAudioFilter = _automaticAudioFilter! with { FavoriteEdges = edges };
         ++_automaticAudioRevision;
         _backlog.Reset();

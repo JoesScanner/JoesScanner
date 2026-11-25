@@ -39,6 +39,7 @@ namespace JoesScanner.Services
         private readonly IToneAlertService _toneAlertService;
         private readonly ISettingsService _settings;
         private readonly ISystemMediaService _systemMediaService;
+        private readonly PlaybackAudioCache _audioCache;
 
         // Global interrupt token: ensures Stop/Skip actions cancel *all* in-flight work immediately,
         // including: filter preparation, downloads, and platform playback.
@@ -46,16 +47,14 @@ namespace JoesScanner.Services
         private readonly object _interruptLock = new object();
         private CancellationTokenSource _interruptCts = new CancellationTokenSource();
 
-#if MACCATALYST
-        private string? _iosTempDownloadedFile;
-#endif
-
-        public AudioPlaybackService(IAudioFilterService audioFilterService, IToneAlertService toneAlertService, ISettingsService settings, ISystemMediaService systemMediaService)
+        public AudioPlaybackService(IAudioFilterService audioFilterService, IToneAlertService toneAlertService,
+            ISettingsService settings, ISystemMediaService systemMediaService, PlaybackAudioCache audioCache)
         {
             _audioFilterService = audioFilterService;
             _toneAlertService = toneAlertService;
             _settings = settings;
             _systemMediaService = systemMediaService;
+            _audioCache = audioCache;
         }
 
 #if MACCATALYST
@@ -97,7 +96,7 @@ namespace JoesScanner.Services
             // immediately even if the caller token isn't canceled yet.
             CancellationToken linkedToken;
             CancellationTokenSource? linkedCts = null;
-            string? authenticatedDownload = null;
+            PlaybackAudioLease? transientAudio = null;
 #if IOS
             IDisposable? routeWatch = null;
 #endif
@@ -134,22 +133,18 @@ namespace JoesScanner.Services
 #endif
                 if (Uri.TryCreate(audioUrl, UriKind.Absolute, out var source) && source.Scheme is "http" or "https")
                 {
-                    if (!string.IsNullOrEmpty(source.UserInfo))
-                        source = new UriBuilder(source) { UserName = string.Empty, Password = string.Empty }.Uri;
-
-                    var authentication = ServerAuthentication.For(_settings);
-                    if (PrivacyNetworkPolicy.For(_settings).IsJoeManaged(source) || _settings.LocalOnlyMode ||
-                        authentication.GetCustomAuthorization(source) != null)
-                    {
-                        authenticatedDownload = await DownloadToTempFileAsync(source.AbsoluteUri, linkedToken);
-                        source = new Uri(authenticatedDownload);
-                    }
-
-                    audioUrl = source.AbsoluteUri;
+                    // Only recorder-scoped callers can persist media under a recording identity.
+                    using var http = ServerAuthenticationHandler.CreateClient(_settings);
+                    using var deadline = CancellationTokenSource.CreateLinkedTokenSource(linkedToken);
+                    deadline.CancelAfter(TimeSpan.FromSeconds(15));
+                    transientAudio = await _audioCache.AcquireAsync(null, (_, _) => Task.CompletedTask,
+                        async (transfer, token) => await RecordingAudioRecovery.DownloadAsync(http, source.AbsoluteUri,
+                            transfer, token) ?? throw new RecordingAudioUnavailableException(), deadline.Token)
+                        ?? throw new RecordingAudioUnavailableException();
+                    audioUrl = transientAudio.Url;
                 }
 
-                // Phase 2+: when audio filters are enabled, ensure we have a local file URL.
-                // Phase 3: carry static filter fade hints without altering queue behavior.
+                // Carry filter analysis into the native player for the leased local media.
                 PreparedAudio prepared;
                 try
                 {
@@ -237,8 +232,7 @@ namespace JoesScanner.Services
             }
             finally
             {
-                if (authenticatedDownload != null)
-                    DeleteTemporaryAudio(authenticatedDownload);
+                transientAudio?.Dispose();
 
                 try { linkedCts?.Dispose(); } catch { }
 #if IOS
@@ -306,10 +300,17 @@ namespace JoesScanner.Services
                     tcs.TrySetException(new InvalidOperationException($"Windows audio playback failed ({e.Error})."));
             }
 
+            void OnPlaybackStateChanged(Windows.Media.Playback.MediaPlaybackSession session, object args)
+            {
+                if (session.PlaybackState == Windows.Media.Playback.MediaPlaybackState.Playing)
+                    completion.NotifyStarted(cancellationToken);
+            }
+
             try
             {
                 player.MediaEnded += OnEnded;
                 player.MediaFailed += OnFailed;
+                player.PlaybackSession.PlaybackStateChanged += OnPlaybackStateChanged;
 
                 player.Source = MediaSource.CreateFromUri(new global::System.Uri(prepared.Url));
                 player.PlaybackSession.PlaybackRate = playbackRate;
@@ -334,6 +335,7 @@ namespace JoesScanner.Services
             {
                 try { player.MediaEnded -= OnEnded; } catch { }
                 try { player.MediaFailed -= OnFailed; } catch { }
+                try { player.PlaybackSession.PlaybackStateChanged -= OnPlaybackStateChanged; } catch { }
                 Interlocked.CompareExchange(ref _windowsPlayer, null, player);
                 player.Dispose();
             });
@@ -562,7 +564,7 @@ namespace JoesScanner.Services
                                 break;
                         }
                         await PlayAndroidSegmentAsync(manager, player, playerRoute, prepared, focusMode, rate, focus, finished.Task,
-                            focusMode == MobileAudioMode.MixAndDuck ? duckingDeadline : null, token);
+                            focusMode == MobileAudioMode.MixAndDuck ? duckingDeadline : null, token, completion);
                     }
                 }
             }
@@ -570,7 +572,7 @@ namespace JoesScanner.Services
 
         private async Task PlayAndroidSegmentAsync(AudioManager manager, Android.Media.MediaPlayer player,
             AndroidAudioEnvironment.PlayerRouteWatch playerRoute, PreparedAudio prepared, MobileAudioMode mode, double rate,
-            AndroidClipFocus focus, Task finished, Task? duckingDeadline, CancellationToken token)
+            AndroidClipFocus focus, Task finished, Task? duckingDeadline, CancellationToken token, PlaybackCompletion completion)
         {
             var playing = false;
             var showPlayingState = false;
@@ -636,6 +638,7 @@ namespace JoesScanner.Services
                 // Keep the same prepared player and resume at its paused position.
                 var playbackLimit = TimeSpan.FromSeconds(Math.Clamp((player.Duration / 1000d / rate * 2) + 120, 180, 10800));
                 player.Start();
+                completion.NotifyStarted(token);
                 playing = true;
                 try
                 {
@@ -774,54 +777,9 @@ namespace JoesScanner.Services
                 {
                 }
 
-	                // When audio is downloaded to a local temp file, iOS needs a file URL.
-	                // Passing a raw filesystem path into NSUrl.FromString often fails.
-	                NSUrl? nsUrl = null;
-	                var audioUrl = prepared.Url;
-	                var requestedUrl = audioUrl;
-
-	                // IMPORTANT (Apple + HTTP): even with ATS allowances, AVPlayer streaming to http:// URLs
-	                // can still fail on some iOS/macOS builds. For http:// we download via managed HttpClient
-	                // and then play from a local file URL.
-	                if (Uri.TryCreate(audioUrl, UriKind.Absolute, out var requestedUri)
-	                    && string.Equals(requestedUri.Scheme, "http", StringComparison.OrdinalIgnoreCase))
-	                {
-	                    try
-	                    {
-	                        var localPath = await DownloadToTempFileAsync(audioUrl, cancellationToken);
-	                        _iosTempDownloadedFile = localPath;
-	                        requestedUrl = new Uri(localPath).AbsoluteUri;
-	                        nsUrl = NSUrl.FromFilename(localPath);
-	                        AppLog.Add("Audio(iOS): downloaded recording for local playback.");
-	                    }
-	                    catch (Exception ex)
-	                    {
-	                        try { AppLog.Add(() => $"Audio(iOS): http download failed ({ex.GetType().Name})."); } catch { }
-	                        // Fall back to streaming attempt.
-	                        nsUrl = NSUrl.FromString(audioUrl);
-	                    }
-	                }
-	                else
-	                {
-	                    try
-	                    {
-	                        if (requestedUri != null && requestedUri.IsFile)
-	                        {
-	                            nsUrl = NSUrl.FromFilename(requestedUri.LocalPath);
-	                        }
-	                        else
-	                        {
-	                            // Ensure the URL is properly escaped (spaces, etc.)
-	                            if (Uri.TryCreate(audioUrl, UriKind.Absolute, out var u))
-	                                requestedUrl = u.AbsoluteUri;
-	                            nsUrl = NSUrl.FromString(requestedUrl);
-	                        }
-	                    }
-	                    catch
-	                    {
-	                        nsUrl = NSUrl.FromString(audioUrl);
-	                    }
-	                }
+                var requestedUri = new Uri(prepared.Url, UriKind.Absolute);
+                using var nsUrl = requestedUri.IsFile ? NSUrl.FromFilename(requestedUri.LocalPath) :
+                    NSUrl.FromString(requestedUri.AbsoluteUri);
 
                 if (nsUrl == null)
                     throw new InvalidOperationException("The recording source could not be opened.");
@@ -914,6 +872,7 @@ namespace JoesScanner.Services
                 cancellationToken.ThrowIfCancellationRequested();
 
                 player.Play();
+                completion.NotifyStarted(cancellationToken);
                 try { AppLog.Add(() => $"Audio(iOS): player.Play invoked. mixEnabled={mixEnabled} rate={playbackRate}"); } catch { }
 
                 try { player.Rate = (float)playbackRate; } catch { }
@@ -988,20 +947,6 @@ namespace JoesScanner.Services
             {
                 _iosPlayer = null;
 
-	                // Cleanup any temp file we downloaded for http:// playback.
-	                try
-	                {
-	                    if (!string.IsNullOrWhiteSpace(_iosTempDownloadedFile) && File.Exists(_iosTempDownloadedFile))
-	                        File.Delete(_iosTempDownloadedFile);
-	                }
-	                catch
-	                {
-	                }
-	                finally
-	                {
-	                    _iosTempDownloadedFile = null;
-	                }
-
                 try
                 {
                     if (_iosEndObserver != null)
@@ -1029,45 +974,6 @@ namespace JoesScanner.Services
         }
 
 #endif
-
-        private async Task<string> DownloadToTempFileAsync(string url, CancellationToken cancellationToken)
-        {
-            // Keep HTTP support when the Apple native networking stack is constrained.
-            using var http = ServerAuthenticationHandler.CreateClient(_settings,
-                new SocketsHttpHandler { AllowAutoRedirect = false });
-            http.Timeout = TimeSpan.FromSeconds(15);
-
-            var source = new Uri(url);
-            using var response = await http.GetAsync(source, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            response.EnsureSuccessStatusCode();
-
-            var tempRoot = Path.Combine(Path.GetTempPath(), "joesscanner-audio");
-            Directory.CreateDirectory(tempRoot);
-            var extension = Path.GetExtension(source.AbsolutePath);
-            if (string.IsNullOrWhiteSpace(extension) || extension.Length > 8)
-                extension = ".bin";
-
-            var path = Path.Combine(tempRoot, $"{Guid.NewGuid():N}{extension}");
-            try
-            {
-                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-                await using var file = File.Open(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
-                await stream.CopyToAsync(file, cancellationToken);
-                return path;
-            }
-            catch
-            {
-                DeleteTemporaryAudio(path);
-                throw;
-            }
-        }
-
-        private static void DeleteTemporaryAudio(string path)
-        {
-            try { File.Delete(path); }
-            catch (IOException) { }
-            catch (UnauthorizedAccessException) { }
-        }
 
         private static double SmoothVolume(double current, double target, int tickMs)
         {

@@ -18,26 +18,10 @@ public partial class AudioPlaybackService
     {
         // A local source lets the player prepare and seek without holding audio
         // priority during network acquisition or AVPlayer stream buffering.
-        string? downloaded = null;
         AppLog.DebugWriteLine("iOS recording preparing.");
         try
         {
             var url = new Uri(prepared.Url, UriKind.Absolute);
-            if (url.Scheme is "http" or "https")
-            {
-                using var download = CancellationTokenSource.CreateLinkedTokenSource(token);
-                download.CancelAfter(TimeSpan.FromSeconds(90));
-                try
-                {
-                    downloaded = await DownloadToTempFileAsync(url.AbsoluteUri, download.Token).ConfigureAwait(false);
-                    url = new Uri(downloaded);
-                }
-                catch (OperationCanceledException ex) when (download.IsCancellationRequested && !token.IsCancellationRequested)
-                {
-                    throw new TimeoutException("iOS audio download timed out.", ex);
-                }
-            }
-
             await _iosClipGate.WaitAsync(token).ConfigureAwait(false);
             try
             {
@@ -58,11 +42,6 @@ public partial class AudioPlaybackService
         {
             AppLog.DebugWriteLine(() => $"iOS recording failed ({ex.GetType().Name}).");
             throw;
-        }
-        finally
-        {
-            if (downloaded != null)
-                DeleteTemporaryAudio(downloaded);
         }
     }
 
@@ -276,6 +255,7 @@ public partial class AudioPlaybackService
             playIssued = true;
             observers.Started();
             player.PlayImmediatelyAtRate((float)rate);
+            observers.NotifyStarted(token);
             AppLog.DebugWriteLine(() => $"iOS recording segment started (lease={lease}, mode={mode}).");
             await _systemMediaService.SetClipPlaybackStateAsync(true, true, "IosClipStarted");
             if (prepared.StaticFilterEnabled || (prepared.ToneFilterEnabled && prepared.ToneDuckSegments.Count > 0))
@@ -349,6 +329,7 @@ public partial class AudioPlaybackService
         private readonly TaskCompletionSource _finished = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<NSError?> _failure = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly PlaybackCompletion _itemCompletion = new();
+        private readonly PlaybackCompletion _completion;
         private int _started;
         private readonly IDisposable _status;
         private readonly NSObject _end;
@@ -360,6 +341,7 @@ public partial class AudioPlaybackService
 
         internal IosPlayerObservers(AVPlayerItem item, PlaybackCompletion completion, CancellationToken token)
         {
+            _completion = completion;
             Terminal = Task.WhenAny(Finished, Failure);
             var center = NSNotificationCenter.DefaultCenter;
             _end = center.AddObserver(AVPlayerItem.DidPlayToEndTimeNotification, _ =>
@@ -379,6 +361,8 @@ public partial class AudioPlaybackService
         }
 
         internal void Started() => Volatile.Write(ref _started, 1);
+
+        internal void NotifyStarted(CancellationToken token) => _completion.NotifyStarted(token);
 
         internal bool TryRetireStalledItem() => _itemCompletion.Reject();
 

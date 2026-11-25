@@ -917,6 +917,26 @@
                                 <x:String>Selected Server / Favorites Only</x:String>
                             </Picker.Items>
                         </Picker>
+                        <Label Text="Audio Cache Size" FontSize="12" />
+                        <Picker SelectedIndex="{Binding AudioCacheLimitIndex, Mode=TwoWay}"
+                                AutomationId="AudioCacheSize" SemanticProperties.Description="Audio cache size">
+                            <Picker.Items>
+                                <x:String>25 MB</x:String>
+                                <x:String>50 MB</x:String>
+                                <x:String>100 MB</x:String>
+                                <x:String>250 MB</x:String>
+                                <x:String>500 MB</x:String>
+                                <x:String>1 GB</x:String>
+                            </Picker.Items>
+                        </Picker>
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <Label Text="Current Cache Usage" FontSize="12" VerticalOptions="Center" />
+                            <Label Grid.Column="1" Text="{Binding AudioCacheUsage}" FontSize="12"
+                                   VerticalOptions="Center" AutomationId="AudioCacheUsage" />
+                        </Grid>
+                        <Button Text="Clear Audio Cache" Command="{Binding ClearAudioCacheCommand}"
+                                AutomationId="ClearAudioCache" HorizontalOptions="Start" />
+                        <Label Text="{Binding AudioCacheError}" IsVisible="{Binding HasAudioCacheError}" FontSize="12" />
                         <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                             <Label Text="Group calls by talkgroup" FontSize="12" VerticalOptions="Center" />
                             <Switch Grid.Column="1" AutomationId="GroupLiveCalls" IsToggled="{Binding GroupLiveCalls, Mode=TwoWay}"

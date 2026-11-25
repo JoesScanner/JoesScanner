@@ -93,14 +93,38 @@ internal sealed class LivePlaybackScheduler(IFavoriteTalkgroupMembership favorit
     {
         var window = await journal.ReadReadyWindowAsync(scopes, recoveryFloor, after.HasValue || !options.GroupCalls ? 1 : Lookahead,
             token, after ?? 0, visibleReplays, automatic);
-        var choice = Choose(window.Select(row => new Candidate(row.Row.ArrivalSequence,
-            TalkgroupKey.From(row.Scope.ServerId, row.Row.Snapshot?.Metadata), row.Row.AudioRecovered, row.Row.Resuming,
-            FavoriteTalkgroupIdentity.From(row.Row.Snapshot?.Metadata))),
-            options, manualReplay: after.HasValue);
+        var choice = Choose(window.Select(ToCandidate), options, manualReplay: after.HasValue);
         return choice is { } selected
             ? new(window.First(row => row.Row.ArrivalSequence == selected.Candidate.Arrival), selected)
             : null;
     }
+
+    internal async Task<DurableLiveQueue.Selection[]> ForecastAsync(DurableLiveQueue journal,
+        IReadOnlyList<DurableLiveQueue.Run> scopes, Func<DurableLiveQueue.Run, long> recoveryFloor,
+        LivePlaybackPreferences options, Choice playing, Func<DurableLiveQueue.Selection, bool> eligible,
+        LiveAutomaticAudioFilter? automatic, CancellationToken token)
+    {
+        // Forecast on a copy before yielding. The queue commits streaks and
+        // dispositions only after confirmed native completion.
+        var draft = (LivePlaybackScheduler)MemberwiseClone();
+        draft.Complete(playing);
+        var window = await journal.ReadReadyWindowAsync(scopes, recoveryFloor, Lookahead + LiveAudioPreloader.MaxUpcoming,
+            token, automatic: automatic);
+        var remaining = window.Where(row => row.Row.ArrivalSequence != playing.Candidate.Arrival && eligible(row)).ToList();
+        var forecast = new List<DurableLiveQueue.Selection>(LiveAudioPreloader.MaxUpcoming);
+        while (forecast.Count < LiveAudioPreloader.MaxUpcoming && draft.Choose(remaining.Select(ToCandidate), options) is { } next)
+        {
+            var index = remaining.FindIndex(row => row.Row.ArrivalSequence == next.Candidate.Arrival);
+            forecast.Add(remaining[index]);
+            remaining.RemoveAt(index);
+            draft.Complete(next);
+        }
+        return forecast.ToArray();
+    }
+
+    private static Candidate ToCandidate(DurableLiveQueue.Selection row) => new(row.Row.ArrivalSequence,
+        TalkgroupKey.From(row.Scope.ServerId, row.Row.Snapshot?.Metadata), row.Row.AudioRecovered, row.Row.Resuming,
+        FavoriteTalkgroupIdentity.From(row.Row.Snapshot?.Metadata));
 
     private TalkgroupKey? _lastGroup;
     private int _consecutiveGroup;

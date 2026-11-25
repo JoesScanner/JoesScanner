@@ -27,6 +27,7 @@ namespace JoesScanner.ViewModels
         private readonly ICallStreamService _callStreamService;
         private readonly ISettingsService _settingsService;
         private readonly IAudioPlaybackService _audioPlaybackService;
+        private readonly PlaybackAudioCache _audioCache;
         private readonly ISystemMediaService _systemMediaService;
         private readonly HttpClient _audioHttpClient;
         private readonly FilterService _filterService = FilterService.Instance;
@@ -220,7 +221,8 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             IWhat3WordsService what3WordsService,
             IToneAlertService toneAlertService,
             DurableLiveQueue durableQueue,
-            PlaybackOwnership playbackOwnership, ScannerConnectionStore connectionStore, FavoritesService favorites)
+            PlaybackOwnership playbackOwnership, ScannerConnectionStore connectionStore, FavoritesService favorites,
+            PlaybackAudioCache audioCache)
         {
             _callStreamService = callStreamService ?? throw new ArgumentNullException(nameof(callStreamService));
             _settingsService = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
@@ -235,6 +237,8 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 			_toneAlertService = toneAlertService ?? throw new ArgumentNullException(nameof(toneAlertService));
             _durableQueue = durableQueue;
             _playbackOwnership = playbackOwnership;
+            _audioCache = audioCache;
+            _ = _audioCache.InitializeAsync();
             _connectionStore = connectionStore;
             Favorites = favorites;
             _scheduler = new(favorites);
@@ -1728,21 +1732,16 @@ private static string SpeedStepToLabel(double step)
             };
         }
 
-        private async Task<string> PrepareManualAudioAsync(CallItem item, CancellationToken token)
+        private async Task<PlaybackAudioLease> PrepareManualAudioAsync(CallItem item, CancellationToken token)
         {
             using var preparation = CancellationTokenSource.CreateLinkedTokenSource(token);
             preparation.CancelAfter(TimeSpan.FromMinutes(15));
-            return await AcquireRecordingAudioAsync(item, preparation.Token);
-        }
-
-        private static void ReleasePreparedManualAudio(string prepared)
-        {
-            if (IsDownloadedAudioTempFile(prepared))
-                TryDeleteFile(prepared);
+            return await AcquireRecordingAudioAsync(item, preparation.Token) ?? throw new RecordingAudioUnavailableException();
         }
 
         private async Task<PlaybackOutcome> PlayAudioAsync(CallItem item, LivePlaybackRequests.Request request,
-            bool allowFilteredPlayback = false, string? preparedAudio = null)
+            bool allowFilteredPlayback = false, PlaybackAudioLease? preparedAudio = null,
+            LivePlaybackScheduler.Choice? forecastFrom = null)
         {
             if (_playbackOwnership.Live == null || (!AudioEnabled && !allowFilteredPlayback) || !request.CanContinue)
                 return PlaybackOutcome.Canceled;
@@ -1755,7 +1754,7 @@ private static string SpeedStepToLabel(double step)
             var outcome = IsFilteredForPlayback(item, allowFilteredPlayback)
                 ? PlaybackOutcome.Skipped
                 : await PlaybackAttempt.RunAsync(() =>
-                    PlayAudioCoreAsync(item, request, completion, preparedAudio, () => reachedNative = true),
+                    PlayAudioCoreAsync(item, request, completion, preparedAudio, () => reachedNative = true, forecastFrom),
                     request.Token, ex => ReportPlaybackFailure(ex, request), completion);
 
             if (!request.CanContinue)
@@ -1795,7 +1794,7 @@ private static string SpeedStepToLabel(double step)
         }
 
         private async Task PlayAudioCoreAsync(CallItem item, LivePlaybackRequests.Request request, PlaybackCompletion completion,
-            string? preparedAudio, Action enteringNative)
+            PlaybackAudioLease? preparedAudio, Action enteringNative, LivePlaybackScheduler.Choice? forecastFrom)
         {
             var token = request.Token;
             var rate = await GetEffectivePlaybackRateAsync(item, token);
@@ -1803,7 +1802,7 @@ private static string SpeedStepToLabel(double step)
             _currentPlayingCall = item;
             item.IsPlaying = true;
             RequestReadyCount();
-            string? acquired = null;
+            PlaybackAudioLease? acquired = null;
             try
             {
                 var started = System.Diagnostics.Stopwatch.StartNew();
@@ -1824,7 +1823,7 @@ private static string SpeedStepToLabel(double step)
                 }
 
                 token.ThrowIfCancellationRequested();
-                var path = preparedAudio ?? acquired ?? throw new RecordingAudioUnavailableException();
+                var audio = preparedAudio ?? acquired ?? throw new RecordingAudioUnavailableException();
                 if (!request.IsManual && ScopeOf(item) == null)
                     return;
                 if (!request.IsManual && !item.IsCompletedReplay && ScopeOf(item) is { } pending &&
@@ -1844,7 +1843,15 @@ private static string SpeedStepToLabel(double step)
                 watchdog.CancelAfter(TimeSpan.FromSeconds(Math.Clamp(expectedSeconds * 2 + 120, 180, 10800)));
 #endif
                 started.Restart();
-                try { await PlayOnDeviceAsync(item, path, rate, request, watchdog.Token, completion, enteringNative); }
+                try
+                {
+                    await PlayOnDeviceAsync(item, audio.Url, rate, request, watchdog.Token, completion, () =>
+                    {
+                        if (audio.CacheHit)
+                            RequireCachedLiveEntitlement(item);
+                        enteringNative();
+                    }, forecastFrom, audio.Invalidate);
+                }
                 catch (OperationCanceledException ex) when (!token.IsCancellationRequested && watchdog.IsCancellationRequested)
                 {
                     throw new TimeoutException("Call playback watchdog timeout.", ex);
@@ -1854,8 +1861,7 @@ private static string SpeedStepToLabel(double step)
             }
             finally
             {
-                if (acquired != null)
-                    ReleasePreparedManualAudio(acquired);
+                acquired?.Dispose();
                 if (request.IsCurrent)
                 {
                     item.IsPlaying = false;
@@ -1866,136 +1872,8 @@ private static string SpeedStepToLabel(double step)
             }
         }
 
-        private static bool IsDownloadedAudioTempFile(string? path)
-        {
-            if (string.IsNullOrWhiteSpace(path))
-                return false;
-
-            try
-            {
-                var cacheDir = FileSystem.CacheDirectory;
-                if (string.IsNullOrWhiteSpace(cacheDir))
-                    return false;
-
-                var fullPath = Path.GetFullPath(path);
-                var fullCache = Path.GetFullPath(cacheDir);
-
-                if (!fullPath.StartsWith(fullCache, StringComparison.OrdinalIgnoreCase))
-                    return false;
-
-                var name = Path.GetFileName(fullPath);
-                return name.StartsWith("jaas_", StringComparison.OrdinalIgnoreCase);
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        private static void TryDeleteFile(string path)
-        {
-            try
-            {
-                if (File.Exists(path))
-                    File.Delete(path);
-            }
-            catch
-            {
-            }
-        }
-
-        private async Task<string?> GetPlayableAudioUrlAsync(string audioUrl, CancellationToken cancellationToken,
-            string? recorder = null, Guid? recorderId = null)
-        {
-            if (string.IsNullOrWhiteSpace(audioUrl))
-                return null;
-
-            if (!Uri.TryCreate(audioUrl, UriKind.Absolute, out var audioUri) || audioUri.Scheme is not ("http" or "https"))
-                return audioUrl;
-
-            if (!string.IsNullOrEmpty(audioUri.UserInfo))
-                audioUri = new UriBuilder(audioUri) { UserName = string.Empty, Password = string.Empty }.Uri;
-
-
-            using var request = new HttpRequestMessage(HttpMethod.Get, audioUri);
-            if (Uri.TryCreate(recorder, UriKind.Absolute, out var origin))
-                request.Options.Set(ServerAuthenticationHandler.Recorder, new RecorderRequestScope(origin, recorderId));
-            using var response = await _audioHttpClient.SendAsync(
-                request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            response.EnsureSuccessStatusCode();
-            var contentType = response.Content.Headers.ContentType?.MediaType;
-            if (contentType?.StartsWith("text/", StringComparison.OrdinalIgnoreCase) == true ||
-                contentType?.Equals("application/json", StringComparison.OrdinalIgnoreCase) == true)
-                throw new RecordingAudioUnavailableException(detail: "The recorder returned a text response for its audio.");
-
-            var extension = Path.GetExtension(audioUri.AbsolutePath);
-            if (string.IsNullOrEmpty(extension))
-                extension = ".wav";
-
-            var localPath = Path.Combine(FileSystem.CacheDirectory, $"jaas_{Guid.NewGuid():N}{extension}");
-            var tempPath = localPath + ".tmp";
-            try
-            {
-                await using (var target = File.Create(tempPath))
-                await using (var stream = await response.Content.ReadAsStreamAsync(cancellationToken))
-                {
-                    await stream.CopyToAsync(target, cancellationToken);
-                    if (target.Length == 0)
-                        throw new RecordingAudioUnavailableException(detail: "The recording file was empty.");
-                }
-
-                File.Move(tempPath, localPath);
-                return localPath;
-            }
-            finally
-            {
-                TryDeleteFile(tempPath);
-            }
-        }
-
-        private async Task<string> AcquireRecordingAudioAsync(CallItem item, CancellationToken token, bool automatic = false)
-        {
-            var access = await AuthorizeRecordingAsync(item, token);
-            var lastUrl = item.AudioUrl;
-            if (automatic)
-            {
-                var reference = string.IsNullOrWhiteSpace(lastUrl) ? await Refresh(token) : lastUrl;
-                return !string.IsNullOrWhiteSpace(reference) && await Download(reference, token) is { Length: > 0 } path
-                    ? path : throw new RecordingAudioUnavailableException();
-            }
-
-            return await RecordingAudioRecovery.AcquireAsync(lastUrl, Refresh, Download, token);
-
-            async Task<string?> Refresh(CancellationToken refreshToken)
-            {
-                if (!string.IsNullOrWhiteSpace(item.AudioUrl) && item.AudioUrl != lastUrl)
-                {
-                    if (access.Protected)
-                        await AuthorizeRecordingAsync(item, refreshToken);
-                    return lastUrl = item.AudioUrl;
-                }
-
-                var scope = ScopeOf(item);
-                var refreshed = await RefreshRecorderAudioAsync(item, access.Server, access.RecordedAt, refreshToken);
-                if (item.LiveState is { } state && scope is { } durable && IsCurrentLiveScope(durable) &&
-                    TryGetDurableRecording(item, durable, out _))
-                    await _durableQueue.ObserveAsync(durable, state.Id, null, state.Read(), refreshToken, existingOnly: true);
-                refreshToken.ThrowIfCancellationRequested();
-                RequireCurrentRecordingAccount(item);
-                if (refreshed != null)
-                    item.AudioUrl = lastUrl = refreshed;
-                return refreshed;
-            }
-
-            Task<string?> Download(string url, CancellationToken acquireToken)
-            {
-                RequireCurrentRecordingAccount(item);
-                return GetPlayableAudioUrlAsync(url, acquireToken, recorder: access.Server, recorderId: item.ServerId);
-            }
-        }
-
         private async Task<(string Server, bool Protected, DateTimeOffset? RecordedAt)> AuthorizeRecordingAsync(
-            CallItem item, CancellationToken token)
+            CallItem item, CancellationToken token, bool cached = false)
         {
             var server = item.RecordingServer ?? item.LiveState?.ServerUrl ?? _settingsService.ServerUrl ?? "";
             if (item.ServerId != null && !CanUseRecorder(item, server))
@@ -2020,8 +1898,12 @@ private static string SpeedStepToLabel(double step)
             if (protectedSource && !CanUseRecorder(item, server))
                 throw new RecordingAccessException("The recording's hosted server is no longer configured.");
             var currentLive = ScopeOf(item) is { } scope && scope.Owner == owner && (!protectedSource || context.Account != null);
-            await RecordingPlaybackAccess.VerifyAsync(_settingsService, _subscriptionService, server,
-                recordedAt, context, currentLive, requireAccount: protectedSource, token, independent: item.ServerId != null);
+            if (cached && protectedSource)
+                RecordingPlaybackAccess.RequireCachedEntitlement(_settingsService, server, account, recordedAt,
+                    currentLive && context.Origin == RecordingOrigin.Live, independent: item.ServerId != null);
+            else
+                await RecordingPlaybackAccess.VerifyAsync(_settingsService, _subscriptionService, server,
+                    recordedAt, context, currentLive, requireAccount: protectedSource, token, independent: item.ServerId != null);
             return (server, protectedSource, recordedAt);
         }
 

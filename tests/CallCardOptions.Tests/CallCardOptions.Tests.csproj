@@ -34,6 +34,11 @@
     <Compile Include="../../JoesScanner/Services/DurableLiveQueue.Scheduling.cs" Link="DurableLiveQueue.Scheduling.cs" />
     <Compile Include="../../JoesScanner/Services/LiveAudioSource.cs" Link="LiveAudioSource.cs" />
     <Compile Include="../../JoesScanner/Services/LivePlaybackScheduler.cs" Link="LivePlaybackScheduler.cs" />
+    <Compile Include="../../JoesScanner/Services/LiveAudioPreloader.cs" Link="LiveAudioPreloader.cs" />
+    <Compile Include="../../JoesScanner/Services/PlaybackAudioCache.cs" Link="PlaybackAudioCache.cs" />
+    <Compile Include="../../JoesScanner/Services/PlaybackAudioCachePreferences.cs" Link="PlaybackAudioCachePreferences.cs" />
+    <Compile Include="../../JoesScanner/Services/RecordingAudioRecovery.cs" Link="RecordingAudioRecovery.cs" />
+    <Compile Include="../../JoesScanner/Services/RecordingAudioTransfer.cs" Link="RecordingAudioTransfer.cs" />
     <Compile Include="../../JoesScanner/Services/FavoriteRecords.cs" Link="FavoriteRecords.cs" />
     <Compile Include="../../JoesScanner/Services/IDatabasePathProvider.cs" Link="IDatabasePathProvider.cs" />
     <Compile Include="../../JoesScanner/Services/IosAudioState.cs" Link="IosAudioState.cs" />
@@ -54,7 +59,6 @@
     <Compile Include="../../JoesScanner/ViewModels/MainViewModel.PlaybackOwnership.cs" Link="MainViewModel.PlaybackOwnership.cs" />
     <Compile Include="../../JoesScanner/ViewModels/MainViewModel.LiveAudioSource.cs" Link="MainViewModel.LiveAudioSource.cs" />
     <Compile Include="../../JoesScanner/ViewModels/MainViewModel.ListeningSession.cs" Link="MainViewModel.ListeningSession.cs" />
-    <Compile Include="../../JoesScanner/Services/HistoryAudioFile.cs" Link="HistoryAudioFile.cs" />
     <Compile Include="../../JoesScanner/Services/HistoryResultOrder.cs" Link="HistoryResultOrder.cs" />
     <Compile Include="../../JoesScanner/Services/ICallHistoryService.cs" Link="ICallHistoryService.cs" />
     <Compile Include="../../JoesScanner/ViewModels/HistoryViewModel.Paging.cs" Link="HistoryViewModel.Paging.cs" />

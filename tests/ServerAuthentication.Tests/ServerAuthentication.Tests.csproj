@@ -25,6 +25,9 @@
     <Compile Include="../../JoesScanner/Services/FavoritesSyncClient.cs" Link="FavoritesSyncClient.cs" />
     <Compile Include="../../JoesScanner/Services/LiveAudioSource.cs" Link="LiveAudioSource.cs" />
     <Compile Include="../../JoesScanner/Services/LivePlaybackScheduler.cs" Link="LivePlaybackScheduler.cs" />
+    <Compile Include="../../JoesScanner/Services/LiveAudioPreloader.cs" Link="LiveAudioPreloader.cs" />
+    <Compile Include="../../JoesScanner/Services/PlaybackAudioCache.cs" Link="PlaybackAudioCache.cs" />
+    <Compile Include="../../JoesScanner/Services/RecordingAudioTransfer.cs" Link="RecordingAudioTransfer.cs" />
     <Compile Include="../../JoesScanner/Services/WordPressSession.cs" Link="WordPressSession.cs" />
     <Compile Include="../../JoesScanner/Services/SubscriptionService.cs" Link="SubscriptionService.cs" />
     <Compile Include="../../JoesScanner/Services/ITelemetryService.cs" Link="ITelemetryService.cs" />

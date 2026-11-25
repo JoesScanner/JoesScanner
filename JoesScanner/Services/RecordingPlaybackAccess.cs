@@ -111,7 +111,7 @@ internal static class RecordingPlaybackAccess
 
     internal static string? RecorderAccountKey(ISettingsService settings, Guid recorderId, string endpoint) =>
         settings.TryGetRecorderCredentials(recorderId, endpoint, out var username, out _)
-            ? AccountKeyForUsername(username) : null;
+            ? Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(username))) : null;
 
     internal static string? AccountKeyForUsername(string? username) =>
         string.IsNullOrWhiteSpace(username) ? null :
@@ -121,6 +121,33 @@ internal static class RecordingPlaybackAccess
     {
         if (account == null || (!independent && !IsSelected(settings, server)) || AccountKey(settings, server, independent) != account)
             throw new RecordingAccessException("This recording could not be authorized for the current hosted account.");
+    }
+
+    // Local playback uses the last account-scoped verification. It never performs a
+    // cloud refresh or grants a longer outage window than the underlying subscription.
+    internal static void RequireCachedEntitlement(ISettingsService settings, string server, string? account,
+        DateTimeOffset? recordedAt, bool currentLive, bool independent, TimeProvider? clock = null)
+    {
+        RequireAccount(settings, server, account, independent);
+        var now = (clock ?? TimeProvider.System).GetUtcNow();
+        var grant = settings.ReadHostedSubscription();
+        var offline = settings.LocalOnlyMode || !grant.VerifiedOnline;
+        if (!grant.IsAllowed || grant.CheckedUtc is not { } checkedAt ||
+            checkedAt < now.AddHours(-24).UtcDateTime || checkedAt > now.UtcDateTime ||
+            grant.ExpiresUtc <= now.UtcDateTime || grant.RenewalUtc <= now.UtcDateTime ||
+            offline && (grant.RenewalUtc ?? grant.ExpiresUtc) == null)
+            throw new RecordingAccessException("Cached hosted audio requires a valid subscription.");
+
+        if (!currentLive && grant.Tier is not (1 or 2))
+            throw VerificationRequired();
+        if (!currentLive && grant.Tier == 1 && !(recordedAt >= now.AddHours(-24) && recordedAt <= now))
+            throw new RecordingAccessException("This recording is outside the Standard 24-hour history window.");
+    }
+
+    internal static void RequireRecorderNetwork(ISettingsService settings, string endpoint)
+    {
+        if (Uri.TryCreate(endpoint, UriKind.Absolute, out var uri) && !PrivacyNetworkPolicy.For(settings).Allows(uri))
+            throw new RecordingAccessException("Online playback for this recorder is paused in Local Only Mode.");
     }
 
     // Returns a lower bound for a subsequent metadata lookup on Standard.

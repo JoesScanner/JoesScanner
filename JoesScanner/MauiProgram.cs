@@ -47,6 +47,14 @@ public static class MauiProgram
         builder.Services.AddSingleton<ICallHistoryService, CallHistoryService>();
         builder.Services.AddSingleton<HistorySearchPreferences>();
         builder.Services.AddSingleton<IHistoryLookupsCacheService, HistoryLookupsCacheService>();
+        builder.Services.AddSingleton(_ =>
+        {
+            var appData = AppPaths.GetAppDataDirectorySafe();
+            var cacheDirectory = AppPaths.TryGetCacheDirectory();
+            return new PlaybackAudioCache(Path.Combine(cacheDirectory ?? appData, "PlaybackAudioCache"),
+                Path.Combine(Path.GetTempPath(), "joesscanner-audio"), PlaybackAudioCachePreferences.Read(),
+                legacyDownloads: cacheDirectory, legacyFilterCache: Path.Combine(appData, "AudioFilterCache"));
+        });
         builder.Services.AddSingleton<IAudioFilterService, AudioFilterService>();
         builder.Services.AddSingleton<IAudioPlaybackService, AudioPlaybackService>();
         builder.Services.AddSingleton<PlaybackOwnership>();

@@ -181,8 +181,8 @@ internal static class HistoryPlaybackDispatcherTests
         history.PrepareForTest = (call, _) =>
         {
             preparations.Enqueue(call.BackendId);
-            return call == unavailable ? Task.FromException<HistoryAudioFile>(new IOException("No audio.")) :
-                Task.FromResult(new HistoryAudioFile(call.BackendId));
+            return call == unavailable ? Task.FromException<PlaybackAudioLease>(new IOException("No audio.")) :
+                Task.FromResult(new PlaybackAudioLease(call.BackendId));
         };
         player.Playing = (id, _) => id == "corrupt" ?
             Task.FromException(new InvalidDataException("Cannot decode.")) : Task.CompletedTask;
@@ -220,12 +220,18 @@ internal static class HistoryPlaybackDispatcherTests
         try
         {
             var acquired = new ConcurrentQueue<string>();
-            history.PrepareForTest = (call, _) =>
+            var shared = new PlaybackAudioCache(Path.Combine(cache.FullName, "media"), Path.Combine(cache.FullName, "fallback"),
+                25, _ => null);
+            history.PrepareForTest = async (call, token) =>
             {
-                acquired.Enqueue(call.BackendId);
-                var path = Path.Combine(cache.FullName, Guid.NewGuid().ToString("N") + ".wav");
-                File.WriteAllBytes(path, [1, 2, 3]);
-                return Task.FromResult(new HistoryAudioFile(call.BackendId, path, 3));
+                var key = RecordingCacheKey.Create(call.ServerId, call.RecordingServer!, call.BackendId, null, null);
+                var audio = await shared.AcquireAsync(key, (_, _) => Task.CompletedTask, async (transfer, cancellation) =>
+                {
+                    acquired.Enqueue(call.BackendId);
+                    using var response = AudioCacheTests.WaveResponse(256);
+                    return await transfer.StoreAsync(response, ".wav", cancellation);
+                }, token) ?? throw new InvalidOperationException("Missing test audio.");
+                return new PlaybackAudioLease(call.BackendId, audio.CacheHit, audio.Dispose, audio.Invalidate);
             };
             await dispatcher.DispatchAsync(() => history.SearchForTestAsync([newest, oldest], true)).Unwrap();
             var original = history.SelectForTestAsync(oldest);
@@ -259,8 +265,8 @@ internal static class HistoryPlaybackDispatcherTests
             await again.WaitAsync(Timeout);
             await history.OnPageClosedAsync();
             LiveHistoryHandoffTests.Check(acquired.SequenceEqual(["row_10", "row_9"]) &&
-                history.PagesForTest.PageRequests == 1 && cache.GetFiles().Length == 0,
-                "Adjacent navigation must reuse the recent prepared audio and release temporary files on close.");
+                history.PagesForTest.PageRequests == 1 && shared.UsageBytes > 0,
+                "Adjacent navigation must reuse audio and leave it available to the shared cache after History closes.");
         }
         finally
         {
@@ -281,7 +287,7 @@ internal static class HistoryPlaybackDispatcherTests
         var bad = history.MakeCallForTest("bad", -3);
         var latest = history.MakeCallForTest("latest", -4);
         var slowStarted = LiveHistoryHandoffTests.Signal();
-        var late = new TaskCompletionSource<HistoryAudioFile>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var late = new TaskCompletionSource<PlaybackAudioLease>(TaskCreationOptions.RunContinuationsAsynchronously);
         CancellationToken slowToken = default;
         history.PrepareForTest = (call, token) =>
         {
@@ -292,8 +298,8 @@ internal static class HistoryPlaybackDispatcherTests
                 return late.Task;
             }
             if (call == bad)
-                return Task.FromException<HistoryAudioFile>(new IOException("Failed to download."));
-            return Task.FromResult(new HistoryAudioFile(call.BackendId));
+                return Task.FromException<PlaybackAudioLease>(new IOException("Failed to download."));
+            return Task.FromResult(new PlaybackAudioLease(call.BackendId));
         };
         await dispatcher.DispatchAsync(() => history.SearchForTestAsync([active, slow, bad, latest], false)).Unwrap();
         var original = history.SelectForTestAsync(active);
@@ -390,7 +396,7 @@ internal static class HistoryPlaybackDispatcherTests
             await ExpectStartAsync(starts, "old");
 
             var page = new TaskCompletionSource<HistorySearchResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var audio = new TaskCompletionSource<HistoryAudioFile>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var audio = new TaskCompletionSource<PlaybackAudioLease>(TaskCreationOptions.RunContinuationsAsynchronously);
             var preparationStarted = LiveHistoryHandoffTests.Signal();
             CancellationToken pagingToken = default;
             CancellationToken preparationToken = default;
@@ -404,7 +410,7 @@ internal static class HistoryPlaybackDispatcherTests
             history.PrepareForTest = (call, token) =>
             {
                 if (call != pending)
-                    return Task.FromResult(new HistoryAudioFile(call.BackendId));
+                    return Task.FromResult(new PlaybackAudioLease(call.BackendId));
                 preparationToken = token;
                 preparationStarted.SetResult();
                 return audio.Task;

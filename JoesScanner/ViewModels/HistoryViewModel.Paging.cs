@@ -34,7 +34,6 @@ public sealed partial class HistoryViewModel
     {
         RetireHistoryPageRequest();
         StopHistoryPlayback();
-        ReleaseHistoryAudio();
         _historyResults = null;
         _historyPageError = null;
         _activeCall = null;

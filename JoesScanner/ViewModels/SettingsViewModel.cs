@@ -587,7 +587,8 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
             IHistoryLookupsCacheService historyLookupsCacheService,
             IAuthObservedTriplesSyncService authObservedTriplesSyncService,
             ISubscriptionService subscriptionService,
-            CallCardOptionsService callCardOptionsService)
+            CallCardOptionsService callCardOptionsService,
+            PlaybackAudioCache audioCache)
         {
             _settings = settingsService ?? throw new ArgumentNullException(nameof(settingsService));
             _mainViewModel = mainViewModel ?? throw new ArgumentNullException(nameof(mainViewModel));
@@ -599,6 +600,7 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
             _authObservedTriplesSyncService = authObservedTriplesSyncService ?? throw new ArgumentNullException(nameof(authObservedTriplesSyncService));
             _subscriptionService = subscriptionService;
             _callCardOptionsService = callCardOptionsService;
+            InitializeAudioCache(audioCache);
             _filterService.CatalogChanged += (_, _) => QueueFilterCatalogRefresh();
 
             _httpClient = WordPressSession.CreateClient(_settings);

@@ -31,6 +31,8 @@ public partial class MainViewModel
         options.Save();
         var previous = _livePlaybackPreferences;
         _livePlaybackPreferences = options;
+        if (previous != options)
+            _automaticPreloads.Retire();
         if (previous.SourceMode != options.SourceMode)
             RefreshAutomaticAudioSource();
         if (previous.GroupCalls != options.GroupCalls || previous.PrioritizeFavorites != options.PrioritizeFavorites)
@@ -124,6 +126,7 @@ public partial class MainViewModel
 
     private void ResetScheduler()
     {
+        _automaticPreloads.Retire();
         ++_readyCountRevision;
         _scheduler.Reset();
         _backlog.Reset();
@@ -168,6 +171,7 @@ public partial class MainViewModel
 
     private async Task ApplyAutomaticAudioFiltersAsync()
     {
+        _automaticPreloads.Retire();
         UpdateQueueDerivedState();
         var run = _monitoring.Current;
         if (!_monitoring.CanRecover(run))
@@ -193,5 +197,35 @@ public partial class MainViewModel
         }
         if (_monitoring.CanRecover(run))
             RequestQueueForLiveArrival("AutomaticAudioFiltersChanged");
+    }
+
+    private void StartAutomaticPreloads(LivePlaybackScheduler.Choice current, CancellationToken playback, long revision)
+    {
+        if (!AudioEnabled || !IsRunning || _playbackOwnership.Live == null || ManualBacklogExemption || _backlog.JumpPending)
+            return;
+
+        _ = _automaticPreloads.Start(async token =>
+        {
+            if (!await _audioCache.CanPreloadAsync(token))
+                return [];
+            var predicted = await _scheduler.ForecastAsync(_durableQueue, AutomaticQueueScopes(), LocalRecoveryFloor,
+                _livePlaybackPreferences, current, row => row.Row.Snapshot is { } snapshot &&
+                    !IsFilteredForPlayback(row.Scope.ServerId, snapshot.Metadata), _automaticAudioFilter, token);
+            token.ThrowIfCancellationRequested();
+            return predicted.Where(row => IsCurrentLiveScope(row.Scope)).Select(row =>
+            {
+                // Read an in-memory signed URL when available without modifying cards.
+                var card = Calls.FirstOrDefault(item => item.LiveArrivalSequence == row.Row.ArrivalSequence &&
+                    item.ServerId == row.Scope.ServerId && row.Scope.Owns(item.RecordingAccess)) ??
+                    row.Row.ToCallItem(row.Scope.Server, row.Scope.ServerId);
+                return new LiveAudioPreloader.Candidate(row.Row.ArrivalSequence, async preloadToken =>
+                {
+                    if (_backlog.JumpPending || !IsCurrentLiveScope(row.Scope) || !AutomaticAudioIncludes(card) ||
+                        IsFilteredForPlayback(card))
+                        return;
+                    using var audio = await AcquireRecordingAudioAsync(card, preloadToken, automatic: true, speculative: true);
+                });
+            }).ToArray();
+        }, playback, revision);
     }
 }

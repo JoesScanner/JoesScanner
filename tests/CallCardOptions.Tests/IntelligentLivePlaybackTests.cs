@@ -28,12 +28,56 @@ internal static class IntelligentLivePlaybackTests
             await ManualReplayExemptsJumpAsync(Path.Combine(directory.FullName, "manual.db"));
             await ManualPreparationFailureAsync(Path.Combine(directory.FullName, "failed.db"));
             await SilentArrivalsAsync(Path.Combine(directory.FullName, "silent.db"));
+            await ForecastDoesNotCommitAsync(Path.Combine(directory.FullName, "forecast.db"));
         }
         finally
         {
             SqliteConnection.ClearAllPools();
             directory.Delete(recursive: true);
         }
+    }
+
+    private static async Task ForecastDoesNotCommitAsync(string path)
+    {
+        var queue = new DurableLiveQueue(new Paths(path));
+        var a = new DurableLiveQueue.Run("https://recorder-a.test", 71, null, ServerId: ServerA);
+        var b = new DurableLiveQueue.Run("https://recorder-b.test", 72, null, ServerId: ServerB);
+        await queue.StartListeningAsync(a, Now, default);
+        await queue.StartListeningAsync(b, Now, default);
+        var group = Group(ServerB, "radio-system", "fire");
+        var scheduler = CreateScheduler(group);
+        scheduler.Complete(new(new(1, group), true));
+        scheduler.Complete(new(new(2, group), true));
+        var active = await Observe(queue, b, "active-favorite", "active.wav", "fire");
+        await Observe(queue, a, "filtered", "filtered.wav", "patrol");
+        await Observe(queue, a, "oldest-regular", "regular.wav", "patrol");
+        await Observe(queue, b, "another-favorite", "favorite.wav", "fire");
+        await Observe(queue, b, "other-b", "other.wav", "ems");
+
+        var options = Defaults with { ConsecutiveLimit = 10 };
+        var playing = new LivePlaybackScheduler.Choice(new(active.ArrivalSequence!.Value, group), true);
+        var forecast = await scheduler.ForecastAsync(queue, [a, b], _ => 0, options, playing,
+            row => row.Row.Id != "filtered", null, default);
+        Check(forecast.Select(row => row.Row.Id).SequenceEqual(["oldest-regular", "another-favorite"]) &&
+            await queue.CountReadyAsync([a, b], _ => 0, null, default) == 5,
+            "The forecast must respect Favorites fairness and filters without changing durable rows.");
+        var stillFavorite = scheduler.Choose([new(20, Police), new(21, group)], options);
+        Check(stillFavorite?.Favorite == true, "The forecast cannot advance the live fairness counter.");
+
+        var grouped = await scheduler.ForecastAsync(queue, [a, b], _ => 0,
+            Defaults with { PrioritizeFavorites = false, ConsecutiveLimit = 2 }, playing,
+            row => row.Row.Id != "filtered", null, default);
+        Check(grouped.Select(row => row.Row.Id).SequenceEqual(["oldest-regular", "another-favorite"]),
+            "Simulating the active clip must make the exhausted group yield during forecasting.");
+        var favoriteOnly = new LiveAutomaticAudioFilter(0, 0,
+            new Dictionary<(Guid, FavoriteTalkgroupIdentity), long>
+            {
+                [(ServerB, FavoriteTalkgroupIdentity.From(new CallCardMetadata { SystemId = "radio-system", TalkgroupId = "fire" })!)] = 0
+            });
+        var scoped = await scheduler.ForecastAsync(queue, [b], _ => 0, options, playing, _ => true, favoriteOnly, default);
+        Check(scoped.Select(row => row.Row.Id).SequenceEqual(["another-favorite"]),
+            "Only the selected recorder and eligible Favorites should be forecast.");
+        Console.WriteLine("PASS Production preload forecasts honor Favorites fairness, group caps, filters and source without advancing scheduler state");
     }
 
     private static void OptionsAndIdentities()

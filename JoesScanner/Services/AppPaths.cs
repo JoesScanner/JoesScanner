@@ -44,4 +44,10 @@ internal static class AppPaths
         var dir = GetAppDataDirectorySafe();
         return Path.Combine(dir, fileName);
     }
+
+    internal static string? TryGetCacheDirectory()
+    {
+        try { return FileSystem.CacheDirectory; }
+        catch { return null; }
+    }
 }
