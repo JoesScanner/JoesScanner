@@ -33,6 +33,7 @@ await LiveInterruptionTests.RunAsync();
 await RecordingDatabaseMaintenanceTests.RunAsync();
 await LiveHistoryHandoffTests.RunAsync();
 await IntelligentLivePlaybackTests.RunAsync();
+await LiveAudioSourceTests.RunAsync();
 await HistoryPlaybackDispatcherTests.RunAsync();
 
 var defaults = CallCardLayout.Default;

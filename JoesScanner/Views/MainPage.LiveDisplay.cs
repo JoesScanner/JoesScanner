@@ -48,7 +48,34 @@ public partial class MainPage
     }
 
     private void OnCombinedLiveClicked(object? sender, EventArgs e) => SetLiveDisplay(separate: false);
-    private void OnSeparateLiveClicked(object? sender, EventArgs e) => SetLiveDisplay(separate: true);
+    private void OnSeparateLiveClicked(object? sender, EventArgs e)
+    {
+        SetLiveDisplay(separate: true);
+        if (_liveDisplay.SelectedServer is { } id)
+            _viewModel.ChooseLiveAudioSource(LiveAudioSource.Recorder(id));
+    }
+
+    private async void OnLiveAudioSourceClicked(object? sender, EventArgs e)
+    {
+        var recorders = _viewModel.ScannerConnections.Where(row => row.Enabled).ToArray();
+        var duplicateNames = recorders.GroupBy(row => row.Name, StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Count() > 1).Select(group => group.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var choices = recorders.Select(row => (Source: LiveAudioSource.Recorder(row.Id),
+                Text: duplicateNames.Contains(row.Name) ? $"Recorder · {row.Name} ({row.Id.ToString("N")[..8]})" : $"Recorder · {row.Name}"))
+            .Append((Source: LiveAudioSource.Favorites, Text: "Favorites")).ToArray();
+        try
+        {
+            var selected = await UiDialogs.ActionSheetAsync("Automatic Playback Source", "Cancel", null,
+                choices.Select(choice => choice.Text).ToArray());
+            var choice = choices.FirstOrDefault(choice => choice.Text == selected);
+            if (_handlersAttached && _viewModel.IsSelectedLiveAudioMode && choice.Text != null)
+                _viewModel.ChooseLiveAudioSource(choice.Source);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Add(() => $"Could not choose the Live audio source ({ex.GetType().Name}).");
+        }
+    }
 
     private void OnFavoriteMembershipChanged() => MainThread.BeginInvokeOnMainThread(() =>
     {
@@ -60,6 +87,7 @@ public partial class MainPage
     {
         _favoritesLive = true;
         AppStateStore.SetBool(FavoritesLiveKey, true);
+        _viewModel.ChooseLiveAudioSource(LiveAudioSource.Favorites);
         RenderLiveDisplay();
     }
 
@@ -123,7 +151,11 @@ public partial class MainPage
             {
                 var button = new Button { FontSize = 12 };
                 button.SetBinding(Button.TextProperty, nameof(ScannerConnectionRow.Name));
-                button.Clicked += (_, _) => SelectLiveServer(id);
+                button.Clicked += (_, _) =>
+                {
+                    SelectLiveServer(id);
+                    _viewModel.ChooseLiveAudioSource(LiveAudioSource.Recorder(id));
+                };
                 var status = CreateServerStatusIndicator(10);
                 status.HorizontalOptions = LayoutOptions.Center;
                 tab = (new VerticalStackLayout { BindingContext = configured[id], Spacing = 1, Children = { button, status } }, button);
@@ -183,6 +215,8 @@ public partial class MainPage
     {
         if (_liveDisplay.MoveSelection(e.Direction == SwipeDirection.Left ? 1 : -1))
         {
+            if (_liveDisplay.SelectedServer is { } id)
+                _viewModel.ChooseLiveAudioSource(LiveAudioSource.Recorder(id));
             RenderLiveDisplay();
             ScrollSelectedTabIntoView();
         }

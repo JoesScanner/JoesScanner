@@ -4,7 +4,7 @@ using JoesScanner.Models;
 namespace JoesScanner.Services;
 
 internal sealed record LivePlaybackPreferences(bool GroupCalls = true, bool PrioritizeFavorites = true,
-    int ConsecutiveLimit = 3, int WarningThreshold = 80, int JumpThreshold = 100)
+    int ConsecutiveLimit = 3, int WarningThreshold = 80, int JumpThreshold = 100, LiveAudioSourceMode SourceMode = LiveAudioSourceMode.AllEnabledServers)
 {
     internal const int MinimumConsecutive = 1;
     internal const int MaximumConsecutive = 10;
@@ -34,7 +34,8 @@ internal sealed record LivePlaybackPreferences(bool GroupCalls = true, bool Prio
                 ConsecutiveLimit = options.ConsecutiveLimit is >= MinimumConsecutive and <= MaximumConsecutive
                     ? options.ConsecutiveLimit : Default.ConsecutiveLimit,
                 WarningThreshold = options.WarningThreshold > 0 ? options.WarningThreshold : Default.WarningThreshold,
-                JumpThreshold = options.JumpThreshold > 0 ? options.JumpThreshold : Default.JumpThreshold
+                JumpThreshold = options.JumpThreshold > 0 ? options.JumpThreshold : Default.JumpThreshold,
+                SourceMode = Enum.IsDefined(options.SourceMode) ? options.SourceMode : Default.SourceMode
             };
         }
         catch (JsonException) { return Default; }
@@ -88,10 +89,10 @@ internal sealed class LivePlaybackScheduler(IFavoriteTalkgroupMembership favorit
 
     internal async Task<Scheduled?> SelectAsync(DurableLiveQueue journal, IReadOnlyList<DurableLiveQueue.Run> scopes,
         Func<DurableLiveQueue.Run, long> recoveryFloor, LivePlaybackPreferences options, CancellationToken token,
-        long? after = null, IReadOnlyList<long>? visibleReplays = null)
+        long? after = null, IReadOnlyList<long>? visibleReplays = null, LiveAutomaticAudioFilter? automatic = null)
     {
         var window = await journal.ReadReadyWindowAsync(scopes, recoveryFloor, after.HasValue || !options.GroupCalls ? 1 : Lookahead,
-            token, after ?? 0, visibleReplays);
+            token, after ?? 0, visibleReplays, automatic);
         var choice = Choose(window.Select(row => new Candidate(row.Row.ArrivalSequence,
             TalkgroupKey.From(row.Scope.ServerId, row.Row.Snapshot?.Metadata), row.Row.AudioRecovered, row.Row.Resuming,
             FavoriteTalkgroupIdentity.From(row.Row.Snapshot?.Metadata))),

@@ -240,7 +240,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             _scheduler = new(favorites);
             _privacyNetwork = PrivacyNetworkPolicy.For(settingsService);
             _settingsService.LocalOnlyModeChanged += OnPrivacyNetworkChanged;
-            Favorites.Changed += () => MainThread.BeginInvokeOnMainThread(() => RequestQueueForLiveArrival("FavoritesChanged"));
+            Favorites.Changed += () => MainThread.BeginInvokeOnMainThread(() => _ = RefreshFavoriteAudioSourceAsync());
             _connections.StatusChanged += OnRecorderStatusChanged;
             _connections.Retired += RetireRecorder;
             _playbackCommit = new DurablePlaybackCommit(durableQueue.CommitCompletionAsync);
@@ -606,7 +606,7 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 						isMainAudioSoftMuted: false,
 						isAlreadyPlaying: _currentPlayingCall != null,
 						isQueuePlaybackRunning: _isQueuePlaybackRunning,
-						visibleQueueCount: LiveQueueScopes().Length != 0 ? Math.Max(1, CallsWaiting) : CallsWaiting);
+						visibleQueueCount: AutomaticQueueScopes().Length != 0 || _manualLiveTraversal != null ? Math.Max(1, CallsWaiting) : 0);
 
 					if (!canStart || _playbackRequests.HasManualSelection || _retryPlaybackCall != null)
 						return;

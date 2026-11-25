@@ -24,11 +24,13 @@ namespace JoesScanner.ViewModels
             _manualLiveTraversal = null;
             _liveEdgeBoundary = null;
             _livePlaybackFloor = 0;
+            ResetAutomaticAudioSource();
             ResetScheduler();
         }
 
         private void BeginAudioAtLiveEdge(bool skipOutstandingRecovery = false)
         {
+            ResetAutomaticAudioSource();
             _manualLiveTraversal = null;
             ResetScheduler();
             _liveEdgeBoundary = _monitoring.Current is { } run && _monitoring.CanRecover(run)
@@ -74,6 +76,7 @@ namespace JoesScanner.ViewModels
             if (_playbackOwnership.Live == null)
             {
                 InvalidateLivePlayback();
+                ResetAutomaticAudioSource();
                 ResetScheduler();
                 UpdateQueueDerivedState();
                 return;
@@ -129,7 +132,7 @@ namespace JoesScanner.ViewModels
 
             _isQueuePlaybackRunning = true;
             var version = ++_queuePlaybackVersion;
-            var traversal = _manualLiveTraversal is { } selected && selected.Session == run!.Id ? selected : null;
+
             using var selection = CancellationTokenSource.CreateLinkedTokenSource(run!.Token, live.Token);
             var token = selection.Token;
             var aborted = false;
@@ -146,13 +149,21 @@ namespace JoesScanner.ViewModels
                 await FlushLiveCompletionAsync(token);
                 while (OwnsSelection() && AudioEnabled && !IsLiveInterruptionBlockingPlayback)
                 {
+                    if (!await WaitForAutomaticAudioSourceAsync(token))
+                        break;
+                    var sourceRevision = _automaticAudioRevision;
+                    var traversal = _manualLiveTraversal is { } selected && selected.Session == run!.Id ? selected : null;
                     var beforeRead = _queueWake.BeforeRead();
                     if (traversal == null && await TryAutomaticBacklogJumpAsync(run!, live, version, token))
+                        continue;
+                    if (sourceRevision != _automaticAudioRevision)
                         continue;
                     if (!OwnsSelection() || !AudioEnabled || IsLiveInterruptionBlockingPlayback)
                         break;
 
                     var selectedCall = await GetNextDurableCallAsync(token, version, traversal);
+                    if (sourceRevision != _automaticAudioRevision)
+                        continue;
                     if (!OwnsSelection() || !AudioEnabled || IsLiveInterruptionBlockingPlayback)
                         break;
                     if (selectedCall is not { } selectedAtBoundary)
@@ -161,7 +172,7 @@ namespace JoesScanner.ViewModels
                             continue;
                         if (traversal != null)
                         {
-                            _manualLiveTraversal = traversal = null;
+                            _manualLiveTraversal = null;
                             _scheduler.Reset();
                             continue;
                         }
@@ -174,6 +185,13 @@ namespace JoesScanner.ViewModels
                     using var request = _playbackRequests.Begin(manual: false, live.Token);
                     var outcome = await PlayAudioAsync(next, request);
                     hadFailure = outcome == PlaybackOutcome.Failed;
+                    if (sourceRevision != _automaticAudioRevision)
+                    {
+                        if (traversal != null && ReferenceEquals(_manualLiveTraversal, traversal) &&
+                            outcome.AdvancesQueue() && next.LiveArrivalSequence is { } position)
+                            traversal.Position = position;
+                        continue;
+                    }
                     if (request.CanContinue)
                     {
                         if (traversal == null && outcome == PlaybackOutcome.Completed)
@@ -341,6 +359,7 @@ namespace JoesScanner.ViewModels
             DurableLiveQueue.Run? durable, CallItem item, long[] visibleReplays, LivePlaybackRequests.Request request)
         {
             var token = request.Token;
+            var sourceGeneration = _audioSourceGeneration;
             var position = item.LiveArrivalSequence;
             if (durable != null && TryGetDurableRecording(item, durable, out var id))
             {
@@ -350,7 +369,7 @@ namespace JoesScanner.ViewModels
                         LocalRecoveryFloor(durable), position.Value, token))
                     return null;
             }
-            if (position is not { } sequence || !request.CanContinue)
+            if (position is not { } sequence || !request.CanContinue || sourceGeneration != _audioSourceGeneration)
                 return null;
 
             item.LiveArrivalSequence = sequence;
@@ -380,7 +399,9 @@ namespace JoesScanner.ViewModels
                 ClearPlayingSelection();
                 _manualLiveTraversal = null;
                 ResetScheduler();
-                var scopes = LiveQueueScopes();
+                if (!await WaitForAutomaticAudioSourceAsync(token))
+                    return;
+                var scopes = AutomaticQueueScopes();
                 var run = _monitoring.Current;
                 var playTarget = AudioEnabled;
                 CallItem? newest;
@@ -389,7 +410,8 @@ namespace JoesScanner.ViewModels
                     var jump = await _durableQueue.JumpToLiveAsync(scopes, LocalRecoveryFloor, !playTarget, token,
                         failed: row => failedRecording != null && TryGetDurableRecording(failedRecording, row.Scope, out var id) &&
                             id == row.Row.Id,
-                        prepareBoundary: () => FlushLiveCompletionAsync(token));
+                        prepareBoundary: () => FlushLiveCompletionAsync(token),
+                        automatic: AutomaticJumpFilter);
                     if (!request.CanContinue || !_monitoring.CanRecover(run))
                         return;
                     if (jump == null)
@@ -418,7 +440,8 @@ namespace JoesScanner.ViewModels
                 }
                 else
                 {
-                    newest = SnapshotLiveCalls().Where(call => call.LiveArrivalSequence.HasValue)
+                    newest = SnapshotLiveCalls().Where(call => call.LiveArrivalSequence.HasValue &&
+                        (!IsSelectedLiveAudioMode || AutomaticAudioIncludes(call)))
                         .MaxBy(call => call.LiveArrivalSequence);
                     if (newest == null)
                     {
@@ -533,10 +556,12 @@ namespace JoesScanner.ViewModels
             if (item.LiveArrivalSequence is { } sequence && ScopeOf(item) != null)
             {
                 var traversal = _manualLiveTraversal;
-                var scopes = LiveQueueScopes().Where(scope => traversal?.ServerId == null || scope.ServerId == traversal.ServerId).ToArray();
+                var scopes = traversal == null ? AutomaticQueueScopes() :
+                    LiveQueueScopes().Where(scope => traversal.ServerId == null || scope.ServerId == traversal.ServerId).ToArray();
                 catchingUp = traversal?.HasReplayAfter(sequence) == true;
                 if (!catchingUp)
-                    catchingUp = await _durableQueue.CountReadyAsync(scopes, LocalRecoveryFloor, sequence, token) > 0;
+                    catchingUp = await _durableQueue.CountReadyAsync(scopes, LocalRecoveryFloor, sequence, token,
+                        traversal == null ? _automaticAudioFilter : null) > 0;
             }
 
             if (!catchingUp)
@@ -575,8 +600,19 @@ namespace JoesScanner.ViewModels
                     if (!request.IsManual && scope == null)
                         return;
                     RequireCurrentRecordingAccount(item);
-                    enteringNative?.Invoke();
-                    await _audioPlaybackService.PlayAsync(url, rate, token, completion);
+                    if (!request.IsManual && _manualLiveTraversal == null && !AutomaticAudioIncludes(item))
+                    {
+                        request.Cancel();
+                        token.ThrowIfCancellationRequested();
+                    }
+
+                    _nativeLiveRequest = request;
+                    try
+                    {
+                        enteringNative?.Invoke();
+                        await _audioPlaybackService.PlayAsync(url, rate, token, completion);
+                    }
+                    finally { _nativeLiveRequest = null; }
                 }
                 catch (Exception ex) when (completion.Confirmed)
                 {

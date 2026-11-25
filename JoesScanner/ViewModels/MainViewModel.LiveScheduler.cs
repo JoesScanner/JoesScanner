@@ -31,6 +31,8 @@ public partial class MainViewModel
         options.Save();
         var previous = _livePlaybackPreferences;
         _livePlaybackPreferences = options;
+        if (previous.SourceMode != options.SourceMode)
+            RefreshAutomaticAudioSource();
         if (previous.GroupCalls != options.GroupCalls || previous.PrioritizeFavorites != options.PrioritizeFavorites)
             _scheduler.Reset();
         if (previous.JumpThreshold != options.JumpThreshold)
@@ -43,13 +45,14 @@ public partial class MainViewModel
         CancellationToken token, int version, ManualLiveTraversal? traversal)
     {
         await _pendingFilterProcessing.WaitAsync(token);
-        var scopes = LiveQueueScopes();
+        var sourceRevision = _automaticAudioRevision;
+        var scopes = traversal == null ? AutomaticQueueScopes() : LiveQueueScopes();
         if (traversal?.ServerId is { } selected)
             scopes = scopes.Where(scope => scope.ServerId == selected).ToArray();
         var next = await _scheduler.SelectAsync(_durableQueue, scopes, LocalRecoveryFloor, _livePlaybackPreferences,
-            token, traversal?.Position, traversal?.ReplaysAfter(traversal.Position));
+            token, traversal?.Position, traversal?.ReplaysAfter(traversal.Position), traversal == null ? _automaticAudioFilter : null);
         if (version != _queuePlaybackVersion || token.IsCancellationRequested || _playbackRequests.HasManualSelection ||
-            next == null || !IsCurrentLiveScope(next.Row.Scope))
+            sourceRevision != _automaticAudioRevision || next == null || !IsCurrentLiveScope(next.Row.Scope))
             return null;
 
         var card = ResolveDurableCard(next.Row.Scope, next.Row.Row);
@@ -86,10 +89,12 @@ public partial class MainViewModel
                 }
 
                 var revision = ++_readyCountRevision;
+                var sourceRevision = _automaticAudioRevision;
                 var activeSequence = _currentPlayingCall?.LiveArrivalSequence;
                 await _pendingFilterProcessing.WaitAsync(run!.Token);
-                var count = await _durableQueue.CountReadyAsync(LiveQueueScopes(), LocalRecoveryFloor, activeSequence, run.Token);
-                if (revision == _readyCountRevision && AudioEnabled && _monitoring.CanRecover(run) &&
+                var count = await _durableQueue.CountReadyAsync(AutomaticQueueScopes(), LocalRecoveryFloor, activeSequence,
+                    run.Token, _automaticAudioFilter);
+                if (revision == _readyCountRevision && sourceRevision == _automaticAudioRevision && AudioEnabled && _monitoring.CanRecover(run) &&
                     _playbackOwnership.Live != null && activeSequence == _currentPlayingCall?.LiveArrivalSequence)
                     PublishReadyCount(count);
             }
@@ -132,22 +137,22 @@ public partial class MainViewModel
             return false;
         await _pendingFilterProcessing.WaitAsync(token);
         var revision = ++_readyCountRevision;
-        var scopes = LiveQueueScopes();
-        var count = await _durableQueue.CountReadyAsync(scopes, LocalRecoveryFloor, null, token);
-        if (version != _queuePlaybackVersion || !_monitoring.CanRecover(run) || !_playbackOwnership.IsCurrent(live))
+        var sourceRevision = _automaticAudioRevision;
+        var scopes = AutomaticQueueScopes();
+        var count = await _durableQueue.CountReadyAsync(scopes, LocalRecoveryFloor, null, token, _automaticAudioFilter);
+        if (version != _queuePlaybackVersion || sourceRevision != _automaticAudioRevision ||
+            !_monitoring.CanRecover(run) || !_playbackOwnership.IsCurrent(live))
             return false;
         if (revision == _readyCountRevision)
             PublishReadyCount(count);
-        if (!_backlog.JumpPending || ManualBacklogExemption)
+        if (scopes.Length == 0 || !_backlog.JumpPending || ManualBacklogExemption)
             return false;
 
         // The journal reserves the edge in arrival order after the current
         // clip has completed, including arrivals since the threshold was hit.
         using var jump = _transportLookups.Begin(manual: false, token);
-        var floor = await _durableQueue.SetPlaybackFloorAtLiveEdgeAsync(scopes, jump.Token, skipOutstandingRecovery: true);
-        if (version != _queuePlaybackVersion || !jump.CanContinue)
+        if (!await SkipAutomaticAudioBacklogAsync(scopes, jump, sourceRevision) || version != _queuePlaybackVersion)
             return false;
-        _livePlaybackFloor = floor;
         _lastTransportCall = null;
         _lastPlayedCall = Calls.FirstOrDefault();
         ResetScheduler();

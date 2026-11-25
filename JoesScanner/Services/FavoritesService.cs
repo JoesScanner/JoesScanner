@@ -80,6 +80,9 @@ public sealed class FavoritesService : IFavoriteTalkgroupMembership
 
     internal bool Contains(CallItem call) => Contains(call.ServerId, FavoriteTalkgroupIdentity.From(call.CardMetadata));
 
+    internal IReadOnlySet<(Guid ServerId, FavoriteTalkgroupIdentity Identity)> LiveAudioMembership =>
+        Volatile.Read(ref _snapshot).Membership;
+
     internal bool IsSaved(CallItem call) => call.ServerId is { } id && FavoriteTalkgroupIdentity.From(call.CardMetadata) is { } identity
         && Volatile.Read(ref _snapshot).Membership.Contains((id, identity));
 

@@ -33,6 +33,9 @@ public partial class MainViewModel
     internal Guid? VisibleLiveRecorderId => _visibleLiveServer;
     internal event Action? ScannerConnectionLayoutChanged;
 
+    private IReadOnlySet<(Guid ServerId, FavoriteTalkgroupIdentity Identity)> ReadFavoriteAudioMembership() =>
+        Favorites.LiveAudioMembership;
+
     private bool HasEnabledScannerConnections() => LoadScannerConnections().Any(profile => profile.Enabled);
 
     private IReadOnlyList<SavedScannerConnection> LoadScannerConnections(string? legacyEndpoint = null)
@@ -67,6 +70,7 @@ public partial class MainViewModel
                     AppLog.Add(() => $"Saved recorder credentials could not be migrated ({ex.GetType().Name}).");
                 }
             }
+            SetLiveAudioRecorders(_profiles.Select(profile => (profile.Id, profile.Name, profile.Enabled)));
             Favorites.SetProfiles(_profiles);
         }
         catch (Exception ex)

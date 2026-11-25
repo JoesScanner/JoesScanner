@@ -5,6 +5,17 @@ namespace JoesScanner.ViewModels;
 
 public partial class SettingsViewModel
 {
+    public int LivePlaybackSourceModeIndex
+    {
+        get => (int)_mainViewModel.LivePlaybackOptions.SourceMode;
+        set
+        {
+            if (value is 0 or 1)
+                SaveLivePlayback(_mainViewModel.LivePlaybackOptions with { SourceMode = (LiveAudioSourceMode)value },
+                    nameof(LivePlaybackSourceModeIndex));
+        }
+    }
+
     public bool GroupLiveCalls
     {
         get => _mainViewModel.LivePlaybackOptions.GroupCalls;

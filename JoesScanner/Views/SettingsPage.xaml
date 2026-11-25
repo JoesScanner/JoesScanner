@@ -909,6 +909,14 @@
             <controls:DeferredContentView.ContentTemplate>
                 <DataTemplate x:DataType="vm:SettingsViewModel">
                     <VerticalStackLayout Spacing="8" Margin="0,0,0,4">
+                        <Label Text="Automatic Playback Source" FontSize="12" />
+                        <Picker SelectedIndex="{Binding LivePlaybackSourceModeIndex, Mode=TwoWay}"
+                                AutomationId="AutomaticPlaybackSource" SemanticProperties.Description="Automatic playback source">
+                            <Picker.Items>
+                                <x:String>All Enabled Servers</x:String>
+                                <x:String>Selected Server / Favorites Only</x:String>
+                            </Picker.Items>
+                        </Picker>
                         <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
                             <Label Text="Group calls by talkgroup" FontSize="12" VerticalOptions="Center" />
                             <Switch Grid.Column="1" AutomationId="GroupLiveCalls" IsToggled="{Binding GroupLiveCalls, Mode=TwoWay}"

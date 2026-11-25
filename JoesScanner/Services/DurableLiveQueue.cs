@@ -532,32 +532,35 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
         });
 
     private static Recording? FindTransportTarget(SqliteConnection db, Run run, long historicalFloor, long? anchor,
-        bool older, SqliteTransaction? transaction = null, bool liveEdge = false)
+        bool older, SqliteTransaction? transaction = null, bool liveEdge = false, LiveAutomaticAudioFilter? automatic = null)
     {
-        using var command = CreateTransportTargetCommand(db, run, historicalFloor, anchor, older, liveEdge);
+        using var command = CreateTransportTargetCommand(db, run, historicalFloor, anchor, older, liveEdge, automatic);
         command.Transaction = transaction;
         using var reader = command.ExecuteReader();
         return reader.Read() ? Read(reader, reader.GetString(7)) : null;
     }
 
     internal static SqliteCommand CreateTransportTargetCommand(SqliteConnection db, Run run, long historicalFloor,
-        long? anchor, bool older, bool liveEdge = false)
+        long? anchor, bool older, bool liveEdge = false, LiveAutomaticAudioFilter? automatic = null)
     {
         var comparison = older ? "<" : ">";
         var sort = older ? "DESC" : "ASC";
         // Keep the range predicate visible to SQLite's index planner.
         var range = anchor is null ? "" : $"AND q.arrival_sequence {comparison} $anchor";
         var liveEdgeFilter = liveEdge ? "AND q.recovery_backlog = 0 AND q.arrival_sequence >= s.playback_floor" : "";
+        var source = AutomaticAudioClause(db, run, automatic);
         var sql = $"""
             SELECT q.recorded_utc, q.payload, q.origin, q.protected, q.account_scope, q.first_owner, q.arrival_sequence, q.recording_id
             FROM live_queue_recordings q
             JOIN live_queue_servers s USING (server, account_scope)
-            WHERE {EligibleRecording} {range} {liveEdgeFilter}
+            WHERE {EligibleRecording} {range} {liveEdgeFilter} {source}
             ORDER BY q.arrival_sequence {sort} LIMIT 1
             """;
-        return anchor is { } position
+        var command = anchor is { } position
             ? EligibleCommand(db, run, historicalFloor, sql, ("$anchor", position))
             : EligibleCommand(db, run, historicalFloor, sql);
+        AddAutomaticAudioParameters(command, automatic);
+        return command;
     }
 
     internal Task<(RecordingAccessContext Access, long Owner, DateTimeOffset? RecordedAt)?> GetAccessAsync(
@@ -637,7 +640,8 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
 
     internal Task<CombinedJump?> JumpToLiveAsync(IReadOnlyList<Run> runs, Func<Run, long> recoveryFloor,
         bool skipSelected, CancellationToken token, Func<Selection, bool>? failed = null,
-        Func<Task>? prepareBoundary = null, Action<SqliteTransaction>? commitPlayback = null) =>
+        Func<Task>? prepareBoundary = null, Action<SqliteTransaction>? commitPlayback = null,
+        LiveAutomaticAudioFilter? automatic = null) =>
         InArrivalOrderAsync(async () =>
         {
             // Reserve the shared arrival boundary before waiting on the previous native commit.
@@ -648,20 +652,23 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
                 using var transaction = db.BeginTransaction();
                 token.ThrowIfCancellationRequested();
                 var newest = SelectAcross(runs, older: true, run =>
-                    FindTransportTarget(db, run, recoveryFloor(run), anchor: null, older: true, transaction, liveEdge: true));
+                    FindTransportTarget(db, run, recoveryFloor(run), anchor: null, older: true, transaction, liveEdge: true, automatic));
                 var playTarget = newest != null && !skipSelected && failed?.Invoke(newest) != true;
                 foreach (var run in runs)
                 {
-                    MarkRecoveryBacklog(db, transaction, run);
+                    if (automatic == null)
+                        MarkRecoveryBacklog(db, transaction, run);
                     if (newest == null)
                         continue;
                     UpdatePlaybackFloor(db, transaction, run, newest.Row.ArrivalSequence);
+                    var source = AutomaticAudioClause(db, run, automatic);
                     using var skip = EligibleCommand(db, run, recoveryFloor(run), $"""
                         UPDATE live_queue_recordings AS q SET disposition = 2, payload = NULL, audio_ready = 0
                         FROM live_queue_servers s
                         WHERE q.server = s.server AND q.account_scope = s.account_scope AND {EligibleRecording} AND q.disposition = 0
-                          AND q.arrival_sequence <= $lastSkipped
+                          AND q.arrival_sequence <= $lastSkipped {source}
                         """, ("$lastSkipped", playTarget ? newest.Row.ArrivalSequence - 1 : newest.Row.ArrivalSequence));
+                    AddAutomaticAudioParameters(skip, automatic);
                     skip.Transaction = transaction;
                     skip.ExecuteNonQuery();
                 }

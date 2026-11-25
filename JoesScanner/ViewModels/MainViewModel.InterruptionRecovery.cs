@@ -135,6 +135,8 @@ public partial class MainViewModel
         return RequestQueuePlaybackAsync("InterruptionEnded", userInitiated || _userRunShouldDriveQueue);
     }
 
+    private void CancelSourceRecoveryJump() => _interruptionJump?.Cancel();
+
     private async Task JumpAfterInterruptionAsync(LiveInterruptionRecovery episode, MonitoringLifecycle.Run run,
         PlaybackOwnership.Lease live, bool userInitiated)
     {
@@ -143,11 +145,12 @@ public partial class MainViewModel
         try
         {
             InvalidateLivePlayback();
-            if (!await WaitForLiveEdgeAsync(jump.Token))
+            if (!await WaitForLiveEdgeAsync(jump.Token) || !await WaitForAutomaticAudioSourceAsync(jump.Token))
                 return;
-            var result = await _durableQueue.JumpToLiveAsync(LiveQueueScopes(), LocalRecoveryFloor, skipSelected: false, jump.Token,
+            var result = await _durableQueue.JumpToLiveAsync(AutomaticQueueScopes(), LocalRecoveryFloor, skipSelected: false, jump.Token,
                 prepareBoundary: () => FlushLiveCompletionAsync(jump.Token),
-                commitPlayback: transaction => AppStateStore.Write(transaction, PlaybackInterruptionKey, string.Empty));
+                commitPlayback: transaction => AppStateStore.Write(transaction, PlaybackInterruptionKey, string.Empty),
+                automatic: AutomaticJumpFilter);
             if (!_monitoring.CanRecover(run) || jump.IsCancellationRequested)
                 return;
             _manualLiveTraversal = null;
