@@ -1,0 +1,78 @@
+name: Increment 24 isolated validation
+on:
+  push:
+    branches:
+      - codex/increment24-validation-20261125
+permissions:
+  contents: read
+jobs:
+  managed:
+    name: Managed regression suites
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
+        with:
+          dotnet-version: '11.0.100'
+      - run: dotnet run --project tests/ServerAuthentication.Tests -c Debug
+      - run: dotnet run --project tests/CallCardOptions.Tests -c Debug
+      - run: dotnet run --project tests/CallCardOptions.Tests -c Debug -- --fresh-live-session
+      - run: dotnet run --project tests/SettingsStability.Tests -c Debug
+      - run: dotnet run --project tests/AppleCredentialStorage.Tests -c Debug
+      - run: dotnet run --project tests/WindowsNavigation.Tests -c Debug
+  wordpress:
+    name: Disposable WordPress integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
+        with:
+          dotnet-version: '11.0.100'
+      - run: python tests/WordPressFavorites.Integration/run.py
+  windows:
+    name: Windows Debug build
+    runs-on: windows-2025
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
+        with:
+          dotnet-version: '11.0.100'
+      - run: dotnet workload install maui --skip-manifest-update
+      - run: dotnet build JoesScanner/JoesScanner.csproj -f net11.0-windows10.0.19041.0 -c Debug -p:WindowsPackageType=None -p:GenerateAppxPackageOnBuild=false
+  android:
+    name: Android Debug build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
+        with:
+          dotnet-version: '11.0.100'
+      - run: dotnet workload install maui-android --skip-manifest-update
+      - run: dotnet build JoesScanner/JoesScanner.csproj -f net11.0-android -c Debug
+  apple:
+    name: Apple managed compilations
+    runs-on: macos-15
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
+        with:
+          dotnet-version: '11.0.100'
+      - run: xcodebuild -version
+      - run: dotnet workload install maui --skip-manifest-update
+      - run: dotnet build JoesScanner/JoesScanner.csproj -f net11.0-ios -c Debug -p:RuntimeIdentifier=iossimulator-x64 -p:CodesignKey= -p:CodesignProvision=
+      - run: dotnet build JoesScanner/JoesScanner.csproj -f net11.0-maccatalyst -c Debug -p:RuntimeIdentifier=maccatalyst-x64 -p:CodesignKey= -p:CodesignProvision=

@@ -372,7 +372,10 @@ internal static class LiveHistoryHandoffTests
         Check(await started.Reader.ReadAsync(token) == "middle", "Next must use the playing call's arrival anchor.");
         Check(await live.IsPendingForTestAsync("old") && await live.IsPendingForTestAsync("middle"),
             "Transport cancellation must leave interrupted rows pending.");
+        live.TrackJumpScrollForTest();
         var jump = live.JumpForTestAsync();
+        Check(live.JumpScrollRequestsForTest == 1,
+            "Jump must issue one visual navigation request before waiting for native cleanup.");
         await jumpRetired.Task.WaitAsync(token);
         var arrival = live.AddForTestAsync("new");
         Check(!arrival.IsCompleted, "Jump must reserve its boundary before waiting for native cleanup.");
@@ -382,6 +385,8 @@ internal static class LiveHistoryHandoffTests
         await Task.WhenAll(queue, manual, previous, next, jump).WaitAsync(token);
         Check(player.Completed.SequenceEqual(["edge"]) && !await live.IsPendingForTestAsync("missing"),
             "Only deliberate Jump may skip the older backlog.");
+        Check(live.JumpScrollRequestsForTest == 1,
+            "Natural clip completion and queue resume must not issue duplicate visual navigation.");
         Check(await live.IsPendingForTestAsync("new"), "An arrival after Jump must remain eligible.");
         Console.WriteLine("PASS Previous, Next, and Jump preempt native playback using the durable arrival anchor");
     }

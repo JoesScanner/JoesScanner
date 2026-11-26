@@ -36,6 +36,7 @@ await LivePlaybackPinTests.RunAsync();
 await IntelligentLivePlaybackTests.RunAsync();
 await VerifiedPlaybackLagTests.RunAsync();
 await LiveAudioSourceTests.RunAsync();
+await JumpVisualNavigationTests.RunAsync();
 await AudioCacheTests.RunAsync();
 await AudioPreloadTests.RunAsync();
 await HistoryPlaybackDispatcherTests.RunAsync();
