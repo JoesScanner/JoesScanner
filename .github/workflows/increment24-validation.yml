@@ -50,7 +50,7 @@ jobs:
       - run: dotnet build JoesScanner/JoesScanner.csproj -f net11.0-windows10.0.19041.0 -c Debug -p:TargetFrameworks=net11.0-windows10.0.19041.0 -p:WindowsPackageType=None -p:GenerateAppxPackageOnBuild=false
   android:
     name: Android Debug build
-    runs-on: ubuntu-24.04
+    runs-on: windows-2025
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -59,11 +59,11 @@ jobs:
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
         with:
           dotnet-version: '11.0.100'
-      - run: dotnet workload install maui-android --skip-manifest-update
+      - run: dotnet workload install maui --skip-manifest-update
       - run: dotnet build JoesScanner/JoesScanner.csproj -f net11.0-android -c Debug -p:TargetFrameworks=net11.0-android
   apple:
     name: Apple managed compilations
-    runs-on: macos-15
+    runs-on: macos-26-intel
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
