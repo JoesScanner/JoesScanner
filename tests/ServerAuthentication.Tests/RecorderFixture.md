@@ -24,3 +24,17 @@ The recorder accepts POST /calljson with the client's DataTables draw, start and
 Use the request, response, poll, release and audio_download records to correlate activity. A download records bytes written by the server. Verify native playback and completion on the client, and capture output separately when acoustic evidence is required.
 
 Running the test console without the fixture arguments runs the usual regression suite.
+
+## Queue scenarios
+
+Start a new fixture process for each independent scenario. Use either the Phase 1 controls above or the numbered queue controls below in a run. All controls are local stdin commands.
+
+| Command | Effect |
+| --- | --- |
+| `send 4500` | Publish one 4.5-second call with audio. |
+| `burst 1800 2300 2700` | Publish the three durations together in one atomic snapshot. |
+| `hold 5000` | Publish one call with no audio URL. Leave it missing or attach its audio later. |
+| `attach 4` | Attach the previously specified audio to numbered call 4 and revise its transcript. |
+| `revise 2` | Publish a transcript revision for call 2, retaining its identity, timestamp, and audio. |
+
+Durations are integer milliseconds from 250 to 60000. A burst accepts up to 64 durations. Numbers start at 1 in input order. IDs include the run ID. Polls return newest first. Recording timestamps advance by at least one second per number so bursts have explicit display order. A rapid burst can place a synthetic recording timestamp ahead of wall time. The UTC log event records the actual release time. Compare playback with the client's durable admission sequence. WAVs have 8000 mono samples per second and a numbered tone (300 + 23 × (number modulo 127) Hz). Poll metadata rounds duration up to whole seconds.

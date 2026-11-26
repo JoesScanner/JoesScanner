@@ -14,15 +14,19 @@ internal sealed class RecorderFixture
     // The console has one writer. A poll takes one snapshot, including during a B update.
     private volatile Call[] calls = [];
 
-    private sealed record Call(string Id, DateTimeOffset At, string Text, string? Audio)
+    private int queueCount;
+    private long lastQueueSecond;
+
+    private sealed record Call(string Id, DateTimeOffset At, string Text, string? Audio,
+        int DurationMs = ClipSeconds * 1000, int Number = 0)
     {
         public JsonObject ToRow()
         {
             var row = JsonSerializer.SerializeToNode(MobileRecoveryTests.Row(Id, At, Audio))!.AsObject();
             row["CallText"] = Text;
-            row["CallDuration"] = ClipSeconds;
+            row["CallDuration"] = (int)Math.Ceiling(DurationMs / 1000d);
             row["TargetID"] = "101";
-            row["TargetLabel"] = "Fixture Dispatch";
+            row["TargetLabel"] = Number == 0 ? "Fixture Dispatch" : $"Fixture {Number:D3}";
             row["SystemID"] = "1";
             row["SystemLabel"] = "Fixture System";
             row["SiteID"] = "1";
@@ -39,7 +43,7 @@ internal sealed class RecorderFixture
         var origin = $"http://127.0.0.1:{port}/";
         listener.Prefixes.Add(origin);
         listener.Start();
-        Log("ready", new { origin, fixture.runId, commands = "a, b, update-b, quit" });
+        Log("ready", new { origin, fixture.runId, commands = "a, b, update-b, send, burst, hold, attach, revise, quit" });
         var serving = fixture.ServeAsync(listener);
         try
         {
@@ -61,6 +65,19 @@ internal sealed class RecorderFixture
     private void Release(string command)
     {
         var current = calls;
+        var words = command.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (words.FirstOrDefault() is "send" or "hold" or "burst" or "attach" or "revise")
+        {
+            if ((current.Length == 0 || queueCount > 0) && ApplyQueueCommand(words, current))
+                return;
+            Log("rejected", new { reason = "Invalid queue command, arguments, or fixture mode." });
+            return;
+        }
+        if (queueCount > 0)
+        {
+            Log("rejected", new { reason = "Restart for a Phase 1 scenario." });
+            return;
+        }
         var now = DateTimeOffset.UtcNow;
         Call next;
         switch (command, current.Length)
@@ -83,6 +100,60 @@ internal sealed class RecorderFixture
         }
         Log("release", new { command, next.Id, next.At, next.Text, next.Audio });
     }
+
+    private bool ApplyQueueCommand(string[] words, Call[] current)
+    {
+        var command = words[0];
+        if (command is "attach" or "revise")
+        {
+            if (words.Length != 2 || !int.TryParse(words[1], out var number))
+                return false;
+            var index = Array.FindIndex(current, c => c.Number == number);
+            if (index < 0)
+                return false;
+            var prior = current[index];
+            if (command == "attach" && prior.Audio != null)
+                return false;
+            var revised = prior with
+            {
+                Text = $"Phase 2 call {number:D3} revised.",
+                Audio = command == "attach" ? $"/audio/{number}.wav" : prior.Audio
+            };
+            var snapshot = (Call[])current.Clone();
+            snapshot[index] = revised;
+            calls = snapshot;
+            LogQueueRelease(command, revised);
+            return true;
+        }
+
+        int count = words.Length - 1;
+        if (count is < 1 or > 64 || (command != "burst" && count != 1))
+            return false;
+        var durations = new int[count];
+        for (int i = 0; i < count; i++)
+            if (!int.TryParse(words[i + 1], NumberStyles.None, CultureInfo.InvariantCulture, out durations[i]) ||
+                durations[i] is < 250 or > 60000)
+                return false;
+
+        var firstSecond = Math.Max(DateTimeOffset.UtcNow.ToUnixTimeSeconds() - count + 1, lastQueueSecond + 1);
+        var batch = new Call[count];
+        for (int i = 0; i < count; i++)
+        {
+            int number = ++queueCount;
+            batch[i] = new Call($"{runId}-P{number:D3}", DateTimeOffset.FromUnixTimeSeconds(firstSecond + i),
+                $"Phase 2 call {number:D3}.", command == "hold" ? null : $"/audio/{number}.wav", durations[i], number);
+        }
+        lastQueueSecond = firstSecond + count - 1;
+        calls = [.. batch.Reverse(), .. current];
+        foreach (var call in batch)
+            LogQueueRelease(command, call);
+        return true;
+    }
+
+    private static int ToneHz(int number) => 300 + 23 * (number % 127);
+
+    private static void LogQueueRelease(string command, Call call) =>
+        Log("release", new { command, call.Id, call.At, call.Text, call.Audio, call.DurationMs, frequencyHz = ToneHz(call.Number) });
 
     private async Task ServeAsync(HttpListener listener)
     {
@@ -115,7 +186,9 @@ internal sealed class RecorderFixture
                 }
                 else if (method == "GET" && snapshot.FirstOrDefault(call => call.Audio == path) is { } call)
                 {
-                    var clip = path == "/audio/a.wav" ? lowTone : highTone;
+                    var clip = call.Number == 0
+                        ? (path == "/audio/a.wav" ? lowTone : highTone)
+                        : RecorderWave.Create(44 + 16 * call.DurationMs, ToneHz(call.Number));
                     await WriteAsync(response, "audio/wav", clip);
                     Log("audio_download", new { call.Id, path, bytesWritten = clip.Length });
                 }
