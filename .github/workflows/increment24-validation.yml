@@ -47,7 +47,7 @@ jobs:
         with:
           dotnet-version: '11.0.100'
       - run: dotnet workload install maui --skip-manifest-update
-      - run: dotnet build JoesScanner/JoesScanner.csproj -f net11.0-windows10.0.19041.0 -c Debug -p:WindowsPackageType=None -p:GenerateAppxPackageOnBuild=false
+      - run: dotnet build JoesScanner/JoesScanner.csproj -f net11.0-windows10.0.19041.0 -c Debug -p:TargetFrameworks=net11.0-windows10.0.19041.0 -p:WindowsPackageType=None -p:GenerateAppxPackageOnBuild=false
   android:
     name: Android Debug build
     runs-on: ubuntu-24.04
@@ -60,7 +60,7 @@ jobs:
         with:
           dotnet-version: '11.0.100'
       - run: dotnet workload install maui-android --skip-manifest-update
-      - run: dotnet build JoesScanner/JoesScanner.csproj -f net11.0-android -c Debug
+      - run: dotnet build JoesScanner/JoesScanner.csproj -f net11.0-android -c Debug -p:TargetFrameworks=net11.0-android
   apple:
     name: Apple managed compilations
     runs-on: macos-15
@@ -74,5 +74,5 @@ jobs:
           dotnet-version: '11.0.100'
       - run: xcodebuild -version
       - run: dotnet workload install maui --skip-manifest-update
-      - run: dotnet build JoesScanner/JoesScanner.csproj -f net11.0-ios -c Debug -p:RuntimeIdentifier=iossimulator-x64 -p:CodesignKey= -p:CodesignProvision=
-      - run: dotnet build JoesScanner/JoesScanner.csproj -f net11.0-maccatalyst -c Debug -p:RuntimeIdentifier=maccatalyst-x64 -p:CodesignKey= -p:CodesignProvision=
+      - run: dotnet build JoesScanner/JoesScanner.csproj -f net11.0-ios -c Debug -p:TargetFrameworks=net11.0-ios -p:RuntimeIdentifier=iossimulator-x64 -p:CodesignKey= -p:CodesignProvision=
+      - run: dotnet build JoesScanner/JoesScanner.csproj -f net11.0-maccatalyst -c Debug -p:TargetFrameworks=net11.0-maccatalyst -p:RuntimeIdentifier=maccatalyst-x64 -p:CodesignKey= -p:CodesignProvision=
