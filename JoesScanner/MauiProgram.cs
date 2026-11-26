@@ -60,7 +60,8 @@ public static class MauiProgram
         builder.Services.AddSingleton<PlaybackOwnership>();
         builder.Services.AddSingleton<MonitoringDeviceService>();
         builder.Services.AddSingleton<ISystemMediaService, SystemMediaService>();
-        builder.Services.AddSingleton<ISubscriptionService, SubscriptionService>();
+        builder.Services.AddSingleton<SubscriptionService>();
+        builder.Services.AddSingleton<ISubscriptionService>(services => services.GetRequiredService<SubscriptionService>());
         builder.Services.AddSingleton<ITelemetryService, TelemetryService>();
         builder.Services.AddSingleton<IAuthLookupsSyncService>(sp =>
             new AuthLookupsSyncService(sp.GetRequiredService<ISettingsService>(), WordPressSession.CreateClient(sp.GetRequiredService<ISettingsService>())));

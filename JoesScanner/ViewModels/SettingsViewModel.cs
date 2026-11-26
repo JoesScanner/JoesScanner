@@ -4,12 +4,9 @@ using JoesScanner.Services;
 using Microsoft.Maui.ApplicationModel;
 using System.Collections.ObjectModel;
 using System.Linq;
-using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Windows.Input;
 using System;
 using System.Threading;
@@ -28,11 +25,10 @@ namespace JoesScanner.ViewModels
         private readonly MainViewModel _mainViewModel;
         private readonly IHistoryLookupsCacheService _historyLookupsCacheService;
         private readonly IAuthObservedTriplesSyncService _authObservedTriplesSyncService;
-        private readonly ISubscriptionService _subscriptionService;
+        private readonly SubscriptionService _subscriptionService;
         private readonly CallCardOptionsService _callCardOptionsService;
         private CallCardOptionsViewModel? _callCardOptions;
         public CallCardOptionsViewModel CallCardOptions => _callCardOptions ??= new(_callCardOptionsService);
-        private readonly HttpClient _httpClient;
         private readonly HttpClient _scannerValidationClient;
         private readonly FilterService _filterService = FilterService.Instance;
 
@@ -586,7 +582,7 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
             IFilterProfileStore filterProfileStore,
             IHistoryLookupsCacheService historyLookupsCacheService,
             IAuthObservedTriplesSyncService authObservedTriplesSyncService,
-            ISubscriptionService subscriptionService,
+            SubscriptionService subscriptionService,
             CallCardOptionsService callCardOptionsService,
             PlaybackAudioCache audioCache)
         {
@@ -603,8 +599,6 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
             InitializeAudioCache(audioCache);
             _filterService.CatalogChanged += (_, _) => QueueFilterCatalogRefresh();
 
-            _httpClient = WordPressSession.CreateClient(_settings);
-            _httpClient.Timeout = TimeSpan.FromSeconds(3);
             _serverDirectory = new ServerDirectoryClient(_settings);
             _settings.LocalOnlyModeChanged += (_, _) => MainThread.BeginInvokeOnMainThread(OnDirectoryPrivacyChanged);
             Favorites.Changed += OnFavoritesSettingsChanged;
@@ -2746,255 +2740,8 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
                     if (!HostedServerRules.SameOrigin(destination, new Uri(DefaultServerUrl)))
                         throw new FirewallAuthenticationException("Use the default HTTPS address for Joe's Scanner.");
 
-                    var accountUsername = (BasicAuthUsername ?? string.Empty).Trim();
-                    var accountPassword = TextNormalizationHelper.NormalizeSmartQuotes((BasicAuthPassword ?? string.Empty).Trim());
-
-                    var accountBase = AuthServerBaseUrl;
-                    var authUrl = SavedConnectionUrl.AccountEndpoint(accountBase);
-                    var savedSession = WordPressSession.Capture(_settings);
-                    var matchesSavedEndpoint = savedSession.Endpoint("auth") == authUrl;
-                    var hasSavedAccount = matchesSavedEndpoint &&
-                        _settings.TryGetServerCredentials(DefaultServerUrl, out _, out _);
-
-                    if (string.IsNullOrWhiteSpace(accountUsername) || string.IsNullOrWhiteSpace(accountPassword))
-                    {
-                        if (accountUsername.Length == 0 && accountPassword.Length == 0 && hasSavedAccount &&
-                            HostedServerRules.IsHostedStreamServerUrl(_settings.ServerUrl))
-                        {
-                            await _mainViewModel.ApplyHostedAccountAsync(string.Empty, false,
-                                () => ownsInputs() && savedSession.IsCurrentAccount, () =>
-                            {
-                                publish(savedSession, () => _settings.ClearServerCredentials(DefaultServerUrl));
-                            });
-                            if (!ownsInputs())
-                                return false;
-                        }
-                        var notice = !hasSavedAccount && matchesSavedEndpoint ? _settings.SavedCredentialWarning : null;
-                        ServerValidationMessage = notice ?? "Enter your Joe's Scanner username and password, then tap Validate.";
-                        ServerValidationIsError = true;
-                        SetShowValidationPrefix(false);
-                        UpdateSubscriptionSummaryFromSettings();
-                        return false;
-                    }
-
-                    var session = matchesSavedEndpoint && savedSession.IsCurrent &&
-                        (!_settings.TryGetServerCredentials(DefaultServerUrl, out var savedUser, out _) ||
-                         string.Equals(savedUser, accountUsername, StringComparison.OrdinalIgnoreCase))
-                        ? savedSession.Token : string.Empty;
-
-                    var appVersion = AppInfo.Current.VersionString ?? string.Empty;
-                    var appBuild = AppInfo.Current.BuildString ?? string.Empty;
-
-                    var platform = DeviceInfo.Platform.ToString();
-                    var type = DeviceInfo.Idiom.ToString();
-                    var model = DeviceInfoHelper.CombineManufacturerAndModel(DeviceInfo.Manufacturer, DeviceInfo.Model);
-                    var osVersion = DeviceInfo.VersionString ?? string.Empty;
-
-                    var payload = new
-                    {
-                        username = accountUsername,
-                        password = accountPassword,
-
-                        client = "JoesScannerApp",
-                        version = appVersion,
-
-                        device_platform = platform,
-                        device_type = type,
-                        device_model = model,
-                        app_version = appVersion,
-                        app_build = appBuild,
-                        os_version = osVersion,
-                        device_id = _settings.DeviceInstallId,
-
-                        session_token = session
-                    };
-
-                    // Use UnsafeRelaxedJsonEscaping so special characters like apostrophes in
-                    // passwords are sent as literal characters (e.g. ') rather than Unicode escapes
-                    // (e.g. '). The default JavaScriptEncoder escapes ' which causes
-                    // authentication failures for passwords containing apostrophes.
-                    var authJsonOptions = new JsonSerializerOptions
-                    {
-                        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-                    };
-                    var json = JsonSerializer.Serialize(payload, authJsonOptions);
-                    using var content = new StringContent(json, Encoding.UTF8, "application/json");
-
-                    if (!ownsInputs() || !savedSession.IsCurrentAccount)
-                        return false;
-                    using var authResponseMessage = await _httpClient.PostAsync(authUrl, content);
-                    var responseBody = await authResponseMessage.Content.ReadAsStringAsync();
-                    if (!ownsInputs() || !savedSession.IsCurrentAccount)
-                        return false;
-
-                    if (!authResponseMessage.IsSuccessStatusCode)
-                    {
-                        var statusInt = (int)authResponseMessage.StatusCode;
-                        ServerValidationMessage =
-                            $"Auth server responded with HTTP {statusInt}.";
-                        ServerValidationIsError = true;
-
-                        UpdateSubscriptionSummaryFromSettings();
-                        return false;
-                    }
-
-                    AuthResponseDto? authResponse = null;
-                    try
-                    {
-                        authResponse = JsonSerializer.Deserialize<AuthResponseDto>(
-                            responseBody,
-                            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                    }
-                    catch
-                    {
-                    }
-
-                    if (authResponse == null)
-                    {
-                        ServerValidationMessage = "Auth server returned an unexpected response.";
-                        ServerValidationIsError = true;
-
-                        UpdateSubscriptionSummaryFromSettings();
-                        return false;
-                    }
-
-                    if (!authResponse.Ok)
-                    {
-                        ServerValidationMessage = DiagnosticRedaction.SanitizeAuthenticationMessage(
-                            authResponse.Message ?? "Account validation failed.", accountUsername, accountPassword, session);
-                        ServerValidationIsError = true;
-
-                        UpdateSubscriptionSummaryFromSettings();
-                        return false;
-                    }
-
-                    var sub = authResponse.Subscription;
-                    if (sub == null || !sub.Active)
-                    {
-                        ServerValidationMessage = "Account validated but subscription is not active.";
-                        ServerValidationIsError = true;
-
-                        UpdateSubscriptionSummaryFromSettings();
-                        return false;
-                    }
-
-                    var planLabelRaw = sub.LevelLabel ?? sub.Level ?? string.Empty;
-                    var periodEndRaw = sub.PeriodEndAt ?? sub.TrialEndsAt ?? string.Empty;
-                    var statusRaw = sub.Status ?? string.Empty;
-                    var priceIdRaw = sub.PriceId ?? string.Empty;
-
-                    var planLabel = planLabelRaw.Trim();
-                    var priceText = priceIdRaw.Trim();
-                    var statusText = statusRaw.Trim().ToLowerInvariant();
-                    var periodEnd = periodEndRaw.Trim();
-
-                    var includePriceText =
-                        !string.IsNullOrEmpty(priceText) &&
-                        !string.Equals(planLabel, priceText, StringComparison.OrdinalIgnoreCase) &&
-                        !planLabel.Contains(priceText, StringComparison.OrdinalIgnoreCase) &&
-                        !priceText.Contains(planLabel, StringComparison.OrdinalIgnoreCase);
-
-                    string formattedDate = string.Empty;
-                    if (!string.IsNullOrEmpty(periodEnd))
-                    {
-                        if (DateTime.TryParse(
-                                periodEnd,
-                                CultureInfo.InvariantCulture,
-                                DateTimeStyles.RoundtripKind,
-                                out var dt)
-                            || DateTime.TryParse(periodEnd, out dt))
-                        {
-                            if (dt.Kind == DateTimeKind.Unspecified)
-                                dt = DateTime.SpecifyKind(dt, DateTimeKind.Utc);
-
-                            formattedDate = dt.ToLocalTime().ToString("yyyy-MM-dd");
-                        }
-                    }
-
-                    string dateLabel = statusText == "trialing"
-                        ? "Trial end date:"
-                        : "Renewal:";
-
-                    string planSummary;
-
-                    if (!string.IsNullOrEmpty(planLabel) &&
-                        includePriceText &&
-                        !string.IsNullOrEmpty(formattedDate))
-                    {
-                        planSummary = $"Plan: {planLabel} - {priceText} - {dateLabel} {formattedDate}";
-                    }
-                    else if (!string.IsNullOrEmpty(planLabel) &&
-                             includePriceText)
-                    {
-                        planSummary = $"Plan: {planLabel} - {priceText}";
-                    }
-                    else if (!string.IsNullOrEmpty(planLabel) &&
-                             !string.IsNullOrEmpty(formattedDate))
-                    {
-                        planSummary = $"Plan: {planLabel} - {dateLabel} {formattedDate}";
-                    }
-                    else if (!string.IsNullOrEmpty(planLabel))
-                    {
-                        planSummary = $"Plan: {planLabel}";
-                    }
-                    else if (!string.IsNullOrEmpty(formattedDate))
-                    {
-                        planSummary = $"{dateLabel} {formattedDate}";
-                    }
-                    else
-                    {
-                        planSummary = string.Empty;
-                    }
-
-                    var committed = false;
-                    await _mainViewModel.ApplyHostedAccountAsync(accountUsername, !matchesSavedEndpoint,
-                        () => ownsInputs() && savedSession.IsCurrentAccount, () =>
-                    {
-                        committed = publish(savedSession, () =>
-                        {
-                            _settings.AuthServerBaseUrl = accountBase;
-                            _settings.SetServerCredentials(DefaultServerUrl, accountUsername, accountPassword);
-                            _settings.ServerUrl = DefaultServerUrl;
-                            string Safe(string? value) => DiagnosticRedaction.SanitizeAuthenticationMessage(
-                                value, accountUsername, accountPassword, session, authResponse.SessionToken ?? "");
-                            _settings.SaveHostedSubscription(new(true, true, sub.TierLevel, DateTime.UtcNow,
-                                DateParseHelper.TryParseUtc(sub.ExpiresAt), null, Safe(planLabel), Safe(priceIdRaw), Safe(planSummary)));
-                            _settings.AuthSessionToken = authResponse.SessionToken ?? string.Empty;
-                        });
-                        if (committed)
-                            _mainViewModel.ServerUrl = DefaultServerUrl;
-                    });
-                    if (!committed || !ownsInputs())
-                        return false;
-                    ServerValidationMessage = "Joe's Scanner account validated.";
-                    ServerValidationIsError = false;
-
-                    // Mark connection as saved so plan and renewal info appears immediately after the first successful verify.
-                    Interlocked.Increment(ref _suppressDirectorySelectionSync);
-                    try
-                    {
-                        UseDefaultConnection = true;
-                        ServerUrl = DefaultServerUrl;
-                        BasicAuthUsername = accountUsername;
-                        BasicAuthPassword = accountPassword;
-                    }
-                    finally
-                    {
-                        Interlocked.Decrement(ref _suppressDirectorySelectionSync);
-                    }
-
-                    _savedAuthServerBaseUrl = _authServerBaseUrl;
-                    _savedServerUrl = _serverUrl;
-                    _savedUseDefaultConnection = _useDefaultConnection;
-                    _savedBasicAuthUsername = _basicAuthUsername;
-                    _savedBasicAuthPassword = _basicAuthPassword;
-
-                    UpdateHasChanges();
-
-                    SetShowValidationPrefix(true);
-                    UpdateSubscriptionSummaryFromSettings();
-                    await ServerAuthentication.For(_settings).GetFirewallAuthorizationAsync(
-                        new Uri(DefaultServerUrl), CancellationToken.None);
+                    return await ValidateHostedAccountAsync(ownsInputs, publish, () =>
+                        ServerAuthentication.For(_settings).GetFirewallAuthorizationAsync(new Uri(DefaultServerUrl), CancellationToken.None));
                 }
                 else if (!independentProbe && (HostedServerRules.RequiresApiFirewallCredentials(_settings, destination) ||
                          (selectedDirectoryServerAtStart?.UsesApiFirewallCredentials == true &&
@@ -3421,56 +3168,5 @@ _addressDetectionEnabled = _settings.AddressDetectionEnabled;
             {
             }
         }
-
-        class AuthResponseDto
-        {
-            [JsonPropertyName("ok")]
-            public bool Ok { get; set; }
-
-            [JsonPropertyName("error")]
-            public string? Error { get; set; }
-
-            [JsonPropertyName("message")]
-            public string? Message { get; set; }
-
-            [JsonPropertyName("session_token")]
-            public string? SessionToken { get; set; }
-
-            [JsonPropertyName("subscription")]
-            public AuthSubscriptionDto? Subscription { get; set; }
-        }
-
-        private sealed class AuthSubscriptionDto
-        {
-            [JsonPropertyName("active")]
-            public bool Active { get; set; }
-
-            [JsonPropertyName("status")]
-            public string? Status { get; set; }
-
-            [JsonPropertyName("level")]
-            public string? Level { get; set; }
-
-            [JsonPropertyName("level_label")]
-            public string? LevelLabel { get; set; }
-
-            [JsonPropertyName("price_id")]
-            public string? PriceId { get; set; }
-
-            [JsonPropertyName("tier_level")]
-            [JsonConverter(typeof(SubscriptionService.FlexibleIntConverter))]
-            public int TierLevel { get; set; }
-
-            [JsonPropertyName("expires_at")]
-            public string? ExpiresAt { get; set; }
-
-            [JsonPropertyName("period_end_at")]
-            public string? PeriodEndAt { get; set; }
-
-            [JsonPropertyName("trial_ends_at")]
-            public string? TrialEndsAt { get; set; }
-        }
-
-
     }
 }

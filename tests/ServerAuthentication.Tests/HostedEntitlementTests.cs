@@ -1,6 +1,7 @@
 using System.Net;
 using JoesScanner.Models;
 using JoesScanner.Services;
+using JoesScanner.ViewModels;
 
 internal static partial class WordPressOwnershipTests
 {
@@ -182,7 +183,11 @@ internal static partial class WordPressOwnershipTests
         Check(calls == 2, "Stopping the hosted monitoring owners must cancel their cadence.");
     }
 
-    internal static async Task RevocationCancelsProtectedWork()
+    internal static Task RevocationCancelsProtectedWork() => RevocationCancelsProtectedWorkAsync(fromSettings: false);
+
+    internal static Task SettingsRevocationCancelsProtectedWork() => RevocationCancelsProtectedWorkAsync(fromSettings: true);
+
+    private static async Task RevocationCancelsProtectedWorkAsync(bool fromSettings)
     {
         using var fixture = new SavedCredentialTests.Fixture();
         var settings = fixture.Load();
@@ -237,7 +242,17 @@ internal static partial class WordPressOwnershipTests
             transfer, preparing.Token) ?? throw new InvalidOperationException("Missing synthetic audio."), testLifetime.Token);
         await Task.WhenAll(entered.Task, mediaStarted.Task).WaitAsync(Timeout);
         clock.Advance(TimeSpan.FromMinutes(30));
-        Check((await subscription.EnsureSubscriptionAsync(default)).ErrorCode == "http_403", "The verifier must publish the denial.");
+        if (fromSettings)
+        {
+            var editor = new SettingsViewModel(settings, subscription);
+            Check(!await editor.PressValidateAsync() && editor.ServerValidationMessage == "Auth server responded with HTTP 403.",
+                "The real Settings validation handler must publish the denial and show the error.");
+            await AccessDeniedAsync(Task.Run(() => RecordingPlaybackAccess.RequireCachedEntitlement(settings, Recorder,
+                RecordingPlaybackAccess.AccountKey(settings, Recorder), VerificationStart, false, false, clock)));
+            await AccessDeniedAsync(RecordingPlaybackAccess.VerifyHistoryAsync(settings, subscription, Recorder, default, clock));
+        }
+        else
+            Check((await subscription.EnsureSubscriptionAsync(default)).ErrorCode == "http_403", "The verifier must publish the denial.");
         await CanceledAsync(protectedAudio);
         await CanceledAsync(prepared);
         Check(cache.UsageBytes == 0, "The retired acquisition must not publish audio to the cache.");
@@ -259,7 +274,11 @@ internal static partial class WordPressOwnershipTests
         await independentConnection.Worker.WaitAsync(Timeout);
     }
 
-    internal static async Task HostedTierChangesPreserveLive()
+    internal static Task HostedTierChangesPreserveLive() => HostedTierChangesPreserveLiveAsync(fromSettings: false);
+
+    internal static Task SettingsHostedTierChangesPreserveLive() => HostedTierChangesPreserveLiveAsync(fromSettings: true);
+
+    private static async Task HostedTierChangesPreserveLiveAsync(bool fromSettings)
     {
         using var fixture = new SavedCredentialTests.Fixture();
         var settings = fixture.Load();
@@ -274,8 +293,12 @@ internal static partial class WordPressOwnershipTests
         var entitlement = HostedEntitlement.For(settings);
         using var live = entitlement.Protect(default, clock);
         using var standardSearch = entitlement.Protect(default, clock, expectedTier: 1);
+        var accountVersion = settings.ReadAccountSession().AccountVersion;
+        var editor = new SettingsViewModel(settings, service);
         tier = 2;
         clock.Advance(TimeSpan.FromMinutes(30));
+        if (fromSettings)
+            Check(await editor.PressValidateAsync(), "The Settings upgrade must publish a new verified tier.");
         var premium = await RecordingPlaybackAccess.VerifyHistoryAsync(settings, service, Recorder, default, clock);
         Check(premium is { Tier: 2 } && premium.Allows(archived) && standardSearch.Token.IsCancellationRequested &&
             !live.Token.IsCancellationRequested, "An upgrade must unlock History and retire the old search without touching live audio.");
@@ -284,9 +307,12 @@ internal static partial class WordPressOwnershipTests
 
         tier = 1;
         clock.Advance(TimeSpan.FromMinutes(30));
+        if (fromSettings)
+            Check(await editor.PressValidateAsync(), "The Settings downgrade must publish the restricted tier.");
         var downgraded = await RecordingPlaybackAccess.VerifyHistoryAsync(settings, service, Recorder, default, clock);
         Check(!downgraded.Allows(archived) && !premium.IsCurrent(settings) && oldClip.Token.IsCancellationRequested &&
-            !recentClip.Token.IsCancellationRequested && !live.Token.IsCancellationRequested,
+            !recentClip.Token.IsCancellationRequested && !live.Token.IsCancellationRequested &&
+            settings.ReadAccountSession().AccountVersion == accountVersion,
             "Downgrade must immediately fence old History work while permitted hosted audio continues.");
         settings.ClearServerCredentials(Recorder);
         Check(live.Token.IsCancellationRequested && recentClip.Token.IsCancellationRequested,

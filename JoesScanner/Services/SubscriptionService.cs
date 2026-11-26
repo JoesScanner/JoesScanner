@@ -19,6 +19,9 @@ namespace JoesScanner.Services
         private readonly object _gate = new();
         private Verification? _inFlight;
         private LastCheck? _lastCheck;
+        private long _requestOrder;
+        private long _publishedOrder;
+        private long _authoritativeOrder;
 
         public SubscriptionService(ISettingsService settings, ITelemetryService telemetryService)
             : this(settings, telemetryService, WordPressSession.CreateClient(settings))
@@ -98,22 +101,28 @@ namespace JoesScanner.Services
             Verification? flight = null;
             SubscriptionCheckResult? recent = null;
             var start = false;
-            lock (_gate)
+            if (!account.TryApplyIdentity(() =>
             {
-                if (_inFlight is { } active && active.Matches(account, generation))
-                    flight = active;
-                else if (_lastCheck is { } last && last.AccountVersion == account.AccountVersion &&
-                    last.Generation == generation && last.CompletedAt <= now && now < last.NextCheck)
-                    recent = last.Result;
-                else
+                lock (_gate)
                 {
-                    _inFlight = flight = new Verification(account, generation);
-                    start = true;
-                }
+                    // A completed Settings check takes precedence over an older automatic flight.
+                    if (_inFlight is { } active && active.Scope.Order >= (_lastCheck?.Order ?? 0) &&
+                        active.Matches(account, generation))
+                        flight = active;
+                    else if (_lastCheck is { } last && last.AccountVersion == account.AccountVersion &&
+                        last.Generation == generation && last.CompletedAt <= now && now < last.NextCheck)
+                        recent = last.Result;
+                    else
+                    {
+                        _inFlight = flight = new Verification(NewScope(account, generation));
+                        start = true;
+                    }
 
-                if (flight != null)
-                    flight.Waiters++;
-            }
+                    if (flight != null)
+                        flight.Waiters++;
+                }
+            }))
+                return Replaced();
 
             if (start)
                 _ = CompleteVerificationAsync(flight!);
@@ -161,18 +170,6 @@ namespace JoesScanner.Services
             {
                 var result = await RequestVerificationAsync(flight).ConfigureAwait(false);
                 flight.Token.ThrowIfCancellationRequested();
-                var now = _clock.GetUtcNow();
-                var next = now + (result.VerifiedOnlineTier != null ? VerificationInterval : RetryInterval);
-                if (result.IsAllowed && HostedEntitlement.Deadline(_settings.ReadHostedSubscription(), now) is { } end && end < next)
-                    next = end;
-                lock (_gate)
-                {
-                    if (ReferenceEquals(_inFlight, flight))
-                    {
-                        _lastCheck = new(flight.Account.AccountVersion, flight.Generation, now, next, result);
-                        _inFlight = null;
-                    }
-                }
                 flight.Completion.TrySetResult(result);
             }
             catch (OperationCanceledException) when (flight.Token.IsCancellationRequested)
@@ -216,13 +213,84 @@ namespace JoesScanner.Services
                 retired = _inFlight;
                 _inFlight = null;
                 _lastCheck = null;
+                _publishedOrder = _authoritativeOrder = 0;
             }
             retired?.Cancel();
         }
 
+        internal async Task<(SubscriptionCheckResult Result, WordPressSession? VerifiedAccount)> ValidateFromSettingsAsync(
+            WordPressSession account, string accountBase, string user, string password, Func<bool> ownsInputs,
+            Func<string, bool, Func<bool>, Action, Task> applyHostedAccount)
+        {
+            var generation = PrivacyNetworkPolicy.For(_settings).Generation;
+            if (generation.IsCancellationRequested || _settings.LocalOnlyMode)
+                return (LocalOnly(), null);
+            if (!ownsInputs() || !account.IsCurrentAccount)
+                return (Replaced(), null);
+
+            var endpoint = SavedConnectionUrl.AccountEndpoint(accountBase);
+            var matchesEndpoint = account.Endpoint("auth") == endpoint;
+            var sameAccount = false;
+            var currentCredentials = false;
+            if (matchesEndpoint && _settings.TryGetServerCredentials(HostedServerRules.DefaultServerUrl, out var savedUser, out var savedPassword) &&
+                string.Equals(user, savedUser, StringComparison.OrdinalIgnoreCase))
+            {
+                sameAccount = true;
+                currentCredentials = password == TextNormalizationHelper.NormalizeSmartQuotes(savedPassword);
+            }
+            var scope = NewScope(account, generation);
+            if (!account.IsCurrentAccount)
+                return (Replaced(), null);
+
+            AuthorizationReply reply;
+            try
+            {
+                reply = await RequestAuthorizationAsync(endpoint, user, password, currentCredentials ? account.Token : "", generation);
+            }
+            catch (OperationCanceledException) when (generation.IsCancellationRequested)
+            {
+                return (LocalOnly(), null);
+            }
+
+            if (reply.Grant == null)
+                return (Publish(scope, reply, ownsInputs, sameAccount, currentCredentials), null);
+
+            // Use the existing UI-owned transition for any account replacement. The store
+            // rechecks ownership, ordering, and the deadline inside the publication lock.
+            var result = Replaced();
+            WordPressSession? committedAccount = null;
+            await applyHostedAccount(user, !matchesEndpoint, CanApply, () =>
+            {
+                result = Publish(scope, reply, ownsInputs, sameAccount, currentCredentials, () =>
+                {
+                    _settings.AuthServerBaseUrl = accountBase;
+                    if (!currentCredentials)
+                        _settings.SetServerCredentials(HostedServerRules.DefaultServerUrl, user, password);
+                    _settings.ServerUrl = HostedServerRules.DefaultServerUrl;
+                    if (reply.SessionToken is { Length: > 0 } issuedToken && _settings.AuthSessionToken != issuedToken)
+                        _settings.AuthSessionToken = issuedToken;
+                    committedAccount = WordPressSession.Capture(_settings);
+                });
+            });
+            return (result, committedAccount);
+
+            bool CanApply()
+            {
+                if (!ownsInputs() || !account.IsCurrentAccount)
+                    return false;
+                if (generation.IsCancellationRequested)
+                {
+                    result = LocalOnly();
+                    return false;
+                }
+                lock (_gate)
+                    return !sameAccount || scope.Order >= _authoritativeOrder;
+            }
+        }
+
         private async Task<SubscriptionCheckResult> RequestVerificationAsync(Verification flight)
         {
-            var account = flight.Account;
+            var account = flight.Scope.Account;
             var token = flight.Token;
             if (!account.IsCurrentAccount)
                 return Replaced();
@@ -245,10 +313,29 @@ namespace JoesScanner.Services
                 return new(false, "missing_credentials", _settings.SavedCredentialWarning ??
                     "Enter your username and password in Settings before connecting.");
 
+            token.ThrowIfCancellationRequested();
+            if (!account.IsCurrentAccount)
+                return Replaced();
+
+            var reply = await RequestAuthorizationAsync(endpoint, user, password, account.Token, token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            var result = Publish(flight.Scope, reply, () => !token.IsCancellationRequested && ReferenceEquals(_inFlight, flight),
+                sameAccount: true, currentCredentials: true);
+            if (result.VerifiedOnlineTier.HasValue && reply.SessionToken is { Length: > 0 } issuedToken)
+                await _telemetryService.AdoptSessionTokenAsync(issuedToken, "auth_session_token_issued", token,
+                    account.Version).ConfigureAwait(false);
+            return result;
+        }
+
+        private async Task<AuthorizationReply> RequestAuthorizationAsync(Uri endpoint, string user, string password,
+            string sessionToken, CancellationToken token)
+        {
             var payload = new
             {
                 username = user,
                 password,
+                client = "JoesScannerApp",
+                version = AppInfo.Current.VersionString ?? string.Empty,
                 device_platform = DeviceInfo.Platform.ToString(),
                 device_type = DeviceInfo.Idiom.ToString(),
                 device_model = DeviceInfoHelper.CombineManufacturerAndModel(DeviceInfo.Manufacturer, DeviceInfo.Model),
@@ -256,12 +343,10 @@ namespace JoesScanner.Services
                 app_build = AppInfo.Current.BuildString ?? string.Empty,
                 os_version = DeviceInfo.VersionString ?? string.Empty,
                 device_id = _settings.DeviceInstallId,
-                session_token = account.Token
+                session_token = sessionToken
             };
 
             token.ThrowIfCancellationRequested();
-            if (!account.IsCurrentAccount)
-                return Replaced();
 
             AuthResponseDto? body = null;
             try
@@ -278,19 +363,21 @@ namespace JoesScanner.Services
                 };
                 using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token)
                     .ConfigureAwait(false);
+                timeout.Token.ThrowIfCancellationRequested();
                 var code = (int)response.StatusCode;
                 if (code is 408 or 429 or >= 500 and <= 599)
                 {
                     AppLog.Basic(() => $"Account verification returned a transient HTTP {code}.");
-                    return ApplyTransient(flight, "http_" + code);
+                    return Transient("http_" + code);
                 }
                 if (!response.IsSuccessStatusCode)
                 {
                     AppLog.Basic(() => $"Account verification returned HTTP {code}.");
-                    return PublishDenial(flight, "http_" + code, $"Authentication request denied (HTTP {code}).");
+                    return new(null, null, "http_" + code, $"Authentication request denied (HTTP {code}).");
                 }
 
                 var json = await response.Content.ReadAsStringAsync(timeout.Token).ConfigureAwait(false);
+                timeout.Token.ThrowIfCancellationRequested();
                 try
                 {
                     body = JsonSerializer.Deserialize<AuthResponseDto>(json,
@@ -302,7 +389,7 @@ namespace JoesScanner.Services
                 ex is HttpRequestException or IOException or OperationCanceledException)
             {
                 AppLog.Basic(() => $"Account verification request failed ({DiagnosticRedaction.Describe(ex)}).");
-                return ApplyTransient(flight, "unreachable");
+                return Transient(ex is OperationCanceledException ? "timeout" : "unreachable");
             }
 
             var subscription = body?.Subscription;
@@ -317,15 +404,20 @@ namespace JoesScanner.Services
             expires = HostedEntitlement.Earliest(expires, credentialExpiry);
 
             var issuedToken = (body?.SessionToken ?? "").Trim();
-            string Safe(string? value) => DiagnosticRedaction.SanitizeAuthenticationMessage(value, user, password, account.Token, issuedToken);
-            if (expires <= now)
-                return PublishDenial(flight, "expired", "The verified subscription or credential has expired.");
-            if (body is not { Ok: true } || subscription is not { Active: true, TierLevel: 1 or 2 })
+            string Safe(string? value) => DiagnosticRedaction.SanitizeAuthenticationMessage(value, user, password, sessionToken, issuedToken);
+            if (expires <= now || string.Equals(subscription?.Status, "expired", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(body?.Error, "expired", StringComparison.OrdinalIgnoreCase))
+                return Expired();
+            if (body == null)
+                return new(null, null, "invalid_authorization", "Auth server returned an unexpected response.");
+            if (!body.Ok || !string.IsNullOrWhiteSpace(body.Error))
             {
-                var message = Safe(body?.Message);
-                return PublishDenial(flight, "invalid_authorization", string.IsNullOrWhiteSpace(message)
-                    ? "The account server did not confirm an active subscription." : message);
+                var message = Safe(body.Message);
+                return new(null, null, "invalid_authorization", string.IsNullOrWhiteSpace(message) ? "Account validation failed." : message);
             }
+            if (subscription is not { Active: true, TierLevel: 1 or 2 } ||
+                string.Equals(subscription.Status, "revoked", StringComparison.OrdinalIgnoreCase))
+                return new(null, null, "invalid_authorization", "Account validated but subscription is not active.");
 
             var summary = Safe(BuildPlanSummary(subscription));
             if (string.IsNullOrWhiteSpace(summary))
@@ -333,63 +425,94 @@ namespace JoesScanner.Services
             var verified = new HostedSubscriptionSnapshot(true, true, subscription.TierLevel, now, expires,
                 trial ? null : renewal, Safe(subscription.LevelLabel ?? subscription.Level),
                 Safe(subscription.PriceId), summary);
-            if (!ApplyCurrent(flight, () => _settings.SaveHostedSubscription(verified)))
-                return Replaced();
-
-            if (issuedToken.Length != 0)
-                await _telemetryService.AdoptSessionTokenAsync(issuedToken, "auth_session_token_issued", token,
-                    account.Version).ConfigureAwait(false);
-
-            return new(true, message: summary) { VerifiedOnlineTier = verified.Tier, EffectiveTier = verified.Tier };
+            return new(verified, issuedToken, null, summary);
         }
 
-        private SubscriptionCheckResult ApplyTransient(Verification flight, string reason)
+        private VerificationScope NewScope(WordPressSession account, CancellationToken generation) =>
+            new(account, generation, Interlocked.Increment(ref _requestOrder));
+
+        private SubscriptionCheckResult Publish(VerificationScope scope, AuthorizationReply reply, Func<bool> ownsRequest,
+            bool sameAccount, bool currentCredentials, Action? saveLogin = null)
         {
-            SubscriptionCheckResult result = Replaced();
-            ApplyCurrent(flight, () =>
+            var result = Replaced();
+            scope.Account.TryApplyIdentity(() =>
             {
-                var snapshot = _settings.ReadHostedSubscription();
-                var deadline = HostedEntitlement.Deadline(snapshot, _clock.GetUtcNow());
-                var message = deadline is { } end
-                    ? $"Account verification is unavailable. Using the verified subscription until {end.ToLocalTime():g}."
-                    : "Account verification is unavailable and no current verified subscription is cached.";
-                _settings.SaveHostedSubscription(snapshot with
+                lock (_gate)
                 {
-                    IsAllowed = deadline != null,
-                    VerifiedOnline = false,
-                    Message = message
-                });
-                result = new(deadline != null, deadline != null ? "offline_cached" : reason, message)
-                {
-                    EffectiveTier = deadline != null ? snapshot.Tier : null
-                };
+                    // A newer outage report cannot supersede a definitive subscription decision.
+                    var latest = reply.IsTransient ? _publishedOrder : _authoritativeOrder;
+                    if (!ownsRequest() || (sameAccount && scope.Order < latest))
+                        return;
+                    if (scope.Generation.IsCancellationRequested || _settings.LocalOnlyMode)
+                    {
+                        result = LocalOnly();
+                        return;
+                    }
+
+                    var now = _clock.GetUtcNow();
+                    // A verified reply can expire while waiting for the Settings account transition.
+                    if (reply.Grant is { } grant && HostedEntitlement.Deadline(grant, now) == null)
+                        reply = Expired();
+                    if (reply.Grant == null && !currentCredentials)
+                    {
+                        result = new(false, reply.ErrorCode, reply.Message);
+                        return;
+                    }
+
+                    var snapshot = ResultSnapshot(reply, now);
+                    if (reply.Grant != null)
+                        saveLogin?.Invoke();
+                    else if (!reply.IsTransient)
+                    {
+                        // Retire any pending token adoption from older verification while
+                        // preserving the signed-in account and its existing session value.
+                        var session = _settings.ReadAccountSession();
+                        _settings.TryReplaceAccountSession(session.Version, session.Token);
+                    }
+
+                    _settings.SaveHostedSubscription(snapshot);
+                    _publishedOrder = Math.Max(_publishedOrder, scope.Order);
+                    if (!reply.IsTransient)
+                        _authoritativeOrder = scope.Order;
+                    result = new(snapshot.IsAllowed, reply.IsTransient && snapshot.IsAllowed ? "offline_cached" : reply.ErrorCode, snapshot.Message)
+                    {
+                        EffectiveTier = snapshot.IsAllowed ? snapshot.Tier : null,
+                        VerifiedOnlineTier = snapshot.VerifiedOnline ? snapshot.Tier : null
+                    };
+                    var next = now + (snapshot.VerifiedOnline ? VerificationInterval : RetryInterval);
+                    if (HostedEntitlement.Deadline(snapshot, now) is { } end && end < next)
+                        next = end;
+                    _lastCheck = new(scope.Order, _settings.ReadAccountSession().AccountVersion, scope.Generation, now, next, result);
+                }
             });
             return result;
         }
 
-        private SubscriptionCheckResult PublishDenial(Verification flight, string code, string message)
+        private HostedSubscriptionSnapshot ResultSnapshot(AuthorizationReply reply, DateTimeOffset now)
         {
-            var denied = new HostedSubscriptionSnapshot(false, false, 0, null, null, null, "", "", message);
-            return ApplyCurrent(flight, () => _settings.SaveHostedSubscription(denied))
-                ? new(false, code, message) : Replaced();
+            if (reply.Grant is { } grant)
+                return grant;
+            if (!reply.IsTransient)
+                return new(false, false, 0, null, null, null, "", "", reply.Message ?? "");
+
+            var saved = _settings.ReadHostedSubscription();
+            var deadline = HostedEntitlement.Deadline(saved, now);
+            var message = deadline is { } end
+                ? $"Account verification is unavailable. Using the verified subscription until {end.ToLocalTime():g}."
+                : "Account verification is unavailable and no current verified subscription is cached.";
+            return saved with { IsAllowed = deadline != null, VerifiedOnline = false, Message = message };
         }
 
-        private bool ApplyCurrent(Verification flight, Action apply)
-        {
-            var applied = false;
-            flight.Account.TryApplyIdentity(() =>
-            {
-                lock (_gate)
-                {
-                    flight.Token.ThrowIfCancellationRequested();
-                    if (!ReferenceEquals(_inFlight, flight))
-                        return;
-                    apply();
-                    applied = true;
-                }
-            });
-            return applied;
-        }
+        private static AuthorizationReply Transient(string code) =>
+            new(null, null, code, "Account verification is temporarily unavailable.", IsTransient: true);
+
+        private static AuthorizationReply Expired() =>
+            new(null, null, "expired", "The verified subscription or credential has expired.");
+
+        private sealed record AuthorizationReply(HostedSubscriptionSnapshot? Grant, string? SessionToken,
+            string? ErrorCode, string? Message, bool IsTransient = false);
+
+        private readonly record struct VerificationScope(WordPressSession Account, CancellationToken Generation, long Order);
 
         private static SubscriptionCheckResult LocalOnly() =>
             new(false, "local_only", "Subscription verification is paused in Local Only Mode.");
@@ -397,21 +520,20 @@ namespace JoesScanner.Services
         private static SubscriptionCheckResult Replaced() =>
             new(false, "account_changed", "The recorder or hosted account changed during verification.");
 
-        private sealed record LastCheck(long AccountVersion, CancellationToken Generation, DateTimeOffset CompletedAt,
+        private sealed record LastCheck(long Order, long AccountVersion, CancellationToken Generation, DateTimeOffset CompletedAt,
             DateTimeOffset NextCheck, SubscriptionCheckResult Result);
 
-        private sealed class Verification(WordPressSession account, CancellationToken generation) : IDisposable
+        private sealed class Verification(VerificationScope scope) : IDisposable
         {
-            private readonly CancellationTokenSource _lifetime = CancellationTokenSource.CreateLinkedTokenSource(generation);
-            internal WordPressSession Account { get; } = account;
-            internal CancellationToken Generation { get; } = generation;
+            private readonly CancellationTokenSource _lifetime = CancellationTokenSource.CreateLinkedTokenSource(scope.Generation);
+            internal VerificationScope Scope { get; } = scope;
             internal CancellationToken Token => _lifetime.Token;
             internal TaskCompletionSource<SubscriptionCheckResult> Completion { get; } =
                 new(TaskCreationOptions.RunContinuationsAsynchronously);
             internal int Waiters { get; set; }
 
             internal bool Matches(WordPressSession session, CancellationToken privacy) =>
-                session.AccountVersion == Account.AccountVersion && privacy == Generation;
+                session.AccountVersion == Scope.Account.AccountVersion && privacy == Scope.Generation;
 
             internal void Cancel()
             {
@@ -546,7 +668,7 @@ namespace JoesScanner.Services
 
         // Some deployments may serialize numeric fields as strings.
         // Accept both JSON number and JSON string for tier level.
-        internal sealed class FlexibleIntConverter : JsonConverter<int>
+        private sealed class FlexibleIntConverter : JsonConverter<int>
         {
             public override int Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
             {

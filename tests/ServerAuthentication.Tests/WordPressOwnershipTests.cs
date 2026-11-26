@@ -235,11 +235,14 @@ internal static partial class WordPressOwnershipTests
         public void StopMonitoringHeartbeat(string reason) { }
         public Task ResetSessionAsync(string reason, CancellationToken cancellationToken) => Task.CompletedTask;
         public Task TryFlushQueueAsync(CancellationToken cancellationToken) => Task.CompletedTask;
-        public Task AdoptSessionTokenAsync(string newSessionToken, string reason, CancellationToken cancellationToken,
+        internal Func<Task>? BeforeAdoption { get; init; }
+
+        public async Task AdoptSessionTokenAsync(string newSessionToken, string reason, CancellationToken cancellationToken,
             long? expectedVersion = null)
         {
+            if (BeforeAdoption is { } wait)
+                await wait();
             settings.TryReplaceAccountSession(expectedVersion ?? settings.ReadAccountSession().Version, newSessionToken);
-            return Task.CompletedTask;
         }
     }
 }
