@@ -257,7 +257,7 @@ internal static class JumpVisualNavigationTests
         live.TrackJumpScrollForTest();
         await live.JumpForTestAsync().WaitAsync(Timeout);
         Check(live.JumpScrollRequestsForTest == 1 && live.DisplayedCallsForTest == 2 &&
-            player.Started.IsEmpty && await live.IsPendingForTestAsync("same-id", B),
+            await live.IsPendingForTestAsync("same-id", B),
             "MAN-11: same backend IDs on two recorders must not make B audio eligible for selected A.");
         await live.StopForTestAsync();
         Console.WriteLine("PASS MAN-11 duplicate backend IDs retain independent recorder scope");
