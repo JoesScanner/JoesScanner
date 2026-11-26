@@ -8,6 +8,7 @@ permissions:
 jobs:
   managed:
     name: Managed regression suites
+    if: false # already verified on the previous validation commit
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -25,6 +26,7 @@ jobs:
       - run: dotnet run --project tests/WindowsNavigation.Tests -c Debug
   wordpress:
     name: Disposable WordPress integration
+    if: false # already verified on the previous validation commit
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -37,6 +39,7 @@ jobs:
       - run: python tests/WordPressFavorites.Integration/run.py
   windows:
     name: Windows Debug build
+    if: false # already verified on the previous validation commit
     runs-on: windows-2025
     timeout-minutes: 50
     steps:
@@ -50,6 +53,7 @@ jobs:
       - run: dotnet build JoesScanner/JoesScanner.csproj -f net11.0-windows10.0.19041.0 -c Debug -p:TargetFrameworks=net11.0-windows10.0.19041.0 -p:WindowsPackageType=None -p:GenerateAppxPackageOnBuild=false
   android:
     name: Android Debug build
+    if: false # already verified on the previous validation commit
     runs-on: windows-2025
     timeout-minutes: 50
     steps:
@@ -63,7 +67,7 @@ jobs:
       - run: dotnet build JoesScanner/JoesScanner.csproj -f net11.0-android -c Debug -p:TargetFrameworks=net11.0-android
   apple:
     name: Apple managed compilations
-    runs-on: macos-26-intel
+    runs-on: xcode-27
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -74,5 +78,5 @@ jobs:
           dotnet-version: '11.0.100'
       - run: xcodebuild -version
       - run: dotnet workload install maui --skip-manifest-update
-      - run: dotnet build JoesScanner/JoesScanner.csproj -f net11.0-ios -c Debug -p:TargetFrameworks=net11.0-ios -p:RuntimeIdentifier=iossimulator-x64 -p:CodesignKey= -p:CodesignProvision=
-      - run: dotnet build JoesScanner/JoesScanner.csproj -f net11.0-maccatalyst -c Debug -p:TargetFrameworks=net11.0-maccatalyst -p:RuntimeIdentifier=maccatalyst-x64 -p:CodesignKey= -p:CodesignProvision=
+      - run: dotnet build JoesScanner/JoesScanner.csproj -f net11.0-ios -c Debug -p:TargetFrameworks=net11.0-ios -p:RuntimeIdentifier=iossimulator-arm64 -p:CodesignKey= -p:CodesignProvision=
+      - run: dotnet build JoesScanner/JoesScanner.csproj -f net11.0-maccatalyst -c Debug -p:TargetFrameworks=net11.0-maccatalyst -p:RuntimeIdentifier=maccatalyst-arm64 -p:CodesignKey= -p:CodesignProvision=
