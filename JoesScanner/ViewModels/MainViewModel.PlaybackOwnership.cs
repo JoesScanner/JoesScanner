@@ -499,6 +499,21 @@ namespace JoesScanner.ViewModels
                 ClearPlayingSelection();
                 _manualLiveTraversal = null;
                 ResetScheduler();
+                // Return the reader to Live for this accepted user action, independent
+                // of which automatic audio source has an eligible recording. Publish
+                // synchronously before any await so a retired request cannot scroll
+                // a subsequent listening session.
+                try
+                {
+                    if (request.CanContinue)
+                        RequestJumpToLiveScroll?.Invoke();
+                }
+                catch (Exception ex)
+                {
+                    AppLog.DebugWriteLine(() => $"Jump to Live could not publish visual navigation ({ex.GetType().Name}).");
+                }
+                if (!request.CanContinue)
+                    return;
                 if (!await WaitForAutomaticAudioSourceAsync(token))
                     return;
                 var scopes = AutomaticQueueScopes();
@@ -561,16 +576,6 @@ namespace JoesScanner.ViewModels
                 // for a recording the user just chose to skip.
                 foreach (var card in Calls)
                     card.ConsumeLateAudio();
-
-                // Force the UI list to snap back to the newest call even if the user was
-                // scrolled into history (which intentionally disables auto-follow).
-                try
-                {
-                    RequestJumpToLiveScroll?.Invoke();
-                }
-                catch
-                {
-                }
 
                 if (!playTarget || !AudioEnabled)
                 {

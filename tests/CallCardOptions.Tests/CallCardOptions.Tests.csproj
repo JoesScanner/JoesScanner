@@ -63,6 +63,7 @@
     <Compile Include="../../JoesScanner/ViewModels/MainViewModel.PlaybackOwnership.cs" Link="MainViewModel.PlaybackOwnership.cs" />
     <Compile Include="../../JoesScanner/ViewModels/MainViewModel.PlaybackLag.cs" Link="MainViewModel.PlaybackLag.cs" />
     <Compile Include="../../JoesScanner/ViewModels/MainViewModel.LiveAudioSource.cs" Link="MainViewModel.LiveAudioSource.cs" />
+    <Compile Include="../../JoesScanner/ViewModels/LiveReadingState.cs" Link="LiveReadingState.cs" />
     <Compile Include="../../JoesScanner/ViewModels/MainViewModel.ListeningSession.cs" Link="MainViewModel.ListeningSession.cs" />
     <Compile Include="../../JoesScanner/ViewModels/MainViewModel.InterruptionRecovery.cs" Link="MainViewModel.InterruptionRecovery.cs" />
     <Compile Include="../../JoesScanner/Services/HistoryResultOrder.cs" Link="HistoryResultOrder.cs" />

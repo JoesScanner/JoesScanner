@@ -97,6 +97,13 @@ namespace JoesScanner.ViewModels
         internal int CallsWaiting => _durableQueue.CountReadyAsync(AutomaticQueueScopes(), LocalRecoveryFloor,
             _currentPlayingCall?.LiveArrivalSequence, default, _automaticAudioFilter).GetAwaiter().GetResult();
         private Action? RequestJumpToLiveScroll { get; set; }
+        internal int JumpScrollRequestsForTest { get; private set; }
+        internal void TrackJumpScrollForTest(Action? onScroll = null) =>
+            RequestJumpToLiveScroll = () =>
+            {
+                JumpScrollRequestsForTest++;
+                onScroll?.Invoke();
+            };
         private string LastQueueEvent { get; set; } = string.Empty;
 
         internal MainViewModel(PlaybackOwnership ownership, HandoffAudio player, string path)

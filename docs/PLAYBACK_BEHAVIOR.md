@@ -22,7 +22,7 @@ This document and the playback integration tests define JoesScanner's playback c
 ## C. Live transport
 
 - Previous and Next select adjacent cards in the currently visible projection, including Favorites. A prepared selection starts a new pass using that view.
-- Jump to Live changes both the playback and visible position. It discards the older playback backlog at a reserved arrival boundary. Admissions after that reservation remain eligible. Authorized History still has access to older recordings.
+- An accepted Jump to Live returns the active Combined, Favorites, or Separate view to its newest visible position and resumes visual follow even when the selected audio source has no eligible recording (or the visible list is empty). This visual action is independent of the audio-target search and resets only that view's New Calls count. With eligible audio, Jump retains its existing playback boundary and backlog-skipping behavior; admissions after the boundary remain eligible. Authorized History still has access to older recordings. The separate New Calls control never changes audio or queue state.
 
 ### Live reading
 
