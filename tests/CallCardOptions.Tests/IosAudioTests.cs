@@ -7,6 +7,16 @@ internal static class IosAudioTests
     {
         RecordingModesAndLeaseOwnership();
         LongRecordingStopsDucking();
+        TransientDuckingHandoff();
+        PersistentDuckingHandoffPause();
+        StationaryHandoffAndBuffering();
+        NearEndHandoffPause();
+        HandoffEligibilityContinuity();
+        PhysicalOutputChangeAfterActivation();
+        HandoffOutputNotificationOrder();
+        HandoffReconcilesPrivateRoute();
+        InvalidatedDuckingHandoff();
+        OrdinaryMixAndExclusivePlayback();
         FailedDeactivation();
         BoundedReleaseRetries();
         await StalledPlaybackRecoveryAsync();
@@ -17,6 +27,487 @@ internal static class IosAudioTests
         await StopAndReplaceAsync();
         MediaResetAndPlayerRebuild();
         await ForegroundSocketRecoveryAsync();
+    }
+
+    private static void TransientDuckingHandoff()
+    {
+        var session = new IosClipSession(_ => true, () => true);
+        var state = new IosAudioSuspension();
+        var recording = new IosRecordingState();
+        using var request = new CancellationTokenSource();
+        var completion = new PlaybackCompletion();
+        int ends = 0;
+        completion.OnEnded(() => ends++);
+        using var item = new MobileRecordingAttempt(completion);
+        item.Start();
+        var duck = session.TryStart(MobileAudioMode.MixAndDuck);
+        recording.Activated(MobileAudioMode.MixAndDuck);
+        recording.Observe(2.931);
+        var continuation = new IosDuckingContinuation(session, state, () => item.HasStarted && !request.IsCancellationRequested,
+            () => ["speaker"], (_, mode) => session.TryStart(mode));
+        continuation.DuckingExpired(duck);
+        session.Release(duck);
+        recording.EndDuckedSegment(TimeSpan.FromSeconds(3), windowExpired: true);
+        var mix = continuation.StartClip(MobileAudioMode.MixAndDuck, recording.ModeForActivation(MobileAudioMode.MixAndDuck),
+            out var eligible);
+        Check(eligible != null, "The immediate plain-mix activation of the same player should receive handoff protection.");
+        var handoff = new IosDuckingHandoff(session, state, mix, eligible!, 2.931,
+            () => item.HasStarted && !request.IsCancellationRequested, () => { });
+
+        // An inspection dispatched by Waiting can see Paused, then Playing.
+        Check(!handoff.ShouldReportPause(false, false, 2.931, TimeSpan.Zero) &&
+              !handoff.ShouldReportPause(true, false, 2.932, TimeSpan.FromMilliseconds(7)) &&
+              !handoff.ShouldReportPause(false, true, 2.933, TimeSpan.FromMilliseconds(19)) &&
+              !handoff.NeedsSample && !state.RequiresPlay && state.RecordingRestartRevision == 0,
+            "A transient handoff pause must leave the original attempt running.");
+        Check(handoff.ShouldReportPause(true, false, 4.5, TimeSpan.FromSeconds(2)),
+            "After Playing, a later unexplained pause is handled immediately.");
+        Check(recording.SeekTarget(2.933) == null && recording.SeekTarget(0) == 2.931 &&
+              recording.DuckingRemaining(TimeSpan.Zero) == TimeSpan.Zero &&
+              session.ActiveMode == MobileAudioMode.MixNormally,
+            "The same item must retain position and the exhausted ducking budget.");
+        recording.Observe(8);
+        Check(item.Confirm(request.Token) && !item.Confirm(request.Token) && ends == 1 &&
+              completion.Confirmed && recording.SeekTarget(0) == 8,
+            "Only one native end owns this recording's completion.");
+
+        var clockHandoff = new IosDuckingHandoff(session, state, mix, new IosHandoffOutputs(state, () => ["speaker"]), 2.931, () => true, () => { });
+        Check(!clockHandoff.ShouldReportPause(true, false, 2.931, TimeSpan.Zero) &&
+              !clockHandoff.ShouldReportPause(true, false, 3.2, TimeSpan.FromMilliseconds(250)) &&
+              clockHandoff.NeedsSample &&
+              !clockHandoff.ShouldReportPause(true, false, 3.45, TimeSpan.FromMilliseconds(500)) &&
+              !clockHandoff.ShouldReportPause(false, true, 3.70, TimeSpan.FromMilliseconds(750)) &&
+              !clockHandoff.NeedsSample,
+            "Media progression clears a provisional pause even before Playing is observed.");
+        Console.WriteLine("PASS iOS transient ducking handoff, media progress, retained position and exactly one completion");
+    }
+
+    private static void PersistentDuckingHandoffPause()
+    {
+        var session = new IosClipSession(_ => true, () => true);
+        var state = new IosAudioSuspension();
+        var lease = session.TryStart(MobileAudioMode.MixNormally);
+        var handoff = new IosDuckingHandoff(session, state, lease, new IosHandoffOutputs(state, () => ["speaker"]), 2.931, () => true, () => { });
+        Check(!handoff.ShouldReportPause(true, false, 2.931, TimeSpan.FromMilliseconds(40)) &&
+              !handoff.ShouldReportPause(true, false, 2.932, TimeSpan.FromMilliseconds(139)) &&
+              handoff.NeedsSample && !state.IsBlocked,
+            "Repeated inspections and clock jitter cannot confirm a pause early.");
+        if (handoff.ShouldReportPause(true, false, 2.932, TimeSpan.FromMilliseconds(140)))
+            state.UnreportedPause();
+        Check(state.IsBlocked && state.RequiresPlay && state.RecordingRestartRevision == 1 &&
+              !handoff.ShouldReportPause(true, false, 2.932, TimeSpan.FromMilliseconds(250)),
+            "A persistent stationary pause must trigger the existing interruption behavior once.");
+        Console.WriteLine("PASS iOS persistent ducking handoff pause requires Play after bounded confirmation");
+    }
+
+    private static void StationaryHandoffAndBuffering()
+    {
+        var session = new IosClipSession(_ => true, () => true);
+        var state = new IosAudioSuspension();
+        var lease = session.TryStart(MobileAudioMode.MixNormally);
+        IosDuckingHandoff New() => new(session, state, lease, new IosHandoffOutputs(state, () => ["speaker"]), 3, () => true, () => { });
+        static TimeSpan Ms(int ms) => TimeSpan.FromMilliseconds(ms);
+
+        var oscillating = New();
+        var stall = new IosPlaybackProgress(3);
+        Check(!oscillating.ShouldReportPause(true, false, 3, Ms(4990)) &&
+              !oscillating.ShouldReportPause(false, false, 3, Ms(5000)) &&
+              stall.IsStalled(3, true, Ms(5000)) && !oscillating.AllowsStallRecovery(true, Ms(5000)),
+            "An expired stall timer cannot retire the item during a newly provisional pause.");
+        for (var ms = 5010; ms < 5090; ms += 10)
+            Check(!oscillating.ShouldReportPause(ms % 20 == 0, false, 3, Ms(ms)),
+                "Stationary status chatter cannot confirm before 100 ms.");
+        Check(!oscillating.ShouldReportPause(false, false, 3, Ms(5090)) &&
+              oscillating.ShouldReportPause(true, false, 3, Ms(5091)),
+            "Waiting cannot confirm, but the first due Paused sample must use the original clock.");
+
+        var buffering = New();
+        Check(!buffering.ShouldReportPause(false, false, 3, Ms(0)) &&
+              buffering.AllowsStallRecovery(true, Ms(2000)) &&
+              !buffering.ShouldReportPause(false, true, 3.02, Ms(2100)) && !buffering.NeedsSample,
+            "Waiting alone must retain normal buffering and allow Playing.");
+        var returnedToWaiting = New();
+        returnedToWaiting.ShouldReportPause(true, false, 3, Ms(50));
+        Check(!returnedToWaiting.ShouldReportPause(false, false, 3, Ms(2050)) &&
+              returnedToWaiting.AllowsStallRecovery(true, Ms(2050)),
+            "A sustained return to Waiting may use the existing buffering timeout.");
+
+        var finalAdvance = New();
+        Check(!finalAdvance.ShouldReportPause(true, false, 3, Ms(0)) &&
+              !finalAdvance.ShouldReportPause(true, false, 3.1, Ms(250)) &&
+              !finalAdvance.ShouldReportPause(true, false, 3.101, Ms(349)) &&
+              finalAdvance.ShouldReportPause(true, false, 3.101, Ms(350)),
+            "The final advancing Paused sample anchors a new 100 ms confirmation interval.");
+        var watchdogOnly = New();
+        Check(!watchdogOnly.ShouldReportPause(true, false, 3.1, Ms(250)) &&
+              watchdogOnly.ShouldReportPause(true, false, 3.1, Ms(500)),
+            "One stationary watchdog sample after the final advance must be sufficient.");
+        var betweenTicks = New();
+        Check(!betweenTicks.ShouldReportPause(true, false, 3.1, Ms(151)) &&
+              !betweenTicks.ShouldReportPause(true, false, 3.1, Ms(250)) &&
+              betweenTicks.ShouldReportPause(true, false, 3.1, Ms(500)),
+            "A 99 ms watchdog sample is too early; the next tick confirms at 349 ms.");
+        var delayedDispatcher = New();
+        Check(!delayedDispatcher.ShouldReportPause(true, false, 3.1, Ms(0)) &&
+              delayedDispatcher.ShouldReportPause(true, false, 3.1, Ms(3000)),
+            "After a blocked dispatcher, the first stationary sample confirms without another wait.");
+        Console.WriteLine("PASS iOS oscillating handoff, buffering and stall precedence, final advancing pause timing");
+    }
+
+    private static void NearEndHandoffPause()
+    {
+        const double position = 2.931, duration = 3.020;
+        foreach (var nativeEndMs in new int?[] { 50, 125, null })
+        {
+            var session = new IosClipSession(_ => true, () => true);
+            var state = new IosAudioSuspension();
+            var lease = session.TryStart(MobileAudioMode.MixNormally);
+            var completion = new PlaybackCompletion();
+            int ends = 0;
+            completion.OnEnded(() => ends++);
+            using var attempt = new MobileRecordingAttempt(completion);
+            attempt.Start();
+            var handoff = new IosDuckingHandoff(session, state, lease, new IosHandoffOutputs(state, () => ["speaker"]), position,
+                () => attempt.HasStarted && !completion.IsFinished, () => { });
+            var progress = new IosPlaybackProgress(position);
+            bool Inspect(int ms) => IosPlaybackProgress.ShouldReportNativePause(handoff, true, false,
+                position, duration, TimeSpan.FromMilliseconds(ms));
+
+            Check(!Inspect(0) && handoff.NeedsSample && !handoff.AllowsStallRecovery(false, TimeSpan.Zero),
+                "The initial near-end pause is provisional.");
+            if (nativeEndMs != 50)
+            {
+                Check(!Inspect(100) && !handoff.NeedsSample && !Inspect(110) && !Inspect(120) &&
+                      !handoff.NeedsSample && handoff.AllowsStallRecovery(false, TimeSpan.FromMilliseconds(120)),
+                    "A confirmed near-end pause and its duplicates must leave the stall watchdog available.");
+            }
+            Check(ends == 0 && !completion.IsFinished, "Proximity to the expected duration cannot consume the item.");
+            if (nativeEndMs is { } ms)
+            {
+                Check(attempt.Confirm(CancellationToken.None) && !Inspect(ms) &&
+                      !attempt.Confirm(CancellationToken.None) && !attempt.Reject() && ends == 1 && completion.Confirmed,
+                    "A native end during or after provisional handling must win once against stale callbacks.");
+            }
+            else
+            {
+                var deadline = TimeSpan.FromSeconds(5);
+                Check(!progress.IsStalled(position, false, deadline - TimeSpan.FromMilliseconds(1)) &&
+                      progress.IsStalled(position, false, deadline) && handoff.AllowsStallRecovery(false, deadline) &&
+                      attempt.Reject() && !attempt.Confirm(CancellationToken.None) && !completion.IsFinished && ends == 0,
+                    "Without a native end, five seconds of stationary media must permit retirement without consumption.");
+            }
+        }
+        Console.WriteLine("PASS iOS 3.020 s item paused at 2.931 s, duplicate pauses, stall deadline and native end ownership");
+    }
+
+    private static void HandoffEligibilityContinuity()
+    {
+        var duck = MobileAudioMode.MixAndDuck;
+        var mix = MobileAudioMode.MixNormally;
+        var session = new IosClipSession(_ => true, () => true);
+        var state = new IosAudioSuspension();
+        bool deny = true;
+        var continuity = new IosDuckingContinuation(session, state, () => true, () => ["speaker"], (_, mode) =>
+        {
+            if (!deny)
+                return session.TryStart(mode);
+            state.ActivationDenied();
+            return 0; // A blocked activation need not advance the session signal.
+        });
+        var outgoing = session.TryStart(duck);
+        continuity.DuckingExpired(outgoing);
+        session.Release(outgoing);
+        Check(continuity.StartClip(duck, mix, out var eligible) == 0 && eligible == null, "Denied activation cannot own a handoff.");
+        state.RequestPlay();
+        state.ActivationSucceeded();
+        deny = false;
+        var recovered = continuity.StartClip(duck, mix, out eligible);
+        Check(recovered == outgoing + 1 && eligible == null,
+            "Even an adjacent lease after manual recovery cannot inherit consumed eligibility.");
+
+        void CheckBreak(Action<IosClipSession, IosAudioSuspension> change, bool duringActivation = false)
+        {
+            var clips = new IosClipSession(_ => true, () => true);
+            var audio = new IosAudioSuspension();
+            var next = new IosDuckingContinuation(clips, audio, () => true, () => ["speaker"], (_, mode) =>
+            {
+                var lease = clips.TryStart(mode);
+                if (duringActivation)
+                    change(clips, audio);
+                return lease;
+            });
+            var initial = clips.TryStart(duck);
+            next.DuckingExpired(initial);
+            clips.Release(initial);
+            if (!duringActivation)
+                change(clips, audio);
+            next.StartClip(duck, mix, out var inherited);
+            Check(inherited == null, "An intervening change cannot inherit ducking continuation.");
+        }
+        CheckBreak((_, audio) => audio.RouteDisconnected(AudioDisconnectionBehavior.ContinueThroughPhoneSpeaker));
+        CheckBreak((_, audio) => audio.RouteDisconnected(AudioDisconnectionBehavior.ContinueThroughPhoneSpeaker), duringActivation: true);
+        CheckBreak((_, audio) => { audio.BeginInterruption(); audio.RecommendResume(true); audio.ActivationSucceeded(); });
+        CheckBreak((_, audio) => { audio.MediaServicesReset(); audio.RequestPlay(); });
+        CheckBreak((_, audio) => audio.NoteOutputChange()); // A physical output changed away and back.
+        CheckBreak((clips, _) => clips.InvalidatePendingSignals());
+        CheckBreak((clips, _) => clips.Release(clips.TryStart(mix)));
+
+        var output = "speaker";
+        var physical = new IosDuckingContinuation(session, state, () => true, () => [output],
+            (_, mode) => session.TryStart(mode));
+        session.Release(recovered);
+        outgoing = session.TryStart(duck);
+        physical.DuckingExpired(outgoing);
+        session.Release(outgoing);
+        output = "headphones"; // New output without a delivered private-route loss.
+        recovered = physical.StartClip(duck, mix, out eligible);
+        Check(eligible == null, "A different physical output cannot inherit the outgoing handoff.");
+
+        foreach (var changesBeforeActivation in new[] { false, true })
+        {
+            var clips = new IosClipSession(_ => true, () => true);
+            var audio = new IosAudioSuspension();
+            var currentOutput = "speaker";
+            var exchange = new IosDuckingContinuation(clips, audio, () => true, () => [currentOutput], (_, mode) =>
+            {
+                // A pre-activation mismatch stays disqualifying if activation restores the output.
+                currentOutput = changesBeforeActivation ? "speaker" : "headset";
+                return clips.TryStart(mode);
+            });
+            var duckLease = clips.TryStart(duck);
+            exchange.DuckingExpired(duckLease);
+            clips.Release(duckLease);
+            if (changesBeforeActivation)
+                currentOutput = "headset";
+            exchange.StartClip(duck, mix, out var protectedOutputs);
+            Check(protectedOutputs == null, "An observable mismatch on either side of activation precludes protection.");
+        }
+
+        var current = true;
+        var owner = new IosDuckingContinuation(session, state, () => current, () => ["speaker"], (_, mode) => session.TryStart(mode));
+        session.Release(recovered);
+        outgoing = session.TryStart(duck);
+        owner.DuckingExpired(outgoing);
+        session.Release(outgoing);
+        current = false;
+        owner.StartClip(duck, mix, out eligible);
+        Check(eligible == null, "A canceled request or replacement player cannot inherit the handoff.");
+        Console.WriteLine("PASS iOS one-shot handoff activation denial, recovery, generations and request ownership");
+    }
+
+    private static void PhysicalOutputChangeAfterActivation()
+    {
+        foreach (var preference in new[] { AudioDisconnectionBehavior.PausePlayback, AudioDisconnectionBehavior.ContinueThroughPhoneSpeaker })
+        foreach (var wasProvisional in new[] { false, true })
+        foreach (var privateRouteLost in new[] { false, true })
+        {
+            var session = new IosClipSession(_ => true, () => true);
+            var state = new IosAudioSuspension();
+            var routes = new IosPrivateAudioRoutes();
+            string[] outputs = ["headset"];
+            routes.AcceptCurrentRoute(outputs);
+            var continuation = new IosDuckingContinuation(session, state, () => true, () => outputs,
+                (_, mode) => session.TryStart(mode));
+            var outgoing = session.TryStart(MobileAudioMode.MixAndDuck);
+            continuation.DuckingExpired(outgoing);
+            session.Release(outgoing);
+            var incoming = continuation.StartClip(MobileAudioMode.MixAndDuck, MobileAudioMode.MixNormally, out var captured);
+            Check(captured != null, "Activation must transfer the validated output snapshot.");
+
+            void ChangeOutputs()
+            {
+                outputs = [];
+                state.NoteOutputChange();
+                if (!privateRouteLost)
+                {
+                    outputs = ["headset"];
+                    state.NoteOutputChange();
+                }
+            }
+
+            if (!wasProvisional)
+                ChangeOutputs(); // Even a change before observer construction must be visible.
+            var handoff = new IosDuckingHandoff(session, state, incoming, captured!, 2.931, () => true, () =>
+            {
+                var pause = routes.Reconcile(outputs, preference, out var disconnected);
+                if (disconnected || pause)
+                    state.RouteDisconnected(preference);
+            });
+            bool Inspect(int ms) => IosPlaybackProgress.ShouldReportNativePause(handoff, true, false,
+                2.931, 8, TimeSpan.FromMilliseconds(ms));
+            if (wasProvisional)
+            {
+                Check(!Inspect(0) && handoff.NeedsSample, "Expected a provisional pause before the output changed.");
+                ChangeOutputs();
+            }
+            Check(Inspect(25) == !privateRouteLost && !handoff.NeedsSample &&
+                  handoff.AllowsStallRecovery(false, TimeSpan.FromMilliseconds(25)) &&
+                  state.RouteGeneration == (privateRouteLost ? 1 : 0) &&
+                  state.RequiresPlay == (privateRouteLost && preference == AudioDisconnectionBehavior.PausePlayback),
+                "Route loss must use its policy; a still-owned unexplained pause after restoration must report immediately.");
+            Check(Inspect(30) == !privateRouteLost && !handoff.NeedsSample,
+                "A repeated observation cannot revive expired output eligibility.");
+        }
+        Console.WriteLine("PASS iOS physical output changes before inspection and during confirmation under Pause and Continue");
+    }
+
+    private static void HandoffOutputNotificationOrder()
+    {
+        foreach (var preference in Enum.GetValues<AudioDisconnectionBehavior>())
+        foreach (var alreadyProvisional in new[] { false, true })
+        foreach (var notifyBeforeInspection in new[] { false, true })
+        foreach (var pausedAtChange in new[] { false, true })
+        {
+            var session = new IosClipSession(_ => true, () => true);
+            var state = new IosAudioSuspension();
+            var routes = new IosPrivateAudioRoutes();
+            string output = "speaker";
+            // Speaker and HDMI are both non-private. Route reconciliation alone
+            // cannot identify this swap. Restoration must not revive the timer.
+            var continuation = new IosDuckingContinuation(session, state, () => true, () => [output],
+                (_, mode) => session.TryStart(mode));
+            var duck = session.TryStart(MobileAudioMode.MixAndDuck);
+            continuation.DuckingExpired(duck);
+            session.Release(duck);
+            var mix = continuation.StartClip(MobileAudioMode.MixAndDuck, MobileAudioMode.MixNormally, out var captured);
+            Check(captured != null, "Unchanged outputs must qualify for the intentional handoff.");
+            if (!alreadyProvisional)
+                output = "HDMI"; // Before the incoming observer is constructed.
+            var handoff = new IosDuckingHandoff(session, state, mix, captured!, 3, () => true, () =>
+            {
+                if (routes.Reconcile([], preference, out var disconnected) || disconnected)
+                    state.RouteDisconnected(preference);
+            });
+            bool Inspect(bool paused, int ms) => IosPlaybackProgress.ShouldReportNativePause(handoff,
+                paused, false, 3, 8, TimeSpan.FromMilliseconds(ms));
+
+            if (alreadyProvisional)
+            {
+                Check(!Inspect(true, 0) && handoff.NeedsSample, "An unchanged route can defer the first pause.");
+                output = "HDMI";
+            }
+            if (notifyBeforeInspection)
+                state.NoteOutputChange();
+            Check(Inspect(pausedAtChange, 10) == pausedAtChange && !handoff.NeedsSample &&
+                  handoff.AllowsStallRecovery(false, TimeSpan.FromMilliseconds(10)) && state.RouteGeneration == 0,
+                "The first observation of different live outputs must settle protection, including while Waiting.");
+
+            output = "speaker";
+            Check(Inspect(true, 20), "Restoring the original outputs cannot revive provisional protection.");
+            state.NoteOutputChange();
+            state.NoteOutputChange();
+            Check(Inspect(true, 30) && !handoff.NeedsSample, "Late or repeated route notifications cannot re-arm the handoff.");
+        }
+        Console.WriteLine("PASS iOS live output mismatch before or after notification, restoration and duplicates under both preferences");
+    }
+
+    private static void HandoffReconcilesPrivateRoute()
+    {
+        foreach (var preference in new[] { AudioDisconnectionBehavior.PausePlayback, AudioDisconnectionBehavior.ContinueThroughPhoneSpeaker })
+        {
+            var session = new IosClipSession(_ => true, () => true);
+            var state = new IosAudioSuspension();
+            var lease = session.TryStart(MobileAudioMode.MixNormally);
+            var routes = new IosPrivateAudioRoutes();
+            routes.AcceptCurrentRoute(["headset"]);
+            var handoff = new IosDuckingHandoff(session, state, lease, new IosHandoffOutputs(state, () => ["speaker"]), 3, () => true, () =>
+            {
+                var mustPause = routes.Reconcile([], preference, out var disconnected);
+                if (disconnected || mustPause)
+                    state.RouteDisconnected(preference);
+            });
+            Check(!state.IsBlocked && !handoff.ShouldReportPause(true, false, 3, TimeSpan.Zero) &&
+                  !handoff.NeedsSample && state.RouteGeneration == 1 &&
+                  state.RequiresPlay == (preference == AudioDisconnectionBehavior.PausePlayback),
+                "The first Paused inspection must detect a missing private output before deferral, honoring the preference.");
+        }
+        Console.WriteLine("PASS iOS first provisional sample reconciles missing private routes for Pause and Continue");
+    }
+
+    private static void InvalidatedDuckingHandoff()
+    {
+        foreach (var cause in new[] { "system interruption", "private route loss", "outgoing lease", "new signal",
+                     "Stop", "replacement request", "replacement item", "media reset", "restart revision" })
+        {
+            var session = new IosClipSession(_ => true, () => true);
+            var state = new IosAudioSuspension();
+            var requests = new LivePlaybackRequests();
+            using var original = requests.Begin(manual: false);
+            var originalItem = new object();
+            var currentItem = originalItem;
+            var lease = session.TryStart(MobileAudioMode.MixNormally);
+            var handoff = new IosDuckingHandoff(session, state, lease, new IosHandoffOutputs(state, () => ["speaker"]), 2.931,
+                () => original.CanContinue && ReferenceEquals(currentItem, originalItem), () => { });
+            Check(!handoff.ShouldReportPause(true, false, 2.931, TimeSpan.Zero) && handoff.NeedsSample,
+                "Expected a provisional pause before " + cause);
+
+            switch (cause)
+            {
+                case "system interruption":
+                    state.BeginInterruption();
+                    Check(state.IsBlocked && state.RecordingRestartRevision == 1, "Real interruption must block immediately.");
+                    state.RecommendResume(true);
+                    state.ActivationSucceeded();
+                    break;
+                case "private route loss":
+                    state.RouteDisconnected(AudioDisconnectionBehavior.PausePlayback);
+                    Check(state.IsRoutePaused && state.RequiresPlay, "Private route loss must require explicit Play immediately.");
+                    break;
+                case "outgoing lease":
+                    session.Release(lease);
+                    var replacementLease = session.TryStart(MobileAudioMode.Exclusive);
+                    Check(session.Owns(replacementLease), "Replacement must own its lease.");
+                    break;
+                case "new signal": session.InvalidatePendingSignals(); break;
+                case "Stop": requests.RetireCurrent(); break;
+                case "replacement request":
+                    using (var next = requests.Begin(manual: true))
+                        Check(next.CanContinue && !original.CanContinue, "New request must supersede the original.");
+                    break;
+                case "replacement item": currentItem = new object(); break;
+                case "media reset":
+                    state.MediaServicesReset();
+                    Check(state.RequiresPlay && state.MediaGeneration == 1, "Media reset must block immediately.");
+                    state.RequestPlay();
+                    break;
+                case "restart revision": state.ForegroundAfterSuspension(); break;
+            }
+            Check(!handoff.ShouldReportPause(true, false, 2.931, TimeSpan.FromMilliseconds(250)) && !handoff.NeedsSample,
+                "A stale confirmation must have no effect after " + cause);
+        }
+        Console.WriteLine("PASS iOS provisional pause invalidation on interruption, route loss, Stop, replacement and media reset");
+    }
+
+    private static void OrdinaryMixAndExclusivePlayback()
+    {
+        foreach (var mode in new[] { MobileAudioMode.MixNormally, MobileAudioMode.Exclusive })
+        {
+            var state = new IosAudioSuspension();
+            var recording = new IosRecordingState();
+            var activations = new List<IosAudioOptions>();
+            var session = new IosClipSession(options => { activations.Add(options); return true; }, () => true);
+            var lease = session.TryStart(recording.ModeForActivation(mode));
+            recording.Activated(mode);
+            foreach (var seconds in new[] { 0.25, 3, 3.25, 7.9 })
+            {
+                recording.Observe(seconds);
+                Check(session.Owns(lease) && recording.ModeForActivation(MobileAudioMode.MixAndDuck) == mode &&
+                      recording.SeekTarget(seconds) == null, "Ordinary playback must keep its original mode and position.");
+            }
+            var options = mode == MobileAudioMode.Exclusive ? IosAudioOptions.None : IosAudioOptions.Mix;
+            Check(activations.SequenceEqual([options]) && recording.DuckingRemaining(TimeSpan.Zero) == TimeSpan.FromSeconds(3),
+                "An ordinary recording must neither exchange session priority nor consume a ducking budget.");
+            var continuity = new IosDuckingContinuation(session, state, () => true, () => ["speaker"], (_, next) => session.TryStart(next));
+            continuity.DuckingExpired(lease);
+            session.Release(lease);
+            continuity.StartClip(mode, mode, out var eligible);
+            Check(eligible == null,
+                "The handoff policy must never defer an ordinary Mix Normally or Exclusive pause.");
+            state.UnreportedPause();
+            Check(state.RequiresPlay && state.RecordingRestartRevision == 1,
+                "An ordinary unexplained pause must still take the immediate interruption path.");
+        }
+        Console.WriteLine("PASS iOS ordinary Mix Normally and Exclusive preserve priority and immediate interruption behavior");
     }
 
     private static void LongRecordingStopsDucking()

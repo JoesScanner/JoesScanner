@@ -59,10 +59,12 @@ public partial class AudioPlaybackService
             var generation = IosAudioEnvironment.MediaGeneration;
             using var item = new AVPlayerItem(source);
             using var player = new AVPlayer(item);
-            using var observers = new IosPlayerObservers(item, completion, token);
+            using var observers = new IosPlayerObservers(player, item, completion, token);
             if (!await PrepareIosPlayerAsync(observers, generation, token))
                 continue;
 
+            var continuation = IosAudioEnvironment.TrackDuckingContinuation(
+                () => !token.IsCancellationRequested && observers.OwnsPlayback(player));
             while (generation == IosAudioEnvironment.MediaGeneration && !observers.RestartIfInterrupted())
             {
                 await IosAudioEnvironment.WaitForReleaseAsync(token);
@@ -94,7 +96,7 @@ public partial class AudioPlaybackService
                 var selected = recording.SelectedMode(_settings.MobileAudio.Mode);
                 var mode = recording.ModeForActivation(selected);
                 var activationStarted = Stopwatch.GetTimestamp();
-                var lease = IosAudioEnvironment.StartClip(selected, mode);
+                var lease = continuation.StartClip(selected, mode, out var handoffOutputs);
                 if (lease == 0)
                     continue;
                 if (observers.RestartIfInterrupted())
@@ -105,7 +107,7 @@ public partial class AudioPlaybackService
                 recording.Activated(mode);
 
                 var result = await PlayIosSegmentAsync(prepared, player, observers, recording, rate, generation, lease,
-                    mode, activationStarted, token);
+                    mode, activationStarted, continuation, handoffOutputs, token);
                 if (result == IosSegmentResult.Completed)
                     return;
                 if (result == IosSegmentResult.Stalled)
@@ -161,7 +163,7 @@ public partial class AudioPlaybackService
 
     private async Task<IosSegmentResult> PlayIosSegmentAsync(PreparedAudio prepared, AVPlayer player, IosPlayerObservers observers,
         IosRecordingState recording, double rate, int generation, long lease, MobileAudioMode mode, long activationStarted,
-        CancellationToken token)
+        IosDuckingContinuation continuation, IosHandoffOutputs? handoffOutputs, CancellationToken token)
     {
         var route = IosAudioEnvironment.RouteGeneration;
         var suspended = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -172,6 +174,10 @@ public partial class AudioPlaybackService
         bool playIssued = false;
         bool duckingWindowExpired = false;
         string stopReason = "failed";
+        var handoff = handoffOutputs != null
+            ? IosAudioEnvironment.ObserveDuckingHandoff(lease, handoffOutputs, player.CurrentTime.Seconds,
+                () => !stopped && !token.IsCancellationRequested && observers.OwnsPlayback(player))
+            : null;
 
         void StopSegment()
         {
@@ -215,12 +221,11 @@ public partial class AudioPlaybackService
 
             var seconds = player.CurrentTime.Seconds;
             recording.Observe(seconds);
-            if (player.TimeControlStatus != AVPlayerTimeControlStatus.Paused)
-                return;
-            var duration = player.CurrentItem?.Duration.Seconds ?? 0;
-            var atEnd = double.IsFinite(duration) && duration > 0 &&
-                double.IsFinite(seconds) && duration - seconds <= 0.1;
-            if (!atEnd)
+            var status = player.TimeControlStatus;
+            var paused = status == AVPlayerTimeControlStatus.Paused;
+            var duration = paused ? player.CurrentItem?.Duration.Seconds ?? 0 : 0;
+            if (IosPlaybackProgress.ShouldReportNativePause(handoff, paused, status == AVPlayerTimeControlStatus.Playing,
+                    seconds, duration, Stopwatch.GetElapsedTime(activationStarted)))
                 IosAudioEnvironment.HandleUnreportedPause(lease);
         }
 
@@ -285,8 +290,16 @@ public partial class AudioPlaybackService
 
                 var seconds = player.CurrentTime.Seconds;
                 recording.Observe(seconds);
+                if (handoff?.NeedsSample == true)
+                {
+                    InspectNativePlayer();
+                    if (stopped)
+                        break;
+                }
                 var waiting = player.TimeControlStatus == AVPlayerTimeControlStatus.WaitingToPlayAtSpecifiedRate;
-                if (progress.IsStalled(seconds, waiting, elapsed.Elapsed) && observers.TryRetireStalledItem())
+                if (progress.IsStalled(seconds, waiting, elapsed.Elapsed) &&
+                    (handoff == null || handoff.AllowsStallRecovery(waiting, Stopwatch.GetElapsedTime(activationStarted))) &&
+                    observers.TryRetireStalledItem())
                 {
                     stopReason = "stalled";
                     return IosSegmentResult.Stalled;
@@ -305,11 +318,12 @@ public partial class AudioPlaybackService
             }
             if (generation == IosAudioEnvironment.MediaGeneration)
                 observers.ProcessFailure();
-            if (duckingDeadline?.IsCompletedSuccessfully == true)
+            if (!stopped && duckingDeadline?.IsCompletedSuccessfully == true)
             {
                 // Pause and deactivate before continuing the same item in plain mix.
                 duckingWindowExpired = true;
                 stopReason = "ducking window expired";
+                continuation.DuckingExpired(lease);
             }
             return IosSegmentResult.Suspended;
         }
@@ -340,6 +354,8 @@ public partial class AudioPlaybackService
         private readonly TaskCompletionSource<NSError?> _failure = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly MobileRecordingAttempt _attempt;
         private readonly PlaybackCompletion _completion;
+        private readonly AVPlayer _player;
+        private readonly AVPlayerItem _item;
         private int _restartRevision;
         private readonly IDisposable _status;
         private readonly NSObject _end;
@@ -349,8 +365,10 @@ public partial class AudioPlaybackService
         internal Task<NSError?> Failure => _failure.Task;
         internal Task Terminal { get; }
 
-        internal IosPlayerObservers(AVPlayerItem item, PlaybackCompletion completion, CancellationToken token)
+        internal IosPlayerObservers(AVPlayer player, AVPlayerItem item, PlaybackCompletion completion, CancellationToken token)
         {
+            _player = player;
+            _item = item;
             _completion = completion;
             _attempt = new(completion);
             Terminal = Task.WhenAny(Finished, Failure);
@@ -370,6 +388,10 @@ public partial class AudioPlaybackService
                     Fail(item.Error);
             });
         }
+
+        internal bool OwnsPlayback(AVPlayer player) =>
+            ReferenceEquals(player, _player) && player.CurrentItem?.Handle == _item.Handle &&
+            _attempt.HasStarted && !_completion.IsFinished;
 
         internal void Started()
         {

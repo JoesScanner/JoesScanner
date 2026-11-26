@@ -117,6 +117,10 @@ internal sealed class IosAudioSuspension
     internal bool IsRecoveryBlocked(bool waitForActivation = false) => IsBlocked || waitForActivation && NeedsReconciliation;
     internal int MediaGeneration { get; private set; }
     internal int RouteGeneration { get; private set; }
+    // Native output changes can arrive before the main-thread disconnect handler.
+    private long _outputGeneration;
+    internal long OutputGeneration => Interlocked.Read(ref _outputGeneration);
+    internal void NoteOutputChange() => Interlocked.Increment(ref _outputGeneration);
     internal int RecordingRestartRevision { get; private set; }
 
     internal async Task WaitUntilPlayableAsync(Func<Task> changed, CancellationToken token, Task? terminal)
@@ -349,12 +353,164 @@ internal sealed class IosRecordingState
     }
 }
 
+// Capture both identities while the ducking lease still owns the session. A live
+// UID comparison detects a change before notification delivery. The generation
+// also detects a notified change away and back between inspections.
+internal sealed class IosHandoffOutputs(IosAudioSuspension suspension, Func<IEnumerable<string>> readOutputs)
+{
+    private readonly long _generation = suspension.OutputGeneration;
+    private readonly HashSet<string> _ids = readOutputs().ToHashSet(StringComparer.Ordinal);
+
+    internal bool MatchesCurrent() => _ids.Count != 0 && _ids.SetEquals(readOutputs()) &&
+        suspension.OutputGeneration == _generation;
+}
+
+// Belongs to one player, item and playback request. Arm while the outgoing
+// lease still owns the session. Consume before calling into AVAudioSession,
+// even when that call fails before allocating a new lease.
+internal sealed class IosDuckingContinuation(IosClipSession session, IosAudioSuspension suspension,
+    Func<bool> ownsPlayback, Func<IEnumerable<string>> readOutputs, Func<MobileAudioMode, MobileAudioMode, long> activate)
+{
+    private long _outgoingLease;
+    private IosHandoffOutputs? _outputs;
+    private int _route;
+    private int _media;
+    private int _restart;
+
+    internal void DuckingExpired(long lease)
+    {
+        if (session.ActiveMode != MobileAudioMode.MixAndDuck || !session.Owns(lease) ||
+            !session.IsCurrentSignal(lease) || suspension.IsBlocked || !ownsPlayback())
+            return;
+
+        _outputs = new(suspension, readOutputs);
+        _outgoingLease = lease;
+        _route = suspension.RouteGeneration;
+        _media = suspension.MediaGeneration;
+        _restart = suspension.RecordingRestartRevision;
+    }
+
+    internal long StartClip(MobileAudioMode selected, MobileAudioMode effective, out IosHandoffOutputs? handoffOutputs)
+    {
+        var outgoing = _outgoingLease;
+        var outputs = _outputs;
+        _outgoingLease = 0;
+        _outputs = null;
+        if (outputs != null && (selected != MobileAudioMode.MixAndDuck || effective != MobileAudioMode.MixNormally ||
+            !session.IsCurrentSignal(outgoing) || !StillCurrent() || !outputs.MatchesCurrent()))
+            outputs = null;
+
+        var lease = activate(selected, effective);
+        handoffOutputs = outputs != null && lease == outgoing + 1 && session.Owns(lease) &&
+            session.IsCurrentSignal(lease) && StillCurrent() && outputs.MatchesCurrent() ? outputs : null;
+        return lease;
+    }
+
+    private bool StillCurrent() => !suspension.IsBlocked && suspension.RouteGeneration == _route &&
+        suspension.MediaGeneration == _media && suspension.RecordingRestartRevision == _restart && ownsPlayback();
+}
+
+// AVPlayer can briefly report Paused after PlayImmediatelyAtRate on the same
+// item when the ducking lease is exchanged for plain mixing. Main-thread KVO
+// inspections and the segment's cancellable watchdog sample this one handoff.
+internal sealed class IosDuckingHandoff(IosClipSession session, IosAudioSuspension suspension,
+    long lease, IosHandoffOutputs outputs, double startPosition, Func<bool> ownsPlayerAndRequest, Action reconcileRoute)
+{
+    private static readonly TimeSpan ConfirmationDelay = TimeSpan.FromMilliseconds(100);
+    private readonly int _route = suspension.RouteGeneration;
+    private readonly int _media = suspension.MediaGeneration;
+    private readonly int _restart = suspension.RecordingRestartRevision;
+    private TimeSpan? _pausedSince;
+    private TimeSpan _lastPaused;
+    private bool _settled;
+
+    internal bool NeedsSample => !_settled;
+
+    private void Settle()
+    {
+        _pausedSince = null;
+        _settled = true;
+    }
+
+    // Waiting alone can still stall. After observing Paused, give the pause
+    // path precedence until playback spends a full buffering timeout in Waiting.
+    internal bool AllowsStallRecovery(bool waiting, TimeSpan elapsed) =>
+        !_pausedSince.HasValue || (waiting && elapsed - _lastPaused >= IosPlaybackProgress.WaitingTimeout);
+
+    private bool IsCurrent() => session.Owns(lease) && session.IsCurrentSignal(lease) && !suspension.IsBlocked &&
+        suspension.RouteGeneration == _route && suspension.MediaGeneration == _media &&
+        suspension.RecordingRestartRevision == _restart && ownsPlayerAndRequest();
+
+    internal bool ShouldReportPause(bool paused, bool playing, double seconds, TimeSpan elapsed)
+    {
+        // A changed private route is actionable immediately, even if the
+        // native route notification is delayed. Reconciliation can end this lease.
+        if (paused && IsCurrent())
+            reconcileRoute();
+        if (!IsCurrent())
+        {
+            Settle();
+            return false;
+        }
+
+        // The player can observe a different output before its route notification.
+        // Once a sample sees a mismatch, later restoration cannot re-arm protection.
+        if (!_settled && !outputs.MatchesCurrent())
+            Settle();
+        if (_settled)
+            return paused;
+
+        if (paused)
+            _lastPaused = elapsed;
+
+        var advanced = double.IsFinite(seconds) && double.IsFinite(startPosition) && seconds - startPosition >= 0.025;
+        if (double.IsFinite(seconds) && (!double.IsFinite(startPosition) || advanced))
+            startPosition = seconds;
+        if (playing || advanced)
+        {
+            // The last advancing Paused sample is also the first evidence of
+            // a possible stationary pause. A later sample can confirm directly.
+            if (paused)
+                _pausedSince = elapsed;
+            else
+                Settle();
+            return false;
+        }
+
+        // Stationary Waiting cannot confirm a pause or restart its clock.
+        // With a continuously Paused player, confirmation is due at 100 ms
+        // and sampled by KVO or the 250 ms watchdog (normally 100–350 ms).
+        // A busy or suspended main thread can delay either observation.
+        if (!paused)
+            return false;
+        _pausedSince ??= elapsed;
+        if (elapsed - _pausedSince < ConfirmationDelay)
+            return false;
+        // Confirmation consumes the handoff even if the ordinary near-end
+        // guard waits for AVPlayer's end notification. A duplicate must not
+        // re-arm a provisional clock or block the independent stall watchdog.
+        Settle();
+        return true;
+    }
+}
+
 // Unlike an AVPlayer media-time observer, this clock keeps advancing during a
 // buffer stall. It is reset for every audible segment, including recovery.
 internal sealed class IosPlaybackProgress(double position)
 {
+    internal static readonly TimeSpan WaitingTimeout = TimeSpan.FromSeconds(2);
     private TimeSpan _lastProgress;
     private TimeSpan? _waitingSince;
+
+    internal static bool ShouldReportNativePause(IosDuckingHandoff? handoff, bool paused, bool playing,
+        double seconds, double duration, TimeSpan elapsed)
+    {
+        if (handoff != null && !handoff.ShouldReportPause(paused, playing, seconds, elapsed))
+            return false;
+        var atEnd = double.IsFinite(duration) && duration > 0 &&
+            double.IsFinite(seconds) && duration - seconds <= 0.1;
+        return paused && !atEnd;
+    }
 
     internal bool IsStalled(double seconds, bool waiting, TimeSpan elapsed)
     {
@@ -370,6 +526,6 @@ internal sealed class IosPlaybackProgress(double position)
             _waitingSince ??= elapsed;
 
         return elapsed - _lastProgress >= TimeSpan.FromSeconds(5) ||
-            _waitingSince is { } since && elapsed - (since > _lastProgress ? since : _lastProgress) >= TimeSpan.FromSeconds(2);
+            _waitingSince is { } since && elapsed - (since > _lastProgress ? since : _lastProgress) >= WaitingTimeout;
     }
 }

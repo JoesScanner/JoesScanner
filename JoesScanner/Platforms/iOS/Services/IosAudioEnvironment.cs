@@ -100,6 +100,15 @@ internal static class IosAudioEnvironment
         Change(Suspension.RequestPlay);
     }
 
+    internal static IosDuckingContinuation TrackDuckingContinuation(Func<bool> ownsPlayback) =>
+        new(Session, Suspension, ownsPlayback, CurrentOutputIds, StartClip);
+
+    private static IEnumerable<string> CurrentOutputIds() =>
+        AVAudioSession.SharedInstance().CurrentRoute.Outputs.Select(port => port.UID);
+
+    internal static IosDuckingHandoff ObserveDuckingHandoff(long lease, IosHandoffOutputs outputs, double position, Func<bool> ownsPlayerAndRequest) =>
+        new(Session, Suspension, lease, outputs, position, ownsPlayerAndRequest, () => _observers?.ReconcileCurrentRoute());
+
     internal static void HandleUnreportedPause(long lease)
     {
         var route = RouteGeneration;
@@ -273,6 +282,12 @@ internal static class IosAudioEnvironment
                 ObserveLegacyInterruptions();
             _tokens.Add(AVAudioSession.Notifications.ObserveRouteChange((_, e) =>
             {
+                // Fence an in-flight lease exchange even if the output changes
+                // back before the main queue runs. Category-only notifications
+                // with identical outputs do not break a valid handoff.
+                if (e.PreviousRoute is { } previous &&
+                    !previous.Outputs.Select(port => port.UID).ToHashSet(StringComparer.Ordinal).SetEquals(CurrentOutputIds()))
+                    Suspension.NoteOutputChange();
                 if (e.Reason == AVAudioSessionRouteChangeReason.NewDeviceAvailable)
                     Dispatch(() => ReconcileCurrentRoute());
                 else if (e.Reason == AVAudioSessionRouteChangeReason.OldDeviceUnavailable &&
