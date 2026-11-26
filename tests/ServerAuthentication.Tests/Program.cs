@@ -12,9 +12,10 @@ using JoesScanner.Services;
 
 if (args.FirstOrDefault() == "--recorder-fixture")
 {
-    if (args.Length != 2 || !ushort.TryParse(args[1], out var port) || port == 0)
-        throw new ArgumentException("Usage: --recorder-fixture <port 1-65535>");
-    await RecorderFixture.RunAsync(port);
+    if (args.Length is < 2 or > 3 || (args.Length == 3 && args[2] is not ("north" or "south")) ||
+        !ushort.TryParse(args[1], out var port) || port == 0)
+        throw new ArgumentException("Usage: --recorder-fixture <port 1-65535> [north|south]");
+    await RecorderFixture.RunAsync(port, args.ElementAtOrDefault(2));
     return;
 }
 

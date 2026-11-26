@@ -5,7 +5,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Web;
 
-internal sealed class RecorderFixture
+internal sealed class RecorderFixture(string? profile)
 {
     private const int ClipSeconds = 8;
     private readonly string runId = Guid.NewGuid().ToString("N")[..8];
@@ -20,7 +20,7 @@ internal sealed class RecorderFixture
     private sealed record Call(string Id, DateTimeOffset At, string Text, string? Audio,
         int DurationMs = ClipSeconds * 1000, int Number = 0)
     {
-        public JsonObject ToRow()
+        public JsonObject ToRow(string? profile)
         {
             var row = JsonSerializer.SerializeToNode(MobileRecoveryTests.Row(Id, At, Audio))!.AsObject();
             row["CallText"] = Text;
@@ -32,18 +32,31 @@ internal sealed class RecorderFixture
             row["SiteID"] = "1";
             row["SiteLabel"] = "Fixture Site";
             row["VoiceReceiver"] = "Fixture Receiver";
+            if (profile != null)
+            {
+                var south = profile == "south";
+                row["TargetID"] = Number % 2 == 1 ? "101" : "102";
+                row["TargetLabel"] = Talkgroup(profile, Number);
+                row["SystemID"] = south ? "22" : "11";
+                row["SystemLabel"] = $"{profile} system";
+                row["SiteID"] = south ? "202" : "201";
+                row["SiteLabel"] = $"{profile} site";
+                row["VoiceReceiver"] = $"{profile} receiver";
+                row["SourceID"] = south ? "702" : "701";
+                row["SourceLabel"] = $"{profile} radio";
+            }
             return row;
         }
     }
 
-    internal static async Task RunAsync(int port)
+    internal static async Task RunAsync(int port, string? profile)
     {
-        var fixture = new RecorderFixture();
+        var fixture = new RecorderFixture(profile);
         using var listener = new HttpListener();
         var origin = $"http://127.0.0.1:{port}/";
         listener.Prefixes.Add(origin);
         listener.Start();
-        Log("ready", new { origin, fixture.runId, commands = "a, b, update-b, send, burst, hold, attach, revise, quit" });
+        Log("ready", new { origin, fixture.runId, profile, commands = "a, b, update-b, send, burst, hold, attach, revise, quit" });
         var serving = fixture.ServeAsync(listener);
         try
         {
@@ -73,7 +86,7 @@ internal sealed class RecorderFixture
             Log("rejected", new { reason = "Invalid queue command, arguments, or fixture mode." });
             return;
         }
-        if (queueCount > 0)
+        if (profile != null || queueCount > 0)
         {
             Log("rejected", new { reason = "Restart for a Phase 1 scenario." });
             return;
@@ -116,7 +129,7 @@ internal sealed class RecorderFixture
                 return false;
             var revised = prior with
             {
-                Text = $"Phase 2 call {number:D3} revised.",
+                Text = $"{CallLabel(number)} revised.",
                 Audio = command == "attach" ? $"/audio/{number}.wav" : prior.Audio
             };
             var snapshot = (Call[])current.Clone();
@@ -140,8 +153,8 @@ internal sealed class RecorderFixture
         for (int i = 0; i < count; i++)
         {
             int number = ++queueCount;
-            batch[i] = new Call($"{runId}-P{number:D3}", DateTimeOffset.FromUnixTimeSeconds(firstSecond + i),
-                $"Phase 2 call {number:D3}.", command == "hold" ? null : $"/audio/{number}.wav", durations[i], number);
+            batch[i] = new Call($"{(profile == null ? runId : "paired")}-P{number:D3}", DateTimeOffset.FromUnixTimeSeconds(firstSecond + i),
+                $"{CallLabel(number)}.", command == "hold" ? null : $"/audio/{number}.wav", durations[i], number);
         }
         lastQueueSecond = firstSecond + count - 1;
         calls = [.. batch.Reverse(), .. current];
@@ -150,9 +163,14 @@ internal sealed class RecorderFixture
         return true;
     }
 
-    private static int ToneHz(int number) => 300 + 23 * (number % 127);
+    private string CallLabel(int number) => $"{profile ?? "Phase 2"} call {number:D3}";
 
-    private static void LogQueueRelease(string command, Call call) =>
+    private static string Talkgroup(string profile, int number) =>
+        $"{profile} {(number % 2 == 1 ? "dispatch" : "tactical")}";
+
+    private int ToneHz(int number) => (profile == "south" ? 600 : 300) + 23 * (number % 127);
+
+    private void LogQueueRelease(string command, Call call) =>
         Log("release", new { command, call.Id, call.At, call.Text, call.Audio, call.DurationMs, frequencyHz = ToneHz(call.Number) });
 
     private async Task ServeAsync(HttpListener listener)
@@ -178,11 +196,30 @@ internal sealed class RecorderFixture
                 {
                     using var reader = new StreamReader(context.Request.InputStream, Encoding.UTF8);
                     var (draw, start, length) = ReadPoll(await reader.ReadToEndAsync());
-                    var rows = snapshot.Skip(start).Take(length).Select(call => call.ToRow()).ToArray();
+                    var rows = snapshot.Skip(start).Take(length).Select(call => call.ToRow(profile)).ToArray();
                     var body = JsonSerializer.SerializeToUtf8Bytes(new { draw, recordsTotal = snapshot.Length,
                         recordsFiltered = snapshot.Length, data = rows });
                     await WriteAsync(response, "application/json", body);
                     Log("poll", new { draw, start, length, ids = rows.Select(row => row["DT_RowId"]) });
+                }
+                else if (method == "GET" && profile != null && path is "/receiversjson" or "/sitesjson" or "/talkgroupsjson")
+                {
+                    var body = path switch
+                    {
+                        "/talkgroupsjson" => JsonSerializer.SerializeToUtf8Bytes(new { results = new[] {
+                            new { text = $"{profile} system", children = new[] {
+                                new { id = "101", text = Talkgroup(profile, 1) },
+                                new { id = "102", text = Talkgroup(profile, 2) }
+                            } }
+                        } }),
+                        "/sitesjson" => JsonSerializer.SerializeToUtf8Bytes(new { results = new[] {
+                            new { id = profile == "south" ? "202" : "201", text = $"{profile} site" }
+                        } }),
+                        _ => JsonSerializer.SerializeToUtf8Bytes(new { results = new[] {
+                            new { id = $"{profile} receiver", text = $"{profile} receiver" }
+                        } })
+                    };
+                    await WriteAsync(response, "application/json", body);
                 }
                 else if (method == "GET" && snapshot.FirstOrDefault(call => call.Audio == path) is { } call)
                 {

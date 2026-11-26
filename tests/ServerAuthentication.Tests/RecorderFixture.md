@@ -38,3 +38,9 @@ Start a new fixture process for each independent scenario. Use either the Phase 
 | `revise 2` | Publish a transcript revision for call 2, retaining its identity, timestamp, and audio. |
 
 Durations are integer milliseconds from 250 to 60000. A burst accepts up to 64 durations. Numbers start at 1 in input order. IDs include the run ID. Polls return newest first. Recording timestamps advance by at least one second per number so bursts have explicit display order. A rapid burst can place a synthetic recording timestamp ahead of wall time. The UTC log event records the actual release time. Compare playback with the client's durable admission sequence. WAVs have 8000 mono samples per second and a numbered tone (300 + 23 × (number modulo 127) Hz). Poll metadata rounds duration up to whole seconds.
+
+## Paired recorder scenarios
+
+Launch two independent processes with distinct unused ports, for example `--recorder-fixture 19874 north` and `--recorder-fixture 19875 south`. Use a fresh Local Only app test container with only those two loopback endpoints. Each process takes the numbered queue commands on its own stdin. Both start at `paired-P001` on each launch. Odd calls use dispatch (101) and even calls use tactical (102). Labels identify the recorder, and south tones are 300 Hz higher. GET /receiversjson, /sitesjson and /talkgroupsjson return each recorder's synthetic catalog.
+
+To establish a specific cross-recorder arrival order, release a call on one endpoint, wait for its admission in the client's durable queue, then release on the other. For distinct displayed timestamps, also wait for the next wall-clock second after the previous synthetic capture timestamp. Each process logs actual UTC release and HTTP events independently.
