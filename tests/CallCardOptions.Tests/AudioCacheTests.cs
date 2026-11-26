@@ -1,4 +1,3 @@
-using System.Buffers.Binary;
 using System.Net;
 using JoesScanner.Services;
 
@@ -204,7 +203,7 @@ internal static class AudioCacheTests
     private static async Task InvalidAndFailedDownloadsAsync()
     {
         using var fixture = new Fixture();
-        foreach (var bytes in new[] { Array.Empty<byte>(), new byte[64], WaveBytes(128)[..64] })
+        foreach (var bytes in new[] { Array.Empty<byte>(), new byte[64], RecorderWave.Create(128)[..64] })
             await ExpectFailureAsync<RecordingAudioUnavailableException>(fixture.Cache.AcquireAsync(Key("bad"), Allowed,
                 async (transfer, token) =>
                 {
@@ -225,25 +224,7 @@ internal static class AudioCacheTests
     }
 
     internal static HttpResponseMessage WaveResponse(int length) =>
-        new(HttpStatusCode.OK) { Content = new ByteArrayContent(WaveBytes(length)) };
-
-    private static byte[] WaveBytes(int length)
-    {
-        var data = new byte[length];
-        "RIFF"u8.CopyTo(data);
-        BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(4), length - 8);
-        "WAVEfmt "u8.CopyTo(data.AsSpan(8));
-        BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(16), 16);
-        BinaryPrimitives.WriteInt16LittleEndian(data.AsSpan(20), 1);
-        BinaryPrimitives.WriteInt16LittleEndian(data.AsSpan(22), 1);
-        BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(24), 8000);
-        BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(28), 16000);
-        BinaryPrimitives.WriteInt16LittleEndian(data.AsSpan(32), 2);
-        BinaryPrimitives.WriteInt16LittleEndian(data.AsSpan(34), 16);
-        "data"u8.CopyTo(data.AsSpan(36));
-        BinaryPrimitives.WriteInt32LittleEndian(data.AsSpan(40), length - 44);
-        return data;
-    }
+        new(HttpStatusCode.OK) { Content = new ByteArrayContent(RecorderWave.Create(length)) };
 
     private static async Task<string> StoreAsync(PlaybackAudioCache.Transfer transfer, CancellationToken token, int length = 256)
     {

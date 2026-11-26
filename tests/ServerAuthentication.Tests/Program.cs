@@ -10,6 +10,14 @@ using JoesScanner.Helpers;
 using JoesScanner.Models;
 using JoesScanner.Services;
 
+if (args.FirstOrDefault() == "--recorder-fixture")
+{
+    if (args.Length != 2 || !ushort.TryParse(args[1], out var port) || port == 0)
+        throw new ArgumentException("Usage: --recorder-fixture <port 1-65535>");
+    await RecorderFixture.RunAsync(port);
+    return;
+}
+
 if (args is ["--wordpress-favorites", var fixture])
 {
     await WordPressFavoritesIntegration.RunAsync(fixture);

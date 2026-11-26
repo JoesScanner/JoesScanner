@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../Fixtures/RecorderWave.cs" Link="RecorderWave.cs" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="11.0.0" />
     <PackageReference Include="SQLite" Version="3.54.1" />
     <Compile Include="../../JoesScanner/Models/CallCardLayout.cs" Link="CallCardLayout.cs" />

@@ -393,7 +393,7 @@ internal static partial class MobileRecoveryTests
         return settings;
     }
 
-    private static object Row(string id, DateTimeOffset timestamp, string? file) =>
+    internal static object Row(string id, DateTimeOffset timestamp, string? file) =>
         new { DT_RowId = id, StartTimeUTC = timestamp.ToUnixTimeSeconds(), AudioFilename = file, CallText = "Call", CallDuration = 5 };
 
     private static HttpResponseMessage Reply(params object[] rows) =>
