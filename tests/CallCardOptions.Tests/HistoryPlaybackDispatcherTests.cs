@@ -15,6 +15,7 @@ internal static partial class HistoryPlaybackDispatcherTests
         await StopWithPendingNotificationsAsync();
         await NavigateDuringPlaybackStartupAsync();
         await SelectedPlaybackSkipsFailedRecordingsAsync();
+        await StandalonePagingToolbarAsync();
         await PrefetchRespectsThresholdAsync();
         await PrefetchKeepsPlaybackSequenceAsync();
         await PrefetchUsesAnExistingPageAsync();
@@ -22,6 +23,98 @@ internal static partial class HistoryPlaybackDispatcherTests
         await LatestPreparationWinsAsync();
         await OlderPageFailuresPreservePlaybackAsync();
         await ScopeChangesRetirePendingWorkAsync();
+    }
+
+    private static async Task StandalonePagingToolbarAsync()
+    {
+        using var dispatcher = new HistoryTestDispatcher();
+        var player = new HandoffAudio();
+        var history = new HistoryViewModel(new PlaybackOwnership(), player);
+        await OpenAsync(dispatcher, history);
+        var first = history.MakeCallForTest("first", -1);
+        var older = history.MakeCallForTest("older", -2);
+        var obsolete = history.MakeCallForTest("obsolete", -3);
+        await dispatcher.DispatchAsync(() => history.SearchForTestAsync([first], true)).Unwrap();
+
+        var changed = new HashSet<string?>();
+        history.PropertyChanged += (_, e) => changed.Add(e.PropertyName);
+        var merges = 0;
+        history.OlderHistoryResultsAdding += () => merges++;
+        void CheckToolbar(bool pending)
+        {
+            LiveHistoryHandoffTests.Check(history.IsStopEnabled == pending && history.ShowHistoryStopButton == pending &&
+                history.IsPlayEnabled != pending && history.ShowHistoryPlayButton != pending &&
+                history.CanLoadMoreOlder != pending, "Standalone paging must own the toolbar until it finishes.");
+        }
+
+        void CheckTransition(bool pending)
+        {
+            CheckToolbar(pending);
+            LiveHistoryHandoffTests.Check(changed.Contains(nameof(history.ShowHistoryPlayButton)) &&
+                changed.Contains(nameof(history.ShowHistoryStopButton)), "The view must be notified of both toolbar buttons.");
+            changed.Clear();
+        }
+
+        var abandoned = new TaskCompletionSource<HistorySearchResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var retry = new TaskCompletionSource<HistorySearchResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        HistorySearchResult? original = null;
+        CancellationToken pageToken = default;
+        history.PagesForTest.Older = (previous, token) =>
+        {
+            original = previous;
+            pageToken = token;
+            return abandoned.Task;
+        };
+        await dispatcher.DispatchAsync(() =>
+        {
+            history.MobilePlaybackRequiresPlay = true;
+            CheckToolbar(false);
+        });
+        var canceled = await dispatcher.DispatchAsync(history.LoadOlderForTestAsync);
+        await dispatcher.DispatchAsync(() => CheckTransition(true));
+        await history.StopForTestAsync().WaitAsync(Timeout);
+        await canceled.WaitAsync(Timeout);
+        await dispatcher.DispatchAsync(() =>
+        {
+            CheckTransition(false);
+            LiveHistoryHandoffTests.Check(pageToken.IsCancellationRequested && merges == 0 &&
+                history.CallsForTest.SequenceEqual([first]), "Stop must cancel the request and preserve the loaded cards.");
+            history.PagesForTest.Older = (previous, _) =>
+            {
+                LiveHistoryHandoffTests.Check(ReferenceEquals(previous, original), "Retry must use the same results and cursor.");
+                return retry.Task;
+            };
+        });
+        var retried = await dispatcher.DispatchAsync(history.LoadOlderForTestAsync);
+        abandoned.SetResult(new(original!.Snapshot, original.Cursor, [obsolete], true));
+        await dispatcher.DispatchAsync(() =>
+        {
+            CheckTransition(true);
+            LiveHistoryHandoffTests.Check(merges == 0 && history.CallsForTest.SequenceEqual([first]),
+                "A late canceled response must leave the retry and the loaded cards intact.");
+        });
+        retry.SetResult(new(original.Snapshot, original.Cursor, [older], true));
+        await retried.WaitAsync(Timeout);
+        await dispatcher.DispatchAsync(() =>
+        {
+            CheckTransition(false);
+            LiveHistoryHandoffTests.Check(merges == 1 && history.CallsForTest.SequenceEqual([first, older]) && player.Started.IsEmpty,
+                "Only the successful retry should append results while idle.");
+        });
+
+        var failed = new TaskCompletionSource<HistorySearchResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        history.PagesForTest.Older = (_, _) => failed.Task;
+        var failing = await dispatcher.DispatchAsync(history.LoadOlderForTestAsync);
+        await dispatcher.DispatchAsync(() => CheckTransition(true));
+        failed.SetException(new IOException("Page unavailable"));
+        await failing.WaitAsync(Timeout);
+        await dispatcher.DispatchAsync(() =>
+        {
+            CheckTransition(false);
+            LiveHistoryHandoffTests.Check(history.StatusForTest.Contains("Try again") && merges == 1,
+                "A failed page must restore the toolbar and preserve the results for retry.");
+        });
+        Console.WriteLine("PASS Idle History toolbar follows page start, Stop, late response, retry, success and failure");
     }
 
     private static async Task ContendedPlaybackAndOlderResultsAsync()

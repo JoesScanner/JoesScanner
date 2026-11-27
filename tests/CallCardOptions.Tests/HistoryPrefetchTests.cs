@@ -106,6 +106,15 @@ internal static partial class HistoryPlaybackDispatcherTests
         await ExpectStartAsync(starts.Reader, selected.BackendId);
         var initial = await requested.Task.WaitAsync(Timeout);
         var fetching = await dispatcher.DispatchAsync(history.LoadOlderForTestAsync);
+        await dispatcher.DispatchAsync(() =>
+        {
+            LiveHistoryHandoffTests.Check(history.ShowHistoryStopButton && history.IsStopEnabled &&
+                !history.ShowHistoryPlayButton && !history.IsPlayEnabled, "Active playback and paging must retain Stop.");
+            history.MobilePlaybackRequiresPlay = true;
+            LiveHistoryHandoffTests.Check(history.ShowHistoryStopButton && history.IsStopEnabled &&
+                history.ShowHistoryPlayButton && history.IsPlayEnabled, "An interrupted mobile player must retain resume while paging.");
+            history.MobilePlaybackRequiresPlay = false;
+        });
         finishSelected.SetResult();
         await ExpectStartAsync(starts.Reader, middle.BackendId);
         LiveHistoryHandoffTests.Check(pageStartedAfterAudio && !fetching.IsCompleted,

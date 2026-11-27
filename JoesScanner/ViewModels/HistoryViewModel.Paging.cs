@@ -124,7 +124,7 @@ public sealed partial class HistoryViewModel
         _isPaging = previous != null;
         IsLoading = previous == null;
         StatusText = _isPaging ? "Loading older recordings…" : "Searching…";
-        RefreshCommandStates();
+        NotifyHistoryToolbarState();
 
         Task<HistorySearchResult>? fetchTask = null;
         try
@@ -187,7 +187,7 @@ public sealed partial class HistoryViewModel
                 {
                     IsLoading = false;
                     _isPaging = false;
-                    RefreshCommandStates();
+                    NotifyHistoryToolbarState();
                 }
                 request.Dispose();
             }).ConfigureAwait(false);

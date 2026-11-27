@@ -135,9 +135,20 @@ namespace JoesScanner.ViewModels
             NotifyHistoryPlaybackState();
         }
 
+        private bool CanResumeMobilePlayback => _isQueuePlaybackRunning && MobilePlaybackRequiresPlay;
+        public bool IsStopEnabled => _isPaging || _isQueuePlaybackRunning || _historySelectionRequests.HasManualSelection;
+        public bool IsPlayEnabled => CanResumeMobilePlayback || (!IsStopEnabled && CanNavigateHistory);
+        public bool ShowHistoryPlayButton => !IsStopEnabled || CanResumeMobilePlayback;
+        public bool ShowHistoryStopButton => IsStopEnabled;
+
         private void NotifyHistoryPlaybackState()
         {
             OnPropertyChanged(nameof(IsHistoryPlaybackRunning));
+            NotifyHistoryToolbarState();
+        }
+
+        private void NotifyHistoryToolbarState()
+        {
             OnPropertyChanged(nameof(ShowHistoryPlayButton));
             OnPropertyChanged(nameof(ShowHistoryStopButton));
             RefreshCommandStates();

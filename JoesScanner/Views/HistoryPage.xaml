@@ -321,6 +321,7 @@
                         <ImageButton
                             Source="mc_play.png"
                             IsVisible="{Binding ShowHistoryPlayButton}"
+                            AutomationId="HistoryPlay"
                             Command="{Binding PlayCommand}"
                             IsEnabled="{Binding IsPlayEnabled}"
                             BackgroundColor="Transparent"
@@ -332,6 +333,7 @@
                         <ImageButton
                             Source="mc_stop.png"
                             IsVisible="{Binding ShowHistoryStopButton}"
+                            AutomationId="HistoryStop"
                             Command="{Binding StopCommand}"
                             IsEnabled="{Binding IsStopEnabled}"
                             BackgroundColor="Transparent"

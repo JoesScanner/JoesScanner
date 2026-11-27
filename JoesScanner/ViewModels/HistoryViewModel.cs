@@ -129,7 +129,7 @@ namespace JoesScanner.ViewModels
             LoadMoreOlderCommand = new Command(async () => await SafeRunAsync(LoadMoreOlderAsync, "History.LoadMoreOlder"), () => CanLoadMoreOlder);
             PlayFromCallCommand = new Command<CallItem>(async c => await SafeRunAsync(() => PlayFromCallAsync(c), "History.PlayFromCall"), c => !IsLoading && c != null);
             PlayCommand = new Command(async () => await SafeRunAsync(PlayAsync, "History.Play"), () => !IsLoading && IsPlayEnabled);
-            StopCommand = new Command(async () => await SafeRunAsync(StopAsync, "History.Stop"), () => true);
+            StopCommand = new Command(async () => await SafeRunAsync(StopAsync, "History.Stop"), () => IsStopEnabled);
 #if ANDROID
             JoesScanner.Platforms.Android.Services.AndroidAudioEnvironment.ResumeStateChanged += OnMobileResumeStateChanged;
 #elif IOS
@@ -450,22 +450,14 @@ namespace JoesScanner.ViewModels
 
         // Keep transport/speed buttons usable while audio is playing even if the list is paged/cleared.
         public bool IsHistoryMediaButtonsEnabled => _isQueuePlaybackRunning || Calls.Count > 0;
-        public bool IsStopEnabled => _isQueuePlaybackRunning || _historySelectionRequests.HasManualSelection;
-
-        private bool CanResumeMobilePlayback =>
+        private static bool MobilePlaybackRequiresPlay =>
 #if ANDROID
-            _isQueuePlaybackRunning && JoesScanner.Platforms.Android.Services.AndroidAudioEnvironment.RequiresPlay;
+            JoesScanner.Platforms.Android.Services.AndroidAudioEnvironment.RequiresPlay;
 #elif IOS
-            _isQueuePlaybackRunning && JoesScanner.Platforms.iOS.Services.IosAudioEnvironment.RequiresPlay;
+            JoesScanner.Platforms.iOS.Services.IosAudioEnvironment.RequiresPlay;
 #else
             false;
 #endif
-
-        public bool IsPlayEnabled => CanResumeMobilePlayback || (!IsStopEnabled && CanNavigateHistory);
-
-        public bool ShowHistoryPlayButton => !IsStopEnabled || CanResumeMobilePlayback;
-
-        public bool ShowHistoryStopButton => IsStopEnabled;
 
 #if ANDROID || IOS
         private void OnMobileResumeStateChanged()

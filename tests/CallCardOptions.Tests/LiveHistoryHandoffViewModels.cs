@@ -547,8 +547,7 @@ namespace JoesScanner.ViewModels
         private CallItem? ActiveCall => _activeCall;
         private bool IsHistoryPlaybackRunning => _isQueuePlaybackRunning;
         private bool IsHistoryMediaButtonsEnabled => _isQueuePlaybackRunning || Calls.Count > 0;
-        private bool ShowHistoryPlayButton => !ShowHistoryStopButton;
-        private bool ShowHistoryStopButton => _isQueuePlaybackRunning || _historySelectionRequests.HasManualSelection;
+        internal bool MobilePlaybackRequiresPlay { get; set; }
         private bool IsLoading { get; set; }
         private string StatusText
         {
