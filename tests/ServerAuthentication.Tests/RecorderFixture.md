@@ -76,3 +76,28 @@ Use one fixture process per recorder. Type `link online` to enable recovery test
 | `batch N` | Admit 1–500 consecutive numbered calls with missing audio at one recorder second, newest ID first on the wire. Use `attach N` by recording number when audio becomes available. |
 
 Continue using send, hold, revise, and attach while disconnected. Restore each recorder independently. A multi-page test can use a batch larger than the client's page size and fail the second offset. Keep the fault until the client requests that offset, then clear it and compare the retried IDs, timestamps, and durable dispositions. Fixture responses prove transmission only. Use application and native playback evidence to verify playback.
+
+## Secure polling and WebSocket delivery
+
+Run the existing numbered recorder and a secure listener in separate terminals, one pair per recorder. For example, start the north recorder on 19774. Its secure listener reads the same recorder's History, lookups, audio, and live rows.
+
+```sh
+dotnet run --project tests/ServerAuthentication.Tests -- --recorder-fixture 19774 north
+dotnet run --project tests/SecureRecorderFixture -- 19784 19774 /path/to/leaf.pem /path/to/leaf.key
+```
+
+Use a disposable server-authentication certificate with an IP subject alternative name of 127.0.0.1. Keep its PEM private key outside the checkout. Add only the issuing root to a newly created disposable simulator with `xcrun simctl keychain <disposable-device-UUID> add-root-cert /path/to/root.pem`. In Local Only Mode, configure the app with `https://127.0.0.1:19784`. The listener binds IPv4 loopback, upgrades at `/Calls`, and obtains recorder data from the specified IPv4 loopback origin. Use distinct port pairs and stdin controls for a second recorder.
+
+Release or update numbered calls on the recorder console as before. Type one of the following on the secure console after its `upgrade` event.
+
+| Command | Result |
+| --- | --- |
+| `row paired-P001` | Send one current recorder row. |
+| `array paired-P001 paired-P002` | Send the rows as a JSON array in the given order. |
+| `data paired-P001 paired-P002` | Send the rows in a JSON object's data array. |
+| `incomplete` or `malformed` | Send a row missing its identity or an unfinished JSON object. |
+| `offline` | Drop the active socket and return 503 to subsequent upgrades. HTTPS recorder requests continue. |
+| `online` | Accept upgrades again. Observe the new connection ID before sending. |
+| `quit` | Close the secure listener. The recorder console has its own quit command. |
+
+A release enters recorder history immediately. A socket send reads a snapshot of that history through the origin's calljson endpoint. Origin page holds and failures can therefore affect the sender too. Use the secure listener's HTTPS records for application requests and its delivery events for completed socket sends. Confirm receipt and playback in the application. After testing, shut down and delete only the dedicated disposable simulator, then remove its disposable certificate and key files.
