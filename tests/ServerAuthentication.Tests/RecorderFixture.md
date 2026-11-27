@@ -75,6 +75,8 @@ Use one fixture process per recorder. Type `link online` to enable recovery test
 | `page clear` | Clear the page rule and release held responses. Replacing a rule also releases previous holds. |
 | `batch N` | Admit 1–500 consecutive numbered calls with missing audio at one recorder second, newest ID first on the wire. Use `attach N` by recording number when audio becomes available. |
 
+On macOS, a request already held when the listener closes may return HTTP 200 with an empty body. To verify hard refusal, wait for the fixture to acknowledge `link refuse`, then open a fresh TCP connection to the same loopback address and port and check for `ECONNREFUSED`.
+
 Continue using send, hold, revise, and attach while disconnected. Restore each recorder independently. A multi-page test can use a batch larger than the client's page size and fail the second offset. Keep the fault until the client requests that offset, then clear it and compare the retried IDs, timestamps, and durable dispositions. Fixture responses prove transmission only. Use application and native playback evidence to verify playback.
 
 ## Secure polling and WebSocket delivery
@@ -95,6 +97,10 @@ curl.exe --noproxy "*" --cacert C:/path/to/root.pem https://127.0.0.1:19784/site
 ```
 
 Serve the leaf's revocation information on loopback when the client requires it. For a WSS check, use the same trust and hostname policy for `wss://127.0.0.1:19784/Calls`. After `offline`, verify that a new upgrade returns 503 while an HTTPS poll still returns newly released rows. After `online`, connect again and compare a delivered row with that HTTPS poll.
+
+On Windows, shut down the secure fixture by typing `quit` or closing stdin to send EOF. Wait for the process to exit. Forced termination can leave a usable disposable private key in the current user's key provider.
+
+Keep the disposable leaf's public certificate until you verify cleanup. For any suspected residual key container, compare its public key with the public key in that certificate. Delete only a positively identified test container through its owning key provider, then verify its removal before discarding the certificate. Leave unrelated containers and any container whose identity is uncertain untouched.
 
 Release or update numbered calls on the recorder console as before. Type one of the following on the secure console after its `upgrade` event.
 
