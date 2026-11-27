@@ -5,7 +5,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Web;
 
-internal sealed class RecorderFixture(string? profile)
+internal sealed partial class RecorderFixture(string? profile)
 {
     private const int ClipSeconds = 8;
     private readonly string runId = Guid.NewGuid().ToString("N")[..8];
@@ -79,6 +79,11 @@ internal sealed class RecorderFixture(string? profile)
     {
         var current = calls;
         var words = command.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (words.FirstOrDefault() == "archive")
+        {
+            ConfigureArchive(words);
+            return;
+        }
         if (words.FirstOrDefault() is "send" or "hold" or "burst" or "attach" or "revise")
         {
             if ((current.Length == 0 || queueCount > 0) && ApplyQueueCommand(words, current))
@@ -175,6 +180,7 @@ internal sealed class RecorderFixture(string? profile)
 
     private async Task ServeAsync(HttpListener listener)
     {
+        var pending = new List<Task>();
         while (listener.IsListening)
         {
             HttpListenerContext context;
@@ -183,65 +189,83 @@ internal sealed class RecorderFixture(string? profile)
             {
                 break;
             }
-            var path = context.Request.Url!.AbsolutePath;
-            var method = context.Request.HttpMethod;
-            Log("request", new { method, path });
-            using var response = context.Response;
-            try
+            if (archive == null)
+                await RespondAsync(context);
+            else
             {
-                var snapshot = calls;
-                if (context.Request.Headers["Authorization"] != null)
-                    response.StatusCode = 403;
-                else if (method == "POST" && path == "/calljson")
-                {
-                    using var reader = new StreamReader(context.Request.InputStream, Encoding.UTF8);
-                    var (draw, start, length) = ReadPoll(await reader.ReadToEndAsync());
-                    var rows = snapshot.Skip(start).Take(length).Select(call => call.ToRow(profile)).ToArray();
-                    var body = JsonSerializer.SerializeToUtf8Bytes(new { draw, recordsTotal = snapshot.Length,
-                        recordsFiltered = snapshot.Length, data = rows });
-                    await WriteAsync(response, "application/json", body);
-                    Log("poll", new { draw, start, length, ids = rows.Select(row => row["DT_RowId"]) });
-                }
-                else if (method == "GET" && profile != null && path is "/receiversjson" or "/sitesjson" or "/talkgroupsjson")
-                {
-                    var body = path switch
-                    {
-                        "/talkgroupsjson" => JsonSerializer.SerializeToUtf8Bytes(new { results = new[] {
-                            new { text = $"{profile} system", children = new[] {
-                                new { id = "101", text = Talkgroup(profile, 1) },
-                                new { id = "102", text = Talkgroup(profile, 2) }
-                            } }
-                        } }),
-                        "/sitesjson" => JsonSerializer.SerializeToUtf8Bytes(new { results = new[] {
-                            new { id = profile == "south" ? "202" : "201", text = $"{profile} site" }
-                        } }),
-                        _ => JsonSerializer.SerializeToUtf8Bytes(new { results = new[] {
-                            new { id = $"{profile} receiver", text = $"{profile} receiver" }
-                        } })
-                    };
-                    await WriteAsync(response, "application/json", body);
-                }
-                else if (method == "GET" && snapshot.FirstOrDefault(call => call.Audio == path) is { } call)
-                {
-                    var clip = call.Number == 0
-                        ? (path == "/audio/a.wav" ? lowTone : highTone)
-                        : RecorderWave.Create(44 + 16 * call.DurationMs, ToneHz(call.Number));
-                    await WriteAsync(response, "audio/wav", clip);
-                    Log("audio_download", new { call.Id, path, bytesWritten = clip.Length });
-                }
-                else
-                    response.StatusCode = 404;
-                Log("response", new { method, path, status = response.StatusCode, bytes = response.ContentLength64 });
+                // A delayed History page must not block audio or a replacement search.
+                pending.RemoveAll(task => task.IsCompletedSuccessfully);
+                pending.Add(RespondAsync(context));
             }
-            catch (Exception e) when (e is FormatException or JsonException or InvalidOperationException)
+        }
+        await Task.WhenAll(pending);
+    }
+
+    private async Task RespondAsync(HttpListenerContext context)
+    {
+        var path = context.Request.Url!.AbsolutePath;
+        var method = context.Request.HttpMethod;
+        Log("request", new { method, path });
+        using var response = context.Response;
+        try
+        {
+            var snapshot = calls;
+            if (context.Request.Headers["Authorization"] != null)
+                response.StatusCode = 403;
+            else if (method == "POST" && path == "/calljson")
             {
-                response.StatusCode = 400;
-                Log("response", new { method, path, status = 400, reason = "Malformed polling request." });
+                using var reader = new StreamReader(context.Request.InputStream, Encoding.UTF8);
+                var requestBody = await reader.ReadToEndAsync();
+                var (draw, start, length) = ReadPoll(requestBody);
+                if (archive is { } history && await history.TrySearchAsync(response, requestBody, draw, start, length))
+                    return;
+                var rows = snapshot.Skip(start).Take(length).Select(call => call.ToRow(profile)).ToArray();
+                var body = JsonSerializer.SerializeToUtf8Bytes(new { draw, recordsTotal = snapshot.Length,
+                    recordsFiltered = snapshot.Length, data = rows });
+                await WriteAsync(response, "application/json", body);
+                Log("poll", new { draw, start, length, ids = rows.Select(row => row["DT_RowId"]) });
             }
-            catch (Exception e) when (e is IOException or HttpListenerException or ObjectDisposedException)
+            else if (method == "GET" && profile != null && path is "/receiversjson" or "/sitesjson" or "/talkgroupsjson")
             {
-                Log("interrupted", new { method, path, error = e.GetType().Name });
+                var body = path switch
+                {
+                    "/talkgroupsjson" => JsonSerializer.SerializeToUtf8Bytes(new { results = new[] {
+                        new { text = $"{profile} system", children = new[] {
+                            new { id = "101", text = Talkgroup(profile, 1) },
+                            new { id = "102", text = Talkgroup(profile, 2) }
+                        } }
+                    } }),
+                    "/sitesjson" => JsonSerializer.SerializeToUtf8Bytes(new { results = new[] {
+                        new { id = profile == "south" ? "202" : "201", text = $"{profile} site" }
+                    } }),
+                    _ => JsonSerializer.SerializeToUtf8Bytes(new { results = new[] {
+                        new { id = $"{profile} receiver", text = $"{profile} receiver" }
+                    } })
+                };
+                await WriteAsync(response, "application/json", body);
             }
+            else if (method == "GET" && archive is { } historyAudio && path.StartsWith("/archive/", StringComparison.Ordinal))
+                await historyAudio.WriteAudioAsync(response, path);
+            else if (method == "GET" && snapshot.FirstOrDefault(call => call.Audio == path) is { } call)
+            {
+                var clip = call.Number == 0
+                    ? (path == "/audio/a.wav" ? lowTone : highTone)
+                    : RecorderWave.Create(44 + 16 * call.DurationMs, ToneHz(call.Number));
+                await WriteAsync(response, "audio/wav", clip);
+                Log("audio_download", new { call.Id, path, bytesWritten = clip.Length });
+            }
+            else
+                response.StatusCode = 404;
+            Log("response", new { method, path, status = response.StatusCode, bytes = response.ContentLength64 });
+        }
+        catch (Exception e) when (e is FormatException or JsonException or InvalidOperationException)
+        {
+            response.StatusCode = 400;
+            Log("response", new { method, path, status = 400, reason = "Malformed polling request." });
+        }
+        catch (Exception e) when (e is IOException or HttpListenerException or ObjectDisposedException)
+        {
+            Log("interrupted", new { method, path, error = e.GetType().Name });
         }
     }
 

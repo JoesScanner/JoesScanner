@@ -44,3 +44,19 @@ Durations are integer milliseconds from 250 to 60000. A burst accepts up to 64 d
 Launch two independent processes with distinct unused ports, for example `--recorder-fixture 19874 north` and `--recorder-fixture 19875 south`. Use a fresh Local Only app test container with only those two loopback endpoints. Each process takes the numbered queue commands on its own stdin. Both start at `paired-P001` on each launch. Odd calls use dispatch (101) and even calls use tactical (102). Labels identify the recorder, and south tones are 300 Hz higher. GET /receiversjson, /sitesjson and /talkgroupsjson return each recorder's synthetic catalog.
 
 To establish a specific cross-recorder arrival order, release a call on one endpoint, wait for its admission in the client's durable queue, then release on the other. For distinct displayed timestamps, also wait for the next wall-clock second after the previous synthetic capture timestamp. Each process logs actual UTC release and HTTP events independently.
+
+## History scenarios
+
+Start a north or south fixture on loopback. Use `archive seed <unix-seconds>` once to set the newest recording time inside the search window. Both recorders supply 510 stable IDs H001–H510, one second apart, newest first. A site or receiver filter matches all 510. Dispatch (101) and tactical (102) each match 255. Date bounds are inclusive at the start and exclusive at the end. Live poll responses stay separate.
+
+North H001 is 20 seconds and South H001 is three minutes. H002–H004 are 2.4, 3.1 and 4.2 seconds. H226–H250 last 8700 + row number milliseconds, and other recordings last 1300 + row number milliseconds. Control the archive from its own stdin:
+
+| Command | Effect |
+| --- | --- |
+| `archive duplicates on` / `off` | Insert or remove a second H250 immediately after the first. Counts and offsets include both raw rows. |
+| `archive missing 2` / `archive ready 2` | Remove or restore H002's audio URL and WAV. Search again to refresh an existing result. |
+| `archive delay 9000` | Delay the next History response by 0–12000 ms. Other requests can finish first. |
+| `archive fail` | Return HTTP 503 for the next History request only. |
+| `archive empty on` / `off` | Return zero filtered matches or resume normal filtering. |
+
+Change duplicate or empty mode before a new search to keep each paged result stable. Correlate UTC history_request, history_response and history_audio events with the native player trace.
