@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Net;
 using System.Net.WebSockets;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
@@ -13,7 +14,7 @@ if (args is not [var endpoint, var origin, var cert, var key] ||
     port == 0 || sourcePort == 0 || port == sourcePort)
     throw new ArgumentException("Usage: SecureRecorderFixture <TLS port> <fixture port> <certificate.pem> <key.pem>");
 
-using var leaf = X509Certificate2.CreateFromPemFile(cert, key);
+using var leaf = LoadServerCertificate(cert, key);
 using var http = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false })
 {
     BaseAddress = new Uri($"http://127.0.0.1:{sourcePort}/")
@@ -123,6 +124,24 @@ finally
 {
     await sockets.SetAvailableAsync(false);
     await host.StopAsync();
+}
+
+static X509Certificate2 LoadServerCertificate(string cert, string key)
+{
+    if (!OperatingSystem.IsWindows())
+        return X509Certificate2.CreateFromPemFile(cert, key);
+
+    // Schannel needs a named key. A user-key import ties its lifetime to the returned certificate.
+    using var pem = X509Certificate2.CreateFromPemFile(cert, key);
+    var pfx = pem.Export(X509ContentType.Pkcs12);
+    try
+    {
+        return X509CertificateLoader.LoadPkcs12(pfx, null, X509KeyStorageFlags.UserKeySet);
+    }
+    finally
+    {
+        CryptographicOperations.ZeroMemory(pfx);
+    }
 }
 
 internal static class Evidence

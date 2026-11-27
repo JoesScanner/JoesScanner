@@ -88,6 +88,14 @@ dotnet run --project tests/SecureRecorderFixture -- 19784 19774 /path/to/leaf.pe
 
 Use a disposable server-authentication certificate with an IP subject alternative name of 127.0.0.1. Keep its PEM private key outside the checkout. Add only the issuing root to a newly created disposable simulator with `xcrun simctl keychain <disposable-device-UUID> add-root-cert /path/to/root.pem`. In Local Only Mode, configure the app with `https://127.0.0.1:19784`. The listener binds IPv4 loopback, upgrades at `/Calls`, and obtains recorder data from the specified IPv4 loopback origin. Use distinct port pairs and stdin controls for a second recorder.
 
+On Windows, pass the same leaf and key PEM files. The fixture loads a temporary current-user key for Schannel and releases it on normal shutdown. For an independent HTTPS check with Schannel curl, supply the disposable issuing CA to that invocation:
+
+```powershell
+curl.exe --noproxy "*" --cacert C:/path/to/root.pem https://127.0.0.1:19784/sitesjson
+```
+
+Serve the leaf's revocation information on loopback when the client requires it. For a WSS check, use the same trust and hostname policy for `wss://127.0.0.1:19784/Calls`. After `offline`, verify that a new upgrade returns 503 while an HTTPS poll still returns newly released rows. After `online`, connect again and compare a delivered row with that HTTPS poll.
+
 Release or update numbered calls on the recorder console as before. Type one of the following on the secure console after its `upgrade` event.
 
 | Command | Result |

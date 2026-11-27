@@ -16,6 +16,7 @@ internal sealed partial class RecorderFixture(string? profile)
 
     private int queueCount;
     private long lastQueueSecond;
+    private volatile bool stoppingListener;
 
     private sealed record Call(string Id, DateTimeOffset At, string Text, string? Audio,
         int DurationMs = ClipSeconds * 1000, int Number = 0)
@@ -60,7 +61,19 @@ internal sealed partial class RecorderFixture(string? profile)
             listener = new HttpListener();
             listener.Prefixes.Add(origin);
             listener.Start();
+            fixture.stoppingListener = false;
             serving = fixture.ServeAsync(listener);
+        }
+
+        async Task StopListeningAsync()
+        {
+            if (listener == null) return;
+            // HTTP.sys can cancel the pending accept before Close updates IsListening.
+            fixture.stoppingListener = true;
+            listener.Close();
+            fixture.SetPageRule(null);
+            await serving;
+            listener = null;
         }
 
         Listen();
@@ -75,14 +88,9 @@ internal sealed partial class RecorderFixture(string? profile)
                 {
                     fixture.recoveryMode = true;
                     fixture.failHttp = command == "link http";
-                    if (command == "link refuse" && listener != null)
-                    {
-                        listener.Close();
-                        listener = null;
-                        fixture.SetPageRule(null);
-                        await serving;
-                    }
-                    else if (command != "link refuse" && listener == null)
+                    if (command == "link refuse")
+                        await StopListeningAsync();
+                    else if (listener == null)
                         Listen();
                     Log("link", new { profile, command });
                     continue;
@@ -92,9 +100,7 @@ internal sealed partial class RecorderFixture(string? profile)
         }
         finally
         {
-            fixture.SetPageRule(null);
-            listener?.Close();
-            await serving;
+            await StopListeningAsync();
             Log("stopped", new { fixture.runId });
         }
     }
@@ -211,11 +217,16 @@ internal sealed partial class RecorderFixture(string? profile)
     private async Task ServeAsync(HttpListener listener)
     {
         var pending = new List<Task>();
-        while (listener.IsListening)
+        while (!stoppingListener)
         {
             HttpListenerContext context;
             try { context = await listener.GetContextAsync(); }
-            catch (Exception e) when (!listener.IsListening && e is HttpListenerException or ObjectDisposedException)
+            catch (ObjectDisposedException) when (stoppingListener)
+            {
+                break;
+            }
+            catch (HttpListenerException e) when (stoppingListener && OperatingSystem.IsWindows()
+                && e.NativeErrorCode == 995) // ERROR_OPERATION_ABORTED
             {
                 break;
             }
@@ -297,6 +308,9 @@ internal sealed partial class RecorderFixture(string? profile)
         }
         catch (Exception e) when (e is IOException or HttpListenerException or ObjectDisposedException)
         {
+            // A partial response cannot be closed normally with its original Content-Length.
+            try { response.Abort(); }
+            catch (ObjectDisposedException) when (stoppingListener) { } // Close already released the request queue.
             Log("interrupted", new { method, path, error = e.GetType().Name });
         }
         catch (Exception e) when (e is FormatException or JsonException or InvalidOperationException)
