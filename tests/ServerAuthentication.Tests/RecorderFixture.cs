@@ -52,24 +52,48 @@ internal sealed partial class RecorderFixture(string? profile)
     internal static async Task RunAsync(int port, string? profile)
     {
         var fixture = new RecorderFixture(profile);
-        using var listener = new HttpListener();
         var origin = $"http://127.0.0.1:{port}/";
-        listener.Prefixes.Add(origin);
-        listener.Start();
-        Log("ready", new { origin, fixture.runId, profile, commands = "a, b, update-b, send, burst, hold, attach, revise, quit" });
-        var serving = fixture.ServeAsync(listener);
+        HttpListener? listener = null;
+        Task serving = Task.CompletedTask;
+        void Listen()
+        {
+            listener = new HttpListener();
+            listener.Prefixes.Add(origin);
+            listener.Start();
+            serving = fixture.ServeAsync(listener);
+        }
+
+        Listen();
+        Log("ready", new { origin, fixture.runId, profile, commands = "a, b, update-b, send, burst, hold, attach, revise, link, page, batch, quit" });
         try
         {
             while (Console.ReadLine() is { } line)
             {
                 var command = line.Trim().ToLowerInvariant();
                 if (command == "quit") break;
+                if (command is "link refuse" or "link http" or "link online")
+                {
+                    fixture.recoveryMode = true;
+                    fixture.failHttp = command == "link http";
+                    if (command == "link refuse" && listener != null)
+                    {
+                        listener.Close();
+                        listener = null;
+                        fixture.SetPageRule(null);
+                        await serving;
+                    }
+                    else if (command != "link refuse" && listener == null)
+                        Listen();
+                    Log("link", new { profile, command });
+                    continue;
+                }
                 fixture.Release(command);
             }
         }
         finally
         {
-            listener.Stop();
+            fixture.SetPageRule(null);
+            listener?.Close();
             await serving;
             Log("stopped", new { fixture.runId });
         }
@@ -79,6 +103,12 @@ internal sealed partial class RecorderFixture(string? profile)
     {
         var current = calls;
         var words = command.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (words.FirstOrDefault() is "page" or "batch")
+        {
+            if (!recoveryMode || !ApplyRecoveryCommand(words))
+                Log("rejected", new { reason = "Invalid recovery command or link mode not enabled." });
+            return;
+        }
         if (words.FirstOrDefault() == "archive")
         {
             ConfigureArchive(words);
@@ -189,7 +219,7 @@ internal sealed partial class RecorderFixture(string? profile)
             {
                 break;
             }
-            if (archive == null)
+            if (archive == null && !recoveryMode)
                 await RespondAsync(context);
             else
             {
@@ -212,6 +242,8 @@ internal sealed partial class RecorderFixture(string? profile)
             var snapshot = calls;
             if (context.Request.Headers["Authorization"] != null)
                 response.StatusCode = 403;
+            else if (failHttp)
+                response.StatusCode = 503;
             else if (method == "POST" && path == "/calljson")
             {
                 using var reader = new StreamReader(context.Request.InputStream, Encoding.UTF8);
@@ -219,6 +251,11 @@ internal sealed partial class RecorderFixture(string? profile)
                 var (draw, start, length) = ReadPoll(requestBody);
                 if (archive is { } history && await history.TrySearchAsync(response, requestBody, draw, start, length))
                     return;
+                if (recoveryMode)
+                {
+                    await WriteRecoveryPageAsync(response, requestBody, snapshot, draw, start, length);
+                    return;
+                }
                 var rows = snapshot.Skip(start).Take(length).Select(call => call.ToRow(profile)).ToArray();
                 var body = JsonSerializer.SerializeToUtf8Bytes(new { draw, recordsTotal = snapshot.Length,
                     recordsFiltered = snapshot.Length, data = rows });
@@ -258,14 +295,14 @@ internal sealed partial class RecorderFixture(string? profile)
                 response.StatusCode = 404;
             Log("response", new { method, path, status = response.StatusCode, bytes = response.ContentLength64 });
         }
+        catch (Exception e) when (e is IOException or HttpListenerException or ObjectDisposedException)
+        {
+            Log("interrupted", new { method, path, error = e.GetType().Name });
+        }
         catch (Exception e) when (e is FormatException or JsonException or InvalidOperationException)
         {
             response.StatusCode = 400;
             Log("response", new { method, path, status = 400, reason = "Malformed polling request." });
-        }
-        catch (Exception e) when (e is IOException or HttpListenerException or ObjectDisposedException)
-        {
-            Log("interrupted", new { method, path, error = e.GetType().Name });
         }
     }
 

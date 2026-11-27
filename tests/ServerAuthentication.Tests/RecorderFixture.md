@@ -60,3 +60,19 @@ North H001 is 20 seconds and South H001 is three minutes. H002–H004 are 2.4, 3
 | `archive empty on` / `off` | Return zero filtered matches or resume normal filtering. |
 
 Change duplicate or empty mode before a new search to keep each paged result stable. Correlate UTC history_request, history_response and history_audio events with the native player trace.
+
+## Connection interruption and HTTP recovery
+
+Use one fixture process per recorder. Type `link online` to enable recovery testing on that process. In this mode calljson serves the recorder's UTC date range inclusively, reports its UTC offset and filtered count, and logs the requested offset, length, draw, and applied fault.
+
+| Command | Effect |
+| --- | --- |
+| `link http` | Return HTTP 503 on the listening endpoint until restored. |
+| `link refuse` | Close the listening socket and release pending page holds. The console and recorder history stay active. |
+| `link online` | Resume HTTP on the same loopback port with the same identities and history. |
+| `page fail N` | Return 503 for nonempty-length call-list requests at offset N, including retries. |
+| `page hold N` | Hold matching responses with their request-time snapshot. Other requests continue. |
+| `page clear` | Clear the page rule and release held responses. Replacing a rule also releases previous holds. |
+| `batch N` | Admit 1–500 consecutive numbered calls with missing audio at one recorder second, newest ID first on the wire. Use `attach N` by recording number when audio becomes available. |
+
+Continue using send, hold, revise, and attach while disconnected. Restore each recorder independently. A multi-page test can use a batch larger than the client's page size and fail the second offset. Keep the fault until the client requests that offset, then clear it and compare the retried IDs, timestamps, and durable dispositions. Fixture responses prove transmission only. Use application and native playback evidence to verify playback.
