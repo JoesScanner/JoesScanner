@@ -248,7 +248,7 @@ namespace JoesScanner.ViewModels
         internal Task<bool> IsPendingForTestAsync(string id, Guid? recorder = null) =>
             _durableQueue.IsPendingAsync(RecorderForTest(recorder), id, 0, default);
 
-        private DurableLiveQueue.Run RecorderForTest(Guid? recorder) =>
+        internal DurableLiveQueue.Run RecorderForTest(Guid? recorder) =>
             recorder != null && _secondRecorder?.ServerId == recorder ? _secondRecorder : _durableRun!;
 
         internal async Task AssertPendingAfterRestartAsync(string id)

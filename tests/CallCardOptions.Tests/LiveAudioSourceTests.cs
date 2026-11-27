@@ -25,6 +25,11 @@ internal static class LiveAudioSourceTests
             await SourceBacklogJumpAsync(Path.Combine(root.FullName, "backlog.db"));
             await HistoryDuringSourceChangeAsync(Path.Combine(root.FullName, "history.db"));
             await RetiredSelectionAndReconnectAsync(Path.Combine(root.FullName, "reconnect.db"));
+            await JumpAcrossRecoveryAsync(Path.Combine(root.FullName, "original-all.db"), null);
+            await JumpAcrossRecoveryAsync(Path.Combine(root.FullName, "recorder-to-all.db"), LiveAudioSource.Recorder(A));
+            await JumpAcrossRecoveryAsync(Path.Combine(root.FullName, "favorites-to-all.db"), LiveAudioSource.Favorites);
+            await SelectedJumpPreservesUnrelatedRecoveryAsync(Path.Combine(root.FullName, "selected-jump.db"), LiveAudioSource.Recorder(A));
+            await SelectedJumpPreservesUnrelatedRecoveryAsync(Path.Combine(root.FullName, "favorites-jump.db"), LiveAudioSource.Favorites);
         }
         finally
         {
@@ -283,6 +288,108 @@ internal static class LiveAudioSourceTests
             live.DisplayedCallsForTest == 3, "A late scheduler read cannot select the retired source, and either recorder can reconnect independently.");
         await live.StopForTestAsync();
         Console.WriteLine("PASS Retired source admissions cannot play after a delayed read or independent recorder reconnection");
+    }
+
+    private sealed record TestPaths(string DbPath) : IDatabasePathProvider;
+
+    private static async Task JumpAcrossRecoveryAsync(string path, LiveAudioSource? previousSource)
+    {
+        var player = new HandoffAudio();
+        var live = TwoRecorders(path, player);
+        await live.StartForTestAsync();
+        await live.AddForTestAsync("before-source-choice", serverId: A);
+        if (previousSource is { } selected)
+        {
+            await live.SetAudioFavoritesForTestAsync((A, "10"));
+            live.ChooseLiveAudioSource(selected);
+            live.PlaybackOptionsForTest = Selected;
+            Check(await live.WaitForSourceForTestAsync(), "The selected source should settle.");
+            live.PlaybackOptionsForTest = LivePlaybackPreferences.Default;
+            Check(await live.WaitForSourceForTestAsync(), "All Enabled Servers should settle.");
+        }
+
+        var queue = new DurableLiveQueue(new TestPaths(path));
+        var scopes = new[] { live.RecorderForTest(A), live.RecorderForTest(B) };
+        // Model an outage after source selection without depending on wall-clock sleeps.
+        var gap = DateTimeOffset.UtcNow.AddMinutes(1);
+        var windows = new List<LiveStreamRecovery.Window>();
+        foreach (var scope in scopes)
+            windows.Add(await queue.RequestRecoveryAsync(scope, gap, ex => throw ex, default)
+                ?? throw new InvalidOperationException("Expected an outstanding recorder window."));
+
+        live.TrackJumpScrollForTest();
+        await live.JumpForTestAsync().WaitAsync(Timeout);
+        await live.ResumedQueue.WaitAsync(Timeout);
+        Check(live.JumpScrollRequestsForTest == 1, "Jump must still navigate when the source edge excludes every target.");
+        if (previousSource.HasValue)
+            Check(!player.Started.Contains("before-source-choice"), "Jump must retain the All source's prior admission edge.");
+
+        // Reopen the database before the held pages are delivered. Retrying the
+        // gap revises the journal but must keep the Jump decision and window ID.
+        queue = new DurableLiveQueue(new TestPaths(path));
+        for (var i = 0; i < scopes.Length; i++)
+        {
+            var scope = scopes[i];
+            var held = windows[i];
+            if (i == 0)
+            {
+                // Simulate recovery by a replacement owner without a fresh-listening
+                // reset (which would independently mark the old window skipped).
+                scope = scope with { Owner = scope.Owner + 1 };
+                await queue.OpenAsync(scope, gap, default);
+                Check(await queue.ReadRecoveryWindowAsync(scope, default) == held,
+                    "Replacing the recorder owner must preserve the outstanding window.");
+            }
+            var retry = await queue.RequestRecoveryAsync(scope, gap, ex => throw ex, default);
+            Check(retry?.Id == held.Id && retry.Revision > held.Revision &&
+                !await queue.CompleteRecoveryAsync(scope, held, ex => throw ex, default),
+                "A stale recovery completion must leave the revised window intact.");
+            var page = new LiveCallSnapshot(new(), null, CallCardIdFallback.None, scope.Server + "/held.wav");
+            var late = await queue.ObserveWithPositionAsync(scope, "held", gap, page, default,
+                RecordingOrigin.History, existingOnly: false, recoveryWindowId: held.Id);
+            Check(late.FirstAdmission && late.IsRecoveryBacklog &&
+                !await queue.IsPendingAsync(scope, "held", 0, default),
+                $"Jump from {previousSource?.Kind.ToString() ?? "original All"} to All must retire the held page for {scope.ServerId}.");
+            Check(await queue.CompleteRecoveryAsync(scope, retry!, ex => throw ex, default),
+                "The skipped recording must still reconcile.");
+        }
+        await live.AddForTestAsync("after-jump", serverId: B);
+        await DrainAudioAsync(live);
+        Check(!player.Started.Contains("held") && player.Completed.LastOrDefault() == "after-jump",
+            "Late responses must stay skipped and genuine subsequent arrivals must play.");
+        await live.StopForTestAsync();
+        Console.WriteLine($"PASS Jump after {previousSource?.Kind.ToString() ?? "original All"} retires both held recovery pages across reopen and retry");
+    }
+
+    private static async Task SelectedJumpPreservesUnrelatedRecoveryAsync(string path, LiveAudioSource selected)
+    {
+        var player = new HandoffAudio();
+        var live = TwoRecorders(path, player);
+        await live.SetAudioFavoritesForTestAsync((A, "10"));
+        live.ChooseLiveAudioSource(selected);
+        live.PlaybackOptionsForTest = Selected;
+        await live.StartForTestAsync();
+        var queue = new DurableLiveQueue(new TestPaths(path));
+        // A nonmember on the same recorder is unrelated even though Favorites
+        // consults that recorder's journal for its member talkgroups.
+        var unrelated = live.RecorderForTest(selected.Kind == LiveAudioSourceKind.Favorites ? A : B);
+        var gap = DateTimeOffset.UtcNow;
+        var held = await queue.RequestRecoveryAsync(unrelated, gap, ex => throw ex, default);
+        await live.AddForTestAsync("selected-edge", serverId: A, talkgroup: "10");
+        await live.JumpForTestAsync().WaitAsync(Timeout);
+        await live.ResumedQueue.WaitAsync(Timeout);
+        var page = new LiveCallSnapshot(new() { SystemId = "SYS", TalkgroupId = "99" },
+            null, CallCardIdFallback.None, unrelated.Server + "/ordinary.wav");
+        var ordinary = await queue.ObserveWithPositionAsync(unrelated, "ordinary", gap, page, default,
+            RecordingOrigin.History, existingOnly: false, recoveryWindowId: held!.Id);
+        await live.AddForTestAsync("fresh-selected", serverId: A, talkgroup: "10");
+        await DrainAudioAsync(live);
+        Check(ordinary.FirstAdmission && !ordinary.IsRecoveryBacklog &&
+            await live.IsPendingForTestAsync("ordinary", unrelated.ServerId) &&
+            player.Completed.SequenceEqual(["selected-edge", "fresh-selected"]),
+            "A selected-source Jump must leave unrelated held audio intact and play eligible arrivals.");
+        await live.StopForTestAsync();
+        Console.WriteLine($"PASS {selected.Kind} Jump preserves unrelated held audio and plays the selected source");
     }
 
     private static async Task DrainAudioAsync(MainViewModel live)

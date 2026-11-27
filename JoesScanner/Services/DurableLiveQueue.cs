@@ -653,7 +653,7 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
         string? failedId = null, Func<Task<long>>? prepareBoundary = null,
         Action<SqliteTransaction>? commitPlayback = null)
     {
-        var result = await JumpToLiveAsync(new[] { run }, _ => historicalFloor, skipSelected, token,
+        var result = await JumpToLiveAsync(new[] { run }, _ => historicalFloor, skipSelected, token, skipOutstandingRecovery: true,
             row => row.Row.Id == failedId,
             prepareBoundary == null ? null : async () => { historicalFloor = await prepareBoundary().ConfigureAwait(false); },
             commitPlayback).ConfigureAwait(false);
@@ -661,7 +661,7 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
     }
 
     internal Task<CombinedJump?> JumpToLiveAsync(IReadOnlyList<Run> runs, Func<Run, long> recoveryFloor,
-        bool skipSelected, CancellationToken token, Func<Selection, bool>? failed = null,
+        bool skipSelected, CancellationToken token, bool skipOutstandingRecovery, Func<Selection, bool>? failed = null,
         Func<Task>? prepareBoundary = null, Action<SqliteTransaction>? commitPlayback = null,
         LiveAutomaticAudioFilter? automatic = null) =>
         InArrivalOrderAsync(async () =>
@@ -678,7 +678,7 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
                 var playTarget = newest != null && !skipSelected && failed?.Invoke(newest) != true;
                 foreach (var run in runs)
                 {
-                    if (automatic == null)
+                    if (skipOutstandingRecovery)
                         MarkRecoveryBacklog(db, transaction, run);
                     if (newest == null)
                         continue;

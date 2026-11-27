@@ -523,6 +523,9 @@ namespace JoesScanner.ViewModels
                 if (scopes.Length != 0 && _monitoring.CanRecover(run))
                 {
                     var jump = await _durableQueue.JumpToLiveAsync(scopes, LocalRecoveryFloor, !playTarget, token,
+                        // Returning to All retains a source edge for target selection.
+                        // That edge does not narrow which recovery windows Jump retires.
+                        skipOutstandingRecovery: _automaticAudioSource.Kind == LiveAudioSourceKind.All,
                         failed: row => failedRecording != null && TryGetDurableRecording(failedRecording, row.Scope, out var id) &&
                             id == row.Row.Id,
                         prepareBoundary: () => FlushLiveCompletionAsync(token),
