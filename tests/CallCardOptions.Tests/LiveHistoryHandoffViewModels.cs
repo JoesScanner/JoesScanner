@@ -4,6 +4,13 @@ using JoesScanner.Services;
 
 namespace JoesScanner.Services
 {
+    public sealed partial class DurableLiveQueue
+    {
+        // Reserve a writer ahead of the manual seek using the journal's normal FIFO.
+        internal Task HoldWriterForTestAsync(Task<bool> release) =>
+            InArrivalOrderAsync(() => release, CancellationToken.None);
+    }
+
     internal sealed class RecordingAccessException(string message) : InvalidOperationException(message);
     internal sealed class FirewallAuthenticationException(string message) : HttpRequestException(message);
     internal readonly record struct RecorderRequestScope(Uri Endpoint, Guid? ServerId = null);
@@ -128,6 +135,10 @@ namespace JoesScanner.ViewModels
             _loadedAudioSourcePreference = true;
             SetLiveAudioRecorders([(first, "Recorder A", true), (second, "Recorder B", true)]);
         }
+
+        internal Task HoldJournalForTestAsync(Task<bool> release) => _durableQueue.HoldWriterForTestAsync(release);
+        internal long PlaybackFloorForTest => _livePlaybackFloor;
+        internal bool ManualNativeRequestActiveForTest => _nativeLiveRequest is { IsManual: true, CanContinue: true };
 
         internal Task<bool> WaitForSourceForTestAsync() => WaitForAutomaticAudioSourceAsync(default);
 

@@ -288,13 +288,23 @@ internal static partial class IntelligentLivePlaybackTests
         Console.WriteLine("PASS Favorites taps stay one-shot with Audio Off or monitoring stopped");
     }
 
-    private static async Task FavoritesSourceChangeAsync(string path)
+    private static Task FavoritesSourceChangeAsync(string path) => PlaybackTestUiContext.RunAsync(async ui =>
+    {
+        await SwitchFavoritesSourceAsync(ui, path, afterSeek: false);
+        await SwitchFavoritesSourceAsync(ui, Path.ChangeExtension(path, "after.db"), afterSeek: true);
+    });
+
+    private static async Task SwitchFavoritesSourceAsync(PlaybackTestUiContext ui, string path, bool afterSeek)
     {
         var player = new HandoffAudio();
         var live = await OpenFavoritesAsync(path, player, (ServerA, "1"), (ServerB, "2"));
-        live.PlaybackOptionsForTest = Defaults with { SourceMode = LiveAudioSourceMode.SelectedOnly };
+        // Select Favorites before enabling selected-only playback so setup starts a single queue read.
         live.ChooseLiveAudioSource(LiveAudioSource.Favorites);
-        await live.WaitForSourceForTestAsync().WaitAsync(FavoritesTimeout);
+        var initialRead = live.HoldNextSelection();
+        live.PlaybackOptionsForTest = Defaults with { SourceMode = LiveAudioSourceMode.SelectedOnly };
+        await initialRead.Reached.Task.WaitAsync(FavoritesTimeout);
+        initialRead.Return.SetResult();
+        await live.ResumedQueue.WaitAsync(FavoritesTimeout);
         await live.AddForTestAsync("selected", talkgroup: "1");
         await live.AddForTestAsync("old-favorite", serverId: ServerB, talkgroup: "2");
 
@@ -302,24 +312,55 @@ internal static partial class IntelligentLivePlaybackTests
         var finish = LiveHistoryHandoffTests.Signal();
         player.Playing = (id, token) =>
         {
+            Check(SynchronizationContext.Current == ui, "Playback must start on the test UI context.");
             if (id != "selected")
                 return Task.CompletedTask;
             entered.TrySetResult();
             return finish.Task.WaitAsync(token);
         };
-        var selection = live.PressVisibleCardForTestAsync(live.CardForTest("selected"));
-        await entered.Task.WaitAsync(FavoritesTimeout);
-        live.ChooseLiveAudioSource(LiveAudioSource.Recorder(ServerB));
-        Check(!selection.IsCompleted && player.Started.SequenceEqual(["selected"]),
-            "An audio-source change must allow the current native recording to finish.");
-        finish.SetResult();
+        var card = live.CardForTest("selected");
+        Check(card.LiveArrivalSequence > live.PlaybackFloorForTest, "The selected Favorite must be ahead of the playback floor.");
+        var releaseWriter = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var writer = live.HoldJournalForTestAsync(releaseWriter.Task);
+        Task selection;
+        try
+        {
+            selection = live.PressVisibleCardForTestAsync(card);
+            await entered.Task.WaitAsync(FavoritesTimeout);
+            if (afterSeek)
+            {
+                releaseWriter.SetResult(true);
+                await ui.WaitForStateAsync(() => live.PlaybackFloorForTest == card.LiveArrivalSequence, FavoritesTimeout);
+            }
+
+            Check(SynchronizationContext.Current == ui && live.ManualNativeRequestActiveForTest && player.Completed.IsEmpty,
+                "The source switch must run on the UI context while the selected manual request owns native playback.");
+            Check((live.PlaybackFloorForTest == card.LiveArrivalSequence) == afterSeek,
+                "The Favorites seek must be on the intended side of validation when the source changes.");
+            live.ChooseLiveAudioSource(LiveAudioSource.Recorder(ServerB));
+            Check(!selection.IsCompleted && player.Started.SequenceEqual(["selected"]),
+                "An audio-source change must allow the current native recording to finish.");
+        }
+        finally
+        {
+            releaseWriter.TrySetResult(true);
+            finish.TrySetResult();
+        }
+        await writer.WaitAsync(FavoritesTimeout);
         await selection.WaitAsync(FavoritesTimeout);
-        await live.WaitForSourceForTestAsync().WaitAsync(FavoritesTimeout);
+        Check(await live.WaitForSourceForTestAsync().WaitAsync(FavoritesTimeout),
+            "Recorder B must become the effective automatic source.");
         await live.ResumedQueue.WaitAsync(FavoritesTimeout);
+        Check((live.PlaybackFloorForTest == card.LiveArrivalSequence) == afterSeek,
+            "A seek retired before validation must never publish its playback floor.");
         await live.AddForTestAsync("new-source", serverId: ServerB, talkgroup: "3");
         await live.StartQueueForTestAsync().WaitAsync(FavoritesTimeout);
         Check(player.Completed.SequenceEqual(["selected", "new-source"]) && live.OpenedTransportsForTest == 2,
             "The previous Favorites traversal must stay retired after the new automatic-source boundary.");
-        Console.WriteLine("PASS Actual audio-source changes retire the Favorites pass without preempting native audio");
+        Check(player.Started.SequenceEqual(["selected", "new-source"]),
+            "The retired Favorite must never start, even if its playback would later be canceled.");
+        Console.WriteLine(afterSeek
+            ? "PASS Switching after Favorites seek validation preserves manual playback and retires the old source"
+            : "PASS Switching before Favorites seek validation preserves manual playback and retires the old source");
     }
 }
