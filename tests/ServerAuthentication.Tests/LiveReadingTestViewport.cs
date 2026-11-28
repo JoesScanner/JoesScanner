@@ -78,6 +78,8 @@ internal sealed class CollectionView(IReadOnlyList<CallItem> cards)
         finally { UserScrolling = false; }
     }
 
+    internal void RepeatPosition(int first) => Scrolled?.Invoke(this, new(first, Offset, 1));
+
     internal void ScrollTo(CallItem card, ScrollToPosition position, bool animate)
     {
         var index = cards.ToList().IndexOf(card);

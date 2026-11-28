@@ -8,12 +8,15 @@ namespace JoesScanner.Views;
 
 internal sealed partial class LiveReadingViewport
 {
+#if !WINDOWS
     private static readonly TimeSpan LayoutDelay = TimeSpan.FromMilliseconds(20);
     private static readonly TimeSpan ScrollAcknowledgement = TimeSpan.FromMilliseconds(180);
+#endif
     private readonly CollectionView _list;
     private readonly Button _indicator;
     private readonly LiveReadingState _reader;
     private readonly INotifyCollectionChanged _catalog;
+#if !WINDOWS
     private long? _programmaticScroll;
     private CallItem? _reveal;
     private CallItem? _centeredCard;
@@ -22,8 +25,13 @@ internal sealed partial class LiveReadingViewport
 
     private readonly record struct CardPosition(double Top, double Height, double ViewportHeight);
 
+#endif
+
     internal LiveReadingViewport(CollectionView list, Button indicator, LiveReadingState reader)
     {
+#if WINDOWS
+        _routedInput = new(this);
+#endif
         _list = list;
         _indicator = indicator;
         _reader = reader;
@@ -39,14 +47,15 @@ internal sealed partial class LiveReadingViewport
             _catalog.CollectionChanged += OnCardsChanged;
             _reader.UnseenChanged += UpdateIndicator;
             _indicator.Clicked += OnNewCalls;
+#if !WINDOWS
             _list.Scrolled += OnScrolled;
+#endif
             _list.SizeChanged += OnViewportSizeChanged;
             _list.Loaded += OnViewportLoaded;
             _list.Unloaded += OnViewportUnloaded;
             _list.HandlerChanging += OnHandlerChanging;
             _list.HandlerChanged += OnViewportLoaded;
-            ConnectNativeInput();
-            QueueUpdate();
+            OnViewportLoaded(_list, EventArgs.Empty);
         }
         else
         {
@@ -55,7 +64,9 @@ internal sealed partial class LiveReadingViewport
             _catalog.CollectionChanged -= OnCardsChanged;
             _reader.UnseenChanged -= UpdateIndicator;
             _indicator.Clicked -= OnNewCalls;
+#if !WINDOWS
             _list.Scrolled -= OnScrolled;
+#endif
             _list.SizeChanged -= OnViewportSizeChanged;
             _list.Loaded -= OnViewportLoaded;
             _list.Unloaded -= OnViewportUnloaded;
@@ -68,37 +79,53 @@ internal sealed partial class LiveReadingViewport
     internal void CancelPendingScroll()
     {
         _reader.InvalidateUpdate();
+#if WINDOWS
+        CancelWindowsWork();
+#else
         _reveal = _centeredCard = null;
         _goToTop = false;
+#endif
     }
 
     internal void FollowLatest()
     {
         CancelPendingScroll();
-#if WINDOWS || ANDROID
+#if ANDROID
         _nativeInput = null;
 #endif
         _reader.FollowLatest();
+#if WINDOWS
+        FollowWindowsLive();
+#else
         _goToTop = true;
         QueueUpdate();
+#endif
     }
 
     internal void Reveal(CallItem card)
     {
         CancelPendingScroll();
-#if WINDOWS || ANDROID
+#if ANDROID
         _nativeInput = null;
 #endif
         if (!_reader.ReadFrom(card))
             return;
+#if WINDOWS
+        RevealWindowsCard(card);
+#else
         _reveal = card;
         QueueUpdate();
+#endif
     }
 
     internal void CardSizeChanged(CallItem card)
     {
         if (_reader.IsVisible && !_reader.IsFollowing && _reader.IndexOf(card) >= 0)
+#if WINDOWS
+            WindowsCardSizeChanged(card);
+#else
             QueueUpdate();
+#endif
     }
 
     private void OnNewCalls(object? sender, EventArgs e) => FollowLatest();
@@ -113,34 +140,68 @@ internal sealed partial class LiveReadingViewport
 
     private void OnCardsChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
+#if WINDOWS
+        WindowsCardsChanged(e);
+#else
         if (e.Action == NotifyCollectionChangedAction.Reset && _reader.Cards.Count == 0)
             CancelPendingScroll();
         if (!_reader.IsFollowing || e is { Action: NotifyCollectionChangedAction.Add, NewStartingIndex: 0 } ||
             e is { Action: NotifyCollectionChangedAction.Remove, OldStartingIndex: 0 })
             QueueUpdate();
+#endif
     }
 
     private void OnViewportSizeChanged(object? sender, EventArgs e)
     {
+#if WINDOWS
+        WindowsLayoutChanged();
+#else
         if (!_reader.IsFollowing)
             QueueUpdate();
+#endif
     }
 
     private void OnViewportLoaded(object? sender, EventArgs e)
     {
         ConnectNativeInput();
+#if WINDOWS
+        WindowsLayoutChanged();
+#else
         QueueUpdate();
+#endif
     }
 
     private void OnHandlerChanging(object? sender, HandlerChangingEventArgs e)
-        => OnViewportUnloaded(sender, EventArgs.Empty);
+    {
+#if WINDOWS
+        if (e.OldHandler == null)
+            return;
+#endif
+        RetireViewport();
+    }
 
     private void OnViewportUnloaded(object? sender, EventArgs e)
+    {
+#if WINDOWS
+        // MAUI can deliver the previous unload after WinUI has reattached this
+        // same surface and accepted newer user navigation. Real handler replacement
+        // always retires through OnHandlerChanging.
+        if (_windowsIntent is { } active && (active.IsPhysical || _accessibilityGeneration == active.Generation) &&
+            _list.IsLoaded && _windowsList is { IsLoaded: true } root && ReferenceEquals(_list.Handler?.PlatformView, root) &&
+            _windowsView is { } view && ReferenceEquals(root.ScrollView, view) &&
+            _windowsPresenter != null && ReferenceEquals(view.ScrollPresenter, _windowsPresenter))
+            return;
+#endif
+        RetireViewport();
+    }
+
+    private void RetireViewport()
     {
         DisconnectNativeInput();
         CancelPendingScroll();
     }
 
+#if !WINDOWS
     private void OnScrolled(object? sender, ItemsViewScrolledEventArgs e)
     {
         var index = e.FirstVisibleItemIndex;
@@ -261,4 +322,5 @@ internal sealed partial class LiveReadingViewport
         try { move(); }
         finally { _applyingNativeScroll = false; }
     }
+#endif
 }

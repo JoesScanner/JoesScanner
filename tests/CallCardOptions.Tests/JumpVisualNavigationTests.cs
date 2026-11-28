@@ -30,6 +30,7 @@ internal static class JumpVisualNavigationTests
             await MutedAndDisabledAsync(Path.Combine(root.FullName, "filtered.db"));
             await EmptyThenArrivalAsync(Path.Combine(root.FullName, "empty.db"));
             await NewCallsResetWithoutQueueMutationAsync(Path.Combine(root.FullName, "new-calls.db"));
+            await ReaderNavigationDuringJumpAudioAsync(Path.Combine(root.FullName, "read-during-jump.db"));
             await HistoryAndRestartAsync(Path.Combine(root.FullName, "history.db"));
             await RetiredInFlightJumpAsync(Path.Combine(root.FullName, "retired.db"));
             await RepeatedAndRetiredJumpsAsync(Path.Combine(root.FullName, "rapid.db"));
@@ -172,6 +173,58 @@ internal static class JumpVisualNavigationTests
             "MAN-11: Jump should clear the visible New Calls count without consuming other-source queue items.");
         await live.StopForTestAsync();
         Console.WriteLine("PASS MAN-11 New Calls reset and unrelated durable queue stays pending");
+    }
+
+    private static async Task ReaderNavigationDuringJumpAudioAsync(string path)
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var player = new HandoffAudio
+        {
+            Playing = (id, cancellation) =>
+            {
+                Check(id == "jump-edge", "The Jump should play the newest eligible recording.");
+                started.SetResult();
+                return release.Task.WaitAsync(cancellation);
+            }
+        };
+        var live = await NewLiveAsync(path, player, LiveAudioSource.Recorder(A));
+        await live.AddForTestAsync("old", serverId: A);
+        await live.AddForTestAsync("jump-edge", serverId: A);
+        var edge = live.CardForTest("jump-edge", A);
+        var old = live.CardForTest("old", A);
+        var cards = new ObservableCollection<CallItem> { edge, old };
+        var reader = new LiveReadingState(cards);
+        reader.SetVisible(true);
+        reader.ObserveViewport(1, -12, userScroll: true);
+        reader.RecordAdmission(edge);
+        live.TrackJumpScrollForTest(reader.FollowLatest);
+        try
+        {
+            var jump = live.JumpForTestAsync();
+            await started.Task.WaitAsync(Timeout);
+            Check(reader.IsFollowing && reader.UnseenCount == 0, "The accepted Jump must first return the reader to Live.");
+            reader.ObserveViewport(1, -24, userScroll: true);
+            await live.AddForTestAsync("other-recorder", serverId: B);
+            var arrival = live.CardForTest("other-recorder", B);
+            cards.Insert(0, arrival);
+            reader.RecordAdmission(arrival);
+            release.SetResult();
+            await jump.WaitAsync(Timeout);
+            await live.ResumedQueue.WaitAsync(Timeout);
+            Check(player.Completed.SequenceEqual(["jump-edge"]) && !await live.IsPendingForTestAsync("old", A) &&
+                !await live.IsPendingForTestAsync("jump-edge", A) && await live.IsPendingForTestAsync("other-recorder", B),
+                "Reading navigation must preserve the Jump's durable boundary, target playback and recorder scope.");
+            Check(live.JumpScrollRequestsForTest == 1 && !reader.IsFollowing && reader.UnseenCount == 1 &&
+                reader.ResolveAnchor() is { Top: -24 } anchor && ReferenceEquals(anchor.Card, old),
+                "Finishing Jump audio must preserve the newer reading bookmark and unread count.");
+        }
+        finally
+        {
+            release.TrySetResult();
+            await live.StopForTestAsync();
+        }
+        Console.WriteLine("PASS Reader navigation during Jump audio preserves playback, durable queue boundary, bookmark and unread count");
     }
 
     private static async Task HistoryAndRestartAsync(string path)

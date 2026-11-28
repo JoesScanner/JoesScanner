@@ -43,7 +43,7 @@ internal static partial class MobileRecoveryTests
         reader.List.Dispatcher.Drain();
         Check(reader.State.IsFollowing && reader.List.Offset == 0 && reader.State.UnseenCount == 0 && !reader.Button.IsVisible,
             "New Calls should return to the visual edge and clear its counter.");
-        reader.List.Move(15); // A late programmatic scroll notification has no user input.
+        reader.List.RepeatPosition(0); // A delayed notification samples the current viewer position.
         Check(reader.State.IsFollowing, "Acknowledging a programmatic scroll must not change the reader's intent.");
         reader.List.Move(35, user: true);
         Admit(display, new() { ServerId = server, BackendId = "after-click" });
@@ -157,6 +157,360 @@ internal static partial class MobileRecoveryTests
             "Returning one recorder to its edge must not clear any other reader after tab or panel reordering.");
         second.Close();
         display.Detach();
+        return Task.CompletedTask;
+    }
+
+    internal static Task FavoritesReaderPreservesAdmissionsAndAnchor()
+    {
+        var server = Guid.NewGuid();
+        var source = ReadingCards(server);
+        var members = source.ToHashSet();
+        var display = new LiveCallDisplay(source, favorite: members.Contains);
+        display.SetServers([server]);
+        display.Observe();
+        var saved = new ReadingView(display.FavoritesReader);
+        saved.Open();
+        saved.List.Move(12, user: true);
+        var anchor = display.Favorites[0];
+        var ordinary = new CallItem { ServerId = server, BackendId = "nonmember" };
+        Admit(display, ordinary);
+        Check(saved.State.UnseenCount == 0 && saved.List.Offset == 12,
+            "A nonmember must leave the partially visible first Favorite in place.");
+
+        for (var i = 0; i < 3; i++)
+        {
+            var member = new CallItem { ServerId = server, BackendId = $"member-{i}" };
+            members.Add(member);
+            Admit(display, member);
+            display.RecordVisibleAdmission(member);
+        }
+        saved.List.Move(0); // Native layout notification before restoration.
+        saved.List.Dispatcher.Drain();
+        Check(saved.State.UnseenCount == 3 && ReferenceEquals(saved.State.ResolveAnchor()?.Card, anchor) &&
+            saved.List.TopOf(saved.State.IndexOf(anchor)) == -12,
+            "Three Favorite admissions should retain the clipped card and each count once.");
+
+        members.Add(ordinary);
+        display.RefreshFavorites();
+        saved.List.SetHeight(ordinary, 145);
+        saved.Viewport.CardSizeChanged(ordinary);
+        saved.List.Dispatcher.Drain();
+        Check(saved.State.UnseenCount == 3 && saved.List.TopOf(saved.State.IndexOf(anchor)) == -12,
+            "A membership edit and transcript growth must preserve offset and count.");
+        source.Remove(anchor);
+        saved.List.Dispatcher.Drain();
+        Check(saved.State.ResolveAnchor() is { } fallback && saved.State.IndexOf(fallback.Card) >= 0 &&
+            !saved.State.IsFollowing && saved.State.UnseenCount == 3, "Eviction must resolve a surviving Favorite.");
+        saved.Viewport.CardSizeChanged(ordinary);
+        saved.Button.Click();
+        saved.List.Dispatcher.Drain();
+        Check(saved.State.IsFollowing && saved.List.Offset == 0 && saved.State.UnseenCount == 0,
+            "Explicit return to Live must supersede the queued Favorite anchor correction.");
+        saved.Close();
+        display.Detach();
+        return Task.CompletedTask;
+    }
+
+    internal static Task WindowsReaderRetainsWheelRestoration()
+    {
+        var server = Guid.NewGuid();
+        var display = new LiveCallDisplay(ReadingCards(server, 20), favorite: _ => true);
+        display.SetServers([server]);
+        display.Observe();
+        var reader = display.FavoritesReader;
+        reader.SetVisible(true);
+        var intent = new WindowsLiveScrollIntent();
+        intent.BeginPhysical();
+        reader.ObserveViewport(0, -12, intent.IsPhysical);
+        var saved = reader.ResolveAnchor()!.Value.Card;
+        for (var i = 0; i < 3; i++)
+        {
+            Admit(display, new() { ServerId = saved.ServerId });
+            reader.ObserveViewport(reader.IndexOf(saved), -12 - 12 * (i + 1), intent.IsPhysical);
+        }
+        intent.EndPhysical();
+        Check(reader.UnseenCount == 3 && reader.ResolveAnchor() is { Top: -48 } anchor &&
+            ReferenceEquals(anchor.Card, saved) && intent.PendingOperations == 0,
+            "Three Favorites must admit exactly once while the physical gesture continues with no application move.");
+
+        var obsolete = intent.Generation;
+        intent.BeginPhysical();
+        reader.ObserveViewport(0, -7, intent.IsPhysical);
+        Check(!intent.IsCurrent(obsolete) && reader.ResolveAnchor() is { Index: 0, Top: -7 },
+            "Later input must supersede work carrying the previous gesture generation.");
+        intent.EndPhysical();
+        display.Detach();
+        return Task.CompletedTask;
+    }
+
+    internal static Task WindowsReaderRecognizesLateRestorations()
+    {
+        var calls = ReadingCards(Guid.NewGuid());
+        var reader = new LiveReadingState(calls);
+        reader.SetVisible(true);
+        reader.ReadFrom(calls[0]);
+        reader.RememberPosition(calls[0], 0);
+        reader.RecordAdmission(calls[1]);
+        var owner = new WindowsLiveScrollIntent();
+        owner.SubmittedApplication(owner.Cancel(), 17);
+        foreach (var id in new[] { 18, 17, 17, 19 })
+            reader.ObserveViewport(0, 0, owner.AcceptAccessibilityCompletion(id));
+        Check(!reader.IsFollowing && reader.UnseenCount == 1 && reader.ResolveAnchor() is { Top: 0 },
+            "A zero-position application restoration, including delayed and duplicate terminals, must preserve reading.");
+        owner.SubmittedAccessibility(owner.BeginAccessibility(), 20);
+        reader.ObserveViewport(0, 0, owner.AcceptAccessibilityCompletion(20));
+        Check(reader.IsFollowing && reader.UnseenCount == 0, "Genuine accessibility navigation to zero resumes Live.");
+        return Task.CompletedTask;
+    }
+
+    internal static Task WindowsScrollOrderingAndNavigation()
+    {
+        var calls = ReadingCards(Guid.NewGuid(), 20);
+        var reader = new LiveReadingState(calls);
+        reader.SetVisible(true);
+        var owner = new WindowsLiveScrollIntent();
+        var withheld = owner.Cancel();
+        owner.SubmittedApplication(withheld, 2);
+        owner.SubmittedApplication(owner.Cancel(), 3);
+        owner.SubmittedAccessibility(owner.BeginAccessibility(), 4);
+        reader.ObserveViewport(0, 0, owner.AcceptAccessibilityCompletion(4));
+        owner.SubmittedAccessibility(owner.BeginAccessibility(), 5);
+        reader.ObserveViewport(3, -24, owner.AcceptAccessibilityCompletion(5));
+        foreach (var call in calls.Take(4))
+            reader.RecordAdmission(call);
+        foreach (var id in new[] { 3, 4, 2, 5, 2 })
+            reader.ObserveViewport(0, 0, owner.AcceptAccessibilityCompletion(id));
+        Check(!owner.IsCurrent(withheld) && !reader.IsFollowing && reader.UnseenCount == 4 &&
+            ReferenceEquals(reader.ResolveAnchor()?.Card, calls[3]),
+            "An old application terminal after genuine accessibility navigation to its destination erased four unread.");
+        owner.Retire();
+        var replacement = new WindowsLiveScrollIntent();
+        replacement.SubmittedAccessibility(replacement.BeginAccessibility(), 2);
+        Check(!owner.AcceptAccessibilityCompletion(2) && replacement.AcceptAccessibilityCompletion(2),
+            "A correlation ID is scoped to the native view which issued it.");
+        return Task.CompletedTask;
+    }
+
+    internal static Task WindowsGestureKeepsFinalPosition()
+    {
+        foreach (var insertAtHead in new[] { false, true })
+        foreach (var detents in new[] { 1, 3 })
+        {
+            var calls = ReadingCards(Guid.NewGuid(), 20);
+            var reader = new LiveReadingState(calls);
+            var owner = new WindowsLiveScrollIntent();
+            reader.SetVisible(true);
+            var card = calls[0];
+            var cut = -12;
+            for (var detent = 0; detent < detents; detent++)
+            {
+                owner.BeginPhysical();
+                reader.ObserveViewport(reader.IndexOf(card), cut, owner.IsPhysical);
+                for (var frame = 0; frame < 3; frame++)
+                {
+                    var admitted = new CallItem { ServerId = card.ServerId };
+                    calls.Insert(insertAtHead ? 0 : calls.Count, admitted);
+                    reader.RecordAdmission(admitted);
+                    cut -= 12;
+                    reader.ObserveViewport(reader.IndexOf(card), cut, owner.IsPhysical);
+                }
+            }
+            owner.EndPhysical();
+            Check(reader.UnseenCount == 3 * detents && reader.ResolveAnchor()?.Top == cut &&
+                ReferenceEquals(reader.ResolveAnchor()?.Card, card) && owner.PendingOperations == 0,
+                "Continuing physical input across head/tail admissions lost the last observed reading position.");
+        }
+        return Task.CompletedTask;
+    }
+
+    internal static Task WindowsReaderBoundsSubmittedWork()
+    {
+        var queue = new WindowsLiveAnimationQueue();
+        var firstPresenter = new WindowsLiveScrollIntent();
+        for (var id = 1; id <= WindowsLiveAnimationQueue.Capacity; id++)
+        {
+            var generation = firstPresenter.Cancel();
+            firstPresenter.SubmittedApplication(generation, id);
+            queue.Add(id, firstPresenter);
+        }
+        Check(!queue.HasRoom && !queue.TryTake(5000, out _), "Foreign animation IDs must keep their native behavior.");
+        firstPresenter.Retire();
+        Check(queue.TryTake(1, out var current) && !current && queue.HasRoom,
+            "An accepted, undispatched animation must remain identifiable after viewport retirement.");
+        var secondPresenter = new WindowsLiveScrollIntent();
+        secondPresenter.SubmittedApplication(secondPresenter.Cancel(), 5001);
+        queue.Add(5001, secondPresenter);
+        queue.Completed(2);
+        Check(queue.TryTake(5001, out current) && current && !queue.TryTake(5001, out _) &&
+            !queue.TryTake(2, out _), "Native dispatch and terminal receipts must be consumed exactly once.");
+        Check(WindowsLiveScrollIntent.WheelDistance(-60, 3, 640) == 24 &&
+            WindowsLiveScrollIntent.WheelDistance(30, 3, 640) == -12 &&
+            WindowsLiveScrollIntent.WheelDistance(-120, 0, 640) == 0 &&
+            WindowsLiveScrollIntent.WheelDistance(120, uint.MaxValue, 640) == -640,
+            "Native wheel direction, fractional detents and system line/page preferences must be preserved.");
+
+        var owner = new WindowsLiveScrollIntent();
+        for (var n = 0; n < 4096; n++)
+        {
+            owner.SubmittedApplication(owner.Cancel(), n);
+            Check(owner.PendingOperations == 1, "A missing acknowledgement accumulated operation history.");
+        }
+        var active = owner.Generation;
+        owner.RetireApplication(active - 1, 4095);
+        owner.RetireApplication(active, 4094);
+        Check(owner.PendingOperations == 1, "An unrelated layout must not retire an outstanding native operation.");
+        owner.RetireApplication(active, 4095);
+        Check(owner.PendingOperations == 0, "Measured placement must retire an app operation whose terminal was withheld.");
+        owner.SubmittedAccessibility(owner.BeginAccessibility(), 4095);
+        owner.RetireApplication(owner.Generation, 4095);
+        Check(owner.AcceptAccessibilityCompletion(4095), "Measured app placement consumed a reused accessibility ID.");
+        var obsolete = owner.Generation;
+        owner.BeginPhysical();
+        Check(!owner.IsCurrent(obsolete) && owner.IsPhysical && owner.PendingOperations == 0,
+            "An unacknowledged application move blocked a new physical gesture.");
+        owner.EndPhysical();
+        owner.SubmittedAccessibility(owner.BeginAccessibility(), 4100);
+        owner.Cancel();
+        owner.SubmittedAccessibility(obsolete, 4101);
+        Check(!owner.AcceptAccessibilityCompletion(4100) && !owner.AcceptAccessibilityCompletion(4101),
+            "Canceled work must not rearm an operation slot.");
+        owner.Retire();
+        owner.SubmittedApplication(owner.Cancel(), 1);
+        Check(owner.PendingOperations == 0 && !owner.IsCurrent(owner.Generation), "A retired owner accepted a new operation.");
+        return Task.CompletedTask;
+    }
+
+    internal static Task WindowsReconstructionMirrorsCurrentProjection()
+    {
+        var source = ReadingCards(Guid.NewGuid(), 500);
+        var bookmark = source[390];
+        var rows = new LiveReadingSource(source, 389);
+        Check(ReferenceEquals(rows[1], bookmark), "The initial window must contain the saved canonical card.");
+        var changes = (System.Collections.Specialized.INotifyCollectionChanged)source;
+        changes.CollectionChanged += (_, change) => rows.Apply(change);
+        for (var i = 0; i < 8; i++)
+        {
+            source.Insert(0, new CallItem { ServerId = bookmark.ServerId });
+            source.RemoveAt(source.Count - 1);
+        }
+        Check(rows.Count == 111, "Before placement the reconstruction source must remain stable.");
+        rows.Complete();
+        Check(rows.SequenceEqual(source) && ReferenceEquals(rows[398], bookmark),
+            "Publishing the projection must include every admission made during reconstruction.");
+        source.Move(4, 9);
+        source[12] = new CallItem { ServerId = bookmark.ServerId };
+        source.Remove(bookmark);
+        Check(rows.SequenceEqual(source), "Reorders, replacement and eviction must reach the completed projection.");
+        source.Clear();
+        source.Add(bookmark);
+        Check(rows.SequenceEqual(source), "Canonical reset followed by admission must reach the replacement.");
+        rows.Retire();
+        source.Clear();
+        rows.Complete();
+        Check(rows.Count == 1 && ReferenceEquals(rows[0], bookmark), "A retired, detached source should remain inert.");
+        var interrupted = new LiveReadingSource(source, 0);
+        changes.CollectionChanged += (_, change) => interrupted.Apply(change);
+        source.Add(bookmark);
+        source.Clear();
+        var replacement = new CallItem { ServerId = bookmark.ServerId };
+        source.Add(replacement);
+        interrupted.Complete();
+        Check(interrupted.Count == 1 && ReferenceEquals(interrupted[0], replacement),
+            "A whole-source reset before first publication must discard all obsolete identities.");
+        return Task.CompletedTask;
+    }
+
+    internal static Task WindowsHiddenBookmarksSurviveEviction()
+    {
+        var server = Guid.NewGuid();
+        var source = ReadingCards(server, 40);
+        var display = new LiveCallDisplay(source, favorite: _ => true);
+        display.SetServers([server]);
+        display.Observe();
+        var readers = new[] { display.CombinedReader, display.FavoritesReader, display.ReaderForServer(server) };
+        var saved = source[20];
+        var neighbor = source[21];
+        foreach (var reader in readers)
+        {
+            reader.SetVisible(true);
+            reader.ObserveViewport(20, -9, true);
+            reader.SetVisible(false);
+        }
+        for (var i = 0; i < 12; i++)
+            Admit(display, new() { ServerId = server });
+        source.Remove(saved);
+        foreach (var reader in readers)
+            Check(ReferenceEquals(reader.ResolveAnchor()?.Card, neighbor) && reader.UnseenCount == 12,
+                "Eviction while hidden must choose the surviving neighbor after all intervening prepends.");
+        display.Detach();
+        return Task.CompletedTask;
+    }
+
+    internal static Task WindowsSeedCancellationIncludesInFlightEdit()
+    {
+        Action<ObservableCollection<CallItem>>[] edits =
+        [
+            cards => cards.Insert(0, new CallItem()),
+            cards => cards.RemoveAt(cards.Count - 1),
+            cards => cards.Move(3, 0),
+            cards => cards[3] = new CallItem(),
+            cards => cards.Clear()
+        ];
+        foreach (var edit in edits)
+        {
+            var cards = ReadingCards(Guid.NewGuid(), 6);
+            var mirror = new LiveReadingSource(cards, 0);
+            mirror.Complete();
+            mirror.SeedAt(3);
+            // A viewport can subscribe before its handler. Canceling a partial restore
+            // from its callback publishes the canonical edit before the mirror receives it.
+            cards.CollectionChanged += (_, _) => mirror.Complete();
+            cards.CollectionChanged += (_, change) => mirror.Apply(change);
+            edit(cards);
+            Check(mirror.IsComplete && mirror.SequenceEqual(cards),
+                "A canonical change incorporated during publication was applied a second time.");
+        }
+        return Task.CompletedTask;
+    }
+
+    internal static Task WindowsDetachedReadersTrackBookmarkWhileVisible()
+    {
+        var north = Guid.NewGuid();
+        var source = ReadingCards(north, 80);
+        var excluded = new HashSet<CallItem>();
+        var display = new LiveCallDisplay(source, favorite: call => !excluded.Contains(call));
+        display.SetServers([north]);
+        display.Observe();
+        try
+        {
+            var recorder = display.ReaderForServer(north);
+            var readers = new[] { display.CombinedReader, recorder, display.FavoritesReader };
+            var saved = source[40];
+            var firstSurvivor = source[41];
+            var secondSurvivor = source[42];
+            foreach (var reader in readers)
+            {
+                // Native unload does not toggle logical visibility. The catalog is still live.
+                reader.SetVisible(true);
+                reader.ObserveViewport(40, -9, true);
+            }
+            for (var i = 0; i < 19; i++)
+                Admit(display, new() { ServerId = north });
+
+            // Do not resolve the bookmarks here. Looking them up would itself repair a stale index.
+            excluded.Add(saved);
+            display.RefreshFavorites();
+            source.Remove(saved);
+            source.Remove(firstSurvivor);
+            foreach (var reader in readers)
+            {
+                var survivor = reader.ResolveAnchor();
+                Check(survivor is { Index: 59 } && ReferenceEquals(survivor.Value.Card, secondSurvivor) &&
+                    reader.UnseenCount == 19 && !reader.IsFollowing && reader.IsVisible,
+                    "Detached visible readers must retain the adjacent survivor and all eligible admissions.");
+            }
+        }
+        finally { display.Detach(); }
         return Task.CompletedTask;
     }
 

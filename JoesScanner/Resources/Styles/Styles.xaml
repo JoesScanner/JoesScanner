@@ -61,6 +61,10 @@
     </Style>
 
     <!-- Pill button styles shared by MainPage and SettingsPage -->
+    <Color x:Key="PillButtonBackground">#2563eb</Color>
+    <Color x:Key="PillButtonBorder">#93c5fd</Color>
+    <Color x:Key="SecondaryPillButtonBackground">#4b5563</Color>
+    <Color x:Key="SecondaryPillButtonBorder">#9ca3af</Color>
     <Style x:Key="PillButtonStyle" TargetType="Button">
         <Setter Property="HeightRequest" Value="22" />
         <Setter Property="MinimumHeightRequest" Value="22" />
@@ -73,8 +77,8 @@
         <Setter Property="FontSize" Value="10" />
         <Setter Property="CornerRadius" Value="8" />
         <Setter Property="TextColor" Value="White" />
-        <Setter Property="BackgroundColor" Value="#2563eb" />
-        <Setter Property="BorderColor" Value="#93c5fd" />
+        <Setter Property="BackgroundColor" Value="{StaticResource PillButtonBackground}" />
+        <Setter Property="BorderColor" Value="{StaticResource PillButtonBorder}" />
         <Setter Property="BorderWidth" Value="1" />
         <Setter Property="HorizontalOptions" Value="End" />
         <Setter Property="VerticalOptions" Value="Center" />
@@ -202,8 +206,8 @@
     <Style x:Key="SecondaryPillButtonStyle"
            TargetType="Button"
            BasedOn="{StaticResource PillButtonStyle}">
-        <Setter Property="BackgroundColor" Value="#4b5563" />
-        <Setter Property="BorderColor" Value="#9ca3af" />
+        <Setter Property="BackgroundColor" Value="{StaticResource SecondaryPillButtonBackground}" />
+        <Setter Property="BorderColor" Value="{StaticResource SecondaryPillButtonBorder}" />
     </Style>
 
     <Style TargetType="CheckBox">

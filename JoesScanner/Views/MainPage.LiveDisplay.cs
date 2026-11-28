@@ -1,3 +1,4 @@
+using System.Collections.Specialized;
 using System.ComponentModel;
 using JoesScanner.Models;
 using JoesScanner.Services;
@@ -16,6 +17,9 @@ public partial class MainPage
     private LiveReadingViewport _favoritesViewport = null!;
     private CallItem? _observedPin;
     private readonly HashSet<LiveTranscriptLabel> _transcriptLabels = [];
+#if WINDOWS
+    private View _favoritesEmpty = null!;
+#endif
     private long _readerGeneration;
     private readonly Dictionary<Guid, LivePanel> _serverPanels = [];
     private readonly Dictionary<Guid, (View Tab, Button Button)> _serverTabs = [];
@@ -32,7 +36,15 @@ public partial class MainPage
         _favoritesLive = AppStateStore.GetBool(FavoritesLiveKey, false);
         _liveDisplay = new LiveCallDisplay(_viewModel.Calls, AppStateStore.GetBool(SeparateLiveKey, false), _viewModel.Favorites.IsSaved);
         FavoritesCallsView.ItemTemplate = CallsView.ItemTemplate;
-        FavoritesCallsView.ItemsSource = _liveDisplay.Favorites;
+        FavoritesCallsView.ReadingSource = _liveDisplay.Favorites;
+#if WINDOWS
+        // The WinUI ItemsView hosts the MAUI card factory. Keep the MAUI empty
+        // view in the page's visual and accessibility tree beside it.
+        _favoritesEmpty = (View)FavoritesCallsView.EmptyView;
+        FavoritesCallsView.EmptyView = null;
+        _favoritesEmpty.IsVisible = false;
+        UnifiedLiveHost.Add(_favoritesEmpty, 0, 1);
+#endif
         _combinedViewport = new(CallsView, CombinedNewCallsButton, _liveDisplay.CombinedReader);
         _favoritesViewport = new(FavoritesCallsView, FavoritesNewCallsButton, _liveDisplay.FavoritesReader);
         ServerPanels.SizeChanged += (_, _) => ShowServerPanels();
@@ -46,6 +58,9 @@ public partial class MainPage
             _liveDisplay.ResetReaders();
         }
         _liveDisplay.Observe();
+#if WINDOWS
+        ((INotifyCollectionChanged)_liveDisplay.Favorites).CollectionChanged += OnFavoritesCollectionChanged;
+#endif
         _viewModel.LiveCardAdmitted += _liveDisplay.RecordVisibleAdmission;
         _viewModel.RequestJumpToLiveScroll += OnRequestJumpToLiveScroll;
         _viewModel.PropertyChanged += OnLiveViewModelChanged;
@@ -68,6 +83,9 @@ public partial class MainPage
             panel.Viewport.Show(false);
         RefreshPlaybackPins();
         RefreshTranscriptFeedback();
+#if WINDOWS
+        ((INotifyCollectionChanged)_liveDisplay.Favorites).CollectionChanged -= OnFavoritesCollectionChanged;
+#endif
         _liveDisplay.Detach();
     }
 
@@ -272,6 +290,7 @@ public partial class MainPage
             if (!_serverTabs.TryGetValue(id, out var tab))
             {
                 var button = new Button { FontSize = 12 };
+                button.SetDynamicResource(StyleProperty, "PillButtonStyle");
                 button.SetBinding(Button.TextProperty, nameof(ScannerConnectionRow.Name));
                 button.Clicked += (_, _) =>
                 {
@@ -302,6 +321,14 @@ public partial class MainPage
         return new HorizontalStackLayout { Spacing = 4, Children = { dot, status } };
     }
 
+#if WINDOWS
+    private void OnFavoritesCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+        => UpdateFavoritesEmptyView();
+
+    private void UpdateFavoritesEmptyView() =>
+        _favoritesEmpty.IsVisible = _favoritesLive && _liveDisplay.Favorites.Count == 0;
+#endif
+
     private void RenderLiveDisplay()
     {
         var separate = !_favoritesLive && _liveDisplay.Separate;
@@ -310,6 +337,9 @@ public partial class MainPage
         _favoritesViewport.Show(_handlersAttached && _favoritesLive);
         _combinedViewport.Show(_handlersAttached && !_favoritesLive && !separate);
         FavoritesCallsView.IsVisible = _favoritesLive;
+#if WINDOWS
+        UpdateFavoritesEmptyView();
+#endif
         CallsView.IsVisible = !_favoritesLive && !separate;
         UnifiedLiveHost.IsVisible = !separate;
         SeparateLiveHost.IsVisible = separate;
@@ -323,9 +353,10 @@ public partial class MainPage
 
     private static void ApplyLiveButtonStyle(Button button, bool selected)
     {
-        var key = selected ? "PillButtonStyle" : "SecondaryPillButtonStyle";
-        if (Application.Current?.Resources.TryGetValue(key, out var style) == true && style is Style buttonStyle)
-            button.Style = buttonStyle;
+        // Swapping the whole style reapplies its shadow to an already parented WinUI button.
+        // Selection only changes the two colors shared with the pill styles.
+        button.SetDynamicResource(BackgroundColorProperty, selected ? "PillButtonBackground" : "SecondaryPillButtonBackground");
+        button.SetDynamicResource(Button.BorderColorProperty, selected ? "PillButtonBorder" : "SecondaryPillButtonBorder");
     }
 
     private void SelectLiveServer(Guid id)
@@ -406,26 +437,13 @@ public partial class MainPage
         var name = new Label { FontAttributes = FontAttributes.Bold, FontSize = 12, LineBreakMode = LineBreakMode.TailTruncation };
         name.SetBinding(Label.TextProperty, nameof(ScannerConnectionRow.Name));
         var statusGroup = CreateServerStatusIndicator(11);
-        var newCalls = new Button { FontSize = 12, IsVisible = false, AutomationId = $"LiveNewCalls-{id:N}" };
-        ApplyLiveButtonStyle(newCalls, selected: true);
-        SemanticProperties.SetHint(newCalls, "Return to the newest recordings from this server");
-        var header = new Grid
-        {
-            ColumnDefinitions = [new ColumnDefinition(GridLength.Star), new ColumnDefinition(GridLength.Auto),
-                new ColumnDefinition(GridLength.Auto)],
-            ColumnSpacing = 5,
-            MinimumHeightRequest = 26,
-            Padding = new Thickness(4, 2)
-        };
-        header.Add(name);
-        header.Add(statusGroup, 1, 0);
-        header.Add(newCalls, 2, 0);
+        var header = new LiveRecorderHeader(id, name, statusGroup);
 
-        var calls = new CollectionView
+        var calls = new LiveCollectionView
         {
             AutomationId = $"LiveServer-{id:N}",
             ItemTemplate = CallsView.ItemTemplate,
-            ItemsSource = cards,
+            ReadingSource = cards,
             SelectionMode = SelectionMode.None,
             ItemsUpdatingScrollMode = ItemsUpdatingScrollMode.KeepScrollOffset,
             ItemSizingStrategy = ItemSizingStrategy.MeasureAllItems,
@@ -451,7 +469,7 @@ public partial class MainPage
         }
 #endif
 
-        panel = new LivePanel(root, new(calls, newCalls, _liveDisplay.ReaderForServer(id)), pin);
+        panel = new LivePanel(root, new(calls, header.NewCalls, _liveDisplay.ReaderForServer(id)), pin);
         _serverPanels.Add(id, panel);
         return panel;
     }

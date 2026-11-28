@@ -86,6 +86,16 @@ internal sealed class LiveReadingState(IReadOnlyList<CallItem> cards)
             _anchor = anchor with { Top = top };
     }
 
+    // The projection owns the bookmark even if its native handler is unloaded.
+    // Refresh after a projection edit so a subsequent eviction chooses the adjacent survivor.
+    [System.Diagnostics.Conditional("WINDOWS")]
+    [System.Diagnostics.Conditional("WINDOWS_LIVE_READING_TESTS")]
+    internal void RefreshBookmark()
+    {
+        if (_anchor.HasValue)
+            ResolveAnchor();
+    }
+
     internal LiveReadingAnchor? ResolveAnchor()
     {
         if (_anchor is not { } anchor || cards.Count == 0)

@@ -189,6 +189,7 @@ internal sealed class LiveCallDisplay(ObservableCollection<CallItem> calls, bool
             else
                 current.Insert(i, valid[i]);
         }
+        FavoritesReader.RefreshBookmark();
     }
 
     private void ReconcileProjections()
@@ -203,6 +204,7 @@ internal sealed class LiveCallDisplay(ObservableCollection<CallItem> calls, bool
                     projection.Items.Add(card);
             }
             projection.Reader.RetainVisibleAdmissions();
+            projection.Reader.RefreshBookmark();
         }
     }
 
@@ -210,6 +212,7 @@ internal sealed class LiveCallDisplay(ObservableCollection<CallItem> calls, bool
     {
         if (e.Action == NotifyCollectionChangedAction.Reset)
             ResetReaders();
+        CombinedReader.RefreshBookmark();
         ObserveFavoriteCards();
         RefreshFavorites();
         if (e.Action is NotifyCollectionChangedAction.Move or NotifyCollectionChangedAction.Reset)
@@ -226,6 +229,7 @@ internal sealed class LiveCallDisplay(ObservableCollection<CallItem> calls, bool
                 {
                     projection.Reader.ForgetCard(old);
                     projection.Items.Remove(old);
+                    projection.Reader.RefreshBookmark();
                 }
             }
 
@@ -238,6 +242,7 @@ internal sealed class LiveCallDisplay(ObservableCollection<CallItem> calls, bool
             {
                 var index = calls.Take(offset).Count(card => card.ServerId == id);
                 projection.Items.Insert(index, added);
+                projection.Reader.RefreshBookmark();
             }
             offset++;
         }

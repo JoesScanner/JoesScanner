@@ -21,6 +21,9 @@ public static class MauiProgram
             .ConfigureMauiHandlers(handlers =>
             {
                 handlers.AddHandler(typeof(SelectableEditor), typeof(SelectableEditorHandler));
+#if WINDOWS
+                handlers.AddHandler(typeof(Views.Controls.LiveCollectionView), typeof(WinUI.LiveCollectionViewHandler));
+#endif
 #if IOS
                 handlers.AddHandler(typeof(JoesScanner.Views.Controls.CursorHidingEntry),
                     typeof(JoesScanner.Platforms.iOS.CursorHidingEntryHandler));

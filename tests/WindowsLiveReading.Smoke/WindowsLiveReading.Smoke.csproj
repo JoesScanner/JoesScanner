@@ -19,9 +19,25 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Maui.Controls" Version="$(MauiVersion)" />
     <Compile Include="../../JoesScanner/Platforms/Windows/Program.cs" Link="EntryPoint.cs" />
+    <Compile Include="../../JoesScanner/ViewModels/LiveCallDisplay.cs" Link="LiveCallDisplay.cs" />
     <Compile Include="../../JoesScanner/ViewModels/LiveReadingState.cs" Link="LiveReadingState.cs" />
     <Compile Include="../../JoesScanner/Views/LiveReadingViewport.cs" Link="LiveReadingViewport.cs" />
     <Compile Include="../../JoesScanner/Views/LiveReadingViewport.Native.cs" Link="LiveReadingViewport.Native.cs" />
+    <Compile Include="../../JoesScanner/Views/LiveReadingViewport.Windows.cs" Link="LiveReadingViewport.Windows.cs" />
+    <Compile Include="../../JoesScanner/Views/LiveReadingSource.cs" Link="LiveReadingSource.cs" />
+    <Compile Include="../../JoesScanner/Views/WindowsLiveScrollIntent.cs" Link="WindowsLiveScrollIntent.cs" />
+    <Compile Include="../../JoesScanner/Views/Controls/LiveCollectionView.cs" Link="LiveCollectionView.cs" />
+    <Compile Include="../../JoesScanner/Platforms/Windows/LiveCollectionViewHandler.cs" Link="LiveCollectionViewHandler.cs" />
+    <Compile Include="../../JoesScanner/Platforms/Windows/LiveScrollPresenter.cs" Link="LiveScrollPresenter.cs" />
+    <Page Include="../../JoesScanner/Platforms/Windows/LiveScrollViewResources.xaml" Link="Platforms/Windows/LiveScrollViewResources.xaml" />
+    <Compile Include="../../JoesScanner/Platforms/Windows/LiveScrollViewResources.xaml.cs" Link="LiveScrollViewResources.xaml.cs" />
+    <EmbeddedResource Include="../../JoesScanner/Views/MainPage.xaml" LogicalName="LivePageMarkup" />
+    <Compile Include="../../JoesScanner/Views/Controls/CallCardMetadataLabel.cs" Link="CallCardMetadataLabel.cs" />
+    <Compile Include="../../JoesScanner/Views/Controls/CallCardDurationLabel.cs" Link="CallCardDurationLabel.cs" />
+    <Compile Include="../../JoesScanner/Models/CallCardLayout.cs" Link="CallCardLayout.cs" />
+    <Compile Include="../../JoesScanner/Models/CallCardMetadata.cs" Link="CallCardMetadata.cs" />
+    <Compile Include="../../JoesScanner/Views/Controls/LiveRecorderHeader.cs" Link="LiveRecorderHeader.cs" />
+    <EmbeddedResource Include="../../JoesScanner/Resources/Styles/Styles.xaml" LogicalName="ToolbarStyles" />
     <Compile Include="../../JoesScanner/Views/Controls/LivePlaybackPinView.cs" Link="LivePlaybackPinView.cs" />
     <Compile Include="../../JoesScanner/Views/Controls/LiveTranscriptLabel.cs" Link="LiveTranscriptLabel.cs" />
     <Compile Include="../../JoesScanner/Views/Controls/TranscriptFeedbackState.cs" Link="TranscriptFeedbackState.cs" />

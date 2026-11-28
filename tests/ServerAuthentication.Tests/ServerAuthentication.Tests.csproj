@@ -1,5 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
+    <DefineConstants>$(DefineConstants);WINDOWS_LIVE_READING_TESTS</DefineConstants>
     <OutputType>Exe</OutputType>
     <TargetFramework>net11.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -74,6 +75,8 @@
     <Compile Include="../../JoesScanner/Services/DirectoryRecorderPolicy.cs" Link="DirectoryRecorderPolicy.cs" />
     <Compile Include="../../JoesScanner/ViewModels/LiveCallDisplay.cs" Link="LiveCallDisplay.cs" />
     <Compile Include="../../JoesScanner/ViewModels/LiveReadingState.cs" Link="LiveReadingState.cs" />
+    <Compile Include="../../JoesScanner/Views/LiveReadingSource.cs" Link="LiveReadingSource.cs" />
+    <Compile Include="../../JoesScanner/Views/WindowsLiveScrollIntent.cs" Link="WindowsLiveScrollIntent.cs" />
     <Compile Include="../../JoesScanner/Views/LiveReadingViewport.cs" Link="LiveReadingViewport.cs" />
     <Compile Include="../../JoesScanner/Views/Controls/TranscriptFeedbackState.cs" Link="TranscriptFeedbackState.cs" />
     <Compile Include="../../JoesScanner/Services/CallHistoryService.cs" Link="CallHistoryService.cs" />

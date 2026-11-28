@@ -1,13 +1,6 @@
 using System.Diagnostics;
 using JoesScanner.ViewModels;
-#if WINDOWS
-using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Input;
-using Microsoft.UI.Xaml.Media;
-using FrameworkElement = Microsoft.UI.Xaml.FrameworkElement;
-using NativeElement = Microsoft.UI.Xaml.UIElement;
-using NativeViewer = Microsoft.UI.Xaml.Controls.ScrollViewer;
-#elif ANDROID
+#if ANDROID
 using AndroidX.RecyclerView.Widget;
 using Android.Views;
 using DroidView = Android.Views.View;
@@ -21,7 +14,7 @@ namespace JoesScanner.Views;
 
 internal sealed partial class LiveReadingViewport
 {
-#if WINDOWS || ANDROID
+#if ANDROID
     private static readonly TimeSpan InputInterval = TimeSpan.FromMilliseconds(220);
     private long? _nativeInput;
     private bool RecentNativeInput => _nativeInput is { } time && Stopwatch.GetElapsedTime(time) < InputInterval;
@@ -34,110 +27,7 @@ internal sealed partial class LiveReadingViewport
     }
 #endif
 
-#if WINDOWS
-    private NativeElement? _nativeRoot;
-    private NativeViewer? _nativeViewer;
-    private ItemsRepeater? _repeater;
-    private PointerEventHandler? _wheelHandler;
-    private KeyEventHandler? _scrollKeyHandler;
-    private bool _directManipulation;
-
-    private void ConnectNativeInput()
-    {
-        if (_list.Handler?.PlatformView is not NativeElement root)
-            return;
-        if (!ReferenceEquals(_nativeRoot, root))
-        {
-            DisconnectNativeInput();
-            _nativeRoot = root;
-            _wheelHandler = OnWheel;
-            _scrollKeyHandler = OnScrollKey;
-            root.AddHandler(NativeElement.PointerWheelChangedEvent, _wheelHandler, true);
-            root.AddHandler(NativeElement.KeyDownEvent, _scrollKeyHandler, true);
-        }
-        if (_nativeViewer == null && FindDescendant<NativeViewer>(root) is { } viewer)
-        {
-            _nativeViewer = viewer;
-            _repeater = FindDescendant<ItemsRepeater>(viewer);
-            viewer.DirectManipulationStarted += OnManipulationStarted;
-            viewer.DirectManipulationCompleted += OnManipulationCompleted;
-        }
-    }
-
-    private void DisconnectNativeInput()
-    {
-        if (_nativeRoot is { } root && _wheelHandler is { } wheel && _scrollKeyHandler is { } scrollKey)
-        {
-            root.RemoveHandler(NativeElement.PointerWheelChangedEvent, wheel);
-            root.RemoveHandler(NativeElement.KeyDownEvent, scrollKey);
-        }
-        if (_nativeViewer is { } viewer)
-        {
-            viewer.DirectManipulationStarted -= OnManipulationStarted;
-            viewer.DirectManipulationCompleted -= OnManipulationCompleted;
-        }
-        _nativeRoot = null;
-        _nativeViewer = null;
-        _repeater = null;
-        _wheelHandler = null;
-        _scrollKeyHandler = null;
-        _directManipulation = false;
-        _nativeInput = null;
-    }
-
-    private void OnWheel(object sender, PointerRoutedEventArgs e) => StartNativeInput();
-
-    private void OnScrollKey(object sender, KeyRoutedEventArgs e)
-    {
-        if (e.Key is global::Windows.System.VirtualKey.Up or global::Windows.System.VirtualKey.Down or
-            global::Windows.System.VirtualKey.PageUp or global::Windows.System.VirtualKey.PageDown or
-            global::Windows.System.VirtualKey.Home or global::Windows.System.VirtualKey.End)
-            StartNativeInput();
-    }
-
-    private void OnManipulationStarted(object? sender, object e)
-    {
-        _directManipulation = true;
-        StartNativeInput();
-    }
-
-    private void OnManipulationCompleted(object? sender, object e) => _directManipulation = false;
-
-    private bool NativeUserScrolling() => _directManipulation || RecentNativeInput;
-
-    private bool NativeAtTop()
-    {
-        ConnectNativeInput();
-        return _nativeViewer?.VerticalOffset <= LiveReadingState.TopTolerance;
-    }
-
-    private CardPosition? MeasureCard(int index)
-    {
-        ConnectNativeInput();
-        if (index < 0 || _nativeViewer is not { } viewer)
-            return null;
-        var element = _nativeRoot is ListViewBase legacy ? legacy.ContainerFromIndex(index) : _repeater?.TryGetElement(index);
-        if (element is not FrameworkElement { ActualHeight: > 0 } card)
-            return null;
-        var point = card.TransformToVisual(viewer).TransformPoint(new global::Windows.Foundation.Point(0, 0));
-        return new(point.Y, card.ActualHeight, viewer.ViewportHeight);
-    }
-
-    private void ShiftViewport(double delta)
-    {
-        if (_nativeViewer is { } viewer)
-            viewer.ChangeView(null, Math.Clamp(viewer.VerticalOffset + delta, 0, viewer.ScrollableHeight), null, true);
-    }
-
-    private static T? FindDescendant<T>(NativeElement element) where T : NativeElement
-    {
-        for (var index = 0; index < VisualTreeHelper.GetChildrenCount(element); index++)
-            if (VisualTreeHelper.GetChild(element, index) is NativeElement child &&
-                (child as T ?? FindDescendant<T>(child)) is { } match)
-                return match;
-        return null;
-    }
-#elif ANDROID
+#if ANDROID
     private RecyclerView? _nativeList;
 
     private void ConnectNativeInput()
