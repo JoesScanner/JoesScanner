@@ -414,6 +414,7 @@ namespace JoesScanner.Services
 
         private void RetireAccountIdentity()
         {
+            DirectoryRecorderPolicy.For(this).InvalidateHostedAccount();
             _accountIdentityVersion++;
             AuthSessionToken = string.Empty;
             AccountIdentityChanged?.Invoke(this, EventArgs.Empty);

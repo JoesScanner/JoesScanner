@@ -79,7 +79,10 @@ public sealed class DbMaintenanceService : IDbMaintenanceService, IDisposable
 
         db.CreateFunction<string?, string?>("storable_recording_path", RecordingStorageReference.ForCache, isDeterministic: true);
         db.CreateFunction<string?, string?>("storable_recording_url", RecordingStorageReference.ForJournal, isDeterministic: true);
+        db.CreateFunction<string?, string?>("recording_metadata_key", RecordingMetadataScope.NormalizeStoredKey, isDeterministic: true);
         db.CreateFunction<string?, string?>("recording_server_key", RecordingStorageReference.ServerKey, isDeterministic: true);
+        db.CreateFunction<string?, string?>("history_server_key", key => HistoryRecorder.IsLookupCacheKey(key)
+            ? key : RecordingStorageReference.ServerKey(key), isDeterministic: true);
         db.CreateFunction<string?, string?>("redact_diagnostic_text", text => text == null ? null : DiagnosticRedaction.Sanitize(text), isDeterministic: true);
         using (var setup = db.CreateCommand())
         {
@@ -91,7 +94,7 @@ public sealed class DbMaintenanceService : IDbMaintenanceService, IDisposable
             UPDATE calls SET audio_filename = storable_recording_path(audio_filename)
             WHERE rowid > $after AND rowid <= $through
               AND audio_filename IS NOT storable_recording_path(audio_filename);
-            """ + NormalizeCacheKeys("calls"), token).ConfigureAwait(false);
+            """ + NormalizeCacheKeys("calls", "recording_metadata_key"), token).ConfigureAwait(false);
         needsMore |= await ScrubLegacyBatchAsync(db, "live_queue_recordings", """
             UPDATE live_queue_recordings SET payload = NULL, audio_ready = 0
             WHERE rowid > $after AND rowid <= $through AND disposition IN (1, 2)
@@ -111,7 +114,7 @@ public sealed class DbMaintenanceService : IDbMaintenanceService, IDisposable
               AND (p.audio IS NOT storable_recording_url(p.audio) OR p.legacy_audio IS NOT NULL);
             """, token).ConfigureAwait(false);
         needsMore |= await ScrubLegacyBatchAsync(db, "lookup_cache", NormalizeCacheKeys("lookup_cache"), token).ConfigureAwait(false);
-        needsMore |= await ScrubLegacyBatchAsync(db, "history_lookups", NormalizeCacheKeys("history_lookups"), token).ConfigureAwait(false);
+        needsMore |= await ScrubLegacyBatchAsync(db, "history_lookups", NormalizeCacheKeys("history_lookups", "history_server_key"), token).ConfigureAwait(false);
         needsMore |= await ScrubLegacyBatchAsync(db, "telemetry_queue", """
             WITH fields AS MATERIALIZED (
                 SELECT id,
@@ -152,11 +155,11 @@ public sealed class DbMaintenanceService : IDbMaintenanceService, IDisposable
         return needsMore;
     }
 
-    private static string NormalizeCacheKeys(string table) => $"""
-        UPDATE OR IGNORE {table} SET server_key = recording_server_key(server_key)
-        WHERE rowid > $after AND rowid <= $through AND server_key IS NOT recording_server_key(server_key);
+    private static string NormalizeCacheKeys(string table, string normalize = "recording_server_key") => $"""
+        UPDATE OR IGNORE {table} SET server_key = {normalize}(server_key)
+        WHERE rowid > $after AND rowid <= $through AND server_key IS NOT {normalize}(server_key);
         DELETE FROM {table} WHERE rowid > $after AND rowid <= $through
-          AND server_key IS NOT recording_server_key(server_key);
+          AND server_key IS NOT {normalize}(server_key);
         """;
 
     // Scan a fixed number of rows even when every row is already clean. Persist the

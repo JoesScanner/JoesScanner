@@ -63,6 +63,11 @@ internal static class DurablePlaybackConcurrencyTests
         Check(sequences.Zip(sequences.Skip(1)).All(pair => pair.First < pair.Second) && observations.All(result => result.Changed),
             "Concurrent producer calls must receive one strictly increasing sequence across recorders.");
         await queue.ObserveAsync(firstServer, "same-id", Now.AddYears(-10),
+            new(new CallCardMetadata { Talkgroup = "Unrelated" }, null, CallCardIdFallback.None, Server + "/wrong.mp3"), token,
+            existingOnly: true);
+        Check((await queue.NextAsync(firstServer, 0, token))?.Snapshot?.Metadata.Talkgroup == null,
+            "A reused ID with a different recording time must not overwrite the earlier admission.");
+        await queue.ObserveAsync(firstServer, "same-id", Now.AddYears(100),
             new(new CallCardMetadata { Talkgroup = "Enriched" }, null, CallCardIdFallback.None, Server + "/late.mp3"), token,
             existingOnly: true);
         Check((await queue.NextAsync(firstServer, 0, token)) is

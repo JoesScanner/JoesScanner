@@ -17,7 +17,7 @@ namespace JoesScanner.Services;
 // must be handled via EnsureColumnExists.
 public static class DbBootstrapper
 {
-    internal const int CurrentSchemaVersion = 5;
+    internal const int CurrentSchemaVersion = 7;
     private static readonly SemaphoreSlim InitializationGate = new(1, 1);
     private static readonly ConcurrentDictionary<string, byte> InitializedDataSources = new(StringComparer.OrdinalIgnoreCase);
 
@@ -53,7 +53,8 @@ public static class DbBootstrapper
             await EnsureSchemaV1Async(connection, transaction, cancellationToken).ConfigureAwait(false);
             if (version < CurrentSchemaVersion)
                 await MigrateLiveQueueAsync(connection, transaction, version, cancellationToken).ConfigureAwait(false);
-            await EnsureLiveRecoverySchemaAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
+            else
+                await EnsureLiveRecoverySchemaAsync(connection, transaction, cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             if (version < CurrentSchemaVersion)
@@ -340,38 +341,49 @@ CREATE TABLE IF NOT EXISTS unregistered_session_queue (
         if (version < 4)
             await MigrateLiveQueueScopesAsync(connection, transaction, queue, token).ConfigureAwait(false);
 
-        // Use the old insertion rowids for a deterministic order and keep the
-        // maintenance cursor valid. The old schema did not record local acceptance order.
+        if (version < 5)
+        {
+            queue.CommandText = """
+                ALTER TABLE live_queue_servers DROP COLUMN jump_utc;
+                ALTER TABLE live_queue_servers DROP COLUMN jump_id;
+                """;
+            await queue.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }
+        await EnsureLiveRecoverySchemaAsync(connection, transaction, token).ConfigureAwait(false);
+
+        if (version < 6)
+            await UpgradeRecordingConstraintAsync(queue, token).ConfigureAwait(false);
+
+        // GUID-only legacy keys omit the archive path and cannot match a v7 saved
+        // recorder key. Preserve their original records, floors and windows in place.
+        // A URL-only scope can prove the archive, but an empty scope cannot prove
+        // anonymous access. A bare hash without protected rows can also be a v5
+        // custom recovery checkpoint whose recording inserts failed the old CHECK.
+        connection.CreateFunction("journal_endpoint", (string? value) => RecordingStorageReference.ServerKey(value),
+            isDeterministic: true);
         queue.CommandText = """
-            CREATE TABLE live_queue_recordings_v5 (
-                arrival_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                server TEXT NOT NULL,
-                account_scope TEXT NOT NULL DEFAULT '',
-                recording_id TEXT NOT NULL,
-                recorded_utc INTEGER,
-                first_owner INTEGER NOT NULL,
-                payload TEXT,
-                audio_ready INTEGER NOT NULL,
-                disposition INTEGER NOT NULL DEFAULT 0 CHECK(disposition IN (0, 1, 2)),
-                origin INTEGER NOT NULL DEFAULT 0,
-                protected INTEGER NOT NULL DEFAULT 0 CHECK(protected = (account_scope <> '')),
-                UNIQUE(server, account_scope, recording_id),
-                FOREIGN KEY(server, account_scope) REFERENCES live_queue_servers(server, account_scope)
-            );
-            INSERT INTO live_queue_recordings_v5
-                (arrival_sequence, server, account_scope, recording_id, recorded_utc,
-                 first_owner, payload, audio_ready, disposition, origin, protected)
-            SELECT rowid, server, account_scope, recording_id, recorded_utc,
-                   first_owner, payload, audio_ready, disposition, origin, protected
-            FROM live_queue_recordings ORDER BY rowid;
-            DROP TABLE live_queue_recordings;
-            ALTER TABLE live_queue_recordings_v5 RENAME TO live_queue_recordings;
-            ALTER TABLE live_queue_servers DROP COLUMN jump_utc;
-            ALTER TABLE live_queue_servers DROP COLUMN jump_id;
-            CREATE INDEX live_queue_pending_arrival
-                ON live_queue_recordings(server, account_scope, arrival_sequence) WHERE disposition = 0;
-            CREATE INDEX live_queue_transport_arrival
-                ON live_queue_recordings(server, account_scope, arrival_sequence);
+            CREATE TEMP TABLE live_queue_unowned (
+                server TEXT NOT NULL, account_scope TEXT NOT NULL, PRIMARY KEY (server, account_scope)
+            ) WITHOUT ROWID;
+            INSERT INTO live_queue_unowned
+            SELECT s.server, s.account_scope FROM live_queue_servers s
+            WHERE journal_endpoint(s.server) = s.server AND (
+                s.account_scope = '' OR
+                (s.account_scope <> ':legacy' AND s.account_scope NOT GLOB 'custom:?*'
+                 AND NOT EXISTS (SELECT 1 FROM live_queue_recordings q
+                     WHERE q.server=s.server AND q.account_scope=s.account_scope AND q.protected=1)));
+
+            INSERT INTO live_queue_servers (server, account_scope, owner, stopped, accept_after, resume_id, playback_floor)
+            SELECT 'archived:' || s.server, s.account_scope, s.owner, s.stopped, s.accept_after, s.resume_id, s.playback_floor
+            FROM live_queue_servers s JOIN live_queue_unowned USING(server, account_scope);
+            UPDATE live_queue_recordings SET server='archived:' || server
+            WHERE (server, account_scope) IN (SELECT server, account_scope FROM live_queue_unowned);
+            UPDATE live_queue_recovery SET server='archived:' || server
+            WHERE (server, account_scope) IN (SELECT server, account_scope FROM live_queue_unowned);
+            DELETE FROM live_queue_servers
+            WHERE (server, account_scope) IN (SELECT server, account_scope FROM live_queue_unowned);
+            DROP TABLE live_queue_unowned;
+
             CREATE TABLE IF NOT EXISTS schema_meta (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 schema_version INTEGER NOT NULL,
@@ -383,6 +395,50 @@ CREATE TABLE IF NOT EXISTS unregistered_session_queue (
             """ + $"\nPRAGMA user_version={CurrentSchemaVersion};";
         queue.Parameters.AddWithValue("$v", CurrentSchemaVersion);
         queue.Parameters.AddWithValue("$u", DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+        await queue.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+    }
+
+    private static async Task UpgradeRecordingConstraintAsync(SqliteCommand queue, CancellationToken token)
+    {
+        // SQLite aliases rowid to arrival_sequence in v5. Retain older insertion
+        // order and the v5 high-water mark even when maintenance pruned the newest rows.
+        queue.CommandText = """
+            CREATE TABLE live_queue_recordings_v6 (
+                arrival_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                server TEXT NOT NULL,
+                account_scope TEXT NOT NULL DEFAULT '',
+                recording_id TEXT NOT NULL,
+                recorded_utc INTEGER,
+                first_owner INTEGER NOT NULL,
+                payload TEXT,
+                audio_ready INTEGER NOT NULL,
+                disposition INTEGER NOT NULL DEFAULT 0 CHECK(disposition IN (0, 1, 2)),
+                origin INTEGER NOT NULL DEFAULT 0,
+                protected INTEGER NOT NULL DEFAULT 0 CHECK(
+                    (protected = 1 AND account_scope <> '' AND account_scope NOT GLOB 'custom:*') OR
+                    (protected = 0 AND (account_scope = '' OR account_scope GLOB 'custom:?*'))),
+                recovery_backlog INTEGER NOT NULL DEFAULT 0,
+                audio_revision INTEGER NOT NULL DEFAULT 0,
+                audio_recovered INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(server, account_scope, recording_id),
+                FOREIGN KEY(server, account_scope) REFERENCES live_queue_servers(server, account_scope)
+            );
+            INSERT INTO live_queue_recordings_v6
+                (arrival_sequence, server, account_scope, recording_id, recorded_utc, first_owner, payload,
+                 audio_ready, disposition, origin, protected, recovery_backlog, audio_revision, audio_recovered)
+            SELECT rowid, server, account_scope, recording_id, recorded_utc, first_owner, payload,
+                   audio_ready, disposition, origin, protected, recovery_backlog, audio_revision, audio_recovered
+            FROM live_queue_recordings ORDER BY rowid;
+            UPDATE sqlite_sequence SET seq = max(seq, coalesce(
+                (SELECT seq FROM sqlite_sequence WHERE name = 'live_queue_recordings'), 0))
+            WHERE name = 'live_queue_recordings_v6';
+            DROP TABLE live_queue_recordings;
+            ALTER TABLE live_queue_recordings_v6 RENAME TO live_queue_recordings;
+            CREATE INDEX live_queue_pending_arrival
+                ON live_queue_recordings(server, account_scope, arrival_sequence) WHERE disposition = 0;
+            CREATE INDEX live_queue_transport_arrival
+                ON live_queue_recordings(server, account_scope, arrival_sequence);
+            """;
         await queue.ExecuteNonQueryAsync(token).ConfigureAwait(false);
     }
 

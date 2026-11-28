@@ -189,20 +189,8 @@ namespace JoesScanner.ViewModels
         // We only show up to 3 alerts at once, but we keep older ones queued until dismissed.
         private readonly List<CallItem> _hiddenAddressAlerts = new();
 
-		public CallItem? ResolveCallForAddressAlert(CallItem alertItem)
-		{
-			try
-			{
-				if (Calls.Contains(alertItem))
-					return alertItem;
-
-				var id = alertItem.BackendId;
-				if (!string.IsNullOrWhiteSpace(id))
-					return Calls.FirstOrDefault(c => c.ServerId == alertItem.ServerId && c.BackendId == id);
-			}
-			catch { }
-			return null;
-		}
+		public CallItem? ResolveCallForAddressAlert(CallItem alertItem) =>
+            RecordingIdentity.Find(Calls, alertItem);
 
         public IReadOnlyList<int> HourOptions { get; }
         public IReadOnlyList<int> MinuteOptions { get; }
@@ -588,6 +576,8 @@ namespace JoesScanner.ViewModels
 
         private bool HasHistoryRecorderAccess(HistoryRecorderAccess access)
         {
+            if (access.Retired)
+                return false;
             var recorder = access.Recorder;
             var protectedServer = HostedServerRules.RequiresApiFirewallCredentials(_settingsService, recorder.Endpoint);
             if (protectedServer != access.Protected)
@@ -668,11 +658,14 @@ namespace JoesScanner.ViewModels
             CancellationToken token)
         {
             var recorder = snapshot.Access.Recorder;
+            var owner = snapshot.Access.Operation;
+            using var lifetime = owner == null ? null : CancellationTokenSource.CreateLinkedTokenSource(token, owner.Token);
             var authority = snapshot.Access.Protected ? _settingsService.ReadAccountSession().BaseUrl : null;
-            var key = RecordingCacheKey.Create(recorder.Id, recorder.Endpoint, item.BackendId, snapshot.Access.Account, authority);
+            var key = RecordingCacheKey.Create(recorder.Id, recorder.Endpoint, item.BackendId, snapshot.Access.Account, authority, item.RecordingTimeUtc);
             return await _audioCache.AcquireAsync(key,
                 (cached, acquireToken) =>
                 {
+                    owner?.Validate();
                     if (cached)
                     {
                         RequireCachedHistoryEntitlement(snapshot, item);
@@ -699,9 +692,10 @@ namespace JoesScanner.ViewModels
                                 // Normalizing legacy encoded spaces must leave signed URLs intact.
                                 var normalized = url.Contains('?') ? url : Regex.Replace(url, "(?i)%25", "%");
                                 return RecordingAudioRecovery.DownloadAsync(_audioHttpClient, normalized, transfer, downloadToken,
-                                    request => request.Options.Set(ServerAuthenticationHandler.Recorder, recorder.RequestScope));
+                                    request => request.Options.Set(ServerAuthenticationHandler.Recorder, recorder.RequestScope with { Operation = owner }));
                             }, authorization?.Token ?? acquireToken).ConfigureAwait(false);
                         authorization?.Validate();
+                        owner?.Validate();
                         RequireHistoryRecordingAccess(snapshot, item);
                         return path;
                     }
@@ -709,10 +703,11 @@ namespace JoesScanner.ViewModels
                     {
                         throw RecordingPlaybackAccess.VerificationRequired();
                     }
-                }, token).ConfigureAwait(false) ?? throw new RecordingAudioUnavailableException();
+                }, lifetime?.Token ?? token, owner: owner).ConfigureAwait(false) ?? throw new RecordingAudioUnavailableException();
 
             void RequireNetwork()
             {
+                owner?.Validate();
                 RequireHistoryRecordingAccess(snapshot, item);
                 RecordingPlaybackAccess.RequireRecorderNetwork(_settingsService, recorder.Endpoint);
             }
@@ -780,7 +775,7 @@ namespace JoesScanner.ViewModels
 
                             var wasApplied = await ReadHistoryUiAsync(() =>
                             {
-                                if (!OwnsHistoryPage(lease) || !Calls.Contains(call))
+                                if (!OwnsHistoryPage(lease) || call.HistoryAccess?.Retired == true || !Calls.Contains(call))
                                     return false;
                                 _addressDetectionService.Apply(call);
                                 if (call.HasDetectedAddress)
@@ -790,7 +785,7 @@ namespace JoesScanner.ViewModels
                             if (!wasApplied)
                                 break;
 
-                            try { _ = _what3WordsService.ResolveCoordinatesIfNeededAsync(call, lease.Token); } catch { }
+                            _ = ResolveHistoryCoordinatesAsync(call, lease.Token);
 
                             applied++;
                             if (!string.IsNullOrWhiteSpace(call.DetectedAddress))
@@ -840,31 +835,8 @@ namespace JoesScanner.ViewModels
         {
         }
 
-        var id = call.BackendId;
-        if (!string.IsNullOrWhiteSpace(id))
-        {
-            if (AddressAlerts.Any(a => !string.IsNullOrWhiteSpace(a.BackendId) &&
-                                      string.Equals(a.BackendId, id, StringComparison.Ordinal)))
-            {
-                try { AppLog.Add(() => $"AddrAlert(Hist): Add skipped. Duplicate visible. callId={id}"); } catch { }
-                return;
-            }
-
-            if (_hiddenAddressAlerts.Any(a => !string.IsNullOrWhiteSpace(a.BackendId) &&
-                                             string.Equals(a.BackendId, id, StringComparison.Ordinal)))
-            {
-                try { AppLog.Add(() => $"AddrAlert(Hist): Add skipped. Duplicate hidden. callId={id}"); } catch { }
-                return;
-            }
-        }
-        else
-        {
-            if (AddressAlerts.Any(a => ReferenceEquals(a, call)) || _hiddenAddressAlerts.Any(a => ReferenceEquals(a, call)))
-            {
-                try { AppLog.Add("AddrAlert(Hist): Add skipped. Duplicate by reference."); } catch { }
-                return;
-            }
-        }
+        if (RecordingIdentity.Find(AddressAlerts, call) != null || RecordingIdentity.Find(_hiddenAddressAlerts, call) != null)
+            return;
 
         AddressAlerts.Insert(0, call);
 
@@ -929,19 +901,13 @@ public void DismissAddressAlert(CallItem call)
         {
         }
 
-        var existing = AddressAlerts.FirstOrDefault(a =>
-            (!string.IsNullOrWhiteSpace(a.BackendId) && !string.IsNullOrWhiteSpace(call.BackendId) &&
-             string.Equals(a.BackendId, call.BackendId, StringComparison.Ordinal)) ||
-            ReferenceEquals(a, call));
+        var existing = RecordingIdentity.Find(AddressAlerts, call);
 
         if (existing != null)
             AddressAlerts.Remove(existing);
         else
         {
-            var hiddenExisting = _hiddenAddressAlerts.FirstOrDefault(a =>
-                (!string.IsNullOrWhiteSpace(a.BackendId) && !string.IsNullOrWhiteSpace(call.BackendId) &&
-                 string.Equals(a.BackendId, call.BackendId, StringComparison.Ordinal)) ||
-                ReferenceEquals(a, call));
+            var hiddenExisting = RecordingIdentity.Find(_hiddenAddressAlerts, call);
 
             if (hiddenExisting != null)
                 _hiddenAddressAlerts.Remove(hiddenExisting);
@@ -969,7 +935,17 @@ public void DismissAddressAlert(CallItem call)
     }
 }
 
-private void OnAddressDetectionSettingsChanged(object? sender, EventArgs e)
+private async Task ResolveHistoryCoordinatesAsync(CallItem call, CancellationToken token)
+        {
+            try
+            {
+                using var lifetime = call.HistoryAccess?.Link(token);
+                await _what3WordsService.ResolveCoordinatesIfNeededAsync(call, lifetime?.Token ?? token).ConfigureAwait(false);
+            }
+            catch (Exception ex) { AppLog.DebugWriteLine(() => $"History coordinate lookup failed ({ex.GetType().Name})."); }
+        }
+
+        private void OnAddressDetectionSettingsChanged(object? sender, EventArgs e)
         {
             try
             {
@@ -982,8 +958,10 @@ private void OnAddressDetectionSettingsChanged(object? sender, EventArgs e)
 
                         foreach (var item in Calls)
                         {
+                            if (item.HistoryAccess?.Retired == true)
+                                continue;
                             _addressDetectionService.Apply(item);
-							try { _ = _what3WordsService.ResolveCoordinatesIfNeededAsync(item, CancellationToken.None); } catch { }
+                            _ = ResolveHistoryCoordinatesAsync(item, _historyOwnership?.Token ?? default);
                         }
                     }
                     catch

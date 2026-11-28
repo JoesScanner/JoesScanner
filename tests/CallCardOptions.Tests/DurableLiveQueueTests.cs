@@ -86,22 +86,24 @@ internal static class DurableLiveQueueTests
                 FOREIGN KEY (server, account_scope) REFERENCES live_queue_servers(server, account_scope));
             CREATE INDEX live_queue_transport_order
                 ON live_queue_recordings(server, account_scope, recorded_utc, recording_id);
-            INSERT INTO live_queue_servers VALUES ($server, '', 6, 0, 0, 'older-stamp', 10000, 'skipped');
+            INSERT INTO live_queue_servers VALUES ($server, $account, 6, 0, 0, 'older-stamp', 10000, 'skipped');
             INSERT INTO live_queue_servers VALUES ($hosted, 'account-one', 7, 1, 0, NULL, NULL, NULL);
             INSERT INTO live_queue_recordings(rowid, server, account_scope, recording_id, recorded_utc, first_owner,
                 payload, audio_ready, disposition, origin, protected) VALUES
-                (10, $server, '', 'newer-stamp', 10000, 6, NULL, 0, 0, 1, 0),
-                (20, $server, '', 'completed', 6000, 6, NULL, 0, 1, 1, 0),
-                (30, $server, '', 'skipped', 4000, 6, NULL, 0, 2, 2, 0),
-                (40, $server, '', 'older-stamp', 3000, 6, NULL, 0, 0, 1, 0),
+                (10, $server, $account, 'newer-stamp', 10000, 6, NULL, 0, 0, 1, 1),
+                (20, $server, $account, 'completed', 6000, 6, NULL, 0, 1, 1, 1),
+                (30, $server, $account, 'skipped', 4000, 6, NULL, 0, 2, 2, 1),
+                (40, $server, $account, 'older-stamp', 3000, 6, NULL, 0, 0, 1, 1),
                 (50, $hosted, 'account-one', 'older-stamp', 2000, 7, NULL, 0, 0, 2, 1);
             WITH RECURSIVE ids(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM ids WHERE n<100001)
             INSERT INTO live_queue_recordings(server, account_scope, recording_id, recorded_utc, first_owner,
                 payload, audio_ready, disposition, origin, protected)
-            SELECT $server, '', 'prior-' || n, n, 6, NULL, 0, 1, 1, 0 FROM ids;
-            CREATE TABLE live_queue_recordings_v5 (conflict INTEGER);
+            SELECT $server, $account, 'prior-' || n, n, 6, NULL, 0, 1, 1, 1 FROM ids;
+            CREATE TABLE live_queue_recordings_v6 (conflict INTEGER);
             """;
         const string hosted = "https://app.joesscanner.com";
+        var provenAccount = new string('C', 64);
+        sql.Parameters.AddWithValue("$account", provenAccount);
         sql.Parameters.AddWithValue("$server", Server);
         sql.Parameters.AddWithValue("$hosted", hosted);
         sql.ExecuteNonQuery();
@@ -114,12 +116,12 @@ internal static class DurableLiveQueueTests
         catch (SqliteException ex) when (ex.Message.Contains("already exists", StringComparison.Ordinal)) { }
         sql.CommandText = "PRAGMA user_version";
         Check((long)sql.ExecuteScalar()! == 4, "An interrupted migration must keep the v4 version.");
-        sql.CommandText = "DROP TABLE live_queue_recordings_v5";
+        sql.CommandText = "DROP TABLE live_queue_recordings_v6";
         sql.ExecuteNonQuery();
         await DbBootstrapper.EnsureInitializedAsync(db);
 
         sql.CommandText = "PRAGMA user_version";
-        Check((long)sql.ExecuteScalar()! == 5, "The retry must install schema v5.");
+        Check((long)sql.ExecuteScalar()! == DbBootstrapper.CurrentSchemaVersion, "The retry must install the current schema.");
         sql.CommandText = "SELECT count(*) FROM live_queue_recordings";
         Check((long)sql.ExecuteScalar()! == 100006, "Migration must preserve all identities.");
         sql.CommandText = "SELECT resume_id FROM live_queue_servers WHERE server = $server";
@@ -128,7 +130,7 @@ internal static class DurableLiveQueueTests
         Check(sql.ExecuteScalar() == null, "Migration must retain valid scope references.");
 
         var queue = new DurableLiveQueue(paths);
-        var run = new DurableLiveQueue.Run(Server, 8, null);
+        var run = new DurableLiveQueue.Run(Server, 8, 2, Protected: true, Account: provenAccount);
         await queue.OpenAsync(run, Start, default);
         Check((await queue.NextAsync(run, 0, default)) is { Id: "newer-stamp", ArrivalSequence: 10 } &&
               (await queue.FindTransportTargetAsync(run, 0, 10, older: false, default)) is { Id: "completed", ArrivalSequence: 20 },
@@ -191,7 +193,7 @@ internal static class DurableLiveQueueTests
             check.CommandText = "SELECT value FROM app_settings WHERE key = 'durability_test'";
             Check((string?)check.ExecuteScalar() == "keep", "Migration must preserve existing settings.");
             check.CommandText = "PRAGMA user_version";
-            Check(Convert.ToInt32(check.ExecuteScalar()) == 5, "Version 1 should migrate to version 5.");
+            Check(Convert.ToInt32(check.ExecuteScalar()) == DbBootstrapper.CurrentSchemaVersion, "Version 1 should migrate to the current schema.");
         }
 
         // Newest first, over the old 100-row recovery and 500-row cache limits;

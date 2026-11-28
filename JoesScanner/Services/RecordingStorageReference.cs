@@ -81,4 +81,17 @@ internal static class RecordingStorageReference
         var server = new UriBuilder(uri) { UserName = "", Password = "", Query = "", Fragment = "" }.Uri;
         return ForJournal(server.AbsoluteUri)?.TrimEnd('/');
     }
+
+    // A saved listening profile can be edited to point to another archive.
+    // The path is case-sensitive. Scheme, host, default port and trailing slash
+    // follow the identical normalization used for saved recorder endpoints.
+    internal static string? ArchiveKey(Guid? recorderId, string? endpoint)
+    {
+        var archive = ServerKey(endpoint);
+        if (archive == null)
+            return null;
+        return recorderId is { } id ? RecorderPrefix(id) + archive : archive;
+    }
+
+    internal static string RecorderPrefix(Guid id) => $"recorder:{id:N}:";
 }

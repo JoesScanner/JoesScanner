@@ -49,6 +49,7 @@ namespace JoesScanner.ViewModels
         private const int FilterPageSize = 64;
         private IReadOnlyList<FilterCatalogRow> _filterCatalog = [];
         private FilterCatalogRow[] _visibleFilterRows = [];
+        private HistoryRecorderAccess? _filterCatalogAccess;
         private string _filterCatalogServerUrl = string.Empty;
         private int _filterPageIndex;
         private int _filterCardVersion;
@@ -651,7 +652,13 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
             try
             {
                 IsSyncingTalkgroupFilters = true;
-                var serverUrl = _settings.ServerUrl;
+                var selected = CallHistoryService.SelectedSavedRecorder(_settings);
+                if (selected == null)
+                    return;
+                var access = CallHistoryService.CaptureRecorderAccess(_settings, selected);
+                using var lifetime = access.Link(CancellationToken.None);
+                var token = lifetime.Token;
+                var serverUrl = selected.Endpoint;
                 AppLog.Add("Settings: manual lookup sync requested.");
 
                 // First seed from the local calls database so the filter tree can immediately reflect
@@ -659,11 +666,11 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
                 var localSeeded = 0;
                 try
                 {
-                    var localObserved = await Task.Run(() => _authObservedTriplesSyncService.GetLocalObservedAsync(serverUrl, DateTime.MinValue, CancellationToken.None));
+                    var localObserved = await Task.Run(() => _authObservedTriplesSyncService.GetLocalObservedAsync(access, DateTime.MinValue, token));
                     localSeeded = localObserved?.Count ?? 0;
                     if (localObserved != null && localObserved.Count > 0)
                     {
-                        _filterService.SeedFromObservedTriples(localObserved, serverUrl);
+                        _filterService.SeedFromObservedTriples(localObserved, serverUrl, access.MetadataKey, access.TryPublish);
                     }
                     else
                     {
@@ -681,9 +688,9 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
 
                 // Force a lookup refresh from the stream server. Lookup catalogs are now independent from
                 // talkgroup discovery, but we still refresh them here for the rest of the history/settings UI.
-                await _historyLookupsCacheService.PreloadAsync(forceReload: true, reason: "manual_filters_sync", CancellationToken.None);
+                await _historyLookupsCacheService.PreloadAsync(forceReload: true, reason: "manual_filters_sync", token);
 
-                var cached = await _historyLookupsCacheService.GetCachedAsync(CancellationToken.None);
+                var cached = await _historyLookupsCacheService.GetCachedAsync(token);
                 var r = cached?.Receivers?.Count ?? 0;
                 var s = cached?.Sites?.Count ?? 0;
                 var t = cached?.Talkgroups?.Count ?? 0;
@@ -695,13 +702,15 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
                 try
                 {
                     var accountSession = WordPressSession.Capture(_settings);
-                    var triples = await _authObservedTriplesSyncService.TrySyncExchangeAsync(serverUrl, force: true, CancellationToken.None);
+                    var cloudIdentity = DirectoryRecorderPolicy.For(_settings).CaptureHostedAccount(_settings, accountSession.AccountVersion);
+                    var triples = await _authObservedTriplesSyncService.TrySyncExchangeAsync(access, force: true, token);
                     received = triples?.Count ?? 0;
                     if (triples != null)
                         replaced = await Task.Run(() =>
                         {
                             var count = 0;
-                            accountSession.TryApply(() => count = _filterService.ReplaceFromObservedTriples(triples, serverUrl));
+                            count = _filterService.ReplaceFromObservedTriples(triples, serverUrl, access.MetadataKey,
+                                apply => access.TryPublish(cloudIdentity, apply));
                             return count;
                         });
                 }
@@ -827,6 +836,7 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
             else
             {
                 _filterCatalog = [];
+                _filterCatalogAccess = null;
                 _filterCatalogServerUrl = string.Empty;
                 _filterPageIndex = 0;
                 PublishFilterPage();
@@ -854,9 +864,11 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
                     var start = Stopwatch.GetTimestamp();
                     var version = _filterCardVersion;
                     var serverUrl = _settings.ServerUrl;
+                    var selected = CallHistoryService.SelectedSavedRecorder(_settings);
+                    var access = selected == null ? null : CallHistoryService.CaptureRecorderAccess(_settings, selected);
                     var catalog = await Task.Run(_filterService.GetCatalogSnapshot);
                     var buildTime = Stopwatch.GetElapsedTime(start);
-                    if (!_filtersCardOpen || _filterCardVersion != version ||
+                    if (!_filtersCardOpen || _filterCardVersion != version || access?.Retired == true ||
                         !string.Equals(serverUrl, _settings.ServerUrl, StringComparison.OrdinalIgnoreCase))
                     {
                         continue;
@@ -864,6 +876,7 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
 
                     var publishStart = Stopwatch.GetTimestamp();
                     _filterCatalog = catalog;
+                    _filterCatalogAccess = access;
                     _filterCatalogServerUrl = serverUrl;
                     PublishFilterPage();
                     AppLog.Add(() => $"Settings: filter catalog rows={catalog.Count}, visible={FilterRules.Count}, build={buildTime.TotalMilliseconds:F0} ms, publish={Stopwatch.GetElapsedTime(publishStart).TotalMilliseconds:F0} ms.");
@@ -921,18 +934,20 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
         {
             try
             {
-                var serverKey = ServerKeyHelper.Normalize(serverUrl);
-                if (string.IsNullOrWhiteSpace(serverKey))
+                var selected = CallHistoryService.SelectedSavedRecorder(_settings);
+                if (selected == null || selected.Endpoint != ScannerConnectionStore.Normalize(serverUrl))
                     return;
+                var access = CallHistoryService.CaptureRecorderAccess(_settings, selected);
+                using var lifetime = access.Link(CancellationToken.None);
 
                 // Always seed from the local calls database first so the card can populate immediately from
                 // what this device has already discovered, even when the auth server is unavailable.
                 try
                 {
-                    var localObserved = await _authObservedTriplesSyncService.GetLocalObservedAsync(serverKey, DateTime.MinValue, CancellationToken.None);
+                    var localObserved = await _authObservedTriplesSyncService.GetLocalObservedAsync(access, DateTime.MinValue, lifetime.Token);
                     if (localObserved != null && localObserved.Count > 0)
                     {
-                        _filterService.SeedFromObservedTriples(localObserved, serverUrl);
+                        _filterService.SeedFromObservedTriples(localObserved, serverUrl, access.MetadataKey, access.TryPublish);
                     }
 
                 }
@@ -943,11 +958,13 @@ public double FilterTextColumnWidth => 140 + _filterTextHorizontalOffset;
                 // Then fetch the canonical server view and merge it in. This keeps both sides converging
                 // without making the settings page wait on network success.
                 var accountSession = WordPressSession.Capture(_settings);
-                var triples = await _authObservedTriplesSyncService.TryFetchSeedAsync(serverKey, CancellationToken.None);
+                var cloudIdentity = DirectoryRecorderPolicy.For(_settings).CaptureHostedAccount(_settings, accountSession.AccountVersion);
+                var triples = await _authObservedTriplesSyncService.TryFetchSeedAsync(access, lifetime.Token);
                 if (triples == null || triples.Count == 0)
                     return;
 
-                accountSession.TryApply(() => _filterService.SeedFromObservedTriples(triples, serverUrl));
+                _filterService.SeedFromObservedTriples(triples, serverUrl, access.MetadataKey,
+                    apply => access.TryPublish(cloudIdentity, apply));
             }
             catch (Exception ex)
             {
@@ -1990,7 +2007,7 @@ public bool WindowsStartWithWindows
         }
 
         private bool IsCurrentFilterCatalog() =>
-            _filtersCardOpen && string.Equals(_filterCatalogServerUrl, _settings.ServerUrl, StringComparison.OrdinalIgnoreCase);
+            _filtersCardOpen && _filterCatalogAccess?.Retired != true && string.Equals(_filterCatalogServerUrl, _settings.ServerUrl, StringComparison.OrdinalIgnoreCase);
 
         private void InitializeFromSettings()
         {

@@ -8,7 +8,7 @@ namespace JoesScanner.Services;
 internal readonly record struct RecordingCacheKey(string Value)
 {
     internal static RecordingCacheKey? Create(Guid? recorder, string endpoint, string? recordingId,
-        string? account, string? accountAuthority)
+        string? account, string? accountAuthority, DateTimeOffset? recordedAt = null)
     {
         var archive = RecordingStorageReference.ServerKey(endpoint);
         if (recorder == null || archive == null || string.IsNullOrWhiteSpace(recordingId))
@@ -17,7 +17,7 @@ internal readonly record struct RecordingCacheKey(string Value)
         // Only the digest reaches disk. The archive also distinguishes an edited address
         // that points at a different collection using the same recording IDs.
         var identity = JsonSerializer.Serialize(new[] { recorder.Value.ToString("N"), archive, recordingId,
-            account, accountAuthority });
+            account, accountAuthority, recordedAt?.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture) });
         return new(Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity))));
     }
 }
@@ -126,7 +126,7 @@ public sealed class PlaybackAudioCache
     // No path leaves this method until that caller's current access has been checked.
     internal async Task<PlaybackAudioLease?> AcquireAsync(RecordingCacheKey? key,
         Func<bool, CancellationToken, Task> authorize, Func<Transfer, CancellationToken, Task<string>> fetch,
-        CancellationToken token, bool speculative = false)
+        CancellationToken token, bool speculative = false, RecorderOperation? owner = null)
     {
         await _recovery.Value.WaitAsync(token);
         if (speculative && (key == null || !await CanPreloadAsync(token)))
@@ -191,7 +191,13 @@ public sealed class PlaybackAudioCache
                             lock (_gate)
                             {
                                 token.ThrowIfCancellationRequested();
-                                return revision == _clearRevision && CheckStorage() ? TryPublish(cacheKey, path) : null;
+                                if (revision != _clearRevision || !CheckStorage())
+                                    return null;
+                                if (owner == null)
+                                    return TryPublish(cacheKey, path);
+                                PlaybackAudioLease? published = null;
+                                owner.Apply(() => published = TryPublish(cacheKey, path), token);
+                                return published;
                             }
                         }, token);
                         if (stored != null)
@@ -636,6 +642,7 @@ public sealed class PlaybackAudioCache
 internal sealed class PlaybackAudioLease(string url, bool cacheHit = false, Action? release = null, Action? invalidate = null) : IDisposable
 {
     private Action? _release = release;
+    internal RecorderOperation? Owner { get; set; }
     internal string Url { get; } = url;
     internal bool CacheHit { get; } = cacheHit;
     internal void Invalidate() => invalidate?.Invoke();

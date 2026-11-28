@@ -7,6 +7,9 @@ public sealed class PlaybackCompletion
     private int _result;
     private Action? _started;
     private Action? _ended;
+    private RecorderOperation? _recorder;
+    internal bool RecorderRetired => _recorder?.Token.IsCancellationRequested == true;
+    internal void Bind(RecorderOperation? recorder) => _recorder = recorder;
     internal bool Confirmed => Volatile.Read(ref _result) == 1;
     internal bool IsFinished => Volatile.Read(ref _result) != 0;
 
@@ -21,8 +24,20 @@ public sealed class PlaybackCompletion
         catch (Exception ex) { AppLog.DebugWriteLine(() => $"Playback start observer failed ({ex.GetType().Name})."); }
     }
 
-    internal bool Confirm(CancellationToken token) =>
-        !token.IsCancellationRequested && Finish(1);
+    internal bool Confirm(CancellationToken token)
+    {
+        if (_recorder is not { } recorder)
+            return !token.IsCancellationRequested && Finish(1);
+        bool confirmed = false;
+        recorder.TryApply(() =>
+        {
+            if (!token.IsCancellationRequested)
+                confirmed = Interlocked.CompareExchange(ref _result, 1, 0) == 0;
+        });
+        if (confirmed)
+            NotifyEnded();
+        return confirmed;
+    }
 
     internal bool Reject() => Finish(2);
 
@@ -30,9 +45,14 @@ public sealed class PlaybackCompletion
     {
         if (Interlocked.CompareExchange(ref _result, result, 0) != 0)
             return false;
+        NotifyEnded();
+        return true;
+    }
+
+    private void NotifyEnded()
+    {
         Interlocked.Exchange(ref _started, null);
         try { Interlocked.Exchange(ref _ended, null)?.Invoke(); }
         catch (Exception ex) { AppLog.DebugWriteLine(() => $"Playback end observer failed ({ex.GetType().Name})."); }
-        return true;
     }
 }

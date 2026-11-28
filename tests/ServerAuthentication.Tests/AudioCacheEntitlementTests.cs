@@ -25,7 +25,9 @@ internal static class AudioCacheEntitlementTests
             Key(Recorder, Independent, accountTwo),
             Key(Guid.NewGuid(), Independent, accountOne),
             Key(Recorder, Independent + "/different", accountOne),
-            Key(Recorder, Independent, accountOne, "https://auth-other.test")
+            Key(Recorder, Independent, accountOne, "https://auth-other.test"),
+            RecordingCacheKey.Create(Recorder, Independent, "shared-recording-id", accountOne, null, Now)!.Value,
+            RecordingCacheKey.Create(Recorder, Independent, "shared-recording-id", accountOne, null, Now.AddSeconds(1))!.Value
         };
         Check(accountOne != null && accountTwo != null && variants.Distinct().Count() == variants.Length,
             "A case-sensitive recorder login, archive edit, or account authority must not collide.");

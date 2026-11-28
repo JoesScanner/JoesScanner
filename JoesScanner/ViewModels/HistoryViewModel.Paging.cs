@@ -16,7 +16,7 @@ public sealed partial class HistoryViewModel
     internal event Action? OlderHistoryResultsAdded;
 
     public bool CanSearch => OwnsHistoryPage(_historyOwnership) && !IsLoading &&
-        _historyRecorder is { } recorder && CurrentFilters().IsValidFor(recorder.Id);
+        _selectedAccess is { Retired: false } && _historyRecorder is { } recorder && CurrentFilters().IsValidFor(recorder.Id);
     public bool HasHistoryResults => _historyResults != null && Calls.Count != 0;
     public bool CanLoadMoreOlder => HasHistoryResults && _historyResults!.HasMore && !IsLoading && !_isPaging &&
         OwnsHistoryPage(_historyOwnership);
@@ -117,7 +117,7 @@ public sealed partial class HistoryViewModel
         HistorySearchResult? previous, Func<CancellationToken, Task<HistorySearchResult>> fetch)
     {
         var request = _historyPageRequests.Begin(manual: false, lease.Token);
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(request.Token);
+        using var deadline = _selectedAccess!.Link(request.Token);
         deadline.CancelAfter(TimeSpan.FromSeconds(40));
         bool OwnsRequest() => request.CanContinue && OwnsHistoryPage(lease) && recorder == _historyRecorder;
 
@@ -136,7 +136,7 @@ public sealed partial class HistoryViewModel
                 if (!OwnsRequest())
                     return false;
                 deadline.Token.ThrowIfCancellationRequested();
-                if (page.Snapshot.Access.Recorder != recorder ||
+                if (page.Snapshot.Access.Retired || page.Snapshot.Access != _selectedAccess || page.Snapshot.Access.Recorder != recorder ||
                     previous != null && !ReferenceEquals(previous.Snapshot, page.Snapshot))
                     throw new HistoryResultsChangedException();
 

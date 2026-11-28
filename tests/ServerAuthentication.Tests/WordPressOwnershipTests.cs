@@ -272,6 +272,10 @@ namespace JoesScanner.Services
     {
         internal static string GetString(string key, string fallback = "") => fallback;
         internal static void SetString(string key, string value) { }
+        internal static string? Read(Microsoft.Data.Sqlite.SqliteTransaction transaction, string key) => null;
+        internal static void Write(Microsoft.Data.Sqlite.SqliteTransaction transaction, string key, string value) { }
+        internal static bool TryWrite(Action<Microsoft.Data.Sqlite.SqliteTransaction> write, Func<Action, bool> tryCommit) =>
+            tryCommit(() => { });
         internal static long GetLong(string key, long fallback) => fallback;
         internal static void SetLong(string key, long value) { }
     }

@@ -15,6 +15,8 @@ internal static class LiveHistoryHandoffTests
             await PendingSelectionAsync(Path.Combine(directory.FullName, "selection.sqlite"), closeBeforeRead: false);
             await PendingSelectionAsync(Path.Combine(directory.FullName, "rapid.sqlite"), closeBeforeRead: true);
             await ActivePlaybackAsync(Path.Combine(directory.FullName, "active.sqlite"));
+            await RecorderRetiresNativePlaybackAsync(Path.Combine(directory.FullName, "recorder-native.sqlite"));
+            await RecorderSwitchAfterNativeEndAsync(Path.Combine(directory.FullName, "recorder-completed.sqlite"));
             await CompletedBeforeHandoffAsync(Path.Combine(directory.FullName, "completion.sqlite"));
             await ManualSelectionDuringPlaybackAsync(Path.Combine(directory.FullName, "manual.sqlite"));
             await ManualSelectionDuringCommitAsync(Path.Combine(directory.FullName, "manual-commit.sqlite"));
@@ -40,6 +42,114 @@ internal static class LiveHistoryHandoffTests
             SqliteConnection.ClearAllPools();
             directory.Delete(recursive: true);
         }
+    }
+
+    private static async Task RecorderRetiresNativePlaybackAsync(string path)
+    {
+        foreach (var inHistory in new[] { false, true })
+        {
+            var recorder = new RecorderOperation();
+            var unrelated = new RecorderOperation();
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var canceled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            var player = new HandoffAudio
+            {
+                NativeAttemptForTest = async (_, nativeToken, completion) =>
+                {
+                    using var observe = nativeToken.Register(() => canceled.TrySetResult());
+                    entered.TrySetResult();
+                    await canceled.Task.WaitAsync(timeout.Token);
+                    Check(!completion.Confirm(CancellationToken.None), "A late native end confirmed a retired recorder.");
+                }
+            };
+            var ownership = new PlaybackOwnership();
+            MainViewModel? live = null;
+            Task playback;
+            if (inHistory)
+            {
+                var history = new HistoryViewModel(ownership, player) { NativeRecorderForTest = recorder };
+                history.OpenForTest();
+                await history.SearchForTestAsync([history.MakeCallForTest("private", -1)], false);
+                playback = history.PlayForTestAsync();
+            }
+            else
+            {
+                live = new MainViewModel(ownership, player, path) { NativeRecorderForTest = recorder };
+                await live.StartForTestAsync();
+                await live.AddForTestAsync("private");
+                playback = live.SelectForTestAsync("private");
+            }
+            await entered.Task.WaitAsync(timeout.Token);
+            unrelated.Retire();
+            Check(!canceled.Task.IsCompleted, "An unrelated recorder canceled the playing clip.");
+            recorder.Retire();
+            await playback.WaitAsync(timeout.Token);
+            Check(canceled.Task.IsCompletedSuccessfully && player.Completed.IsEmpty &&
+                (live == null || await live.IsPendingForTestAsync("private")),
+                "Retired playback must stop without marking a recording complete.");
+        }
+    }
+
+    private static async Task RecorderSwitchAfterNativeEndAsync(string path)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var token = timeout.Token;
+        var recorder = Guid.NewGuid();
+        var other = Guid.NewGuid();
+        var ended = Signal();
+        var releasePlayer = Signal();
+        var writing = Signal();
+        var releaseWrite = Signal();
+        var player = new HandoffAudio
+        {
+            NativeAttemptForTest = async (_, nativeToken, completion) =>
+            {
+                Check(completion.Confirm(nativeToken), "Alpha's native end must be accepted before its configuration retires.");
+                ended.TrySetResult();
+                await releasePlayer.Task.WaitAsync(token);
+            }
+        };
+        var live = new MainViewModel(new PlaybackOwnership(), player, path);
+        live.ConfigureAudioSourceRecordersForTest(recorder, other);
+        await live.StartForTestAsync();
+        var alpha = await live.ReplaceRecorderForTestAsync(recorder, "Alpha", token);
+        live.NativeRecorderForTest = alpha.Operation;
+        await live.AddForTestAsync("overlap");
+        live.BeforeCommitForTest = () =>
+        {
+            writing.TrySetResult();
+            return releaseWrite.Task.WaitAsync(token);
+        };
+
+        var selection = live.StartQueueForTestAsync();
+        await ended.Task.WaitAsync(token);
+        var switching = live.ReplaceRecorderForTestAsync(recorder, "Bravo", token);
+        await live.ReplaceRecorderForTestAsync(other, "Other1", token);
+        Check(!switching.IsCompleted, "The new owner must wait for the accepted end to leave the native player.");
+        releasePlayer.TrySetResult();
+        await writing.Task.WaitAsync(token);
+        await live.ReplaceRecorderForTestAsync(other, "Other2", token);
+        Check(!switching.IsCompleted, "The new owner must wait for its recorder's completion write.");
+        releaseWrite.TrySetResult();
+        await Task.WhenAll(selection, switching).WaitAsync(token);
+        var bravo = await switching;
+        await live.AddForTestAsync("overlap", audio: false);
+
+        using var db = new SqliteConnection("Data Source=" + path);
+        db.Open();
+        using var command = db.CreateCommand();
+        command.CommandText = """
+            SELECT q.account_scope, q.disposition, s.stopped FROM live_queue_recordings q
+            JOIN live_queue_servers s USING (server, account_scope)
+            WHERE q.recording_id='overlap' ORDER BY q.arrival_sequence
+            """;
+        using var rows = command.ExecuteReader();
+        Check(rows.Read() && rows.GetString(0) == alpha.AccountScope && rows.GetInt32(1) == 1 && rows.GetInt32(2) == 1,
+            "The stopped Alpha scope must retain the confirmed completion.");
+        Check(rows.Read() && rows.GetString(0) == bravo.AccountScope && rows.GetInt32(1) == 0 &&
+            rows.GetInt32(2) == 0 && !rows.Read(), "Bravo's overlapping recording must remain pending.");
+        Console.WriteLine("PASS Recorder replacement preserves native ends accepted before retirement and leaves unrelated recorders available");
     }
 
     private static async Task PendingSelectionAsync(string path, bool closeBeforeRead)

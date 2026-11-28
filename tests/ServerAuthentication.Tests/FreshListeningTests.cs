@@ -13,8 +13,9 @@ internal static partial class MobileRecoveryTests
         var beforeExit = storage.OpenQueue();
         var old = new DurableLiveQueue.Run(ListeningServer, 1, null);
         await beforeExit.StartListeningAsync(old, Now.AddHours(-1), token);
+        var priorRecordingTime = Now.AddMinutes(-20);
         for (var i = 0; i < 20; i++)
-            await beforeExit.ObserveAsync(old, $"old-{i}", Now.AddMinutes(-20), new(new(), $"Old {i}", 0), token);
+            await beforeExit.ObserveAsync(old, $"old-{i}", priorRecordingTime, new(new(), $"Old {i}", 0), token);
         await beforeExit.MarkPlayingAsync(old, "old-0", token);
         var firstSequence = await beforeExit.GetArrivalSequenceAsync(old, "old-0", token);
 
@@ -32,7 +33,7 @@ internal static partial class MobileRecoveryTests
         var stream = IngestionStream(Settings(ListeningServer), http, _ => ws);
         await using var reader = stream.GetCallStreamAsync([], token, recovery).GetAsyncEnumerator(token);
         Check(await reader.MoveNextAsync() && reader.Current.Talkgroup == "HEARTBEAT", "Expected the WebSocket to connect at Live.");
-        ws.Send(Row("old-0", Now, "updated.mp3"));
+        ws.Send(Row("old-0", priorRecordingTime, "updated.mp3"));
         Check(await reader.MoveNextAsync() && (await SaveIngestionAsync(queue, run, reader.Current, token)).IsRecoveryBacklog,
             "A repeated full socket update cannot re-queue a prior-session identity.");
         ws.Send(Row("first-live", Now.AddMinutes(5), "first.mp3"));

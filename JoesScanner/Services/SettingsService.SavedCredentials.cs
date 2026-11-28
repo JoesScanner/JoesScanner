@@ -237,7 +237,10 @@ public sealed partial class SettingsService
                 var encoded = string.IsNullOrWhiteSpace(username) ? null :
                     ProtectedCredentials.Encode(new(username.Trim(), password ?? string.Empty));
                 if (_unverifiedCredentialWrites.Contains(CredentialKey(scope)) || ReadCredential(scope) != encoded)
+                {
+                    DirectoryRecorderPolicy.For(this).Retire(serverId);
                     SaveCredential(scope, encoded);
+                }
             }
             catch (CredentialStorageException)
             {

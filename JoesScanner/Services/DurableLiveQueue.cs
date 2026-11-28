@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text.Json;
 using JoesScanner.Models;
 using Microsoft.Data.Sqlite;
@@ -6,25 +7,65 @@ namespace JoesScanner.Services;
 
 // This journal contains recordings observed by Live. Its high-water observation
 // can identify a boundary, but is not proof that a server-side gap was reconciled.
-public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
+public sealed partial class DurableLiveQueue
 {
+    private readonly IDatabasePathProvider paths;
+    private readonly Func<byte[]?> _signedReferenceKey;
+
+    internal DurableLiveQueue(IDatabasePathProvider paths, Func<byte[]?> signedReferenceKey)
+    {
+        this.paths = paths;
+        _signedReferenceKey = signedReferenceKey;
+    }
+
     private readonly SemaphoreSlim _ownershipWrites = new(1);
     private readonly Dictionary<(string Server, string Account), (long Owner, bool Retired)> _ownershipRequests = [];
+    private const string CustomScopePrefix = "custom:";
     private readonly object _observationOrder = new();
     private Task _lastObservation = Task.CompletedTask;
     internal sealed record Run(string Server, long Owner, int? VerifiedTier, bool Protected = false, string? Account = null,
-        Guid? ServerId = null)
+        Guid? ServerId = null, RecorderOperation? Operation = null)
     {
-        internal string StorageKey => ServerId?.ToString("N") ?? Server;
+        internal string StorageKey => RecordingStorageReference.ArchiveKey(ServerId, Server)
+            ?? throw new InvalidOperationException("A Live queue requires a valid recorder endpoint.");
 
-        internal string AccountScope => !string.IsNullOrWhiteSpace(Account) && Account != ":legacy" ? Account :
+        // A saved profile can have several archives on disk but only one live configuration.
+        internal (string Server, string Account) ListeningSlot => ServerId is { } id
+            ? (id.ToString("N"), string.Empty) : (StorageKey, AccountScope);
+
+        internal void Commit(SqliteTransaction transaction, CancellationToken token)
+        {
+            if (Operation != null)
+                Operation.Apply(transaction.Commit, token);
+            else
+            {
+                token.ThrowIfCancellationRequested();
+                transaction.Commit();
+            }
+        }
+
+        private string AccessAccount => !string.IsNullOrWhiteSpace(Account) && Account != ":legacy" ? Account :
             !Protected ? string.Empty : throw new InvalidOperationException("A protected Live queue requires a known account.");
 
+        internal string AccountScope => !Protected && AccessAccount.Length != 0 ? CustomScopePrefix + AccessAccount : AccessAccount;
+
+        internal bool MatchesCard(CallItem? item, string id) =>
+            item?.LiveState != null && item.BackendId == id &&
+            RecordingIdentity.From(item) == new RecordingIdentity(ServerId, Server, id, Protected, AccessAccount);
+
+        internal CallItem? FindCard(IEnumerable<CallItem> visible, CallItem? active, string id)
+        {
+            foreach (var item in visible)
+                if (MatchesCard(item, id))
+                    return item;
+            return MatchesCard(active, id) ? active : null;
+        }
+
         internal bool Owns(RecordingAccessContext? access) =>
-            Protected == (access?.Protected == true) && (access?.Account ?? string.Empty) == AccountScope;
+            Protected == (access?.Protected == true) && (access?.Account ?? string.Empty) == AccessAccount;
     }
     internal readonly record struct Observation(long? ArrivalSequence, bool Changed, bool IsRecoveryBacklog = false,
-        bool FirstAdmission = false, bool PlaybackChanged = false);
+        bool FirstAdmission = false, bool PlaybackChanged = false, bool ConflictingRecordingTime = false);
     internal sealed record JumpResult(Recording Target, bool PlayTarget);
     internal sealed record Selection(Run Scope, Recording Row);
     internal sealed record CombinedJump(Selection Target, bool PlayTarget);
@@ -44,7 +85,7 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
                 state.RestoreSnapshot(observed);
             DateTimeOffset? timestamp = RecordedUtc is { } ticks ? new DateTimeOffset(ticks, TimeSpan.Zero) : null;
             var metadata = state.Read().Metadata with { Timestamp = timestamp?.LocalDateTime };
-            return new CallItem
+            var item = new CallItem
             {
                 BackendId = Id, ServerId = serverId, LiveState = state, RecordingTimeUtc = timestamp,
                 RecordingServer = server, RecordingAccess = Access, LivePlaybackOwner = Owner, LiveArrivalSequence = ArrivalSequence,
@@ -53,8 +94,10 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
                 Talkgroup = metadata.Talkgroup ?? string.Empty, Source = metadata.Radio ?? string.Empty,
                 Site = metadata.Site ?? string.Empty, VoiceReceiver = metadata.Receiver ?? string.Empty,
                 CallDurationSeconds = metadata.DurationSeconds ?? 0,
-                Transcription = Snapshot?.Transcription ?? string.Empty, AudioUrl = Snapshot?.AudioUrl ?? string.Empty
+                Transcription = Snapshot?.Transcription ?? string.Empty
             };
+            item.ApplyRecordingAudio(state.Read());
+            return item;
         }
     }
 
@@ -71,7 +114,7 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
     private async Task OpenAsync(Run run, DateTimeOffset now, CancellationToken token, bool explicitlyStopped, bool startAtLiveEdge)
     {
         token.ThrowIfCancellationRequested();
-        var scope = (run.StorageKey, run.AccountScope);
+        var scope = run.ListeningSlot;
         lock (_ownershipRequests)
         {
             if (_ownershipRequests.TryGetValue(scope, out var latest) &&
@@ -98,7 +141,9 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
                         if (_ownershipRequests[scope] != (run.Owner, false))
                             throw new InvalidOperationException("This Live queue run has already been replaced or retired.");
                     }
-                    return ExecuteScopeTransitionAsync(run, """
+                    return ExecuteAsync(run, """
+            UPDATE live_queue_servers SET stopped = 1
+            WHERE server GLOB $archives AND stopped = 0 AND (server <> $server OR account_scope <> $account);
             UPDATE live_queue_recovery SET skip_unseen = 1
             WHERE server = $server AND account_scope = $account
               AND ($stopped = 1 OR ($fresh = 1 AND EXISTS
@@ -115,7 +160,8 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
                 stopped = 0;
             UPDATE live_queue_recordings SET disposition = 2, audio_ready = 0, recovery_backlog = 1
             WHERE $fresh = 1 AND server = $server AND account_scope = $account AND disposition = 0 AND first_owner <> $owner;
-            """, token, ("$now", now.UtcTicks), ("$stopped", explicitlyStopped ? 1 : 0), ("$fresh", startAtLiveEdge ? 1 : 0));
+            """, token, ("$archives", run.ServerId is { } id ? RecordingStorageReference.RecorderPrefix(id) + "*" : string.Empty),
+                        ("$now", now.UtcTicks), ("$stopped", explicitlyStopped ? 1 : 0), ("$fresh", startAtLiveEdge ? 1 : 0));
                 }, token).ConfigureAwait(false);
                 return true;
             }
@@ -125,7 +171,7 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
 
     internal async Task StopAsync(Run run)
     {
-        var scope = (run.StorageKey, run.AccountScope);
+        var scope = run.ListeningSlot;
         lock (_ownershipRequests)
         {
             if (!_ownershipRequests.TryGetValue(scope, out var latest) || latest.Owner <= run.Owner)
@@ -134,7 +180,8 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
         await _ownershipWrites.WaitAsync().ConfigureAwait(false);
         try
         {
-            await RetryBusyWriteAsync(() => ExecuteScopeTransitionAsync(run,
+            // Cleanup of a retired configuration still belongs to its original owner.
+            await RetryBusyWriteAsync(() => ExecuteAsync(run with { Operation = null },
                 """
                 UPDATE live_queue_servers SET stopped = 1, resume_id = NULL
                 WHERE server = $server AND account_scope = $account AND owner = $owner;
@@ -167,6 +214,7 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
         Action<Exception> report, CancellationToken token) => InArrivalOrderAsync(
         () => PersistObservationAsync(() => WithConnectionAsync(token, db =>
         {
+            using var transaction = db.BeginTransaction();
             using var command = Command(db, run, $"""
                 INSERT INTO live_queue_recovery(server, account_scope, window_id, revision, since_utc)
                 SELECT $server, $account, $window, 1, $since WHERE {ActiveRecoveryScope}
@@ -174,19 +222,25 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
                     since_utc = min(since_utc, excluded.since_utc), revision = revision + 1
                 RETURNING since_utc, window_id, revision
                 """, ("$window", Guid.NewGuid().ToString("N")), ("$since", since.ToUnixTimeSeconds()));
-            return ReadRecoveryWindow(command);
+            command.Transaction = transaction;
+            var result = ReadRecoveryWindow(command);
+            run.Commit(transaction, token);
+            return result;
         }), report, token), token);
 
     internal Task<bool> CompleteRecoveryAsync(Run run, LiveStreamRecovery.Window window,
         Action<Exception> report, CancellationToken token) => InArrivalOrderAsync(
         () => PersistObservationAsync(() => WithConnectionAsync(token, db =>
         {
+            using var transaction = db.BeginTransaction();
             using var command = Command(db, run, $"""
                 DELETE FROM live_queue_recovery WHERE server = $server AND account_scope = $account
                   AND window_id = $window AND revision = $revision AND {ActiveRecoveryScope}
                 """, ("$window", window.Id), ("$revision", window.Revision));
-            token.ThrowIfCancellationRequested();
-            return command.ExecuteNonQuery() != 0;
+            command.Transaction = transaction;
+            var changed = command.ExecuteNonQuery() != 0;
+            run.Commit(transaction, token);
+            return changed;
         }), report, token), token);
 
     private static LiveStreamRecovery.Window? ReadRecoveryWindow(SqliteCommand command)
@@ -246,10 +300,10 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
     internal Task<Observation> ObserveWithPositionAsync(Run run, string id, DateTimeOffset? time, LiveCallSnapshot incoming,
         CancellationToken token, RecordingOrigin origin, bool existingOnly, Action<Exception>? report = null,
         TimeProvider? clock = null, string? recoveryWindowId = null, bool historyBaseline = false,
-        bool skipAutomatic = false, bool audioReferenceChanged = false) => InArrivalOrderAsync(() =>
+        bool skipAutomatic = false) => InArrivalOrderAsync(() =>
         {
             Task<Observation> Write() => WriteObservationAsync(run, id, time, incoming, token, origin, existingOnly,
-                recoveryWindowId, historyBaseline, skipAutomatic, audioReferenceChanged);
+                recoveryWindowId, historyBaseline, skipAutomatic);
             return report == null ? Write() : PersistObservationAsync(Write, report, token, clock);
         }, token);
 
@@ -277,12 +331,14 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
 
     private Task<Observation> WriteObservationAsync(Run run, string id, DateTimeOffset? time, LiveCallSnapshot incoming,
         CancellationToken token, RecordingOrigin origin, bool existingOnly, string? recoveryWindowId, bool historyBaseline,
-        bool skipAutomatic, bool audioReferenceChanged)
+        bool skipAutomatic)
     {
         // Signed URLs may contain credentials. Keep those on the in-memory card.
-        var url = DurableAudioUrl(incoming.AudioUrl);
         return WithConnectionAsync<Observation>(token, db =>
         {
+            var observedSecond = incoming.RecordingUnixSeconds ?? time?.ToUnixTimeSeconds();
+            if (incoming.RecordingUnixSeconds is { } supplied && time.HasValue && supplied != time.Value.ToUnixTimeSeconds())
+                return new(null, false, ConflictingRecordingTime: true);
             using var transaction = db.BeginTransaction();
             using var lookup = Command(db, run, """
                 SELECT q.recorded_utc, q.payload, q.origin, q.protected, q.account_scope, q.first_owner,
@@ -299,6 +355,9 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
             {
                 if (!reader.Read())
                     previous = null;
+                else if (observedSecond.HasValue && !reader.IsDBNull(0) &&
+                    new DateTimeOffset(reader.GetInt64(0), TimeSpan.Zero).ToUnixTimeSeconds() != observedSecond.Value)
+                    return new(null, false, ConflictingRecordingTime: true);
                 else if (reader.GetInt32(7) != 0)
                     return new(reader.GetInt64(6), false, reader.GetBoolean(8));
                 else
@@ -311,7 +370,8 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
 
             if (existingOnly && previous == null)
                 return default;
-            var stamp = previous?.RecordedUtc ?? time?.UtcTicks;
+            var stamp = previous?.RecordedUtc ?? time?.UtcTicks ??
+                (observedSecond is { } seconds ? DateTimeOffset.FromUnixTimeSeconds(seconds).UtcTicks : (long?)null);
             var isRecoveryBacklog = previous == null && historyBaseline;
             if (previous == null && recoveryWindowId != null)
             {
@@ -329,18 +389,48 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
 
             var merged = new LiveCallState(run.Server, id);
             if (previous?.Snapshot is { } savedSnapshot)
-                merged.Observe(savedSnapshot, 1);
-            merged.Observe(incoming with { AudioUrl = url }, 2);
-            var snapshot = merged.Read();
-            if (url == null && !string.IsNullOrWhiteSpace(incoming.AudioUrl))
-                snapshot = snapshot with { AudioUrl = null };
-            var hasReference = !string.IsNullOrWhiteSpace(incoming.AudioUrl);
-            var newReference = hasReference && (previous == null || audioReferenceChanged ||
-                previous.Snapshot?.AudioUrl != url || !wasReady && audioRevision == 0);
-            var ready = !skipAutomatic && !isRecoveryBacklog && (wasReady || newReference);
-            if (previous != null && !skipAutomatic && !newReference &&
-                previous.Snapshot == snapshot && previous.RecordedUtc == stamp)
-                return new(previous.ArrivalSequence, false);
+                merged.RestoreSnapshot(savedSnapshot);
+            merged.Observe(incoming, LiveCallState.NextVersion());
+            var observed = merged.Read();
+            var url = DurableAudioUrl(observed.AudioUrl);
+            var tag = observed.SignedReferenceTag;
+            var changedReference = false;
+            if (observed.AudioUrl is { Length: > 0 } transient && url == null)
+            {
+                // Include the recording scope to prevent linkability between journal entries.
+                if (_signedReferenceKey() is { } key)
+                {
+                    var input = JsonSerializer.SerializeToUtf8Bytes(new[] { run.StorageKey, run.AccountScope, id, transient });
+                    // A new vault key cannot prove a change to an existing URL. Adopt
+                    // its first tag as a baseline without rearming a deferred duplicate.
+                    var keyId = Convert.ToHexString(HMACSHA256.HashData(key, "reference key id"u8).AsSpan(0, 12)) + ".";
+                    tag = keyId + Convert.ToHexString(HMACSHA256.HashData(key, input));
+                    if (previous?.Snapshot?.SignedReferenceTag is { } priorTag && priorTag.StartsWith(keyId, StringComparison.Ordinal))
+                        changedReference = tag != priorTag;
+                    CryptographicOperations.ZeroMemory(input);
+                }
+                else
+                {
+                    tag = previous?.Snapshot?.SignedReferenceTag;
+                }
+            }
+            var snapshot = observed with { AudioUrl = url, SignedReferenceTag = tag };
+            var accepted = incoming.AudioOrder?.Supersedes(previous?.Snapshot?.AudioOrder) ?? true;
+            var hasReference = accepted && !string.IsNullOrWhiteSpace(incoming.AudioUrl);
+            var lostReference = accepted && snapshot.Availability == RecordingAudioAvailability.Missing &&
+                previous?.Snapshot?.EffectiveAvailability == RecordingAudioAvailability.Available;
+            var newReference = hasReference && (previous == null || changedReference ||
+                previous.Snapshot?.AudioUrl != url || previous.Snapshot?.EffectiveAvailability != RecordingAudioAvailability.Available ||
+                !wasReady && audioRevision == 0);
+            var ready = !skipAutomatic && !isRecoveryBacklog && snapshot.Availability != RecordingAudioAvailability.Missing &&
+                (wasReady || newReference);
+            var duplicate = previous != null && !skipAutomatic && !newReference &&
+                previous.Snapshot == (snapshot with { AudioOrder = previous.Snapshot?.AudioOrder, FieldOrder = previous.Snapshot?.FieldOrder }) &&
+                previous.RecordedUtc == stamp;
+            // Persist a newer recorder watermark without waking playback for identical content.
+            if (duplicate && (incoming.AudioOrder == null || previous!.Snapshot?.AudioOrder == snapshot.AudioOrder) &&
+                (incoming.FieldOrder == null || snapshot.FieldOrder?.SameVersions(previous!.Snapshot?.FieldOrder) == true))
+                return new(previous!.ArrivalSequence, false);
 
             using var save = Command(db, run, previous == null ? """
                 INSERT INTO live_queue_recordings(server, recording_id, recorded_utc, first_owner, payload, audio_ready,
@@ -358,16 +448,15 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
                 RETURNING arrival_sequence
                 """, ("$id", id), ("$time", (object?)stamp ?? DBNull.Value),
                 ("$payload", skipAutomatic ? DBNull.Value : JsonSerializer.Serialize(snapshot)),
-                ("$ready", ready ? 1 : 0), ("$revision", audioRevision + (newReference ? 1 : 0)),
+                ("$ready", ready ? 1 : 0), ("$revision", audioRevision + (newReference || lostReference ? 1 : 0)),
                 ("$skip", skipAutomatic ? 1 : 0), ("$backlog", isRecoveryBacklog ? 1 : 0),
                 ("$live", (int)RecordingOrigin.Live),
                 ("$origin", (int)origin), ("$protected", run.Protected ? 1 : 0));
             save.Transaction = transaction;
             token.ThrowIfCancellationRequested();
             var sequence = save.ExecuteScalar() as long?;
-            token.ThrowIfCancellationRequested();
-            transaction.Commit();
-            return new(sequence, sequence != null, isRecoveryBacklog && sequence != null,
+            run.Commit(transaction, token);
+            return new(sequence, sequence != null && !duplicate, isRecoveryBacklog && sequence != null,
                 FirstAdmission: previous == null && sequence.HasValue,
                 PlaybackChanged: sequence.HasValue && (ready != wasReady ||
                     ready && (newReference || previous?.Snapshot?.Metadata != snapshot.Metadata)));
@@ -405,7 +494,7 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
             {
                 using var command = EligibleCommand(db, run, historicalFloor, $"""
                     SELECT q.recorded_utc, q.payload, q.origin, q.protected, q.account_scope, q.first_owner,
-                           q.arrival_sequence, q.recording_id
+                           q.arrival_sequence, q.recording_id, q.audio_revision
                     FROM live_queue_recordings q JOIN live_queue_servers s USING (server, account_scope)
                     WHERE {EligibleRecording} AND {disposition}
                       AND q.arrival_sequence >= s.playback_floor AND q.arrival_sequence > $after
@@ -443,8 +532,7 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
                     if (run != selected)
                         UpdatePlaybackFloor(db, transaction, run, sequence);
             }
-            token.ThrowIfCancellationRequested();
-            transaction.Commit();
+            CommitRuns(runs, transaction, token);
             return changed;
         }), token);
 
@@ -457,8 +545,7 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
             using var transaction = db.BeginTransaction();
             foreach (var run in runs)
                 UpdatePlaybackFloor(db, transaction, run, floor, forwardOnly: true);
-            token.ThrowIfCancellationRequested();
-            transaction.Commit();
+            CommitRuns(runs, transaction, token);
             return true;
         }), token);
 
@@ -482,8 +569,7 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
                     UpdatePlaybackFloor(db, transaction, run, floor);
                 }
                 commitPlayback?.Invoke(transaction);
-                token.ThrowIfCancellationRequested();
-                transaction.Commit();
+                CommitRuns(runs, transaction, token);
                 return floor;
             }).ConfigureAwait(false);
         }, token);
@@ -572,7 +658,7 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
         var liveEdgeFilter = liveEdge ? "AND q.recovery_backlog = 0 AND q.arrival_sequence >= s.playback_floor" : "";
         var source = AutomaticAudioClause(db, run, automatic);
         var sql = $"""
-            SELECT q.recorded_utc, q.payload, q.origin, q.protected, q.account_scope, q.first_owner, q.arrival_sequence, q.recording_id
+            SELECT q.recorded_utc, q.payload, q.origin, q.protected, q.account_scope, q.first_owner, q.arrival_sequence, q.recording_id, q.audio_revision
             FROM live_queue_recordings q
             JOIN live_queue_servers s USING (server, account_scope)
             WHERE {EligibleRecording} {range} {liveEdgeFilter} {source}
@@ -586,10 +672,11 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
     }
 
     internal Task<(RecordingAccessContext Access, long Owner, DateTimeOffset? RecordedAt)?> GetAccessAsync(
-        string server, string id, string? account, CancellationToken token) =>
+        string server, string id, string? account, CancellationToken token, bool protectedSource = true, Guid? recorderId = null) =>
         WithConnectionAsync<(RecordingAccessContext, long, DateTimeOffset?)?>(token, db =>
         {
-            using var command = Command(db, new Run(server, 0, null, Protected: account != null, Account: account), """
+            using var command = Command(db, new Run(server, 0, null, Protected: account != null && protectedSource,
+                Account: account, ServerId: recorderId), """
                 SELECT origin, protected, account_scope, first_owner, recorded_utc FROM live_queue_recordings
                 WHERE server = $server AND account_scope = $account AND recording_id = $id
                 """, ("$id", id));
@@ -647,7 +734,10 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
                 """, token, ("$id", id), ("$status", outcome == PlaybackOutcome.Completed ? 1 : 2));
 
     internal Task CommitCompletionAsync(Run run, string id) =>
-        RetryBusyWriteAsync(() => MarkAsync(run, id, PlaybackOutcome.Completed, CancellationToken.None), CancellationToken.None);
+        // Native end was accepted under this operation before admission to the completion FIFO.
+        // A later configuration change cannot redirect it; MarkAsync also compares the run owner.
+        RetryBusyWriteAsync(() => MarkAsync(run with { Operation = null }, id, PlaybackOutcome.Completed, CancellationToken.None),
+            CancellationToken.None);
 
     internal async Task<JumpResult?> JumpToLiveAsync(Run run, long historicalFloor, bool skipSelected, CancellationToken token,
         string? failedId = null, Func<Task<long>>? prepareBoundary = null,
@@ -695,8 +785,7 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
                     skip.ExecuteNonQuery();
                 }
                 commitPlayback?.Invoke(transaction);
-                token.ThrowIfCancellationRequested();
-                transaction.Commit();
+                CommitRuns(runs, transaction, token);
                 return newest == null ? null : new(newest, playTarget);
             }).ConfigureAwait(false);
         }, token);
@@ -706,27 +795,36 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
         var snapshot = reader.IsDBNull(1) ? null :
                 JsonSerializer.Deserialize<LiveCallSnapshot>(reader.GetString(1))
                 ?? throw new InvalidDataException("Live recording snapshot is missing.");
-        if (snapshot?.AudioUrl is { } audio)
-            snapshot = snapshot with { AudioUrl = DurableAudioUrl(audio) };
+        if (snapshot != null)
+        {
+            var availability = snapshot.EffectiveAvailability;
+            if (availability == RecordingAudioAvailability.Unknown && reader.GetInt64(reader.GetOrdinal("audio_revision")) > 0)
+                availability = RecordingAudioAvailability.Available;
+            // Legacy revision-zero rows lost the distinction between an omitted signed URL
+            // and a missing recording. Only a recorder observation can resolve them.
+            snapshot = snapshot with
+            {
+                AudioUrl = DurableAudioUrl(snapshot.AudioUrl), Availability = availability,
+                RecordingUnixSeconds = reader.IsDBNull(0) ? snapshot.RecordingUnixSeconds :
+                    new DateTimeOffset(reader.GetInt64(0), TimeSpan.Zero).ToUnixTimeSeconds()
+            };
+        }
         return new(id, reader.GetInt64(6), reader.IsDBNull(0) ? null : reader.GetInt64(0), snapshot,
             ReadAccess(reader, 2), reader.GetInt64(5));
     }
 
-    private static RecordingAccessContext ReadAccess(SqliteDataReader reader, int offset) =>
-        new((RecordingOrigin)reader.GetInt32(offset), reader.GetBoolean(offset + 1),
-            reader.GetString(offset + 2) is { Length: > 0 } scope ? scope : null);
+    private static RecordingAccessContext ReadAccess(SqliteDataReader reader, int offset)
+    {
+        var isProtected = reader.GetBoolean(offset + 1);
+        var scope = reader.GetString(offset + 2);
+        if (!isProtected && scope.StartsWith(CustomScopePrefix, StringComparison.Ordinal))
+            scope = scope[CustomScopePrefix.Length..];
+        return new((RecordingOrigin)reader.GetInt32(offset), isProtected, scope.Length == 0 ? null : scope);
+    }
 
     internal static string? DurableAudioUrl(string? url) => RecordingStorageReference.ForJournal(url);
 
     private Task ExecuteAsync(Run run, string sql, CancellationToken token, params (string, object)[] parameters) =>
-        WithConnectionAsync(token, db =>
-        {
-            using var command = Command(db, run, sql, parameters);
-            token.ThrowIfCancellationRequested();
-            return command.ExecuteNonQuery();
-        });
-
-    private Task ExecuteScopeTransitionAsync(Run run, string sql, CancellationToken token, params (string, object)[] parameters) =>
         WithConnectionAsync(token, db =>
         {
             using var transaction = db.BeginTransaction();
@@ -734,10 +832,23 @@ public sealed partial class DurableLiveQueue(IDatabasePathProvider paths)
             command.Transaction = transaction;
             token.ThrowIfCancellationRequested();
             var changes = command.ExecuteNonQuery();
-            token.ThrowIfCancellationRequested();
-            transaction.Commit();
+            run.Commit(transaction, token);
             return changes;
         });
+
+    private static void CommitRuns(IReadOnlyList<Run> runs, SqliteTransaction transaction, CancellationToken token)
+    {
+        // A combined operation writes all affected recorders atomically. Acquire only
+        // the final-commit locks in consistent order, after acquiring the SQLite writer.
+        Action commit = transaction.Commit;
+        foreach (var run in runs.Where(r => r.Operation != null).OrderBy(r => r.ServerId).ThenBy(r => r.Owner))
+        {
+            var next = commit;
+            commit = () => run.Operation!.Apply(next, token);
+        }
+        token.ThrowIfCancellationRequested();
+        commit();
+    }
 
     private static SqliteCommand Command(SqliteConnection database, Run run, string sql, params (string Name, object Value)[] parameters)
     {

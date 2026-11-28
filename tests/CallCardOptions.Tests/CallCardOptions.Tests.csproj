@@ -30,6 +30,7 @@
     <Compile Include="../../JoesScanner/Services/DiagnosticRedaction.cs" Link="DiagnosticRedaction.cs" />
     <Compile Include="../../JoesScanner/Services/LocalCallsRepository.cs" Link="LocalCallsRepository.cs" />
     <Compile Include="../../JoesScanner/Services/ILocalCallsRepository.cs" Link="ILocalCallsRepository.cs" />
+    <Compile Include="../../JoesScanner/Services/RecordingMetadataScope.cs" Link="RecordingMetadataScope.cs" />
     <Compile Include="../../JoesScanner/Data/DbCallRecord.cs" Link="DbCallRecord.cs" />
     <Compile Include="../../JoesScanner/Services/DurableLiveQueue.cs" Link="DurableLiveQueue.cs" />
     <Compile Include="../../JoesScanner/Services/DurableLiveQueue.Scheduling.cs" Link="DurableLiveQueue.Scheduling.cs" />
@@ -54,6 +55,7 @@
     <Compile Include="../../JoesScanner/Services/MonitoringIntentStore.cs" Link="MonitoringIntentStore.cs" />
     <Compile Include="../../JoesScanner/Services/MonitoringTransportOwnership.cs" Link="MonitoringTransportOwnership.cs" />
     <Compile Include="../../JoesScanner/Services/PlaybackOutcome.cs" Link="PlaybackOutcome.cs" />
+    <Compile Include="../../JoesScanner/Services/RecorderOperation.cs" Link="RecorderOperation.cs" />
     <Compile Include="../../JoesScanner/Services/PlaybackCompletion.cs" Link="PlaybackCompletion.cs" />
     <Compile Include="../../JoesScanner/Services/MobileRecordingAttempt.cs" Link="MobileRecordingAttempt.cs" />
     <Compile Include="../../JoesScanner/Services/DurablePlaybackCommit.cs" Link="DurablePlaybackCommit.cs" />

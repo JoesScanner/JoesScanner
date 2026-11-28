@@ -351,6 +351,7 @@ namespace JoesScanner.ViewModels
                 if (!preparation.CanContinue || !_playbackOwnership.IsCurrent(live) || _monitoring.Current != run ||
                     favoriteFilter != null && !favoriteFilter(item))
                     return;
+                prepared.Owner?.Validate();
                 RequireLiveRecordingEntitlement(item);
 
                 // A failed or superseded preparation never cancels the current clip
@@ -692,8 +693,12 @@ namespace JoesScanner.ViewModels
 
         private async Task PlayOnDeviceAsync(CallItem item, string url, double rate,
             LivePlaybackRequests.Request request, CancellationToken cancellationToken, PlaybackCompletion completion,
-            Action? enteringNative = null, LivePlaybackScheduler.Choice? forecastFrom = null, Action? invalidateAudio = null)
+            Action? enteringNative = null, LivePlaybackScheduler.Choice? forecastFrom = null, Action? invalidateAudio = null,
+            RecorderOperation? owner = null)
         {
+            using var recorderLifetime = owner == null ? null : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, owner.Token);
+            cancellationToken = recorderLifetime?.Token ?? cancellationToken;
+            completion.Bind(owner);
             if (_playbackOwnership.Live is not { } live || !request.CanContinue || cancellationToken.IsCancellationRequested)
                 return;
 
@@ -713,6 +718,7 @@ namespace JoesScanner.ViewModels
                 {
                     if (!request.IsManual && scope == null)
                         return;
+                    owner?.Validate();
                     RequireCurrentRecordingAccount(item);
                     if (!request.IsManual && _manualLiveTraversal == null && !AutomaticAudioIncludes(item))
                     {
@@ -729,7 +735,7 @@ namespace JoesScanner.ViewModels
                         completion.OnStarted(() => MainThread.BeginInvokeOnMainThread(() =>
                         {
                             if (!ReferenceEquals(_nativeLiveCompletion, completion) || !request.CanContinue ||
-                                !_playbackOwnership.IsCurrent(live) || token.IsCancellationRequested || completion.IsFinished)
+                                !_playbackOwnership.IsCurrent(live) || token.IsCancellationRequested || owner?.Token.IsCancellationRequested == true || completion.IsFinished)
                                 return;
                             PublishActiveLiveCard(item, completion);
                             if (forecastFrom is { } choice && sourceRevision == _automaticAudioRevision &&
@@ -764,7 +770,7 @@ namespace JoesScanner.ViewModels
                 if (completion.Confirmed && !isCompletedReplay && scope != null &&
                     TryGetDurableRecording(item, scope, out var id))
                     saveCompletion = _playbackCommit.ConfirmAsync(scope, id);
-            });
+            }, item.ServerId);
 
             if (saveCompletion != null)
                 await saveCompletion;
@@ -772,10 +778,19 @@ namespace JoesScanner.ViewModels
             void RetirePresentation() => MainThread.BeginInvokeOnMainThread(() => ClearActiveLiveCard(completion));
         }
 
-        private async Task FlushLiveCompletionAsync(CancellationToken token = default)
+        private async Task FlushLiveCompletionAsync(CancellationToken token = default, Guid? recorderId = null)
         {
-            await _playbackOwnership.WaitForLiveReleaseAsync(token);
-            await _playbackCommit.FlushAsync(token);
+            await _playbackOwnership.WaitForLiveReleaseAsync(token, recorderId);
+            await _playbackCommit.FlushAsync(token, recorderId);
+        }
+
+        private async Task<LiveStreamRecovery> StartRecorderRecoveryAsync(DurableLiveQueue.Run scope, DateTimeOffset since,
+            CancellationToken token)
+        {
+            // A confirmed native end enters the completion queue before its player is released.
+            // Finish that recorder's write while its previous journal owner can still accept it.
+            await FlushLiveCompletionAsync(token, scope.ServerId).ConfigureAwait(false);
+            return await LiveStreamRecovery.StartListeningAsync(_durableQueue, scope, since, token).ConfigureAwait(false);
         }
     }
 }

@@ -34,15 +34,30 @@ public sealed class HistorySearchPreferences(IDatabasePathProvider paths)
         set => Write(RecorderKey, value?.ToString("N") ?? string.Empty);
     }
 
-    internal SavedHistoryFilters? ReadFilters(Guid recorder)
+    internal SavedHistoryFilters? ReadFilters(HistoryRecorderAccess access)
     {
-        var json = Read(FilterKey(recorder));
+        var scoped = ReadFilters("history_choices_" + access.MetadataKey);
+        // Older choices contained recorder-supplied names without an archive/account.
+        // Calendar preferences still belong to the user's saved recorder.
+        var dates = ReadFilters(FilterKey(access.Recorder.Id))?.Dates;
+        return scoped == null ? (dates == null ? null : new(dates)) : scoped with { Dates = dates ?? scoped.Dates };
+    }
+
+    private SavedHistoryFilters? ReadFilters(string key)
+    {
+        var json = Read(key);
         try { return json == null ? null : JsonSerializer.Deserialize<SavedHistoryFilters>(json, JsonOptions); }
         catch (JsonException) { return null; }
     }
 
-    internal void SaveFilters(Guid recorder, SavedHistoryFilters value) =>
-        Write(FilterKey(recorder), JsonSerializer.Serialize(value, JsonOptions));
+    internal void SaveFilters(HistoryRecorderAccess access, SavedHistoryFilters value)
+    {
+        using var db = Open();
+        using var transaction = db.BeginTransaction();
+        Write(db, transaction, FilterKey(access.Recorder.Id), JsonSerializer.Serialize(new SavedHistoryFilters(value.Dates), JsonOptions));
+        Write(db, transaction, "history_choices_" + access.MetadataKey, JsonSerializer.Serialize(value, JsonOptions));
+        access.TryPublish(transaction.Commit);
+    }
 
     internal static SavedScannerConnection? ChooseRecorder(IReadOnlyList<SavedScannerConnection> saved, Guid? lastHistory,
         Guid? visibleLive, string? currentEndpoint)
@@ -68,7 +83,13 @@ public sealed class HistorySearchPreferences(IDatabasePathProvider paths)
     private void Write(string key, string value)
     {
         using var db = Open();
+        Write(db, null, key, value);
+    }
+
+    private static void Write(SqliteConnection db, SqliteTransaction? transaction, string key, string value)
+    {
         using var command = db.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             INSERT INTO app_settings (setting_key, setting_value, updated_utc)
             VALUES ($key, $value, $now)

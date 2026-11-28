@@ -26,7 +26,9 @@ public sealed partial class CallHistoryService
             Talkgroups = filters.Talkgroups.DistinctBy(item => item.Value, StringComparer.Ordinal).ToArray()
         };
         var started = _clock.GetUtcNow();
-        var access = ReadRecorderAccess(recorder);
+        var access = CaptureRecorderAccess(_settingsService, recorder);
+        using var linked = access.Link(cancellationToken);
+        cancellationToken = linked.Token;
         var grant = await VerifyRecorderHistoryAsync(access, cancellationToken).ConfigureAwait(false);
         var (from, until) = GetSearchBounds(started, dates, grant.Cutoff);
         var snapshot = new HistorySearchSnapshot(access, filters, from, until, grant.Tier);
@@ -39,6 +41,8 @@ public sealed partial class CallHistoryService
         if (!previous.HasMore)
             return new(snapshot, previous.Cursor, [], false);
 
+        using var linked = snapshot.Access.Link(cancellationToken);
+        cancellationToken = linked.Token;
         var grant = await VerifyRecorderHistoryAsync(snapshot.Access, cancellationToken).ConfigureAwait(false);
         if (grant.Tier != snapshot.Tier)
             throw new HistoryResultsChangedException();
@@ -116,7 +120,8 @@ public sealed partial class CallHistoryService
         }
 
         ValidateSearch(snapshot.Access, grant, token);
-        QueueHistoryPersistence(snapshot.Access.Recorder.Endpoint, records);
+        await PersistHistoryAsync(snapshot.Access, records, token).ConfigureAwait(false);
+        ValidateSearch(snapshot.Access, grant, token);
         calls.Sort(HistoryResultOrder.Compare);
         return new(snapshot, new(offset, lastId, total, seen.ToImmutable()), calls, offset < total);
     }
@@ -130,19 +135,26 @@ public sealed partial class CallHistoryService
         return grant;
     }
 
-    private HistoryRecorderAccess ReadRecorderAccess(HistoryRecorder recorder)
+    internal static HistoryRecorderAccess CaptureRecorderAccess(ISettingsService settings, HistoryRecorder recorder)
     {
-        var hosted = HostedServerRules.RequiresApiFirewallCredentials(_settingsService, recorder.Endpoint);
-        return hosted
-            ? new(recorder, true, RecordingPlaybackAccess.AccountKey(_settingsService, recorder.Endpoint, independent: true),
-                _settingsService.ReadAccountSession().AccountVersion)
-            : new(recorder, false, RecordingPlaybackAccess.RecorderAccountKey(_settingsService, recorder.Id, recorder.Endpoint), null);
+        var owner = DirectoryRecorderPolicy.For(settings).Capture(recorder.Id, new Uri(recorder.Endpoint));
+        var hosted = HostedServerRules.RequiresApiFirewallCredentials(settings, recorder.Endpoint);
+        var version = hosted ? settings.ReadAccountSession().AccountVersion : (long?)null;
+        var account = hosted ? RecordingPlaybackAccess.AccountKey(settings, recorder.Endpoint, independent: true)
+            : RecordingPlaybackAccess.RecorderAccountKey(settings, recorder.Id, recorder.Endpoint);
+        owner.Validate();
+        if (hosted && settings.ReadAccountSession().AccountVersion != version)
+            throw RecordingPlaybackAccess.VerificationRequired();
+        var identity = version is { } accountVersion ? DirectoryRecorderPolicy.For(settings).CaptureHostedAccount(settings, accountVersion) : null;
+        return new(recorder, hosted, account, version, owner, identity);
     }
 
     private void ValidateRecorderAccess(HistoryRecorderAccess access, CancellationToken token)
     {
+        access.Operation!.Validate();
         token.ThrowIfCancellationRequested();
-        if (ReadRecorderAccess(access.Recorder) != access)
+        if (access.Protected && _settingsService.ReadAccountSession().AccountVersion != access.AccountVersion ||
+            access.Protected != HostedServerRules.RequiresApiFirewallCredentials(_settingsService, access.Recorder.Endpoint))
             throw new RecordingAccessException("The recorder or its sign-in changed. Search again.");
     }
 

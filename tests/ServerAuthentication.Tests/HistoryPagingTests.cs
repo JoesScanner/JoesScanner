@@ -28,14 +28,28 @@ internal static partial class MobileRecoveryTests
 
             Check(HistorySearchPreferences.ChooseRecorder([first, second], null, second.Id, first.Endpoint)?.Id == second.Id,
                 "A fresh History selection should prefer the active Live recorder.");
+            HistoryRecorderAccess Owner(SavedScannerConnection profile, string account) =>
+                new(new(profile.Id, profile.Endpoint), false, account, null, new RecorderOperation());
+            var alpha = Owner(first, "Alpha");
+            var bravo = Owner(first, "Bravo");
+            var two = Owner(second, "Alpha");
             store.LastRecorder = first.Id;
-            store.SaveFilters(first.Id, new(dates, Talkgroups: [new("101-SYS", "Dispatch"), new("202-SYS", "Fire")]));
-            store.SaveFilters(second.Id, new(dates with { StartTime = TimeSpan.FromHours(9) }, Site: new("3-SYS", "East")));
+            store.SaveFilters(alpha, new(dates, Talkgroups: [new("101-SYS", "Dispatch"), new("202-SYS", "Fire")]));
+            store.SaveFilters(two, new(dates with { StartTime = TimeSpan.FromHours(9) }, Site: new("3-SYS", "East")));
 
             var edited = connections.Save("https://one.example:8443/new", "Renamed One", null, first.Id);
             var reopened = new HistorySearchPreferences(path);
-            var savedFirst = reopened.ReadFilters(edited.Id)!;
-            var savedSecond = reopened.ReadFilters(second.Id)!;
+            var savedFirst = reopened.ReadFilters(Owner(first, "Alpha"))!;
+            var otherAccount = reopened.ReadFilters(bravo)!;
+            var otherArchive = reopened.ReadFilters(Owner(edited, "Alpha"))!;
+            Check(otherAccount.Dates == dates && otherArchive.Dates == dates &&
+                otherAccount.Talkgroups == null && otherArchive.Talkgroups == null,
+                "Calendar choices survive account/archive changes without disclosing private saved catalog labels.");
+            alpha.Operation!.Retire();
+            reopened.SaveFilters(alpha, new(dates, Site: new("old", "Retired")));
+            Check(reopened.ReadFilters(Owner(first, "Alpha"))!.Site == null,
+                "A retired selection cannot commit a late filter write.");
+            var savedSecond = reopened.ReadFilters(two)!;
             Check(edited.Id == first.Id &&
                 HistorySearchPreferences.ChooseRecorder([second, edited], reopened.LastRecorder, second.Id, second.Endpoint) == edited &&
                 savedFirst.Dates == dates && savedFirst.Site == null && savedFirst.Talkgroups?.Length == 2 &&
@@ -203,7 +217,7 @@ internal static partial class MobileRecoveryTests
         using var http = new HttpClient(PrivacyNetworkPolicy.For(settings).Wrap(new AsyncStubHandler(async (request, token) =>
         {
             var recorder = request.RequestUri!.Host == new Uri(hosted.Endpoint).Host ? hosted : independent;
-            Check(request.Options.TryGetValue(ServerAuthenticationHandler.Recorder, out var scope) && scope == recorder.RequestScope &&
+            Check(request.Options.TryGetValue(ServerAuthenticationHandler.Recorder, out var scope) && scope == recorder.RequestScope with { Operation = DirectoryRecorderPolicy.For(settings).Capture(recorder.Id, new Uri(recorder.Endpoint)) } &&
                 request.RequestUri == new Uri(recorder.Endpoint + "/calljson"), "An older History page escaped its recorder.");
             var page = await ReadHistoryRequest(request, token);
             requests.Add((recorder, page));
@@ -330,9 +344,10 @@ internal static partial class MobileRecoveryTests
         private readonly Dictionary<string, (HistoryLookupData? Data, DateTime? FetchedUtc)> _entries = [];
         public Task<(HistoryLookupData?, DateTime?)> GetAsync(string key, CancellationToken token = default) =>
             Task.FromResult(_entries.GetValueOrDefault(key));
-        public Task UpsertAsync(string key, HistoryLookupData data, DateTime fetchedUtc, CancellationToken token = default)
+        public Task UpsertAsync(string key, HistoryLookupData data, DateTime fetchedUtc, CancellationToken token = default, Func<Action, bool>? publish = null)
         {
-            _entries[key] = (data, fetchedUtc);
+            if (publish == null) _entries[key] = (data, fetchedUtc);
+            else publish(() => _entries[key] = (data, fetchedUtc));
             return Task.CompletedTask;
         }
     }

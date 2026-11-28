@@ -32,28 +32,26 @@ public sealed class LocalCallsRepository : ILocalCallsRepository, IDisposable
     public Task InitializeAsync(CancellationToken cancellationToken = default) =>
         EnqueueAsync((_, _) => Task.FromResult(0), cancellationToken);
 
-    public Task UpsertCallsAsync(string serverKey, IReadOnlyList<DbCallRecord> calls, CancellationToken cancellationToken = default)
+    public Task UpsertCallsAsync(RecordingMetadataScope scope, IReadOnlyList<DbCallRecord> calls, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
 
-        if (RecordingStorageReference.ServerKey(serverKey) is not { } normalizedServerKey)
-            return Task.CompletedTask;
+        cancellationToken.ThrowIfCancellationRequested();
         if (calls == null || calls.Count == 0)
             return Task.CompletedTask;
 
         return EnqueueAsync(async (conn, ct) =>
         {
-            await UpsertCallsInternalAsync(conn, normalizedServerKey, calls, ct);
-            await EnforceRetentionAsync(conn, normalizedServerKey, MaxCallsPerServer, ct);
+            await UpsertCallsInternalAsync(conn, scope, calls, ct);
             return 0;
         }, cancellationToken);
     }
 
-    public Task MarkTranscriptionUpdateNotifiedAsync(string serverKey, string backendId, CancellationToken cancellationToken = default)
+    public Task MarkTranscriptionUpdateNotifiedAsync(RecordingMetadataScope scope, string backendId, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
 
-        if (RecordingStorageReference.ServerKey(serverKey) is not { } normalizedServerKey || string.IsNullOrWhiteSpace(backendId))
+        if (string.IsNullOrWhiteSpace(backendId))
             return Task.CompletedTask;
 
         var id = backendId.Trim();
@@ -61,20 +59,22 @@ public sealed class LocalCallsRepository : ILocalCallsRepository, IDisposable
         return EnqueueAsync(async (conn, ct) =>
         {
             var now = DateTimeOffset.UtcNow;
-
+            using var transaction = conn.BeginTransaction();
             using var cmd = conn.CreateCommand();
+            cmd.Transaction = transaction;
             cmd.CommandText = @"
 UPDATE calls
 SET transcription_update_notified_at_utc = $notified,
     updated_at_utc = $updated
 WHERE server_key = $server_key AND backend_id = $backend_id;";
 
-            cmd.Parameters.AddWithValue("$server_key", normalizedServerKey);
+            cmd.Parameters.AddWithValue("$server_key", scope.StorageKey);
             cmd.Parameters.AddWithValue("$backend_id", id);
             cmd.Parameters.AddWithValue("$notified", now.ToString("O", CultureInfo.InvariantCulture));
             cmd.Parameters.AddWithValue("$updated", now.ToString("O", CultureInfo.InvariantCulture));
 
             await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            scope.Commit(transaction.Commit, ct);
             return 0;
         }, cancellationToken);
     }
@@ -97,12 +97,14 @@ WHERE server_key = $server_key AND backend_id = $backend_id;";
                 {
                     try
                     {
+                        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(item.Token, _cts.Token);
+                        lifetime.Token.ThrowIfCancellationRequested();
                         if (!initialized)
                         {
                             await DbBootstrapper.EnsureInitializedAsync(conn, _cts.Token).ConfigureAwait(false);
                             initialized = true;
                         }
-                        await item.Work(conn, _cts.Token).ConfigureAwait(false);
+                        await item.Work(conn, lifetime.Token).ConfigureAwait(false);
                         item.Tcs.TrySetResult(true);
                     }
                     catch (OperationCanceledException oce)
@@ -134,20 +136,15 @@ WHERE server_key = $server_key AND backend_id = $backend_id;";
         ThrowIfDisposed();
 
         var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var item = new DbWorkItem(work, tcs);
+        var item = new DbWorkItem(work, tcs, cancellationToken);
 
         if (!_queue.Writer.TryWrite(item))
             tcs.TrySetCanceled();
 
-        if (cancellationToken.CanBeCanceled)
-        {
-            cancellationToken.Register(() => tcs.TrySetCanceled(cancellationToken));
-        }
-
         return tcs.Task;
     }
 
-    private static async Task UpsertCallsInternalAsync(SqliteConnection conn, string serverKey, IReadOnlyList<DbCallRecord> calls, CancellationToken ct)
+    private static async Task UpsertCallsInternalAsync(SqliteConnection conn, RecordingMetadataScope scope, IReadOnlyList<DbCallRecord> calls, CancellationToken ct)
     {
         var now = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
 
@@ -212,7 +209,9 @@ ON CONFLICT(server_key, backend_id) DO UPDATE SET
       WHEN excluded.transcription IS NOT NULL AND length(trim(excluded.transcription)) > 0 THEN 1
       ELSE calls.transcript_available
     END,
-  updated_at_utc = excluded.updated_at_utc;
+  updated_at_utc = excluded.updated_at_utc
+WHERE calls.start_time_utc IS NULL OR excluded.start_time_utc IS NULL
+   OR calls.start_time_utc = excluded.start_time_utc;
 ";
 
         // Parameters created once and reassigned for each row.
@@ -260,7 +259,8 @@ ON CONFLICT(server_key, backend_id) DO UPDATE SET
             if (call == null)
                 continue;
 
-            cmd.Parameters["$server_key"].Value = serverKey;
+            ct.ThrowIfCancellationRequested();
+            cmd.Parameters["$server_key"].Value = scope.StorageKey;
             cmd.Parameters["$backend_id"].Value = call.BackendId;
 
             cmd.Parameters["$start_time_utc"].Value = ToDbNull(call.StartTimeUtc);
@@ -304,15 +304,17 @@ ON CONFLICT(server_key, backend_id) DO UPDATE SET
             await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }
 
-        await tx.CommitAsync(ct).ConfigureAwait(false);
+        await EnforceRetentionAsync(conn, tx, scope.StorageKey, MaxCallsPerServer, ct).ConfigureAwait(false);
+        scope.Commit(tx.Commit, ct);
     }
 
-    private static async Task EnforceRetentionAsync(SqliteConnection conn, string serverKey, int limit, CancellationToken ct)
+    private static async Task EnforceRetentionAsync(SqliteConnection conn, SqliteTransaction transaction, string serverKey, int limit, CancellationToken ct)
     {
         if (limit <= 0)
             return;
 
         using var cmd = conn.CreateCommand();
+        cmd.Transaction = transaction;
         cmd.CommandText = @"
 DELETE FROM calls
 WHERE server_key = $server_key
@@ -436,5 +438,5 @@ public void Dispose()
         try { _cts.Dispose(); } catch { }
     }
 
-    private sealed record DbWorkItem(Func<SqliteConnection, CancellationToken, Task<int>> Work, TaskCompletionSource<bool> Tcs);
+    private sealed record DbWorkItem(Func<SqliteConnection, CancellationToken, Task<int>> Work, TaskCompletionSource<bool> Tcs, CancellationToken Token);
 }

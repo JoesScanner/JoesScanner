@@ -17,6 +17,7 @@ internal static class RecordingDatabaseMaintenanceTests
         try
         {
             await WriteAndRestoreAsync(new Paths(Path.Combine(directory.FullName, "writes.sqlite")));
+            await VerifyMetadataOwnershipAsync(new Paths(Path.Combine(directory.FullName, "ownership.sqlite")));
             await InterruptedCleanupAsync(new Paths(Path.Combine(directory.FullName, "migration.sqlite")));
             await RetentionAsync(new Paths(Path.Combine(directory.FullName, "retention.sqlite")));
         }
@@ -62,12 +63,14 @@ internal static class RecordingDatabaseMaintenanceTests
             "Diagnostic output must omit URL credentials and authorization headers and be safe to sanitize twice.");
 
         using var cache = new LocalCallsRepository(paths);
-        await cache.UpsertCallsAsync("https://test-user:test-pass@scanner.example/one?discard=fake",
+        var firstScope = new RecordingMetadataScope(null, "https://test-user:test-pass@scanner.example/one?discard=fake", false, null);
+        var otherScope = new RecordingMetadataScope(null, Other, false, null);
+        await cache.UpsertCallsAsync(firstScope,
             unsafeReferences.Select((value, i) => Cached("unsafe-" + i, value)).Append(Cached("same", customPath)).ToArray());
-        await cache.UpsertCallsAsync(Other, [Cached("same", "/other/clip.wav")]);
+        await cache.UpsertCallsAsync(otherScope, [Cached("same", "/other/clip.wav")]);
         await using var db = await OpenAsync(paths);
         Check(Count(db, "SELECT count(*) FROM calls WHERE audio_filename IS NOT NULL") == 2 &&
-            Count(db, "SELECT count(*) FROM calls WHERE server_key IN ($one, $two)", ("$one", Server), ("$two", Other))
+            Count(db, "SELECT count(*) FROM calls WHERE server_key IN ($one, $two)", ("$one", firstScope.StorageKey), ("$two", otherScope.StorageKey))
                 == unsafeReferences.Length + 2,
             "The real cache writer must omit credentials and isolate recorder base paths.");
 
@@ -85,10 +88,78 @@ internal static class RecordingDatabaseMaintenanceTests
             recovered.ToCallItem(Server) is { BackendId: "same", AudioUrl: "" },
             "Restart must retain a resolvable identity and metadata for a fresh by-ID acquisition.");
         var fresh = Snapshot(Server + "/clip.wav?testLease=fresh");
-        Check(!await reopened.ObserveAsync(restarted, "same", null, fresh, default, existingOnly: true) &&
+        Check(await reopened.ObserveAsync(restarted, "same", null, fresh, default, existingOnly: true) &&
             fresh.AudioUrl != null && await reopened.IsPendingAsync(restarted, "same", 0, default),
-            "A refreshed signed URL stays transient without losing the pending recording.");
+            "A rotated signed reference must advance its revision while its URL remains transient and the recording stays pending.");
         Console.WriteLine("PASS SQLite writers exclude signed and credential-bearing locations while preserving ordinary paths and restart identity");
+    }
+
+    private static async Task VerifyMetadataOwnershipAsync(Paths paths)
+    {
+        using var cache = new LocalCallsRepository(paths);
+        await cache.InitializeAsync();
+        var recorder = Guid.NewGuid();
+        var alpha = new RecordingMetadataScope(recorder, Server, false, "alpha");
+        var bravo = new RecordingMetadataScope(recorder, Server, false, "bravo");
+        var other = new RecordingMetadataScope(recorder, Other, false, "alpha");
+        var hosted = new RecordingMetadataScope(recorder, Server, true, "alpha");
+        DbCallRecord Row(string group, string? text = null, string time = "100") => new()
+        {
+            ServerKey = Server, BackendId = "shared", StartTimeUtc = time,
+            TargetLabel = group, Transcription = text, ReceivedAtUtc = Now, UpdatedAtUtc = Now
+        };
+        await cache.UpsertCallsAsync(alpha, [Row("Alpha", "Alpha transcript")]);
+        await cache.UpsertCallsAsync(bravo, [Row("Bravo")]);
+        await cache.UpsertCallsAsync(other, [Row("Other archive")]);
+        await cache.UpsertCallsAsync(hosted, [Row("Hosted")]);
+        await cache.UpsertCallsAsync(alpha, [Row("Reused ID", "Other time", "101")]);
+
+        // Stop a real writer immediately before SQLite commits. Queue another owner's
+        // write while the transaction is open, then retire (or cancel) the blocked writer.
+        foreach (var retire in new[] { false, true })
+        {
+            using var reached = new ManualResetEventSlim();
+            using var release = new ManualResetEventSlim();
+            using var cancel = new CancellationTokenSource();
+            var owner = new RecorderOperation();
+            var blocked = new RecordingMetadataScope(recorder, Server, false, "alpha", (commit, token) =>
+            {
+                reached.Set();
+                if (!release.Wait(TimeSpan.FromSeconds(10)))
+                    throw new TimeoutException("Timed out before SQLite commit.");
+                owner.Apply(commit, token);
+            });
+            var pending = retire ? cache.MarkTranscriptionUpdateNotifiedAsync(blocked, "shared", cancel.Token)
+                : cache.UpsertCallsAsync(blocked, [Row("Stale", "Late text")], cancel.Token);
+            if (!reached.Wait(TimeSpan.FromSeconds(10)))
+                throw new TimeoutException("SQLite transaction did not reach commit.");
+            var unrelated = cache.UpsertCallsAsync(other, [Row("Unrelated current")]);
+            var obsolete = cache.UpsertCallsAsync(blocked, [Row("Queued stale")], cancel.Token);
+            if (retire)
+                owner.Retire();
+            else
+                cancel.Cancel();
+            release.Set();
+            foreach (var task in new[] { pending, obsolete })
+            {
+                try
+                {
+                    await task;
+                    throw new InvalidOperationException("Obsolete metadata mutation was accepted.");
+                }
+                catch (Exception ex) when (ex is OperationCanceledException or RecordingAccessException) { }
+            }
+            await unrelated;
+        }
+
+        await using var db = await OpenAsync(paths);
+        Check(Count(db, "SELECT count(*) FROM calls WHERE backend_id='shared'") == 4 &&
+            Count(db, "SELECT count(*) FROM calls WHERE server_key=$key AND target_label='Alpha' AND transcription='Alpha transcript' AND transcription_update_notified_at_utc IS NULL", ("$key", alpha.StorageKey)) == 1 &&
+            Count(db, "SELECT count(*) FROM calls WHERE server_key=$key AND target_label='Bravo' AND transcription IS NULL", ("$key", bravo.StorageKey)) == 1 &&
+            Count(db, "SELECT count(*) FROM calls WHERE server_key=$key AND target_label='Unrelated current'", ("$key", other.StorageKey)) == 1 &&
+            Count(db, "SELECT count(*) FROM calls WHERE server_key=$key AND target_label='Hosted'", ("$key", hosted.StorageKey)) == 1,
+            "Each account and archive must retain only its own metadata, including across cancellation at commit.");
+        Console.WriteLine("PASS Scoped SQLite metadata rejects retired and canceled commits, queued writes, and overlapping recording timestamps");
     }
 
     private static async Task InterruptedCleanupAsync(Paths paths)

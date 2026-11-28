@@ -72,4 +72,37 @@ internal sealed class ProtectedCredentials(IProtectedCredentialStorage storage)
         catch (Exception) { }
         throw new CredentialStorageException();
     }
+
+    // The SQLite writer transaction serializes first use, including across processes.
+    // Losing protected storage only loses proof of rotation. The recorder can still
+    // provide audio through ordinary lookup, and no substitute key is written to disk.
+    internal Func<byte[]?> SignedReferenceKey()
+    {
+        const string name = "joesscanner.v1.signed-audio-reference";
+        long retryAfter = 0;
+        byte[]? cached = null;
+        return () =>
+        {
+            if (cached != null)
+                return cached;
+            if (Environment.TickCount64 < retryAfter)
+                return null;
+            try
+            {
+                var stored = Read(name);
+                if (stored == null)
+                {
+                    stored = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+                    Save(name, stored);
+                }
+                var bytes = Convert.FromBase64String(stored);
+                if (bytes.Length == 32)
+                    cached = bytes;
+            }
+            catch (Exception ex) when (ex is CredentialStorageException or FormatException) { }
+            if (cached == null)
+                retryAfter = Environment.TickCount64 + 30_000;
+            return cached;
+        };
+    }
 }

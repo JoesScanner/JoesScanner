@@ -79,20 +79,30 @@ namespace JoesScanner.Services
         public async Task<HistoryLookupData> GetLookupDataAsync(HistorySearchFilters? currentFilters,
             CancellationToken cancellationToken = default)
         {
-            var endpoint = NormalizeBaseUrl(_settingsService.ServerUrl);
-            if (endpoint.Length == 0)
-                return new HistoryLookupData();
-
-            var data = await ReadLookupsAsync(endpoint, null, cancellationToken).ConfigureAwait(false);
-            await SaveLookupCacheAsync(ServerKeyHelper.Normalize(endpoint), data, cancellationToken).ConfigureAwait(false);
-            return data;
+            var recorder = SelectedSavedRecorder(_settingsService);
+            return recorder == null ? new HistoryLookupData() :
+                await GetRecorderLookupsAsync(recorder, refresh: true, cancellationToken).ConfigureAwait(false);
         }
 
-        public async Task<HistoryLookupData> GetRecorderLookupsAsync(HistoryRecorder recorder, bool refresh,
-            CancellationToken cancellationToken = default)
+        internal static HistoryRecorder? SelectedSavedRecorder(ISettingsService settings)
         {
-            var access = ReadRecorderAccess(recorder);
-            var key = recorder.LookupCacheKey(access.Account);
+            if (!Uri.TryCreate(settings.ServerUrl, UriKind.Absolute, out var endpoint))
+                return null;
+            var profile = DirectoryRecorderPolicy.For(settings).Find(endpoint);
+            return profile is { DirectoryBlocked: false } && profile.Endpoint == ScannerConnectionStore.Normalize(endpoint.AbsoluteUri)
+                ? new(profile.Id, profile.Endpoint) : null;
+        }
+
+        public Task<HistoryLookupData> GetRecorderLookupsAsync(HistoryRecorder recorder, bool refresh,
+            CancellationToken cancellationToken = default) =>
+            GetRecorderLookupsAsync(CaptureRecorderAccess(_settingsService, recorder), refresh, cancellationToken);
+
+        internal async Task<HistoryLookupData> GetRecorderLookupsAsync(HistoryRecorderAccess access, bool refresh, CancellationToken cancellationToken)
+        {
+            var recorder = access.Recorder;
+            var key = access.LookupCacheKey;
+            using var lifetime = access.Link(cancellationToken);
+            cancellationToken = lifetime.Token;
             HistoryLookupData? cached = null;
             DateTime? fetched = null;
             try { (cached, fetched) = await _lookupsRepository.GetAsync(key, cancellationToken).ConfigureAwait(false); }
@@ -103,17 +113,17 @@ namespace JoesScanner.Services
 
             ValidateRecorderAccess(access, cancellationToken);
             if (!refresh && cached != null && fetched >= _clock.GetUtcNow().UtcDateTime.AddHours(-6))
-                return ScopeLookups(cached, recorder.Id);
+                return ScopeLookups(cached, access);
 
-            var latest = await ReadLookupsAsync(recorder.Endpoint, recorder.RequestScope, cancellationToken).ConfigureAwait(false);
+            var latest = await ReadLookupsAsync(recorder.Endpoint, access.RequestScope, cancellationToken).ConfigureAwait(false);
             ValidateRecorderAccess(access, cancellationToken);
             var hasLookups = latest.Receivers.Any(item => item.Value.Length != 0) ||
                 latest.Sites.Any(item => item.Value.Length != 0) || latest.Talkgroups.Any(item => item.Value.Length != 0);
             if (hasLookups)
-                await SaveLookupCacheAsync(key, latest, cancellationToken).ConfigureAwait(false);
+                await SaveLookupCacheAsync(access, latest, cancellationToken).ConfigureAwait(false);
 
             ValidateRecorderAccess(access, cancellationToken);
-            return ScopeLookups(hasLookups || cached == null ? latest : cached, recorder.Id);
+            return ScopeLookups(hasLookups || cached == null ? latest : cached, access);
         }
 
         private async Task<HistoryLookupData> ReadLookupsAsync(string endpoint, RecorderRequestScope? scope, CancellationToken token)
@@ -133,22 +143,26 @@ namespace JoesScanner.Services
             };
         }
 
-        private async Task SaveLookupCacheAsync(string key, HistoryLookupData data, CancellationToken token)
+        private async Task SaveLookupCacheAsync(HistoryRecorderAccess access, HistoryLookupData data, CancellationToken token)
         {
-            if (string.IsNullOrWhiteSpace(key))
-                return;
-            try { await _lookupsRepository.UpsertAsync(key, data, _clock.GetUtcNow().UtcDateTime, token).ConfigureAwait(false); }
+            try
+            {
+                await _lookupsRepository.UpsertAsync(access.LookupCacheKey, data, _clock.GetUtcNow().UtcDateTime, token,
+                    access.TryPublish).ConfigureAwait(false);
+            }
             catch (Exception ex) when (!token.IsCancellationRequested)
             {
                 AppLog.Add(() => $"History lookup cache write failed ({ex.GetType().Name}).");
             }
         }
 
-        private static HistoryLookupData ScopeLookups(HistoryLookupData data, Guid id)
+        internal static HistoryLookupData ScopeLookups(HistoryLookupData data, HistoryRecorderAccess access)
         {
+            var id = access.Recorder.Id;
             HistoryLookupItem[] Scoped(IEnumerable<HistoryLookupItem> items) => items.Select(item => item with { RecorderId = id }).ToArray();
             return new HistoryLookupData
             {
+                Access = access,
                 Receivers = Scoped(data.Receivers),
                 Sites = Scoped(data.Sites),
                 Talkgroups = Scoped(data.Talkgroups),
@@ -165,7 +179,7 @@ namespace JoesScanner.Services
             var dateEnd = FormatSearchDate(snapshot.UntilUtc);
             var draw = Interlocked.Increment(ref _draw);
             var payload = BuildDataTablesPayload(draw, start, length, snapshot.Filters, dateStart + "|" + dateEnd);
-            using var request = CreateRecorderRequest(HttpMethod.Post, new Uri(recorder.Endpoint + "/calljson"), recorder.RequestScope);
+            using var request = CreateRecorderRequest(HttpMethod.Post, new Uri(recorder.Endpoint + "/calljson"), snapshot.Access.RequestScope);
             request.Version = HttpVersion.Version11;
             request.VersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
             request.Headers.ConnectionClose = true;
@@ -198,28 +212,27 @@ namespace JoesScanner.Services
             return new CallsPage(total, data.EnumerateArray().Select(ParseRow).ToArray());
         }
 
-        private void QueueHistoryPersistence(string endpoint, IReadOnlyList<DbCallRecord> records)
+        private async Task PersistHistoryAsync(HistoryRecorderAccess access, IReadOnlyList<DbCallRecord> records, CancellationToken token)
         {
             if (records.Count == 0)
                 return;
-
-            _ = Task.Run(async () =>
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+            timeout.CancelAfter(TimeSpan.FromSeconds(3));
+            try
             {
-                using var gateTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(1));
-                try { await _persistSemaphore.WaitAsync(gateTimeout.Token).ConfigureAwait(false); }
-                catch (OperationCanceledException) { return; }
-
+                await _persistSemaphore.WaitAsync(timeout.Token).ConfigureAwait(false);
                 try
                 {
-                    using var writeTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-                    await _localCallsRepository.UpsertCallsAsync(endpoint, records, writeTimeout.Token).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    AppLog.Add(() => $"History cache write failed ({ex.GetType().Name}).");
+                    var scope = RecordingMetadataScope.Capture(_settingsService, access.Recorder.Id, access.Recorder.Endpoint,
+                        access.Protected, access.Account, access.AccountVersion, access.Operation);
+                    await _localCallsRepository.UpsertCallsAsync(scope, records, timeout.Token).ConfigureAwait(false);
                 }
                 finally { _persistSemaphore.Release(); }
-            });
+            }
+            catch (Exception ex) when (!token.IsCancellationRequested && ex is not RecordingAccessException)
+            {
+                AppLog.Add(() => $"History cache write failed ({ex.GetType().Name}).");
+            }
         }
 
         private static HttpRequestMessage CreateRecorderRequest(HttpMethod method, Uri uri, RecorderRequestScope? recorder)
@@ -229,12 +242,6 @@ namespace JoesScanner.Services
                 request.Options.Set(ServerAuthenticationHandler.Recorder, scope);
             return request;
         }
-        private static string NormalizeBaseUrl(string? url)
-        {
-            var baseUrl = (url ?? string.Empty).Trim();
-            return baseUrl.TrimEnd('/');
-        }
-
         private static IReadOnlyList<HistoryLookupItem> PrependAll(IReadOnlyList<HistoryLookupItem> items)
         {
             var list = items?.ToList() ?? new List<HistoryLookupItem>();
@@ -965,7 +972,7 @@ namespace JoesScanner.Services
             if (!string.IsNullOrWhiteSpace(r.CallDuration) && double.TryParse(r.CallDuration, NumberStyles.Float, CultureInfo.InvariantCulture, out var dur))
                 durationSeconds = dur;
 
-            var startUtc = !string.IsNullOrWhiteSpace(r.StartTimeUTC) ? r.StartTimeUTC : r.StartTime;
+            var startUtc = CallStreamService.TryParseTimestampUtc(r.StartTime, r.StartTimeUTC)?.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture);
             var now = DateTimeOffset.UtcNow;
 
             return new DbCallRecord
@@ -1049,6 +1056,7 @@ namespace JoesScanner.Services
                     RecordingServer = baseUrl,
                     RecordingTimeUtc = recordedAt,
                     HistoryArchiveOffset = archiveOffset,
+                    HistoryAccess = access,
                     RecordingAccess = new RecordingAccessContext(RecordingOrigin.History, access.Protected, access.Account),
                     Timestamp = metadata.Timestamp ?? DateTime.Now,
                     CallDurationSeconds = metadata.DurationSeconds ?? 0,

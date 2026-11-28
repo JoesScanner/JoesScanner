@@ -113,7 +113,9 @@ internal static partial class MobileRecoveryTests
         var window = recovery.OutstandingWindow!;
         var pageTwo = NewArrivalSignal();
         var release = NewArrivalSignal();
-        var afterJump = new { DT_RowId = "after-jump", StartTimeUTC = Now.AddDays(-2).ToUnixTimeSeconds(),
+        // The live arrival predates the selected call on the recorder clock and is also on the recovery page.
+        var afterJumpTime = Now.AddMinutes(-55).ToUnixTimeSeconds();
+        var afterJump = new { DT_RowId = "after-jump", StartTimeUTC = afterJumpTime,
             AudioFilename = "live.mp3", CallDuration = 5 };
         using var http = new HttpClient(new AsyncStubHandler(async (request, cancellation) =>
         {
@@ -123,7 +125,7 @@ internal static partial class MobileRecoveryTests
             pageTwo.TrySetResult();
             await release.Task.WaitAsync(cancellation);
             return Reply(Row("from-gap", Now.AddMinutes(-10), "gap.mp3"),
-                new { DT_RowId = "after-jump", StartTimeUTC = Now.AddMinutes(-9).ToUnixTimeSeconds(), CallText = "late transcript" });
+                new { DT_RowId = "after-jump", StartTimeUTC = afterJumpTime, CallText = "late transcript" });
         }));
         var stream = IngestionStream(Settings(server), http, _ => socket);
         await using var reader = stream.GetCallStreamAsync([], token, recovery).GetAsyncEnumerator(token);

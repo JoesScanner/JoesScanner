@@ -84,9 +84,13 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
         return string.Join(" ", value.Split((char[])null, StringSplitOptions.RemoveEmptyEntries));
     }
 
-    public async Task<IReadOnlyList<ObservedTriple>?> TryFetchSeedAsync(string serverKey, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<ObservedTriple>?> TryFetchSeedAsync(HistoryRecorderAccess access, CancellationToken cancellationToken)
     {
-        using var network = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, PrivacyNetworkPolicy.For(_settings).Generation);
+        if (!access.AllowsSharedCatalog || access.Retired)
+            return null;
+        var serverKey = access.Recorder.Endpoint;
+        using var owner = access.Link(cancellationToken);
+        using var network = CancellationTokenSource.CreateLinkedTokenSource(owner.Token, PrivacyNetworkPolicy.For(_settings).Generation);
         cancellationToken = network.Token;
         if (cancellationToken.IsCancellationRequested || string.IsNullOrWhiteSpace(serverKey))
             return null;
@@ -100,7 +104,7 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
 
             AppLog.Add(() => $"AuthObserved: seed GET start. server={serverKey}");
 
-            if (!session.IsCurrent)
+            if (access.Retired || !session.IsCurrent)
 
                 return null;
 
@@ -112,7 +116,7 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
             }
 
             var body = await resp.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            if (!session.IsCurrent || string.IsNullOrWhiteSpace(body))
+            if (access.Retired || !session.IsCurrent || string.IsNullOrWhiteSpace(body))
                 return null;
 
             var dto = JsonSerializer.Deserialize<ObservedTriplesResponseDto>(body, JsonOptions);
@@ -145,7 +149,7 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
             }
 
             AppLog.Add(() => $"AuthObserved: seed GET ok. server={serverKey} items={items.Count}");
-            return !session.IsCurrent || items.Count == 0 ? null : items;
+            return access.Retired || !session.IsCurrent || items.Count == 0 ? null : items;
         }
         catch
         {
@@ -153,18 +157,23 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
         }
     }
 
-    public async Task TryReportAsync(string serverKey, bool force, CancellationToken cancellationToken)
+    public async Task TryReportAsync(HistoryRecorderAccess access, bool force, CancellationToken cancellationToken)
     {
-        using var network = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, PrivacyNetworkPolicy.For(_settings).Generation);
+        if (!access.AllowsSharedCatalog || access.Retired)
+            return;
+        var serverKey = access.Recorder.Endpoint;
+        using var owner = access.Link(cancellationToken);
+        using var network = CancellationTokenSource.CreateLinkedTokenSource(owner.Token, PrivacyNetworkPolicy.For(_settings).Generation);
         cancellationToken = network.Token;
         var session = WordPressSession.Capture(_settings);
+        var identity = DirectoryRecorderPolicy.For(_settings).CaptureHostedAccount(_settings, session.AccountVersion);
         if (cancellationToken.IsCancellationRequested || string.IsNullOrWhiteSpace(serverKey))
             return;
 
         // When force is requested (manual sync), backfill the full local history so a server with
         // existing local history can immediately populate the observed triples table.
         // Otherwise, we default to deltas since the last cutoff, with a conservative 7 day fallback.
-        var lastCutoffRaw = AppStateStore.GetString(GetLastCutoffUtcKey(serverKey), string.Empty);
+        var lastCutoffRaw = AppStateStore.GetString(GetLastCutoffUtcKey(access.MetadataKey), string.Empty);
         var sinceUtc = force
             ? DateTime.MinValue
             : (DateParseHelper.TryParseUtc(lastCutoffRaw) ?? DateTime.UtcNow.AddDays(-7));
@@ -174,7 +183,7 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
         DateTime? maxLastSeen;
         try
         {
-            (delta, maxLastSeen) = await QueryObservedDeltaAsync(serverKey, sinceUtc, cancellationToken).ConfigureAwait(false);
+            (delta, maxLastSeen) = await QueryObservedDeltaAsync(access.MetadataKey, sinceUtc, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -186,7 +195,8 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
         {
             AppLog.Add(() => $"AuthObserved: report skipped (no delta). server={serverKey} since={sinceUtc:O}");
             // Still mark attempt time so we don't spam every connect.
-            AppStateStore.SetString(GetLastReportUtcKey(serverKey), DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            if (session.IsCurrent)
+                UpdateReportCursor(access, identity, null, cancellationToken);
             return;
         }
 
@@ -208,7 +218,7 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
 
             var json = JsonSerializer.Serialize(payload, JsonOptions);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            if (!session.IsCurrent)
+            if (access.Retired || !session.IsCurrent)
                 return;
             using var resp = await _httpClient.PostAsync(endpoint, content, cancellationToken).ConfigureAwait(false);
 
@@ -220,12 +230,8 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
 
             AppLog.Add(() => $"AuthObserved: report POST ok. server={serverKey} items={delta.Count}");
 
-            session.TryApply(() =>
-            {
-                AppStateStore.SetString(GetLastReportUtcKey(serverKey), DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture));
-                if (maxLastSeen.HasValue)
-                    AppStateStore.SetString(GetLastCutoffUtcKey(serverKey), maxLastSeen.Value.ToString("O", CultureInfo.InvariantCulture));
-            });
+            if (session.IsCurrent)
+                UpdateReportCursor(access, identity, maxLastSeen, cancellationToken);
         }
         catch (Exception ex)
         {
@@ -233,15 +239,20 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
         }
     }
 
-    public async Task<IReadOnlyList<ObservedTriple>?> TrySyncExchangeAsync(string serverKey, bool force, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<ObservedTriple>?> TrySyncExchangeAsync(HistoryRecorderAccess access, bool force, CancellationToken cancellationToken)
     {
-        using var network = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, PrivacyNetworkPolicy.For(_settings).Generation);
+        if (!access.AllowsSharedCatalog || access.Retired)
+            return null;
+        var serverKey = access.Recorder.Endpoint;
+        using var owner = access.Link(cancellationToken);
+        using var network = CancellationTokenSource.CreateLinkedTokenSource(owner.Token, PrivacyNetworkPolicy.For(_settings).Generation);
         cancellationToken = network.Token;
         var session = WordPressSession.Capture(_settings);
+        var identity = DirectoryRecorderPolicy.For(_settings).CaptureHostedAccount(_settings, session.AccountVersion);
         if (cancellationToken.IsCancellationRequested || string.IsNullOrWhiteSpace(serverKey))
             return null;
 
-        var lastCutoffRaw = AppStateStore.GetString(GetLastCutoffUtcKey(serverKey), string.Empty);
+        var lastCutoffRaw = AppStateStore.GetString(GetLastCutoffUtcKey(access.MetadataKey), string.Empty);
         var sinceUtc = force
             ? DateTime.MinValue
             : (DateParseHelper.TryParseUtc(lastCutoffRaw) ?? DateTime.UtcNow.AddDays(-7));
@@ -250,7 +261,7 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
         DateTime? maxLastSeen;
         try
         {
-            (delta, maxLastSeen) = await QueryObservedDeltaAsync(serverKey, sinceUtc, cancellationToken).ConfigureAwait(false);
+            (delta, maxLastSeen) = await QueryObservedDeltaAsync(access.MetadataKey, sinceUtc, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -276,7 +287,7 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
 
             var json = JsonSerializer.Serialize(payload, JsonOptions);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            if (!session.IsCurrent)
+            if (access.Retired || !session.IsCurrent)
                 return null;
             using var resp = await _httpClient.PostAsync(endpoint, content, cancellationToken).ConfigureAwait(false);
 
@@ -288,7 +299,7 @@ public sealed class AuthObservedTriplesSyncService : IAuthObservedTriplesSyncSer
 
             var body = string.Empty;
             try { body = await resp.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false); } catch { }
-            if (!session.IsCurrent || string.IsNullOrWhiteSpace(body))
+            if (access.Retired || !session.IsCurrent || string.IsNullOrWhiteSpace(body))
                 return null;
 
 
@@ -358,15 +369,11 @@ var merged = mergedMap.Values
     .ThenBy(x => x.TalkgroupLabel ?? x.TalkgroupValue ?? string.Empty, StringComparer.OrdinalIgnoreCase)
     .ToList();
 
-session.TryApply(() =>
-{
-    AppStateStore.SetString(GetLastReportUtcKey(serverKey), DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture));
-    if (maxLastSeen.HasValue)
-        AppStateStore.SetString(GetLastCutoffUtcKey(serverKey), maxLastSeen.Value.ToString("O", CultureInfo.InvariantCulture));
-});
+if (session.IsCurrent)
+                UpdateReportCursor(access, identity, maxLastSeen, cancellationToken);
 
 AppLog.Add(() => $"AuthObserved: exchange merged ok. server={serverKey} merged={merged.Count}");
-return !session.IsCurrent || merged.Count == 0 ? null : merged;
+return access.Retired || !session.IsCurrent || merged.Count == 0 ? null : merged;
 
         }
         catch (Exception ex)
@@ -376,10 +383,33 @@ return !session.IsCurrent || merged.Count == 0 ? null : merged;
         }
     }
 
-    public async Task<IReadOnlyList<ObservedTriple>> GetLocalObservedAsync(string serverKey, DateTime sinceUtc, CancellationToken cancellationToken)
+    private static void UpdateReportCursor(HistoryRecorderAccess access, RecorderOperation identity,
+        DateTime? cutoff, CancellationToken token)
     {
-        if (string.IsNullOrWhiteSpace(serverKey))
-            return Array.Empty<ObservedTriple>();
+        var key = access.MetadataKey;
+        AppStateStore.TryWrite(transaction =>
+        {
+            AppStateStore.Write(transaction, GetLastReportUtcKey(key), DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+            if (cutoff is { } timestamp)
+            {
+                var cutoffKey = GetLastCutoffUtcKey(key);
+                var previous = DateParseHelper.TryParseUtc(AppStateStore.Read(transaction, cutoffKey) ?? string.Empty);
+                if (!previous.HasValue || timestamp > previous.Value)
+                    AppStateStore.Write(transaction, cutoffKey, timestamp.ToString("O", CultureInfo.InvariantCulture));
+            }
+        }, commit => access.TryPublish(identity, () =>
+        {
+            token.ThrowIfCancellationRequested();
+            commit();
+        }));
+    }
+
+    public async Task<IReadOnlyList<ObservedTriple>> GetLocalObservedAsync(HistoryRecorderAccess access, DateTime sinceUtc, CancellationToken cancellationToken)
+    {
+        using var owner = access.Link(cancellationToken);
+        cancellationToken = owner.Token;
+        var serverKey = access.MetadataKey;
+        cancellationToken.ThrowIfCancellationRequested();
 
         // Use the same selection logic as reporting. Keep it fast and bounded.
         var items = new List<ObservedTriple>();
@@ -441,6 +471,7 @@ LIMIT 5000;";
             });
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         return items;
     }
 

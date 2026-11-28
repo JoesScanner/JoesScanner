@@ -14,6 +14,7 @@
     <Compile Include="../../JoesScanner/Models/FilterRuleStateRecord.cs" Link="FilterRuleStateRecord.cs" />
     <Compile Include="../../JoesScanner/Models/FilterProfile.cs" Link="FilterProfile.cs" />
     <Compile Include="../../JoesScanner/Services/DbBootstrapper.cs" Link="DbBootstrapper.cs" />
+    <Compile Include="../../JoesScanner/Services/RecordingStorageReference.cs" Link="RecordingStorageReference.cs" />
     <Compile Include="../../JoesScanner/Services/DatabaseRecovery.cs" Link="DatabaseRecovery.cs" />
     <Compile Include="../../JoesScanner/Services/IFilterProfileStore.cs" Link="IFilterProfileStore.cs" />
     <Compile Include="../../JoesScanner/Services/LocalFilterProfileStore.cs" Link="LocalFilterProfileStore.cs" />

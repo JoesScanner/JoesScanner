@@ -58,6 +58,8 @@ namespace JoesScanner.Services
             var fileName = BuildSingleFileName(call, uri);
             var tempPath = Path.Combine(FileSystem.CacheDirectory, fileName);
             var copying = false;
+            using var lifetime = LinkDownload([call], cancellationToken);
+            cancellationToken = lifetime.Token;
 
             try
             {
@@ -99,7 +101,9 @@ namespace JoesScanner.Services
 
             try
             {
-                await SaveOrShareFileAsync(tempPath, fileName);
+                cancellationToken.ThrowIfCancellationRequested();
+                call.HistoryAccess?.Operation?.Validate();
+                await SaveOrShareFileAsync(tempPath, fileName, cancellationToken);
             }
             catch (Exception ex)
             {
@@ -113,6 +117,8 @@ namespace JoesScanner.Services
             if (calls == null || calls.Count == 0)
                 return;
 
+            using var lifetime = LinkDownload(calls, cancellationToken);
+            cancellationToken = lifetime.Token;
             var zipName = BuildZipFileName(calls);
             var zipPath = Path.Combine(FileSystem.CacheDirectory, zipName);
 
@@ -209,7 +215,10 @@ namespace JoesScanner.Services
 
             try
             {
-                await SaveOrShareFileAsync(zipPath, zipName);
+                cancellationToken.ThrowIfCancellationRequested();
+                foreach (var call in calls)
+                    call.HistoryAccess?.Operation?.Validate();
+                await SaveOrShareFileAsync(zipPath, zipName, cancellationToken);
             }
             catch (Exception ex)
             {
@@ -218,22 +227,33 @@ namespace JoesScanner.Services
             }
         }
 
+        private static CancellationTokenSource LinkDownload(IReadOnlyList<CallItem> calls, CancellationToken token) =>
+            CancellationTokenSource.CreateLinkedTokenSource(calls.SelectMany(call => new[] { call.HistoryAccess?.Operation?.Token ?? default, call.HistoryAccess?.HostedIdentity?.Token ?? default })
+                .Where(owner => owner.CanBeCanceled).Append(token).Distinct().ToArray());
+
         private async Task<RecordingDownload> AcquireRecordingAsync(CallItem call, Uri uri, CancellationToken token)
         {
             var server = call.RecordingServer ?? call.LiveState?.ServerUrl ?? _settingsService.ServerUrl ?? "";
+            var captured = call.HistoryAccess;
+            if (call.ServerId is { } id && (captured == null || captured.Recorder.Id != id || captured.Recorder.Endpoint != server))
+                throw new RecordingAccessException("Search again before exporting this recording.");
+            captured?.Operation?.Validate();
             var access = call.RecordingAccess ?? new RecordingAccessContext(RecordingOrigin.History, false);
             var hosted = HostedServerRules.RequiresApiFirewallCredentials(_settingsService, server);
             if (HostedServerRules.RequiresApiFirewallCredentials(_settingsService, uri) && !hosted)
                 throw new RecordingAccessException("The recording's hosted server could not be verified.");
 
             var accountVersion = hosted || access.Protected ? _settingsService.ReadAccountSession().AccountVersion : (long?)null;
+            if (captured != null && (captured.AccountVersion != accountVersion || captured.Protected != hosted ||
+                captured.Account != access.Account || access.Protected != captured.Protected))
+                throw new RecordingAccessException("The recorder sign-in changed. Search again.");
             await RecordingPlaybackAccess.VerifyAsync(_settingsService, _subscriptionService, server,
                 call.RecordingTimeUtc, access, currentLive: false, requireAccount: access.Protected, token, _clock, independent: call.ServerId.HasValue)
                 .ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
             using var request = new HttpRequestMessage(HttpMethod.Get, uri);
             if (call.ServerId.HasValue && Uri.TryCreate(server, UriKind.Absolute, out var origin))
-                request.Options.Set(ServerAuthenticationHandler.Recorder, new RecorderRequestScope(origin, call.ServerId));
+                request.Options.Set(ServerAuthenticationHandler.Recorder, new RecorderRequestScope(origin, call.ServerId, captured?.Operation));
             var authorization = accountVersion.HasValue
                 ? HostedEntitlement.For(_settingsService).Protect(token, _clock, call.RecordingTimeUtc,
                     history: true, accountVersion: accountVersion)
@@ -243,7 +263,7 @@ namespace JoesScanner.Services
                 authorization?.Validate();
                 var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead,
                     authorization?.Token ?? token).ConfigureAwait(false);
-                return new(response, token, authorization);
+                return new(response, token, authorization, captured?.Operation);
             }
             catch
             {
@@ -252,7 +272,7 @@ namespace JoesScanner.Services
             }
         }
 
-        private sealed class RecordingDownload(HttpResponseMessage response, CancellationToken token, HostedEntitlement.Access? authorization)
+        private sealed class RecordingDownload(HttpResponseMessage response, CancellationToken token, HostedEntitlement.Access? authorization, RecorderOperation? owner)
             : IDisposable
         {
             internal HttpResponseMessage Response => response;
@@ -262,9 +282,11 @@ namespace JoesScanner.Services
                 try
                 {
                     authorization?.Validate();
+                    owner?.Validate();
                     var copyToken = authorization?.Token ?? token;
                     await using var input = await response.Content.ReadAsStreamAsync(copyToken).ConfigureAwait(false);
                     await input.CopyToAsync(stream, copyToken).ConfigureAwait(false);
+                    owner?.Validate();
                     authorization?.Validate();
                 }
                 catch (Exception) when (!token.IsCancellationRequested && authorization?.Token.IsCancellationRequested == true)
@@ -325,10 +347,10 @@ namespace JoesScanner.Services
         /// On Windows, opens a FileSavePicker so the user can choose where to save.
         /// On mobile, uses the Share sheet.
         /// </summary>
-        private static async Task SaveOrShareFileAsync(string tempPath, string fileName)
+        private static async Task SaveOrShareFileAsync(string tempPath, string fileName, CancellationToken token)
         {
 #if WINDOWS
-            await WindowsFileSaveAsync(tempPath, fileName);
+            await WindowsFileSaveAsync(tempPath, fileName, token);
 #else
             await Share.Default.RequestAsync(new ShareFileRequest
             {
@@ -345,7 +367,7 @@ namespace JoesScanner.Services
         [DllImport("user32.dll")]
         private static extern IntPtr GetForegroundWindow();
 
-        private static Task WindowsFileSaveAsync(string sourcePath, string suggestedFileName)
+        private static Task WindowsFileSaveAsync(string sourcePath, string suggestedFileName, CancellationToken token)
         {
             return MainThread.InvokeOnMainThreadAsync(async () =>
             {
@@ -373,6 +395,7 @@ namespace JoesScanner.Services
                     // Fallback: copy to Documents
                     var docsFolder = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
                     var fallbackPath = Path.Combine(docsFolder, suggestedFileName);
+                    token.ThrowIfCancellationRequested();
                     File.Copy(sourcePath, fallbackPath, overwrite: true);
                     await UiDialogs.AlertAsync("Download complete", $"Saved to:\n{fallbackPath}", "OK");
                     return;
@@ -381,6 +404,7 @@ namespace JoesScanner.Services
                 WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
 
                 var file = await picker.PickSaveFileAsync();
+                token.ThrowIfCancellationRequested();
                 if (file == null)
                     return;
 
@@ -389,7 +413,7 @@ namespace JoesScanner.Services
                 using (var destStream = await file.OpenStreamForWriteAsync())
                 {
                     destStream.SetLength(0);
-                    await sourceStream.CopyToAsync(destStream);
+                    await sourceStream.CopyToAsync(destStream, token);
                 }
 
                 await UiDialogs.AlertAsync("Download complete", $"Saved to:\n{file.Path}", "OK");

@@ -44,6 +44,6 @@ namespace JoesScanner.Services
     public interface IHistoryLookupsRepository
     {
         Task<(HistoryLookupData? Data, DateTime? FetchedUtc)> GetAsync(string serverKey, CancellationToken token = default);
-        Task UpsertAsync(string serverKey, HistoryLookupData data, DateTime fetchedUtc, CancellationToken token = default);
+        Task UpsertAsync(string serverKey, HistoryLookupData data, DateTime fetchedUtc, CancellationToken token = default, Func<Action, bool>? publish = null);
     }
 }

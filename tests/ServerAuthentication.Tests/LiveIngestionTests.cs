@@ -450,7 +450,7 @@ internal static partial class MobileRecoveryTests
             existingOnly: (item.IsLiveUpdate || item.IsRecordingNotification) && item.RecoveryWindowId == null &&
                 !item.IsListeningBaseline,
             report: report, recoveryWindowId: item.RecoveryWindowId, historyBaseline: item.IsListeningBaseline);
-        item.ConfirmLiveAdmission(saved.ArrivalSequence.HasValue);
+        item.ConfirmLiveAdmission(saved.ArrivalSequence.HasValue, saved.ConflictingRecordingTime);
         return saved;
     }
 

@@ -139,7 +139,7 @@ public sealed partial class DurableLiveQueue
             {
                 using var query = EligibleCommand(db, run, recoveryFloor(run), $"""
                     SELECT q.recorded_utc, q.payload, q.origin, q.protected, q.account_scope,
-                           q.first_owner, q.arrival_sequence, q.recording_id
+                           q.first_owner, q.arrival_sequence, q.recording_id, q.audio_revision
                     FROM live_queue_recordings q JOIN live_queue_servers s USING (server, account_scope)
                     WHERE {EligibleRecording} AND q.disposition = 0 AND q.arrival_sequence >= s.playback_floor;
                     """);
@@ -168,8 +168,7 @@ public sealed partial class DurableLiveQueue
                     update.ExecuteNonQuery();
                 }
             }
-            token.ThrowIfCancellationRequested();
-            transaction.Commit();
+            CommitRuns(runs, transaction, token);
             return true;
         }), token);
 }

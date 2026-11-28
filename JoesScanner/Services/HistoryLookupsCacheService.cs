@@ -31,55 +31,49 @@ namespace JoesScanner.Services
 
         public async Task<HistoryLookupData?> GetCachedAsync(CancellationToken cancellationToken = default)
         {
-            var (serverKey, legacyKey) = GetServerKeys(_settingsService.ServerUrl);
-
-            AppLog.Add(() => $"History: GetCachedAsync keys. rawUrl='{_settingsService.ServerUrl}' serverKey='{serverKey}' legacyKey='{legacyKey}'");
-            if (string.IsNullOrWhiteSpace(serverKey))
+            var selected = CallHistoryService.SelectedSavedRecorder(_settingsService);
+            if (selected == null)
                 return null;
-
-            // First try normalized key (no default :443/:80). If missing, also try the legacy
-            // key format that accidentally included explicit default ports.
-            var (data, fetchedUtc) = await _repo.GetAsync(serverKey, cancellationToken);
-            if (data == null && !string.IsNullOrWhiteSpace(legacyKey) && !string.Equals(serverKey, legacyKey, StringComparison.OrdinalIgnoreCase))
-            {
-                AppLog.Add(() => $"History: lookup cache miss on normalized key; trying legacy key. normalized={serverKey} legacy={legacyKey}");
-                (data, fetchedUtc) = await _repo.GetAsync(legacyKey, cancellationToken);
-            }
-            if (data == null)
+            var access = CallHistoryService.CaptureRecorderAccess(_settingsService, selected);
+            using var lifetime = access.Link(cancellationToken);
+            var (data, _) = await _repo.GetAsync(access.LookupCacheKey, lifetime.Token).ConfigureAwait(false);
+            lifetime.Token.ThrowIfCancellationRequested();
+            if (access.AccountVersion is { } version && _settingsService.ReadAccountSession().AccountVersion != version)
                 return null;
-
-            AppLog.Add(() => $"History: lookup cache hit. server={serverKey} fetchedUtc={(fetchedUtc?.ToString("O") ?? "") } receivers={data.Receivers?.Count ?? 0} sites={data.Sites?.Count ?? 0} talkgroups={data.Talkgroups?.Count ?? 0}");
-            return data;
+            return data == null ? null : CallHistoryService.ScopeLookups(data, access);
         }
 
         public async Task PreloadAsync(bool forceReload, string reason, CancellationToken cancellationToken = default)
         {
-            var (serverKey, _) = GetServerKeys(_settingsService.ServerUrl);
-
-            AppLog.Add(() => $"History: PreloadAsync keys. rawUrl='{_settingsService.ServerUrl}' serverKey='{serverKey}' forceReload={forceReload} reason={reason}");
-            if (string.IsNullOrWhiteSpace(serverKey))
-                return;
-
             try
             {
+                var selected = CallHistoryService.SelectedSavedRecorder(_settingsService);
+                if (selected == null)
+                    return;
+                var access = CallHistoryService.CaptureRecorderAccess(_settingsService, selected);
+                using var lifetime = access.Link(cancellationToken);
+                cancellationToken = lifetime.Token;
+                var serverKey = selected.Endpoint;
+                var sharedCatalog = access.AllowsSharedCatalog;
                 await _lock.WaitAsync(cancellationToken);
                 try
                 {
-                    var (cached, fetchedUtc) = await _repo.GetAsync(serverKey, cancellationToken);
+                    var (cached, fetchedUtc) = await _repo.GetAsync(access.LookupCacheKey, cancellationToken);
 
                     // If we have no local lookup data yet, attempt to seed only from the lookup catalog API.
                     // Discovery sync is now handled separately by the observed-triples pipeline and should not
                     // overwrite or masquerade as lookup catalog state.
-                    if (cached == null || (cached.Receivers?.Count ?? 0) == 0 || (cached.Sites?.Count ?? 0) == 0 || (cached.Talkgroups?.Count ?? 0) == 0)
+                    if (sharedCatalog && (cached == null || (cached.Receivers?.Count ?? 0) == 0 || (cached.Sites?.Count ?? 0) == 0 || (cached.Talkgroups?.Count ?? 0) == 0))
                     {
                         try
                         {
                             var accountSession = WordPressSession.Capture(_settingsService);
+                            var identity = DirectoryRecorderPolicy.For(_settingsService).CaptureHostedAccount(_settingsService, accountSession.AccountVersion);
                             var seeded = await _authLookupsSyncService.TryFetchSeedAsync(serverKey, cancellationToken).ConfigureAwait(false);
                             if (seeded != null && accountSession.IsCurrent)
                             {
-                                await _repo.UpsertAsync(serverKey, seeded, DateTime.UtcNow, cancellationToken,
-                                    accountSession.TryApply).ConfigureAwait(false);
+                                await _repo.UpsertAsync(access.LookupCacheKey, seeded, DateTime.UtcNow, cancellationToken,
+                                    commit => access.TryPublish(identity, commit)).ConfigureAwait(false);
                                 if (!accountSession.IsCurrent)
                                     return;
                                 cached = seeded;
@@ -103,8 +97,9 @@ namespace JoesScanner.Services
                     AppLog.Add(() => $"History: lookup preload start. server={serverKey} reason={reason} force={forceReload} stale={isStale}");
 
                     // Network fetch. This may fail if the server is down. That should not block app connection.
-                    var data = await _callHistoryService.GetLookupDataAsync(currentFilters: null, cancellationToken);
-                    await _repo.UpsertAsync(serverKey, data, DateTime.UtcNow, cancellationToken);
+                    var data = await _callHistoryService.GetRecorderLookupsAsync(selected, refresh: true, cancellationToken);
+                    if (data.Access != access || !sharedCatalog || access.Retired)
+                        return;
 
                     // Best-effort daily report of lookup data back to the Auth API.
                     // This is telemetry-gated and silently skipped when disabled.
@@ -124,7 +119,7 @@ namespace JoesScanner.Services
                     {
                         try
                         {
-                            await _authObservedTriplesSyncService.TryReportAsync(serverKey, force: forceReload, cancellationToken).ConfigureAwait(false);
+                            await _authObservedTriplesSyncService.TryReportAsync(access, force: forceReload, cancellationToken).ConfigureAwait(false);
                         }
                         catch
                         {
@@ -144,44 +139,5 @@ namespace JoesScanner.Services
             }
         }
 
-        private static (string Normalized, string Legacy) GetServerKeys(string? serverUrl)
-        {
-            if (string.IsNullOrWhiteSpace(serverUrl))
-                return (string.Empty, string.Empty);
-
-            var raw = serverUrl.Trim().TrimEnd('/');
-
-            try
-            {
-                if (!Uri.TryCreate(raw, UriKind.Absolute, out var uri))
-                    return (raw, raw);
-
-                // Normalized key: scheme://host[:port if non-default]
-                var normalizedBuilder = new UriBuilder(uri)
-                {
-                    Path = string.Empty,
-                    Query = string.Empty,
-                    Fragment = string.Empty,
-                    Port = uri.IsDefaultPort ? -1 : uri.Port
-                };
-                var normalized = normalizedBuilder.Uri.ToString().TrimEnd('/');
-
-                // Legacy key: scheme://host:port (even for default ports)
-                var legacyBuilder = new UriBuilder(uri)
-                {
-                    Path = string.Empty,
-                    Query = string.Empty,
-                    Fragment = string.Empty,
-                    Port = uri.Port
-                };
-                var legacy = legacyBuilder.Uri.ToString().TrimEnd('/');
-
-                return (normalized, legacy);
-            }
-            catch
-            {
-                return (raw, raw);
-            }
-        }
     }
 }

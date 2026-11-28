@@ -6,20 +6,26 @@ namespace JoesScanner.ViewModels;
 
 public partial class MainViewModel
 {
-    private Task<PlaybackAudioLease?> AcquireRecordingAudioAsync(CallItem item, CancellationToken token,
-        bool automatic = false, bool speculative = false)
+    private async Task<PlaybackAudioLease?> AcquireRecordingAudioAsync(CallItem item, CancellationToken token,
+        bool automatic = false, bool speculative = false, RecorderOperation? owner = null)
     {
         var server = item.RecordingServer ?? item.LiveState?.ServerUrl ?? _settingsService.ServerUrl ?? "";
         var protectedSource = IsProtectedRecording(item, server);
+        owner ??= CapturePlaybackOwner(item);
+        using var lifetime = owner == null ? null : CancellationTokenSource.CreateLinkedTokenSource(token, owner.Token);
         var account = RequireCurrentRecordingAccount(item);
         var accountSession = protectedSource ? _settingsService.ReadAccountSession() : default;
         var authority = protectedSource ? accountSession.BaseUrl : null;
-        var key = RecordingCacheKey.Create(item.ServerId, server, item.BackendId, account, authority);
+        var key = RecordingCacheKey.Create(item.ServerId, server, item.BackendId, account, authority, item.RecordingTimeUtc);
         (string Server, bool Protected, DateTimeOffset? RecordedAt) access = default;
-        return _audioCache.AcquireAsync(key, Authorize, Fetch, token, speculative);
+        var lease = await _audioCache.AcquireAsync(key, Authorize, Fetch, lifetime?.Token ?? token, speculative, owner);
+        if (lease != null)
+            lease.Owner = owner;
+        return lease;
 
         void RequireAccount()
         {
+            owner?.Validate();
             if (RequireCurrentRecordingAccount(item) != account ||
                 protectedSource && _settingsService.ReadAccountSession().AccountVersion != accountSession.AccountVersion)
                 throw new RecordingAccessException("This recording belongs to a different account.");
@@ -42,7 +48,7 @@ public partial class MainViewModel
             var fetchToken = authorization?.Token ?? acquireToken;
             var lastUrl = item.AudioUrl;
             var scope = Uri.TryCreate(server, UriKind.Absolute, out var origin)
-                ? new RecorderRequestScope(origin, item.ServerId) : (RecorderRequestScope?)null;
+                ? new RecorderRequestScope(origin, item.ServerId, owner) : (RecorderRequestScope?)null;
             string path;
             if (automatic)
             {
@@ -75,21 +81,35 @@ public partial class MainViewModel
                 {
                     if (access.Protected)
                         await AuthorizeRecordingAsync(item, refreshToken);
-                    return lastUrl = item.AudioUrl;
+                    RequireAccount();
+                    refreshToken.ThrowIfCancellationRequested();
+                    return lastUrl = item.LiveState is { } currentState ? currentState.Read().AudioUrl : item.AudioUrl;
                 }
 
                 var durable = ScopeOf(item);
-                var refreshed = await RefreshRecorderAudioAsync(item, server, access.RecordedAt, refreshToken);
+                var beforeLookup = item.LiveState?.Read();
+                var refreshed = await RefreshRecorderAudioAsync(item, server, access.RecordedAt, refreshToken, owner);
+                RequireAccount();
                 if (item.LiveState is { } state && durable is { } run && IsCurrentLiveScope(run) &&
                     TryGetDurableRecording(item, run, out _))
                     await _durableQueue.ObserveAsync(run, state.Id, null, state.Read(), refreshToken, existingOnly: true);
-                refreshToken.ThrowIfCancellationRequested();
-                RequireAccount();
-                if (refreshed != null)
-                    item.AudioUrl = lastUrl = refreshed;
-                return refreshed;
+                var current = await MainThread.InvokeOnMainThreadAsync(() =>
+                {
+                    RequireAccount();
+                    return item.ApplyRefreshedAudioUrl(refreshed, beforeLookup, refreshToken);
+                });
+                if (current != null)
+                    lastUrl = current;
+                return current;
             }
         }
+    }
+
+    private RecorderOperation? CapturePlaybackOwner(CallItem item)
+    {
+        var server = item.RecordingServer ?? item.LiveState?.ServerUrl ?? _settingsService.ServerUrl;
+        return item.ServerId is { } id && Uri.TryCreate(server, UriKind.Absolute, out var endpoint)
+            ? DirectoryRecorderPolicy.For(_settingsService).Capture(id, endpoint) : null;
     }
 
     private bool IsProtectedRecording(CallItem item, string server) =>

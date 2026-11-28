@@ -84,7 +84,7 @@ LIMIT 1;";
         public async Task UpsertAsync(string serverKey, HistoryLookupData data, DateTime fetchedUtc, CancellationToken cancellationToken = default,
             Func<Action, bool>? publish = null)
         {
-            var normalizedServerKey = serverKey.StartsWith(HistoryRecorder.LookupCachePrefix, StringComparison.Ordinal)
+            var normalizedServerKey = HistoryRecorder.IsLookupCacheKey(serverKey)
                 ? serverKey : RecordingStorageReference.ServerKey(serverKey);
             if (normalizedServerKey == null || data == null)
                 return;

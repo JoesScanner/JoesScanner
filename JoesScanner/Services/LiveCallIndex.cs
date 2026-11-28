@@ -22,7 +22,12 @@ internal sealed class LiveCallIndex
         if (accepted)
             _provisional.Remove(id);
         else
+        {
             _provisional.Add(id);
+            // A failed admission, including a timestamp collision with the journal, cannot bind this ID
+            // to the rejected state when a later row describes its original recording.
+            _calls.Remove(id);
+        }
     }
 
     public string OriginalId(string id) => _seen.TryGetValue(id, out var original) ? original : id;

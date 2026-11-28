@@ -163,6 +163,10 @@ internal static partial class MobileRecoveryTests
         Check(await pending && reader.Current.BackendId == "recovered" && reader.Current.AudioUrl.Length == 0,
             "The replacement stream must deduplicate the old call and admit the recovered row only once.");
         var card = reader.Current;
+        Check(card.HasDebugInfo && card.DebugInfo.Contains("No audio URL"),
+            "The incomplete recording must explain its missing URL.");
+        var diagnosticChanges = new List<string?>();
+        card.PropertyChanged += (_, args) => diagnosticChanges.Add(args.PropertyName);
         replacement.Send(new
         {
             DT_RowId = "recovered", StartTimeUTC = Now.AddMinutes(-7).ToUnixTimeSeconds(),
@@ -177,12 +181,19 @@ internal static partial class MobileRecoveryTests
             BackendId = card.BackendId,
             LiveState = new LiveCallState("https://other.example", card.BackendId!)
         };
+        otherServer.ApplyRecordingAudio(new(new(), null, CallCardIdFallback.None) { Availability = RecordingAudioAvailability.Missing });
         Check(ReferenceEquals(reader.Current.LiveState!.FindCard([otherServer], [card], new object()), card),
             "A pending card must receive the update even when another server has the same ID.");
         card.ApplyLiveUpdate();
         Check(card.AudioUrl == "https://custom.example/late.mp3" && card.ConsumeLateAudio(),
             "The audio-only update must make the card playable.");
+        Check(!card.HasDebugInfo && card.DebugInfo == string.Empty &&
+            diagnosticChanges.Contains(nameof(CallItem.DebugInfo)) && diagnosticChanges.Contains(nameof(CallItem.HasDebugInfo)),
+            "The original playable card must remove its missing-URL diagnostic and notify both label bindings.");
+        diagnosticChanges.Clear();
         card.ApplyLiveUpdate();
+        Check(diagnosticChanges.Count == 0 && otherServer.HasDebugInfo,
+            "A duplicate update must not invalidate the label or resolve another recorder's missing URL.");
         Check(!card.ConsumeLateAudio() && await reader.MoveNextAsync() && reader.Current.BackendId == "subsequent" && opens == 2,
             "A replayed row must not requeue late audio or suppress a subsequent Live call.");
     }
@@ -194,16 +205,17 @@ internal static partial class MobileRecoveryTests
         var token = timeout.Token;
         using var socket = new ScriptSocket();
         var first = Row("a", Now.AddYears(30), "a.mp3");
+        var delayedRecordingTime = Now.AddHours(-2);
         socket.Send(new { data = new[]
         {
             first,
             new { DT_RowId = "b", StartTimeUTC = Now.ToOffset(TimeSpan.FromHours(-7)).ToString("O"), AudioFilename = "b.mp3" },
             new { DT_RowId = "c", StartTimeUTC = Now.ToOffset(TimeSpan.FromHours(9)).ToString("O"), AudioFilename = "c.mp3" },
-            Row("d", Now.AddYears(-30), null)
+            Row("d", delayedRecordingTime, null)
         } });
         using var http = new HttpClient(new StubHandler(_ => Reply(
             Row("f", Now.AddMinutes(-1), "f.mp3"), first, Row("e", Now.AddHours(-3), "e.mp3"),
-            Row("d", Now, "d.mp3"))));
+            Row("d", delayedRecordingTime, "d.mp3"))));
         var stream = new CallStreamService(Settings(server), new RecordedCalls(), new AddressStub(),
             new ScriptSubscription(false, null), http, (_, _, _) => Task.FromResult<WebSocket?>(socket), new FixedClock(Now));
         var recovery = new LiveStreamRecovery();
@@ -302,14 +314,19 @@ internal static partial class MobileRecoveryTests
         socket.Send(new { DT_RowId = "sqlite-only", Update = true });
         socket.Send(new { DT_RowId = "sqlite-only", Update = true });
         var lookups = 0;
+        var recordedAt = Now.AddMinutes(-1);
+        var expectedRange = RecordingPlaybackAccess.DateSearch(recordedAt.AddSeconds(-2), recordedAt.AddSeconds(2));
         using var http = new HttpClient(new AsyncStubHandler(async (request, cancellation) =>
         {
             Check(request.RequestUri == new Uri(server + "/calljson"), "Lookup must stay on the selected recorder.");
-            Check(await DateFilter(request, cancellation) == "",
-                "An ID-only custom notification uses the compatibility lookup until a timestamp is available.");
+            var (date, _, length) = await ReadLookupRequest(request, cancellation);
+            Check(date == (lookups == 0 ? "" : expectedRange),
+                "An undated notification uses the compatibility lookup once, then reacquires within its observed recording time.");
+            if (length == 0)
+                return LookupReply(2, null);
             lookups++;
             return Reply(Row("unrelated", Now, "other.mp3"),
-                Row("sqlite-only", Now.AddMinutes(-1), $"clip.mp3?testLease={lookups}"));
+                Row("sqlite-only", recordedAt, $"clip.mp3?testLease={lookups}"));
         }));
         var stream = new CallStreamService(settings, new RecordedCalls(), new AddressStub(), new ScriptSubscription(false, null), http,
             (_, _, _) => Task.FromResult<WebSocket?>(socket), new FixedClock(Now));
@@ -439,12 +456,12 @@ internal static partial class MobileRecoveryTests
     {
         internal List<string> Ids { get; } = [];
         public Task InitializeAsync(CancellationToken cancellationToken) => Task.CompletedTask;
-        public Task UpsertCallsAsync(string serverKey, IReadOnlyList<DbCallRecord> calls, CancellationToken cancellationToken)
+        public Task UpsertCallsAsync(RecordingMetadataScope scope, IReadOnlyList<DbCallRecord> calls, CancellationToken cancellationToken)
         {
             Ids.AddRange(calls.Select(call => call.BackendId));
             return Task.CompletedTask;
         }
-        public Task MarkTranscriptionUpdateNotifiedAsync(string serverKey, string backendId, CancellationToken token) => Task.CompletedTask;
+        public Task MarkTranscriptionUpdateNotifiedAsync(RecordingMetadataScope scope, string backendId, CancellationToken token) => Task.CompletedTask;
         public Task<string?> GetLookupCacheAsync(string serverKey, string cacheKey, CancellationToken token) => Task.FromResult<string?>(null);
         public Task UpsertLookupCacheAsync(string serverKey, string cacheKey, DateTimeOffset fetchedAt, string jsonPayload, CancellationToken token) =>
             Task.CompletedTask;

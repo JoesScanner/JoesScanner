@@ -10,7 +10,7 @@ public interface ICallStreamService : IDisposable
     // Starts streaming calls from the server until the cancellation token is triggered.
     // The caller consumes the IAsyncEnumerable to receive new CallItem instances as they arrive.
     IAsyncEnumerable<CallItem> GetCallStreamAsync(IReadOnlyList<CallItem> existingCalls, CancellationToken cancellationToken,
-        LiveStreamRecovery? recovery = null);
+        LiveStreamRecovery? recovery = null, bool includeOrderingUpdates = false);
     // Populate the shared update state for existing cards that may have missed notifications.
     Task RefreshCallMetadataAsync(IReadOnlyList<CallItem> calls, CancellationToken cancellationToken);
     Task<string?> RefreshRecordingAudioAsync(CallItem item, string server, DateTimeOffset? recordedAt, CancellationToken cancellationToken);

@@ -20,7 +20,6 @@ namespace JoesScanner.Services
         private const string FilterStateDbKey = "filter_state_v2";
 
         private readonly Lock _gate = new();
-        private readonly HashSet<string> _discoveredRules = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, object> _pendingWrites = new(StringComparer.OrdinalIgnoreCase);
         private bool _discoveryDirty;
         private bool _writerRunning;
@@ -32,6 +31,8 @@ namespace JoesScanner.Services
 
         private string _currentServerKey = string.Empty;
         private Dictionary<string, string> _keysByEndpoint = new(StringComparer.Ordinal);
+        private Dictionary<string, string> _discoveryByEndpoint = new(StringComparer.Ordinal);
+        private string _currentDiscoveryKey = "unconfigured:";
         private Dictionary<Guid, string> _keysByRecorder = [];
         private readonly Dictionary<string, FilterRuleStateRecord[]> _otherRules = new(StringComparer.OrdinalIgnoreCase);
 
@@ -61,21 +62,30 @@ namespace JoesScanner.Services
             return 0;
         }
 
-        public void SeedFromObservedTriples(IReadOnlyList<ObservedTriple> triples, string? expectedServerUrl = null)
+        public void SeedFromObservedTriples(IReadOnlyList<ObservedTriple> triples, string? expectedServerUrl = null,
+            string? expectedDiscoveryKey = null, Func<Action, bool>? publish = null)
         {
             var change = DiscoveryUpdateKind.None;
-            bool affectsFiltering;
+            bool affectsFiltering = false;
             lock (_gate)
             {
-                if (expectedServerUrl != null && !IsCurrentServer_NoLock(expectedServerUrl))
-                    return;
+                void Apply()
+                {
+                    if (expectedDiscoveryKey != null && expectedDiscoveryKey != _currentDiscoveryKey ||
+                        expectedServerUrl != null && !IsCurrentServer_NoLock(expectedServerUrl))
+                        return;
 
-                MergeObservedTriples_NoLock(triples, ref change);
-                if (change == DiscoveryUpdateKind.None)
-                    return;
+                    MergeObservedTriples_NoLock(triples, ref change);
+                    if (change == DiscoveryUpdateKind.None)
+                        return;
 
-                affectsFiltering = change == DiscoveryUpdateKind.Structural && _state.Count != 0;
-                QueueDiscoveryWrite_NoLock();
+                    affectsFiltering = change == DiscoveryUpdateKind.Structural && _state.Count != 0;
+                    QueueDiscoveryWrite_NoLock();
+                }
+                if (publish == null)
+                    Apply();
+                else
+                    publish(Apply);
             }
 
             if (change >= DiscoveryUpdateKind.Catalog)
@@ -84,21 +94,31 @@ namespace JoesScanner.Services
                 RulesChanged?.Invoke(this, EventArgs.Empty);
         }
 
-        public int ReplaceFromObservedTriples(IReadOnlyList<ObservedTriple> triples, string? expectedServerUrl = null)
+        public int ReplaceFromObservedTriples(IReadOnlyList<ObservedTriple> triples, string? expectedServerUrl = null,
+            string? expectedDiscoveryKey = null, Func<Action, bool>? publish = null)
         {
-            int count;
+            int count = -1;
             lock (_gate)
             {
-                if (expectedServerUrl != null && !IsCurrentServer_NoLock(expectedServerUrl))
-                    return 0;
+                void Apply()
+                {
+                    if (expectedDiscoveryKey != null && expectedDiscoveryKey != _currentDiscoveryKey ||
+                        expectedServerUrl != null && !IsCurrentServer_NoLock(expectedServerUrl))
+                        return;
 
-                _discovery.Clear();
-                _discoveredRules.Clear();
-                var change = DiscoveryUpdateKind.None;
-                MergeObservedTriples_NoLock(triples, ref change);
-                count = _discovery.Count;
-                QueueDiscoveryWrite_NoLock();
+                    _discovery.Clear();
+                    var change = DiscoveryUpdateKind.None;
+                    MergeObservedTriples_NoLock(triples, ref change);
+                    count = _discovery.Count;
+                    QueueDiscoveryWrite_NoLock();
+                }
+                if (publish == null)
+                    Apply();
+                else
+                    publish(Apply);
             }
+            if (count < 0)
+                return 0;
 
             NotifyRulesChanged();
             return count;
@@ -120,13 +140,17 @@ namespace JoesScanner.Services
             }
         }
 
-        internal void ConfigureRecorderScopes(IEnumerable<(Guid Id, string Endpoint, string Key)> scopes, string selected)
+        internal void ConfigureRecorderScopes(IEnumerable<(Guid Id, string Endpoint, string Key)> scopes, string selected,
+            IReadOnlyDictionary<Guid, string>? discoveryScopes = null)
         {
             var configured = scopes.ToArray();
             lock (_gate)
             {
                 _keysByEndpoint = configured.ToDictionary(item => item.Endpoint, item => item.Key, StringComparer.Ordinal);
                 _keysByRecorder = configured.ToDictionary(item => item.Id, item => item.Key);
+                _discoveryByEndpoint = configured.ToDictionary(item => item.Endpoint,
+                    item => discoveryScopes == null ? item.Endpoint :
+                        discoveryScopes.GetValueOrDefault(item.Id) ?? "unavailable:" + item.Id.ToString("N"), StringComparer.Ordinal);
             }
             SetServerUrl(selected);
         }
@@ -229,12 +253,15 @@ namespace JoesScanner.Services
         {
             lock (_gate)
             {
-                if (IsCurrentServer_NoLock(serverUrl))
+                var endpoint = Uri.TryCreate(serverUrl, UriKind.Absolute, out var archive) ? archive.AbsoluteUri.TrimEnd('/') : string.Empty;
+                var discovery = _discoveryByEndpoint.GetValueOrDefault(endpoint) ?? "unconfigured:" + endpoint;
+                if (IsCurrentServer_NoLock(serverUrl) && _currentDiscoveryKey == discovery)
                     return;
 
                 CapturePendingDiscovery_NoLock();
                 _otherRules[_currentServerKey] = _state.Values.ToArray();
                 _currentServerKey = ScopeKey_NoLock(serverUrl);
+                _currentDiscoveryKey = discovery;
                 LoadCurrentServerFromStorage();
             }
 
@@ -287,7 +314,7 @@ namespace JoesScanner.Services
             NotifyRulesChanged();
         }
 
-        public void EnsureRulesForCall(CallItem call)
+        public void EnsureRulesForCall(CallItem call, string? expectedDiscoveryKey = null)
         {
             if (call == null)
                 return;
@@ -319,7 +346,7 @@ namespace JoesScanner.Services
             bool affectsFiltering;
             lock (_gate)
             {
-                if (CallScope_NoLock(call) != _currentServerKey)
+                if (CallScope_NoLock(call) != _currentServerKey || expectedDiscoveryKey != null && expectedDiscoveryKey != _currentDiscoveryKey)
                     return;
                 var priorState = GetEffectiveState_NoLock(receiver, site, talkgroup);
                 change = UpsertDiscovery_NoLock(node);
@@ -370,7 +397,6 @@ namespace JoesScanner.Services
         private void LoadCurrentServerFromStorage()
         {
             _discovery.Clear();
-            _discoveredRules.Clear();
             _state.Clear();
 
             var discoveryKey = GetDiscoveryStorageKey();
@@ -523,7 +549,7 @@ namespace JoesScanner.Services
 
         private string GetDiscoveryStorageKey()
         {
-            var k = string.IsNullOrWhiteSpace(_currentServerKey) ? "none" : _currentServerKey.Trim();
+            var k = string.IsNullOrWhiteSpace(_currentDiscoveryKey) ? "none" : _currentDiscoveryKey;
             return $"{FilterDiscoveryDbKey}::{k}";
         }
 
@@ -621,15 +647,15 @@ namespace JoesScanner.Services
 
         private FilterRuleStateRecord? GetEffectiveState_NoLock(string receiver, string site, string talkgroup)
         {
-            return FindDiscoveredState_NoLock(FilterLevel.Talkgroup, receiver, site, talkgroup) ??
-                FindDiscoveredState_NoLock(FilterLevel.Site, receiver, site, string.Empty) ??
-                FindDiscoveredState_NoLock(FilterLevel.Receiver, receiver, string.Empty, string.Empty);
+            return FindExplicitState_NoLock(FilterLevel.Talkgroup, receiver, site, talkgroup) ??
+                FindExplicitState_NoLock(FilterLevel.Site, receiver, site, string.Empty) ??
+                FindExplicitState_NoLock(FilterLevel.Receiver, receiver, string.Empty, string.Empty);
         }
 
-        private FilterRuleStateRecord? FindDiscoveredState_NoLock(FilterLevel level, string receiver, string site, string talkgroup)
+        private FilterRuleStateRecord? FindExplicitState_NoLock(FilterLevel level, string receiver, string site, string talkgroup)
         {
             var key = FilterRuleStateRecord.BuildKey(level, receiver, site, talkgroup);
-            return _discoveredRules.Contains(key) ? _state.GetValueOrDefault(key) : null;
+            return _state.GetValueOrDefault(key);
         }
 
         private static bool TryMapObservedTriple(ObservedTriple? triple, out DiscoveryNode node)
@@ -687,11 +713,6 @@ namespace JoesScanner.Services
             }
 
             _discovery[key] = node;
-            _discoveredRules.Add(FilterRuleStateRecord.BuildKey(FilterLevel.Receiver, node.Receiver, string.Empty, string.Empty));
-            if (node.Site.Length != 0)
-                _discoveredRules.Add(FilterRuleStateRecord.BuildKey(FilterLevel.Site, node.Receiver, node.Site, string.Empty));
-            if (node.Talkgroup.Length != 0)
-                _discoveredRules.Add(FilterRuleStateRecord.BuildKey(FilterLevel.Talkgroup, node.Receiver, node.Site, node.Talkgroup));
             return DiscoveryUpdateKind.Structural;
         }
 

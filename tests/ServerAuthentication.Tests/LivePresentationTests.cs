@@ -1,10 +1,132 @@
 using System.Collections.ObjectModel;
 using JoesScanner.Models;
+using JoesScanner.Services;
 using JoesScanner.ViewModels;
 using JoesScanner.Views.Controls;
 
 internal static partial class MobileRecoveryTests
 {
+    internal static async Task RecordingAudioDiagnosticOwnership()
+    {
+        const string id = "availability";
+        const string server = "https://recorder.example";
+        var time = Now.AddMinutes(-1);
+        var stale = server + "/expired.wav";
+        var fresh = server + "/fresh.wav";
+        var newest = server + "/newest.wav";
+        var state = new LiveCallState(server, id);
+        state.Observe(SignedSnapshot(stale), LiveCallState.NextVersion());
+        var card = new CallItem { BackendId = id, RecordingServer = server, LiveState = state };
+        object responseRow = Row(id, time, fresh);
+        Action duringLookup = () => { card.ApplyLiveUpdate(); };
+        using var http = new HttpClient(new AsyncStubHandler(async (request, token) =>
+        {
+            var (_, _, length) = await ReadLookupRequest(request, token);
+            if (length == 0)
+                return LookupReply(0, null);
+            duringLookup();
+            return LookupReply(1, null, responseRow);
+        }));
+        using var stream = CreateStream(Settings(server), new ScriptSubscription(false, null), http);
+        async Task<string?> Refresh(CancellationToken token = default)
+        {
+            var beforeLookup = state.Read();
+            var result = await stream.RefreshRecordingAudioAsync(card, server, time, token);
+            return card.ApplyRefreshedAudioUrl(result, beforeLookup, token);
+        }
+
+        Check(await Refresh() == fresh && card.AudioUrl == fresh, "The download must receive the fresh URL after the UI catches up.");
+        duringLookup = () => state.Observe(SignedSnapshot(newest), LiveCallState.NextVersion());
+        Check(await Refresh() == newest, "A newer recorder update must supersede the outstanding lookup.");
+
+        duringLookup = () => { };
+        responseRow = new { DT_RowId = id, StartTimeUTC = time.ToUnixTimeSeconds() };
+        Check(await Refresh() == null && card.AudioUrl == newest && !card.HasDebugInfo,
+            "An incomplete exact-row response must preserve known availability.");
+        duringLookup = () => throw new HttpRequestException("Synthetic connection failure.");
+        try { await Refresh(); throw new InvalidOperationException("Expected lookup failure."); }
+        catch (HttpRequestException) { }
+        using var canceled = new CancellationTokenSource();
+        duringLookup = canceled.Cancel;
+        responseRow = Row(id, time, null);
+        try { await Refresh(canceled.Token); throw new InvalidOperationException("Canceled response applied."); }
+        catch (OperationCanceledException) { }
+        Check(card.AudioUrl == newest && state.Read().AudioUrl == newest, "Failure and cancellation must preserve recorder state.");
+
+        duringLookup = () => { };
+        var changes = new List<string?>();
+        card.PropertyChanged += (_, change) => changes.Add(change.PropertyName);
+        Check(await Refresh() == null && card.AudioUrl.Length == 0 && card.HasDebugInfo &&
+            changes.Contains(nameof(CallItem.DebugInfo)) && changes.Contains(nameof(CallItem.HasDebugInfo)),
+            "A confirmed missing filename must invalidate audio and notify the original card.");
+        changes.Clear();
+        await Refresh();
+        Check(changes.Count == 0, "Repeated absence must not invalidate the layout.");
+        responseRow = Row(id, time, fresh);
+        card.DebugInfo = "Recording download failed";
+        Check(await Refresh() == fresh && card.DebugInfo == "Recording download failed", "Independent errors must survive recovery.");
+        card.DebugInfo = "";
+        Check(!card.HasDebugInfo, "Recovery must collapse the warning.");
+
+        var detached = new LiveCallState(server, id);
+        var earlier = LiveCallState.NextVersion();
+        detached.Observe(SignedSnapshot(stale), earlier);
+        state.Observe(SignedSnapshot(newest), LiveCallState.NextVersion());
+        state.MergeRecorderState(detached);
+        detached.MergeRecorderState(state);
+        Check(state.Read().AudioUrl == newest && detached.Read().AudioUrl == newest, "Both merge orders must retain the newer observation.");
+        card.ApplyLiveUpdate();
+        responseRow = Row(id, time, fresh);
+        duringLookup = () => {
+            state.Observe(SignedSnapshot(stale), LiveCallState.NextVersion());
+            state.Observe(SignedSnapshot(newest), LiveCallState.NextVersion());
+        };
+        Check(await Refresh() == newest, "An intervening URL change and reversal must still retire a lookup.");
+
+        // A metadata-only handoff can repeat a URL the detached recorder has kept since
+        // before the lookup, even after it saw another copy of that same expired URL.
+        var parallel = new LiveCallState(server, id);
+        parallel.MergeRecorderState(state);
+        duringLookup = () => {
+            parallel.Observe(SignedSnapshot(newest), LiveCallState.NextVersion());
+            state.MergeRecorderState(parallel);
+        };
+        Check(await Refresh() == fresh, "A duplicate must allow the refresh to replace its expired URL.");
+        state.MergeRecorderState(parallel);
+        parallel.Observe(SignedSnapshot(newest), LiveCallState.NextVersion());
+        state.MergeRecorderState(parallel);
+        Check(state.Read().AudioUrl == fresh, "Repeated snapshots from a detached owner must preserve the last actual audio change.");
+    }
+
+    internal static Task CustomRecorderCardOwnership()
+    {
+        using var fixture = new SavedCredentialTests.Fixture();
+        ISettingsService settings = fixture.Load();
+        var recorder = Guid.NewGuid();
+        DurableLiveQueue.Run SwitchAccount(long generation)
+        {
+            settings.SetRecorderCredentials(recorder, RecorderA, Guid.NewGuid().ToString(), Guid.NewGuid().ToString());
+            return new(RecorderA, generation, null,
+                Account: RecordingPlaybackAccess.RecorderAccountKey(settings, recorder, RecorderA), ServerId: recorder);
+        }
+        CallItem Card(DurableLiveQueue.Run run) => new()
+        {
+            ServerId = run.ServerId, BackendId = "shared", LiveState = new(run.Server, "shared"),
+            RecordingAccess = new(RecordingOrigin.Live, false, run.Account)
+        };
+        var original = SwitchAccount(1);
+        var old = Card(original);
+        var current = SwitchAccount(2);
+        var admitted = Card(current);
+        Check(current.FindCard([old], old, "shared") == null && current.FindCard([old, admitted], old, "shared") == admitted &&
+            current.FindCard([old], admitted, "shared") == admitted && original.FindCard([old, admitted], admitted, "shared") == old,
+            "Reused IDs must match the owning custom account in both visible and active cards.");
+        Check((current with { Server = RecorderA + "/other" }).FindCard([admitted], admitted, "shared") == null &&
+            (current with { ServerId = Guid.NewGuid() }).FindCard([admitted], admitted, "shared") == null &&
+            current.FindCard([admitted], admitted, "other") == null, "Endpoint, recorder and recording ID must also match.");
+        return Task.CompletedTask;
+    }
+
     internal static Task LivePinsRespectDisplayProjection()
     {
         var a = Guid.NewGuid();

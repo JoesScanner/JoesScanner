@@ -46,8 +46,8 @@ internal static partial class MobileRecoveryTests
             var restored = (await queue.NextAsync(a, 0, token))!;
             var cardA = restored.ToCallItem(server);
             var cardB = (await queue.NextAsync(b, 0, token))!.ToCallItem(server);
-            Check(cardA.AudioUrl.Length == 0 && cardB.AudioUrl.Length == 0,
-                "Signed locations must be absent after reopening the journal.");
+            Check(cardA.AudioUrl.Length == 0 && cardB.AudioUrl.Length == 0 && !cardA.HasDebugInfo && !cardB.HasDebugInfo,
+                "A signed URL deliberately omitted from the journal must not be reported as missing from the recorder.");
             var accountARequests = new List<int>();
             var accountBRequests = new List<int>();
             using var clientA = first.CreateClient(new AsyncStubHandler((request, cancellation) =>
@@ -114,6 +114,65 @@ internal static partial class MobileRecoveryTests
         }
     }
 
+    internal static async Task JournalAvailabilityAcrossUpgrade()
+    {
+        using var fixture = new SavedCredentialTests.Fixture();
+        const string server = "https://custom.example";
+        const string signed = server + "/media.wav?lease=ephemeral";
+        var run = new DurableLiveQueue.Run(server, 1, null);
+        var queue = new DurableLiveQueue(fixture);
+        await queue.OpenAsync(run, Now, default);
+        await queue.ObserveAsync(run, "legacy", Now, SignedSnapshot(signed), default, RecordingOrigin.Live);
+        // Recreate the payload written before audio revisions existed, then run the normal bootstrapper.
+        using (var db = new SqliteConnection($"Data Source={fixture.DbPath}"))
+        {
+            await db.OpenAsync();
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = """
+                UPDATE live_queue_recordings SET payload=json_remove(payload,'$.Availability','$.AudioOrder'), audio_ready=0;
+                ALTER TABLE live_queue_recordings DROP COLUMN audio_revision;
+                """;
+            await cmd.ExecuteNonQueryAsync();
+        }
+        DbBootstrapper.Forget(fixture.DbPath);
+        queue = new DurableLiveQueue(fixture);
+        var row = (await queue.NextAsync(run, 0, default))!;
+        Check(row.Snapshot!.EffectiveAvailability == RecordingAudioAvailability.Unknown && !row.ToCallItem(server).HasDebugInfo,
+            "A migrated revision-zero journal cannot establish that a filename was missing.");
+
+        var observed = new LiveCallState(server, "legacy");
+        observed.Observe(SignedSnapshot(signed), LiveCallState.NextVersion());
+        var available = observed.Read();
+        await queue.ObserveAsync(run, "legacy", Now, available, default);
+        row = (await queue.NextAsync(run, 0, default))!;
+        var card = row.ToCallItem(server);
+        Check(row.Snapshot!.AudioUrl == null && row.Snapshot.Availability == RecordingAudioAvailability.Available &&
+            !card.HasDebugInfo, "A stripped signed URL must retain only the availability observation.");
+        string? recorderFile = null;
+        using var http = new HttpClient(new AsyncStubHandler(async (request, token) => {
+            var (_, _, length) = await ReadLookupRequest(request, token);
+            return length == 0 ? LookupReply(0, null) : LookupReply(1, null, Row("legacy", Now, recorderFile));
+        }));
+        using var stream = CreateStream(Settings(server), new ScriptSubscription(false, null), http);
+        var result = await stream.RefreshRecordingAudioAsync(card, server, Now, default);
+        card.ApplyRefreshedAudioUrl(result, row.Snapshot, default);
+        Check(card.HasDebugInfo, "An authoritative exact-row lookup must replace journal availability.");
+        await queue.ObserveAsync(run, "legacy", Now, card.LiveState!.Read(), default);
+        await queue.ObserveAsync(run, "legacy", Now, available, default);
+        row = (await queue.NextAsync(run, 0, default))!;
+        Check(row.ToCallItem(server).HasDebugInfo && (await queue.ReadReadyWindowAsync([run], _ => 0, 1, default)).Length == 0,
+            "A delayed signed observation must not resurrect a newer missing reference or its queue eligibility.");
+        recorderFile = signed;
+        var detached = new CallItem { BackendId = "legacy", LiveState = observed, RecordingServer = server };
+        Check(await stream.RefreshRecordingAudioAsync(detached, server, Now, default) == signed,
+            "A fresh exact-row lookup can reaffirm the same reference after loss.");
+        card.LiveState.MergeRecorderState(observed);
+        card.ApplyLiveUpdate();
+        await queue.ObserveAsync(run, "legacy", Now, observed.Read(), default);
+        Check(!card.HasDebugInfo && (await queue.ReadReadyWindowAsync([run], _ => 0, 1, default)).Length == 1,
+            "Confirmed recovery must restore the original card and re-enable the pending recording.");
+    }
+
     internal static async Task UnavailableDurableAudio()
     {
         var folder = Directory.CreateTempSubdirectory("JoesScanner-UnavailableAudio-");
@@ -126,8 +185,10 @@ internal static partial class MobileRecoveryTests
             var run = new DurableLiveQueue.Run(server, 1, null);
             await queue.OpenAsync(run, Now, token);
             var old = Now.AddDays(-5);
-            await queue.ObserveAsync(run, "old", old, SignedSnapshot(null), token, RecordingOrigin.History);
+            await queue.ObserveAsync(run, "old", old, SignedSnapshot(null) with
+                { Availability = RecordingAudioAvailability.Missing }, token, RecordingOrigin.History);
             var card = (await queue.NextAsync(run, 0, token))!.ToCallItem(server);
+            Check(card.HasDebugInfo, "Reconstructing a recording with no observed audio must retain its missing-URL diagnostic.");
             var settings = Settings(server);
             var subscription = new ScriptSubscription(false, null);
             var pageCalls = 0;

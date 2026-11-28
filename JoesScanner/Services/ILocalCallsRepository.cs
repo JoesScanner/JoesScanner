@@ -6,9 +6,9 @@ public interface ILocalCallsRepository
 {
     Task InitializeAsync(CancellationToken cancellationToken = default);
 
-    Task UpsertCallsAsync(string serverKey, IReadOnlyList<DbCallRecord> calls, CancellationToken cancellationToken = default);
+    Task UpsertCallsAsync(RecordingMetadataScope scope, IReadOnlyList<DbCallRecord> calls, CancellationToken cancellationToken = default);
 
-    Task MarkTranscriptionUpdateNotifiedAsync(string serverKey, string backendId, CancellationToken cancellationToken = default);
+    Task MarkTranscriptionUpdateNotifiedAsync(RecordingMetadataScope scope, string backendId, CancellationToken cancellationToken = default);
 
 
     Task<string?> GetLookupCacheAsync(string serverKey, string cacheKey, CancellationToken cancellationToken = default);

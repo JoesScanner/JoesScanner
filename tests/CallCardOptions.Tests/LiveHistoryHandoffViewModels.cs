@@ -13,7 +13,7 @@ namespace JoesScanner.Services
 
     internal sealed class RecordingAccessException(string message) : InvalidOperationException(message);
     internal sealed class FirewallAuthenticationException(string message) : HttpRequestException(message);
-    internal readonly record struct RecorderRequestScope(Uri Endpoint, Guid? ServerId = null);
+    internal readonly record struct RecorderRequestScope(Uri Endpoint, Guid? ServerId = null, RecorderOperation? Operation = null);
 
     internal static class ScannerConnectionStore
     {
@@ -82,6 +82,7 @@ namespace JoesScanner.ViewModels
         internal int ResumeRequests { get; private set; }
         internal Task ResumedQueue { get; private set; } = Task.CompletedTask;
         internal Func<Task>? BeforeCommitForTest { get; set; }
+        internal RecorderOperation? NativeRecorderForTest { get; set; }
         internal Func<string, CancellationToken, Task>? PrepareForTest { get; set; }
         internal Func<CallItem, string>? AudioIdentityForTest { get; set; }
         internal string? RetryForTest => _retryPlaybackCall?.BackendId;
@@ -251,6 +252,20 @@ namespace JoesScanner.ViewModels
         internal DurableLiveQueue.Run RecorderForTest(Guid? recorder) =>
             recorder != null && _secondRecorder?.ServerId == recorder ? _secondRecorder : _durableRun!;
 
+        internal async Task<DurableLiveQueue.Run> ReplaceRecorderForTestAsync(Guid recorderId, string account,
+            CancellationToken token)
+        {
+            var prior = RecorderForTest(recorderId);
+            prior.Operation?.Retire();
+            var next = prior with { Owner = prior.Owner + 1, Account = account, Operation = new RecorderOperation() };
+            await StartRecorderRecoveryAsync(next, Recorded, token);
+            if (recorderId == _secondRecorderId)
+                _secondRecorder = next;
+            else
+                _durableRun = next;
+            return next;
+        }
+
         internal async Task AssertPendingAfterRestartAsync(string id)
         {
             var replacement = _durableRun! with { Owner = _durableRun.Owner + 1 };
@@ -385,7 +400,7 @@ namespace JoesScanner.ViewModels
                         await prepare(item.BackendId, request.Token);
                     var rate = await GetEffectivePlaybackRateAsync(item, request.Token);
                     await PlayOnDeviceAsync(item, AudioIdentityForTest?.Invoke(item) ?? item.BackendId,
-                        rate, request, request.Token, completion, forecastFrom: forecastFrom);
+                        rate, request, request.Token, completion, forecastFrom: forecastFrom, owner: NativeRecorderForTest);
                 }, request.Token, failure => ReportPlaybackFailure(failure, request), completion);
                 if (request.CanContinue && outcome == PlaybackOutcome.Failed && !request.IsManual)
                 {
@@ -550,6 +565,7 @@ namespace JoesScanner.ViewModels
         private readonly HistoryPageTransport _callHistoryService = new();
         private readonly ObservableCollection<CallItem> Calls = new();
         private HistoryRecorder? _historyRecorder = new(Guid.NewGuid(), "https://history.example");
+        private HistoryRecorderAccess? _selectedAccess;
         private long _accountVersion = 1;
         private bool _isQueuePlaybackRunning;
         private CallItem? _activeCall;
@@ -596,6 +612,7 @@ namespace JoesScanner.ViewModels
         internal Task StopForTestAsync() => StopAsync();
         internal Task LoadOlderForTestAsync() => LoadMoreOlderAsync();
 
+        internal RecorderOperation? NativeRecorderForTest { get; set; }
         internal Task SearchForTestAsync(CallItem[] calls, bool hasMore, bool hosted = false)
         {
             var snapshot = NewSnapshot(hosted);
@@ -616,6 +633,7 @@ namespace JoesScanner.ViewModels
         internal void ChangeRecorderForTest()
         {
             RetireHistorySearchRequests();
+            _selectedAccess = null;
             _historyRecorder = new(Guid.NewGuid(), "https://other.example");
             ClearSearchResults();
         }
@@ -625,13 +643,16 @@ namespace JoesScanner.ViewModels
         internal void ChangeAccountForTest()
         {
             _accountVersion++;
+            _selectedAccess = null;
             RetireHistorySearchRequests();
             ClearSearchResults();
         }
 
-        private HistorySearchSnapshot NewSnapshot(bool hosted) =>
-            new(new(_historyRecorder!, hosted, hosted ? "test" : null, hosted ? _accountVersion : null),
-                CurrentFilters(), HistoryTime.AddDays(-1), HistoryTime, hosted ? 2 : null);
+        private HistorySearchSnapshot NewSnapshot(bool hosted)
+        {
+            _selectedAccess = new(_historyRecorder!, hosted, hosted ? "test" : null, hosted ? _accountVersion : null, NativeRecorderForTest);
+            return new(_selectedAccess, CurrentFilters(), HistoryTime.AddDays(-1), HistoryTime, hosted ? 2 : null);
+        }
 
         private HistorySearchFilters CurrentFilters() => new()
         {

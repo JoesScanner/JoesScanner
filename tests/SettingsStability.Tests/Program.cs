@@ -121,13 +121,22 @@ void RecorderFiltersFollowIdentity()
     Check(filters.ShouldMute(callA) && !filters.ShouldMute(callB), "Changing the editor selection changed another recorder's filters.");
     filters.ConfigureRecorderScopes([(a, edited, a.ToString("N")), (b, second, b.ToString("N"))], edited);
     Check(filters.ShouldMute(callA), "Editing a recorder URL lost its filters.");
+    Check(filters.GetCatalogSnapshot().Count == 0, "Editing an archive must not inherit another archive's discoveries.");
+    filters.ConfigureRecorderScopes([(a, edited, a.ToString("N"))], edited, new Dictionary<Guid, string> { [a] = "alpha" });
+    filters.EnsureRulesForCall(callA, "alpha");
+    filters.ConfigureRecorderScopes([(a, edited, a.ToString("N"))], edited, new Dictionary<Guid, string> { [a] = "bravo" });
+    filters.EnsureRulesForCall(callA, "alpha");
+    Check(filters.GetCatalogSnapshot().Count == 0 && filters.ShouldMute(callA),
+        "A replaced account repopulated the new discovery or erased explicit recorder preferences.");
+    filters.ConfigureRecorderScopes([(a, edited, a.ToString("N"))], edited, new Dictionary<Guid, string> { [a] = "alpha" });
+    Check(filters.GetCatalogSnapshot().Count > 0, "Returning to the same account should restore its own discoveries.");
     Console.WriteLine("PASS Combined Live applies each recorder's saved filters across selection and address changes");
 }
 
 async Task DiscoveryContinuesWhileStorageIsBlocked()
 {
     const string origin = "https://blocked-storage.test";
-    const string discoveryKey = "filter_discovery_v2::" + origin;
+    const string discoveryKey = "filter_discovery_v2::unconfigured:" + origin;
     filters.SetServerUrl(origin);
     using var release = new ManualResetEventSlim();
     var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

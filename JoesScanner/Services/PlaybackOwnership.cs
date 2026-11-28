@@ -35,18 +35,20 @@ public sealed class PlaybackOwnership
         finally { Changed?.Invoke(); }
     }
 
-    internal Task WaitForLiveReleaseAsync(CancellationToken token)
+    internal Task WaitForLiveReleaseAsync(CancellationToken token, Guid? recorderId = null)
     {
         token.ThrowIfCancellationRequested();
         var active = Volatile.Read(ref _nativePlayback);
-        return active?.Owner.IsLive == true ? active.Released.Task.WaitAsync(token) : Task.CompletedTask;
+        return active?.Owner.IsLive == true && (recorderId == null || active.RecorderId == recorderId)
+            ? active.Released.Task.WaitAsync(token) : Task.CompletedTask;
     }
 
-    internal async Task RunNativeAsync(Lease lease, CancellationToken token, Func<CancellationToken, Task> play)
+    internal async Task RunNativeAsync(Lease lease, CancellationToken token, Func<CancellationToken, Task> play,
+        Guid? recorderId = null)
     {
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(lease.Token, token);
         await _nativeGate.WaitAsync(lifetime.Token);
-        var active = new NativePlayback(lease);
+        var active = new NativePlayback(lease, recorderId);
         try
         {
             lifetime.Token.ThrowIfCancellationRequested();
@@ -64,7 +66,7 @@ public sealed class PlaybackOwnership
         }
     }
 
-    private sealed record NativePlayback(Lease Owner)
+    private sealed record NativePlayback(Lease Owner, Guid? RecorderId)
     {
         internal TaskCompletionSource Released { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }

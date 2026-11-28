@@ -33,6 +33,12 @@ internal static class MainThread
 
 namespace JoesScanner.Services
 {
+    public sealed partial class DurableLiveQueue
+    {
+        private static readonly byte[] TestReferenceKey = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+        public DurableLiveQueue(IDatabasePathProvider paths) : this(paths, () => TestReferenceKey) { }
+    }
+
     internal static class AppLog
     {
         public static void Basic(Func<string> message) { }

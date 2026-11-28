@@ -31,7 +31,7 @@ internal static class DatabaseRecoveryTests
         Check(File.Exists(files.DbPath + "-wal"), "The legacy settings must be present with WAL still open.");
 
         Check(!DatabaseRecovery.PrepareMain(files.DbPath), "Supported upgrades must succeed without using corruption recovery.");
-        var backup = Directory.GetFiles(files.RecoveryDirectory, "*.before-v0-v5.db").Single();
+        var backup = Directory.GetFiles(files.RecoveryDirectory, $"*.before-v0-v{DbBootstrapper.CurrentSchemaVersion}.db").Single();
         using (var old = Open(backup))
         {
             Check(Equals(Execute(old, "PRAGMA user_version;"), 0L) &&
@@ -70,14 +70,14 @@ internal static class DatabaseRecoveryTests
         Check(Equals(Execute(db, "PRAGMA user_version;"), 0L) &&
             Equals(Execute(db, "SELECT count(*) FROM sqlite_schema WHERE name IN ('app_settings', 'live_queue_recordings');"), 0L),
             "An interrupted migration must leave the schema version and all preceding DDL unchanged.");
-        var backup = Directory.GetFiles(files.RecoveryDirectory, "*.before-v0-v5.db").Single();
+        var backup = Directory.GetFiles(files.RecoveryDirectory, $"*.before-v0-v{DbBootstrapper.CurrentSchemaVersion}.db").Single();
         using (var old = Open(backup))
             Check(Equals(Execute(old, "SELECT count(*) FROM sqlite_schema WHERE name='fail_migration';"), 1L),
                 "A consistent backup must exist even if migration fails.");
 
         Execute(db, "DROP TRIGGER fail_migration;");
-        Check(!DatabaseRecovery.PrepareMain(files.DbPath) && Equals(Execute(db, "PRAGMA user_version;"), 5L) &&
-            Directory.GetFiles(files.RecoveryDirectory, "*.before-v0-v5.db").Length == 1,
+        Check(!DatabaseRecovery.PrepareMain(files.DbPath) && Equals(Execute(db, "PRAGMA user_version;"), (long)DbBootstrapper.CurrentSchemaVersion) &&
+            Directory.GetFiles(files.RecoveryDirectory, $"*.before-v0-v{DbBootstrapper.CurrentSchemaVersion}.db").Length == 1,
             "Restart must retry safely without replacing the original migration snapshot.");
         return Task.CompletedTask;
     }

@@ -3,7 +3,7 @@ using JoesScanner.Helpers;
 
 namespace JoesScanner.Services;
 
-internal readonly record struct RecorderRequestScope(Uri Endpoint, Guid? ServerId = null);
+internal readonly record struct RecorderRequestScope(Uri Endpoint, Guid? ServerId = null, RecorderOperation? Operation = null);
 
 internal sealed class ServerAuthenticationHandler(ServerAuthentication authentication, HttpMessageHandler transport,
     RecorderRequestScope? recorder = null)
@@ -44,12 +44,18 @@ internal sealed class ServerAuthenticationHandler(ServerAuthentication authentic
                 ? authentication.GetCustomAuthorization(destination)
                 : authentication.GetCustomAuthorization(destination, configured.Value);
 
+        // A credential replacement may race the secure-storage read above. Never
+        // dispatch replacement credentials for a request belonging to the old login.
+        configured?.Operation?.Validate();
+        cancellationToken.ThrowIfCancellationRequested();
         var response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
         if (firewall && IsAuthenticationDenied(response.StatusCode))
         {
             response.Dispose();
             var updated = await authentication.GetFirewallAuthorizationAsync(
                 credentialEndpoint, cancellationToken, request.Headers.Authorization).ConfigureAwait(false);
+            configured?.Operation?.Validate();
+            cancellationToken.ThrowIfCancellationRequested();
             using var retry = CopyRequest(request, destination);
             retry.Headers.Authorization = updated;
             response = await base.SendAsync(retry, cancellationToken).ConfigureAwait(false);
@@ -86,6 +92,8 @@ internal sealed class ServerAuthenticationHandler(ServerAuthentication authentic
             // Never forward Basic credentials via a redirect, even on the same origin.
             redirect.Headers.Authorization = null;
             response.Dispose();
+            configured?.Operation?.Validate();
+            cancellationToken.ThrowIfCancellationRequested();
             response = await base.SendAsync(redirect, cancellationToken).ConfigureAwait(false);
             redirected = target;
         }

@@ -10,8 +10,44 @@ internal enum CallCardIdFallback
     Radio = 8
 }
 
+internal enum RecordingAudioAvailability { Unknown, Available, Missing }
+
+// Sequence numbers are local to a running process. A journal entry from an earlier
+// launch can seed a card, but cannot outrank an observation from this launch.
+internal readonly record struct AudioObservationOrder(Guid Session, long Sequence, long LastChange)
+{
+    internal static readonly Guid CurrentSession = Guid.NewGuid();
+    internal long LocalSequence => Session == CurrentSession ? Sequence : 0;
+    internal long LocalChange => Session == CurrentSession ? LastChange : 0;
+    internal static AudioObservationOrder At(long sequence, long lastChange) => new(CurrentSession, sequence, lastChange);
+
+    internal bool Supersedes(AudioObservationOrder? previous) =>
+        previous == null || LocalChange > previous.Value.LocalChange ||
+        LocalChange == previous.Value.LocalChange && LocalSequence >= previous.Value.LocalSequence;
+}
+
+// The indexes are the persisted CallCardField values followed by the three recorder IDs
+// and transcription. Older payloads have no watermarks and seed fields at version zero.
+internal sealed record RecordingFieldOrder(Guid Session, System.Collections.Immutable.ImmutableArray<long> Versions)
+{
+    internal long LocalVersion(int index) =>
+        Session == AudioObservationOrder.CurrentSession && !Versions.IsDefault && index < Versions.Length ? Versions[index] : 0;
+
+    internal bool SameVersions(RecordingFieldOrder? other) =>
+        other != null && Session == other.Session && Versions.AsSpan().SequenceEqual(other.Versions.AsSpan());
+}
+
 internal sealed record LiveCallSnapshot(CallCardMetadata Metadata, string? Transcription,
-    CallCardIdFallback IdFallbacks, string? AudioUrl = null);
+    CallCardIdFallback IdFallbacks, string? AudioUrl = null)
+{
+    public long? RecordingUnixSeconds { get; init; }
+    public RecordingAudioAvailability Availability { get; init; }
+    public AudioObservationOrder? AudioOrder { get; init; }
+    public RecordingFieldOrder? FieldOrder { get; init; }
+    public string? SignedReferenceTag { get; init; }
+    internal RecordingAudioAvailability EffectiveAvailability =>
+        string.IsNullOrWhiteSpace(AudioUrl) ? Availability : RecordingAudioAvailability.Available;
+}
 
 // A card owns this state through visible/pending transitions. The stream and HTTP lookups can
 // observe it on worker threads, while the UI reads an immutable snapshot to update its bindings.
@@ -22,9 +58,8 @@ internal sealed class LiveCallState(string serverUrl, string id)
     private const int SystemIdField = (int)CallCardField.Lcn + 1;
     private const int TalkgroupIdField = SystemIdField + 1;
     private const int SiteIdField = TalkgroupIdField + 1;
-    private readonly long[] _fieldVersions = new long[SiteIdField + 1];
-    private long _transcriptionVersion;
-    private long _audioVersion;
+    private const int TranscriptionField = SiteIdField + 1;
+    private readonly long[] _fieldVersions = new long[TranscriptionField + 1];
     private LiveCallSnapshot _snapshot = new(new(), null, CallCardIdFallback.None);
     private bool _notificationPending;
     private DateTimeOffset _nextNotificationUtc;
@@ -50,30 +85,23 @@ internal sealed class LiveCallState(string serverUrl, string id)
         Observe(update, version, out _, recoveringAudio: true, priorUrl);
 
     internal void RestoreSnapshot(LiveCallSnapshot snapshot) =>
-        Observe(snapshot, NextVersion(), out _, recoveringAudio: false, priorUrl: null, transcriptionVersion: 0);
+        Observe(snapshot with { AudioOrder = snapshot.AudioOrder ?? default(AudioObservationOrder) }, 0, out _);
 
-    internal void MergeRecorderState(LiveCallState source)
-    {
-        LiveCallSnapshot snapshot;
-        long transcriptionVersion;
-        lock (source._gate)
-        {
-            snapshot = source._snapshot;
-            transcriptionVersion = source._transcriptionVersion;
-        }
-        // A separately reconstructed card can receive a deferred HTTP result.
-        // Keep the recorder observation's text version across that handoff.
-        Observe(snapshot, NextVersion(), out _, recoveringAudio: false, priorUrl: null, transcriptionVersion: transcriptionVersion);
-    }
+    internal void MergeRecorderState(LiveCallState source) => RestoreSnapshot(source.Read());
 
     private bool Observe(LiveCallSnapshot update, long version, out string? changedTranscription, bool recoveringAudio,
-        string? priorUrl, long? transcriptionVersion = null)
+        string? priorUrl)
     {
         lock (_gate)
         {
+            changedTranscription = null;
+            if (_snapshot.RecordingUnixSeconds is { } known && update.RecordingUnixSeconds is { } incomingTime && known != incomingTime)
+                return false;
+            var recordingTime = _snapshot.RecordingUnixSeconds ?? update.RecordingUnixSeconds;
             var current = _snapshot.Metadata;
             var incoming = update.Metadata;
             var fallbacks = _snapshot.IdFallbacks;
+            var fieldOrderChanged = false;
             var metadata = new CallCardMetadata
             {
                 Timestamp = Newer(CallCardField.Time, current.Timestamp, incoming.Timestamp),
@@ -97,57 +125,78 @@ internal sealed class LiveCallState(string serverUrl, string id)
             };
 
             var transcript = _snapshot.Transcription;
-            var textVersion = transcriptionVersion ?? version;
-            if (!CallItem.IsMissingTranscription(update.Transcription) && textVersion >= _transcriptionVersion)
-            {
-                _transcriptionVersion = textVersion;
+            if (!CallItem.IsMissingTranscription(update.Transcription) && AcceptField(TranscriptionField))
                 transcript = update.Transcription;
-            }
 
             changedTranscription = transcript != _snapshot.Transcription ? transcript : null;
             var audioUrl = _snapshot.AudioUrl;
-            // A duplicate notification carrying the same stale URL does not
-            // supersede a fresh lookup. A genuinely different later URL does.
-            if (!string.IsNullOrWhiteSpace(update.AudioUrl) &&
-                (version >= _audioVersion || recoveringAudio && audioUrl == priorUrl))
+            var availability = _snapshot.Availability;
+            var order = _snapshot.AudioOrder;
+            var signedTag = _snapshot.SignedReferenceTag;
+            var incomingAudio = update.EffectiveAvailability;
+            var observedAt = update.AudioOrder?.LocalSequence ?? version;
+            var lastSeen = order?.LocalSequence ?? 0;
+            var takeAudio = update.AudioOrder is { } sourceOrder ? sourceOrder.Supersedes(order) :
+                observedAt >= lastSeen || recoveringAudio && observedAt >= (order?.LocalChange ?? 0) && audioUrl == priorUrl;
+            if (incomingAudio != RecordingAudioAvailability.Unknown && takeAudio)
             {
-                _audioVersion = Math.Max(_audioVersion, version);
-                audioUrl = update.AudioUrl;
+                // A sanitized journal reference says audio exists. It cannot replace a
+                // transient URL from the very same observation with an empty string.
+                if (incomingAudio != RecordingAudioAvailability.Available || audioUrl == null || update.AudioUrl != null ||
+                    (update.AudioOrder?.LocalChange ?? observedAt) > (order?.LocalChange ?? 0))
+                {
+                    audioUrl = update.AudioUrl;
+                    signedTag = update.SignedReferenceTag;
+                }
+                availability = incomingAudio;
+                var changedAt = order?.LocalChange ?? 0;
+                if (update.AudioOrder is { } supplied)
+                    changedAt = Math.Max(changedAt, supplied.LocalChange);
+                else if (recoveringAudio || availability != _snapshot.Availability || audioUrl != _snapshot.AudioUrl)
+                    changedAt = observedAt;
+                order = AudioObservationOrder.At(Math.Max(lastSeen, observedAt), changedAt);
             }
-            var changed = current != metadata || changedTranscription != null || audioUrl != _snapshot.AudioUrl;
-            if (changed || fallbacks != _snapshot.IdFallbacks)
-                _snapshot = new(metadata, transcript, fallbacks, audioUrl);
+            var changed = current != metadata || changedTranscription != null ||
+                audioUrl != _snapshot.AudioUrl || availability != _snapshot.Availability;
+            if (changed || recordingTime != _snapshot.RecordingUnixSeconds || fallbacks != _snapshot.IdFallbacks || order != _snapshot.AudioOrder || fieldOrderChanged ||
+                signedTag != _snapshot.SignedReferenceTag)
+                _snapshot = new(metadata, transcript, fallbacks, audioUrl)
+                {
+                    RecordingUnixSeconds = recordingTime, Availability = availability, AudioOrder = order, SignedReferenceTag = signedTag,
+                    FieldOrder = fieldOrderChanged ? new(AudioObservationOrder.CurrentSession, [.. _fieldVersions]) : _snapshot.FieldOrder
+                };
             return changed;
 
-            T Newer<T>(CallCardField field, T previous, T candidate)
+            bool AcceptField(int index)
             {
-                var index = (int)field;
-                if (candidate is null || version < _fieldVersions[index])
-                    return previous;
-
-                _fieldVersions[index] = version;
-                return candidate;
+                var observedVersion = update.FieldOrder?.LocalVersion(index) ?? version;
+                if (observedVersion < _fieldVersions[index])
+                    return false;
+                if (observedVersion > _fieldVersions[index])
+                {
+                    _fieldVersions[index] = observedVersion;
+                    fieldOrderChanged = true;
+                }
+                return true;
             }
+
+            T Newer<T>(CallCardField field, T previous, T candidate) =>
+                candidate is not null && AcceptField((int)field) ? candidate : previous;
 
             string? Text(CallCardField field, string? previous, string? candidate) =>
                 Newer(field, previous, string.IsNullOrWhiteSpace(candidate) ? null : candidate);
 
             string? PreferLabel(CallCardField field, CallCardIdFallback flag, string? previous, string? candidate)
             {
-                if (string.IsNullOrWhiteSpace(candidate) || version < _fieldVersions[(int)field])
+                if (string.IsNullOrWhiteSpace(candidate) ||
+                    update.IdFallbacks.HasFlag(flag) && previous != null && !fallbacks.HasFlag(flag) || !AcceptField((int)field))
                     return previous;
 
                 if (update.IdFallbacks.HasFlag(flag))
-                {
-                    if (previous != null && !fallbacks.HasFlag(flag))
-                        return previous;
                     fallbacks |= flag;
-                }
                 else
-                {
                     fallbacks &= ~flag;
-                }
-                return Newer(field, previous, candidate);
+                return candidate;
             }
         }
     }

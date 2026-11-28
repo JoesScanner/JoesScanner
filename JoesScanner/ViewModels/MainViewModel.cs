@@ -1197,18 +1197,22 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
         private async Task ReceiveRecorderCallAsync(DurableLiveQueue.Run durable, CallItem call, CancellationToken token)
         {
             call.ServerId = durable.ServerId;
-            if (call.IsRecordingNotification)
+            if (call.IsRecordingNotification || call.IsOrderingUpdate)
             {
                 if (call.LiveState is not { } notification || !IsCurrentLiveScope(durable))
                     return;
                 var update = notification.Read();
                 var observation = await SaveLiveObservationAsync(durable, notification.Id, null, update,
                     RecordingOrigin.Unknown, existingOnly: true, token);
+                call.ConfirmLiveAdmission(observation.ArrivalSequence.HasValue, observation.ConflictingRecordingTime);
+                if (observation.ConflictingRecordingTime)
+                    return;
                 await MainThread.InvokeOnMainThreadAsync(() =>
                 {
                     if (!IsCurrentLiveScope(durable))
                         return;
-                    if (update.AudioUrl != null && FindLiveCard(notification, durable.ServerId, durable) is { } card)
+                    if (durable.FindCard(Calls, ActiveLiveCard, notification.Id) is { } card &&
+                        (!call.IsOrderingUpdate || !ReferenceEquals(card.LiveState, notification)))
                         ApplyLiveUpdate(notification, existing: card);
                     if (observation.PlaybackChanged)
                         RequestQueueForLiveArrival("SavedRecordingNotification");
@@ -1223,15 +1227,17 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
             var saved = await SaveLiveObservationAsync(durable, incoming.Id, call.RecordingTimeUtc, snapshot,
                 call.RecordingAccess?.Origin ?? RecordingOrigin.Unknown,
                 call.IsLiveUpdate && call.RecoveryWindowId == null && !call.IsListeningBaseline, token,
-                call.RecoveryWindowId, call.IsListeningBaseline, skipAutomatic, call.AudioReferenceChanged);
-            call.ConfirmLiveAdmission(saved.ArrivalSequence.HasValue);
+                call.RecoveryWindowId, call.IsListeningBaseline, skipAutomatic);
+            call.ConfirmLiveAdmission(saved.ArrivalSequence.HasValue, saved.ConflictingRecordingTime);
+            if (saved.ConflictingRecordingTime)
+                return;
 
             await MainThread.InvokeOnMainThreadAsync(() =>
             {
                 if (!IsCurrentLiveScope(durable) || saved.IsRecoveryBacklog)
                     return;
 
-                var existing = FindLiveCard(incoming, durable.ServerId, durable);
+                var existing = durable.FindCard(Calls, ActiveLiveCard, incoming.Id);
                 // The first HTTP snapshot is already in History. It can update a
                 // card still on screen when that recorder was disabled and re-enabled.
                 if (call.IsListeningBaseline && existing == null)
@@ -1247,13 +1253,14 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 
                 if (call.IsLiveUpdate || existing != null)
                 {
-                    ApplyLiveUpdate(incoming, call, existing);
+                    if (existing != null)
+                        ApplyLiveUpdate(incoming, existing, call);
                     if (saved.PlaybackChanged)
                         RequestQueueForLiveArrival("UpdatedLiveRecording");
                     return;
                 }
 
-                _filterService.EnsureRulesForCall(call);
+                _filterService.EnsureRulesForCall(call, new RecordingMetadataScope(durable.ServerId, durable.Server, durable.Protected, durable.Account).StorageKey);
                 call.IsMutedByFilter = _filterService.ShouldMute(call);
 
                 try
@@ -1281,11 +1288,11 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 
         private Task<DurableLiveQueue.Observation> SaveLiveObservationAsync(DurableLiveQueue.Run run, string id, DateTimeOffset? recordedAt,
             LiveCallSnapshot snapshot, RecordingOrigin origin, bool existingOnly, CancellationToken token,
-            string? recoveryWindowId = null, bool historyBaseline = false, bool skipAutomatic = false, bool audioReferenceChanged = false) =>
+            string? recoveryWindowId = null, bool historyBaseline = false, bool skipAutomatic = false) =>
             _durableQueue.ObserveWithPositionAsync(run, id, recordedAt, snapshot, token, origin, existingOnly,
                 ex => AppLog.Add(() => $"Live queue storage unavailable; retrying the recording ({ex.GetType().Name})."),
                 recoveryWindowId: recoveryWindowId, historyBaseline: historyBaseline,
-                skipAutomatic: skipAutomatic, audioReferenceChanged: audioReferenceChanged);
+                skipAutomatic: skipAutomatic);
 
         private Task StopMonitoringCoreAsync()
         {
@@ -1380,26 +1387,8 @@ private readonly IPlaybackCoordinator _playbackCoordinator;
 			await RunLivePlaybackInputAsync(() => OnCallTappedAsync(resolved));
 		}
 
-		public CallItem? ResolveCallForAddressAlert(CallItem alertItem)
-		{
-			try
-			{
-				// Prefer direct reference match first.
-				if (Calls.Contains(alertItem))
-					return alertItem;
-
-				var id = alertItem.BackendId;
-				if (!string.IsNullOrWhiteSpace(id))
-				{
-					var match = Calls.FirstOrDefault(c => c.ServerId == alertItem.ServerId && c.BackendId == id);
-					if (match != null)
-						return match;
-				}
-			}
-			catch { }
-
-			return null;
-		}
+		public CallItem? ResolveCallForAddressAlert(CallItem alertItem) =>
+            RecordingIdentity.Find(Calls, alertItem);
 
 		private Task OnToggleAudioAsync()
 		{
@@ -1497,8 +1486,7 @@ private static string SpeedStepToLabel(double step)
 }
         private CallItem ResolveDurableCard(DurableLiveQueue.Run durable, DurableLiveQueue.Recording row, CallItem? capturedReplay = null)
         {
-            bool Matches(CallItem? item) => item?.LiveState is { } state && state.Id == row.Id &&
-                item.ServerId == durable.ServerId && DurableLiveQueue.ServerKey(state.ServerUrl) == durable.Server && durable.Owns(item.RecordingAccess);
+            bool Matches(CallItem? item) => durable.MatchesCard(item, row.Id);
 
             var card = Calls.FirstOrDefault(Matches);
             if (card == null)
@@ -1524,7 +1512,7 @@ private static string SpeedStepToLabel(double step)
 
         private void ShowDurableCard(CallItem card)
         {
-            if (!Calls.Contains(card) && card.LiveState is { } state && FindLiveCard(state, card.ServerId) == null)
+            if (!Calls.Contains(card) && ScopeOf(card) is { } scope && scope.FindCard(Calls, null, card.BackendId) == null)
                 InsertLiveCardInDisplayOrder(card);
         }
 
@@ -1576,31 +1564,17 @@ private static string SpeedStepToLabel(double step)
 				if (AddressAlerts.Count == 0 && _hiddenAddressAlerts.Count == 0)
 					return;
 
-				HashSet<string> liveIds = new(StringComparer.Ordinal);
-				foreach (var c in Calls)
-				{
-					if (!string.IsNullOrWhiteSpace(c.BackendId))
-						liveIds.Add(c.BackendId);
-				}
-
-				bool IsLive(CallItem a)
-				{
-					if (Calls.Contains(a))
-						return true;
-					return !string.IsNullOrWhiteSpace(a.BackendId) && liveIds.Contains(a.BackendId);
-				}
-
 				for (var i = AddressAlerts.Count - 1; i >= 0; i--)
 				{
 					var a = AddressAlerts[i];
-					if (!IsLive(a))
+					if (ResolveCallForAddressAlert(a) == null)
 						AddressAlerts.RemoveAt(i);
 				}
 
 				for (var i = _hiddenAddressAlerts.Count - 1; i >= 0; i--)
 				{
 					var a = _hiddenAddressAlerts[i];
-					if (!IsLive(a))
+					if (ResolveCallForAddressAlert(a) == null)
 						_hiddenAddressAlerts.RemoveAt(i);
 				}
 
@@ -1725,14 +1699,20 @@ private static string SpeedStepToLabel(double step)
             if (!request.IsManual && ScopeOf(item) == null)
                 return PlaybackOutcome.Withheld;
 
+            var owner = preparedAudio?.Owner ?? CapturePlaybackOwner(item);
+            using var lifetime = owner == null ? null : CancellationTokenSource.CreateLinkedTokenSource(owner.Token, request.Token);
+            var token = lifetime?.Token ?? request.Token;
             var completion = new PlaybackCompletion();
+            completion.Bind(owner);
             var reachedNative = false;
             var outcome = IsFilteredForPlayback(item, allowFilteredPlayback)
                 ? PlaybackOutcome.Skipped
                 : await PlaybackAttempt.RunAsync(() =>
-                    PlayAudioCoreAsync(item, request, completion, preparedAudio, () => reachedNative = true, forecastFrom),
-                    request.Token, ex => ReportPlaybackFailure(ex, request), completion);
+                    PlayAudioCoreAsync(item, request, completion, preparedAudio, () => reachedNative = true, forecastFrom, owner, token),
+                    token, ex => { if (owner?.Token.IsCancellationRequested != true) ReportPlaybackFailure(ex, request); }, completion);
 
+            if (owner?.Token.IsCancellationRequested == true)
+                return PlaybackOutcome.Canceled;
             if (!request.CanContinue)
                 return outcome;
 
@@ -1740,7 +1720,7 @@ private static string SpeedStepToLabel(double step)
             {
                 if (outcome == PlaybackOutcome.Skipped && ScopeOf(item) is { } durable &&
                     TryGetDurableRecording(item, durable, out var id))
-                    await _durableQueue.MarkAsync(durable, id, outcome, request.Token);
+                    await _durableQueue.MarkAsync(durable, id, outcome, token);
                 CompleteQueuedCall(item);
                 _lastQueuePlaybackFinishedAtUtc = DateTimeOffset.UtcNow;
             }
@@ -1758,9 +1738,9 @@ private static string SpeedStepToLabel(double step)
                 else
                 {
                     if (reachedNative || IsFilteredForPlayback(item))
-                        await _durableQueue.MarkAsync(failedScope, failedId, PlaybackOutcome.Skipped, request.Token);
+                        await _durableQueue.MarkAsync(failedScope, failedId, PlaybackOutcome.Skipped, token);
                     else
-                        await _durableQueue.DeferAudioAsync(failedScope, failedId, item.LiveAudioRevision, request.Token);
+                        await _durableQueue.DeferAudioAsync(failedScope, failedId, item.LiveAudioRevision, token);
                     outcome = PlaybackOutcome.Withheld;
                 }
             }
@@ -1770,9 +1750,9 @@ private static string SpeedStepToLabel(double step)
         }
 
         private async Task PlayAudioCoreAsync(CallItem item, LivePlaybackRequests.Request request, PlaybackCompletion completion,
-            PlaybackAudioLease? preparedAudio, Action enteringNative, LivePlaybackScheduler.Choice? forecastFrom)
+            PlaybackAudioLease? preparedAudio, Action enteringNative, LivePlaybackScheduler.Choice? forecastFrom,
+            RecorderOperation? owner, CancellationToken token)
         {
-            var token = request.Token;
             var rate = await GetEffectivePlaybackRateAsync(item, token);
             token.ThrowIfCancellationRequested();
             _currentPlayingCall = item;
@@ -1790,7 +1770,7 @@ private static string SpeedStepToLabel(double step)
                     using var acquisition = CancellationTokenSource.CreateLinkedTokenSource(token);
                     // Bound automatic preparation so a remote recorder cannot hold the shared queue.
                     acquisition.CancelAfter(request.IsManual ? TimeSpan.FromMinutes(15) : TimeSpan.FromSeconds(5));
-                    try { acquired = await AcquireRecordingAudioAsync(item, acquisition.Token, automatic: !request.IsManual); }
+                    try { acquired = await AcquireRecordingAudioAsync(item, acquisition.Token, automatic: !request.IsManual, owner: owner); }
                     catch (OperationCanceledException ex) when (!token.IsCancellationRequested && acquisition.IsCancellationRequested)
                     {
                         throw new TimeoutException("Audio preparation timed out.", ex);
@@ -1826,7 +1806,7 @@ private static string SpeedStepToLabel(double step)
                     {
                         authorization?.Validate();
                         enteringNative();
-                    }, forecastFrom, audio.Invalidate);
+                    }, forecastFrom, audio.Invalidate, owner);
                     if (!completion.Confirmed)
                         authorization?.Validate();
                 }
@@ -1860,7 +1840,7 @@ private static string SpeedStepToLabel(double step)
             var server = item.RecordingServer ?? item.LiveState?.ServerUrl ?? _settingsService.ServerUrl ?? "";
             if (item.ServerId != null && !CanUseRecorder(item, server))
                 throw new RecordingAccessException("The recording belongs to a recorder whose address has changed.");
-            var key = item.ServerId?.ToString("N") ?? DurableLiveQueue.ServerKey(server);
+            var key = DurableLiveQueue.ServerKey(server);
             var context = item.RecordingAccess ?? new RecordingAccessContext(RecordingOrigin.Unknown, false);
             var protectedSource = context.Protected || HostedServerRules.RequiresApiFirewallCredentials(_settingsService, server);
             var account = RequireCurrentRecordingAccount(item);
@@ -1868,7 +1848,7 @@ private static string SpeedStepToLabel(double step)
             var recordedAt = item.RecordingTimeUtc;
             if (key != null && !string.IsNullOrWhiteSpace(item.BackendId) && (item.ServerId != null || protectedSource))
             {
-                var persisted = await _durableQueue.GetAccessAsync(key, item.BackendId, account, token);
+                var persisted = await _durableQueue.GetAccessAsync(key, item.BackendId, account, token, protectedSource, item.ServerId);
                 if (persisted is { } record)
                 {
                     context = record.Access with { Protected = record.Access.Protected || protectedSource };
@@ -1922,21 +1902,8 @@ private static string SpeedStepToLabel(double step)
 
         private List<CallItem> SnapshotLiveCalls() => Calls.ToList();
 
-        private CallItem? FindLiveCard(LiveCallState state, Guid? serverId, DurableLiveQueue.Run? updateScope = null)
+        private void ApplyLiveUpdate(LiveCallState state, CallItem existing, CallItem? update = null)
         {
-            var server = DurableLiveQueue.ServerKey(state.ServerUrl);
-            bool Matches(CallItem item) => item.ServerId == serverId && item.LiveState is { } live &&
-                (ReferenceEquals(live, state) || live.Id == state.Id && DurableLiveQueue.ServerKey(live.ServerUrl) == server);
-            return Calls.FirstOrDefault(Matches) ??
-                (updateScope != null && ActiveLiveCard is { } active && updateScope.Owns(active.RecordingAccess) && Matches(active)
-                    ? active : null);
-        }
-
-        private void ApplyLiveUpdate(LiveCallState state, CallItem? update = null, CallItem? existing = null)
-        {
-            existing ??= FindLiveCard(state, update?.ServerId);
-            if (existing == null)
-                return;
             if (existing.LiveState is { } restored && !ReferenceEquals(restored, state))
                 restored.MergeRecorderState(state);
             var alreadyPlayable = !string.IsNullOrWhiteSpace(existing.AudioUrl);
@@ -2013,32 +1980,8 @@ private void AddAddressAlertIfNew(CallItem call)
         {
         }
 
-        var id = call.BackendId;
-        if (!string.IsNullOrWhiteSpace(id))
-        {
-            if (AddressAlerts.Any(a => a.ServerId == call.ServerId &&
-                                      string.Equals(a.BackendId, id, StringComparison.Ordinal)))
-            {
-                try { AppLog.Add(() => $"AddrAlert: Add skipped. Duplicate visible. callId={id}"); } catch { }
-                return;
-            }
-
-            if (_hiddenAddressAlerts.Any(a => a.ServerId == call.ServerId &&
-                                             string.Equals(a.BackendId, id, StringComparison.Ordinal)))
-            {
-                try { AppLog.Add(() => $"AddrAlert: Add skipped. Duplicate hidden. callId={id}"); } catch { }
-                return;
-            }
-        }
-        else
-        {
-            // Fallback: avoid duplicating the same object reference.
-            if (AddressAlerts.Any(a => ReferenceEquals(a, call)) || _hiddenAddressAlerts.Any(a => ReferenceEquals(a, call)))
-            {
-                try { AppLog.Add("AddrAlert: Add skipped. Duplicate by reference."); } catch { }
-                return;
-            }
-        }
+        if (RecordingIdentity.Find(AddressAlerts, call) != null || RecordingIdentity.Find(_hiddenAddressAlerts, call) != null)
+            return;
 
         AddressAlerts.Insert(0, call);
 
@@ -2105,20 +2048,14 @@ public void DismissAddressAlert(CallItem call)
         {
         }
 
-        var existing = AddressAlerts.FirstOrDefault(a =>
-            (a.ServerId == call.ServerId && !string.IsNullOrWhiteSpace(call.BackendId) &&
-             string.Equals(a.BackendId, call.BackendId, StringComparison.Ordinal)) ||
-            ReferenceEquals(a, call));
+        var existing = RecordingIdentity.Find(AddressAlerts, call);
 
         if (existing != null)
             AddressAlerts.Remove(existing);
         else
         {
             // Also allow dismissing something that was previously hidden.
-            var hiddenExisting = _hiddenAddressAlerts.FirstOrDefault(a =>
-                (a.ServerId == call.ServerId && !string.IsNullOrWhiteSpace(call.BackendId) &&
-                 string.Equals(a.BackendId, call.BackendId, StringComparison.Ordinal)) ||
-                ReferenceEquals(a, call));
+            var hiddenExisting = RecordingIdentity.Find(_hiddenAddressAlerts, call);
 
             if (hiddenExisting != null)
                 _hiddenAddressAlerts.Remove(hiddenExisting);

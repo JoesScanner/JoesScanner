@@ -52,8 +52,7 @@ public sealed partial class DurableLiveQueue
             token.ThrowIfCancellationRequested();
             return commitIfCurrent(() =>
             {
-                token.ThrowIfCancellationRequested();
-                transaction.Commit();
+                run.Commit(transaction, token);
             }) ? new LagAdvance(verified, floor) : new LagAdvance(verified, Superseded: true);
         }), token);
 }

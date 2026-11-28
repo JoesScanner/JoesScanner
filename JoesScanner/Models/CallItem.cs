@@ -14,6 +14,7 @@ namespace JoesScanner.Models
         private string _voiceReceiver = string.Empty;
         private string _transcription = string.Empty;
         private string _audioUrl = string.Empty;
+        private RecordingAudioAvailability _audioAvailability;
         private string _debugInfo = string.Empty;
         private bool _isHistory;
         private bool _isPlaying;
@@ -24,6 +25,7 @@ namespace JoesScanner.Models
         internal DateTimeOffset? RecordingTimeUtc { get; init; }
         internal int? HistoryArchiveOffset { get; init; }
         internal string? RecordingServer { get; init; }
+        internal HistoryRecorderAccess? HistoryAccess { get; init; }
         internal RecordingAccessContext? RecordingAccess { get; set; }
         internal bool IsRecordingNotification { get; init; }
         internal long LivePlaybackOwner { get; set; }
@@ -31,7 +33,7 @@ namespace JoesScanner.Models
         internal bool IsConnectionActionRequired { get; init; }
         internal long? LiveArrivalSequence { get; set; }
         internal long LiveAudioRevision { get; set; }
-        internal bool AudioReferenceChanged { get; init; }
+        internal bool IsOrderingUpdate { get; init; }
         internal bool IsCompletedReplay { get; set; }
         internal bool HasUnplayedLateAudio { get; private set; }
         internal long TranscriptionCorrectionVersion { get; private set; }
@@ -46,12 +48,12 @@ namespace JoesScanner.Models
         internal string? RecoveryWindowId { get; set; }
         internal bool IsListeningBaseline { get; set; }
         internal bool IsCurrentTransmission { get; set; }
-        internal bool WasDurablyAdmitted { get; private set; }
+        internal bool WasReconciled { get; private set; }
         internal Action<bool>? LiveAdmission { private get; set; }
 
-        internal void ConfirmLiveAdmission(bool accepted)
+        internal void ConfirmLiveAdmission(bool accepted, bool conflictingRecordingTime = false)
         {
-            WasDurablyAdmitted = accepted;
+            WasReconciled = accepted || conflictingRecordingTime;
             var confirmation = LiveAdmission;
             LiveAdmission = null;
             confirmation?.Invoke(accepted);
@@ -96,11 +98,8 @@ namespace JoesScanner.Models
             CardMetadata = snapshot.Metadata;
             if (snapshot.Metadata.DurationSeconds is { } seconds)
                 CallDurationSeconds = seconds;
-            if (snapshot.AudioUrl is { } audioUrl && AudioUrl != audioUrl)
-            {
-                HasUnplayedLateAudio |= string.IsNullOrWhiteSpace(AudioUrl);
-                AudioUrl = audioUrl;
-            }
+            HasUnplayedLateAudio |= string.IsNullOrWhiteSpace(AudioUrl) && !string.IsNullOrWhiteSpace(snapshot.AudioUrl);
+            ApplyRecordingAudio(snapshot);
 
             if (snapshot.Transcription is not { } transcript || Transcription == transcript)
                 return false;
@@ -463,28 +462,63 @@ public string What3WordsCoordinatesText
             get => _audioUrl;
             set
             {
-                if (_audioUrl == value)
-                    return;
-
-                _audioUrl = value ?? string.Empty;
-                OnPropertyChanged();
+                SetRecordingAudio(value, string.IsNullOrWhiteSpace(value)
+                    ? RecordingAudioAvailability.Unknown : RecordingAudioAvailability.Available);
             }
         }
 
-        // Debug or diagnostic information for this call, shown on a separate line.
-        // Used for diagnostics such as a missing audio URL.
+        internal void ApplyRecordingAudio(LiveCallSnapshot snapshot) =>
+            SetRecordingAudio(snapshot.AudioUrl, snapshot.EffectiveAvailability);
+
+        private void SetRecordingAudio(string? url, RecordingAudioAvailability availability)
+        {
+            url ??= string.Empty;
+            var previousDiagnostic = DebugInfo;
+            var urlChanged = _audioUrl != url;
+            _audioAvailability = availability;
+            _audioUrl = url;
+            if (urlChanged)
+                OnPropertyChanged(nameof(AudioUrl));
+            NotifyDiagnosticChange(previousDiagnostic);
+        }
+
+        // Lookups commit to the ordered recorder state. A UI projection has no
+        // independent authority to accept or reject that observation.
+        internal string? ApplyRefreshedAudioUrl(string? refreshed, LiveCallSnapshot? beforeLookup, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            if (LiveState is not { } state)
+                return refreshed;
+            var snapshot = state.Read();
+            ApplyRecordingAudio(snapshot);
+            var recoveredSinceLookup = (snapshot.AudioOrder?.LocalChange ?? 0) > (beforeLookup?.AudioOrder?.LocalChange ?? 0);
+            return refreshed != null || recoveredSinceLookup ? snapshot.AudioUrl : null;
+        }
+
         public string DebugInfo
         {
-            get => _debugInfo;
+            get
+            {
+                if (!string.IsNullOrWhiteSpace(_debugInfo))
+                    return _debugInfo;
+                if (LiveState == null || _audioAvailability != RecordingAudioAvailability.Missing)
+                    return string.Empty;
+                return "No audio URL from server";
+            }
             set
             {
-                if (_debugInfo == value)
-                    return;
-
+                var previousDiagnostic = DebugInfo;
                 _debugInfo = value ?? string.Empty;
-                OnPropertyChanged();
-                OnPropertyChanged(nameof(HasDebugInfo));
+                NotifyDiagnosticChange(previousDiagnostic);
             }
+        }
+
+        private void NotifyDiagnosticChange(string previous)
+        {
+            if (previous == DebugInfo)
+                return;
+            OnPropertyChanged(nameof(DebugInfo));
+            OnPropertyChanged(nameof(HasDebugInfo));
         }
 
         // True when there is any debug info to show.

@@ -29,8 +29,15 @@ internal sealed class DurablePlaybackCommit(Func<DurableLiveQueue.Run, string, T
             return _pending.Contains((run, id));
     }
 
-    internal async Task FlushAsync(CancellationToken token = default)
+    internal async Task FlushAsync(CancellationToken token = default, Guid? recorderId = null)
     {
+        if (recorderId.HasValue)
+        {
+            token.ThrowIfCancellationRequested();
+            lock (_pending)
+                if (!_pending.Any(entry => entry.Run.ServerId == recorderId))
+                    return;
+        }
         await _writer.WaitAsync(token);
         try
         {

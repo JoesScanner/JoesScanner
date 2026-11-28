@@ -30,6 +30,8 @@ namespace JoesScanner.Services
         private readonly Func<string, bool, CancellationToken, Task<WebSocket?>> _openWebSocket;
         private readonly TimeProvider _clock;
         private readonly Uri? _recorder;
+        private readonly Guid? _recorderId;
+        private readonly RecorderOperation? _customOperation;
 
         private string SelectedEndpoint => (_settingsService.ServerUrl ?? string.Empty).TrimEnd('/');
         private string Endpoint => _recorder?.AbsoluteUri.TrimEnd('/') ?? SelectedEndpoint;
@@ -75,6 +77,13 @@ namespace JoesScanner.Services
             _openWebSocket = openWebSocket ?? TryOpenWebSocketAsync;
             _clock = clock;
             _recorder = recorder?.Endpoint;
+            _recorderId = recorder?.ServerId;
+            if (recorder is { ServerId: { } recorderId } scope &&
+                !HostedServerRules.RequiresApiFirewallCredentials(_settingsService, scope.Endpoint.AbsoluteUri))
+            {
+                _customOperation = DirectoryRecorderPolicy.For(_settingsService).Capture(recorderId, scope.Endpoint);
+                recorder = scope with { Operation = _customOperation };
+            }
             _webSocketInvoker = new HttpMessageInvoker(new ServerAuthenticationHandler(
                 ServerAuthentication.For(_settingsService),
                 PrivacyNetworkPolicy.For(_settingsService).Wrap(new SocketsHttpHandler { AllowAutoRedirect = false }), recorder));
@@ -173,25 +182,41 @@ namespace JoesScanner.Services
         // Continuously polls the server and yields new calls as CallItem objects.
         // Skips initial backlog so only new calls after connection are surfaced.
         public IAsyncEnumerable<CallItem> GetCallStreamAsync(
-            IReadOnlyList<CallItem> existingCalls, CancellationToken cancellationToken, LiveStreamRecovery? recovery = null)
+            IReadOnlyList<CallItem> existingCalls, CancellationToken cancellationToken, LiveStreamRecovery? recovery = null,
+            bool includeOrderingUpdates = false)
         {
             var serverUrl = Endpoint;
             var liveCalls = new LiveCallIndex();
             liveCalls.Seed(existingCalls, serverUrl);
-            return StreamCallsAsync(serverUrl, liveCalls, recovery, cancellationToken);
+            return includeOrderingUpdates ? StreamCallsAsync(serverUrl, liveCalls, recovery, cancellationToken) : VisibleChanges(cancellationToken);
+
+            async IAsyncEnumerable<CallItem> VisibleChanges([EnumeratorCancellation] CancellationToken token)
+            {
+                await foreach (var item in StreamCallsAsync(serverUrl, liveCalls, recovery, token))
+                {
+                    if (!item.IsOrderingUpdate)
+                        yield return item;
+                    else if (!liveCalls.NeedsAdmission(item.BackendId))
+                        item.ConfirmLiveAdmission(true);
+                }
+            }
         }
 
         private async IAsyncEnumerable<CallItem> StreamCallsAsync(string currentServerUrl, LiveCallIndex liveCalls,
             LiveStreamRecovery? recovery,
             [EnumeratorCancellation] CancellationToken cancellationToken)
         {
+            using var lifetime = _customOperation == null ? null :
+                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _customOperation.Token);
+            cancellationToken = lifetime?.Token ?? cancellationToken;
             var recoveryServer = currentServerUrl;
+            var metadataScope = RecordingMetadataScope.ForRecorder(_settingsService, _recorderId, currentServerUrl, _customOperation);
             var protectedRecovery = recovery != null && HostedServerRules.RequiresApiFirewallCredentials(_settingsService, recoveryServer);
             var recoveryAccount = protectedRecovery ? RecordingPlaybackAccess.AccountKey(_settingsService, recoveryServer, _recorder != null) : null;
-            bool InRecoveryScope() => recovery == null ||
+            bool InRecoveryScope() => _customOperation?.Token.IsCancellationRequested != true && (recovery == null ||
                 MatchesEndpoint(recoveryServer) &&
                 HostedServerRules.RequiresApiFirewallCredentials(_settingsService, recoveryServer) == protectedRecovery &&
-                (!protectedRecovery || recoveryAccount == RecordingPlaybackAccess.AccountKey(_settingsService, recoveryServer, _recorder != null));
+                (!protectedRecovery || recoveryAccount == RecordingPlaybackAccess.AccountKey(_settingsService, recoveryServer, _recorder != null)));
 
             var isAppleTestAccount = IsAppleIosTestAccount();
             AppLog.Add(() => $"AppleTest: enabled={isAppleTestAccount}");
@@ -316,7 +341,7 @@ namespace JoesScanner.Services
                     if (!hasReportedIdleConnection)
                     {
                         hasReportedIdleConnection = true;
-                        AppLog.Add(() => $"CallStream: WEBSOCKET CONNECTED. [ServerUrl={baseUrl}, Path=/Calls]");
+                        AppLog.Add(() => $"CallStream: WEBSOCKET CONNECTED. [ServerUrl={baseUrl}/Calls]");
                         yield return new CallItem
                         {
                             Timestamp = DateTime.Now,
@@ -327,7 +352,7 @@ namespace JoesScanner.Services
                     }
 
                     await foreach (var item in StreamConnectionAsync(socket, baseUrl, callsUrl,
-                        liveCalls, recovery, window, foregroundPollFloor, socketOpenedAfter, pollGrant, InRecoveryScope, cancellationToken))
+                        liveCalls, metadataScope, recovery, window, foregroundPollFloor, socketOpenedAfter, pollGrant, InRecoveryScope, cancellationToken))
                         yield return item;
 
                     if (!InRecoveryScope())
@@ -352,7 +377,7 @@ namespace JoesScanner.Services
                     (recovery?.NeedsPollingBaseline != true || !recovery.IsInherited(window)))
                 {
                     await foreach (var call in StreamConnectionAsync(null, baseUrl, callsUrl,
-                        liveCalls, recovery, window, foregroundPollFloor, socketOpenedAfter, pollGrant, InRecoveryScope, cancellationToken))
+                        liveCalls, metadataScope, recovery, window, foregroundPollFloor, socketOpenedAfter, pollGrant, InRecoveryScope, cancellationToken))
                         yield return call;
                     if (!InRecoveryScope())
                         yield break;
@@ -575,7 +600,7 @@ namespace JoesScanner.Services
                     }
 
                     if (toPersist.Count > 0)
-                        await _localCallsRepository.UpsertCallsAsync(baseUrl, toPersist, cancellationToken);
+                        await _localCallsRepository.UpsertCallsAsync(metadataScope, toPersist, cancellationToken);
                 }
                 catch
                 {
@@ -617,7 +642,7 @@ namespace JoesScanner.Services
                         if (item.IsListeningBaseline || recoveryId != null)
                             RequireHistoricalAdmission(item, liveCalls, recoveryId, baseUrl);
                         yield return item;
-                        baselineSaved &= !establishingBaseline || item.WasDurablyAdmitted;
+                        baselineSaved &= !establishingBaseline || item.WasReconciled;
                     }
                 }
                 if (establishingBaseline && baselineSaved && pollGrant!.IsCurrent(_settingsService))
@@ -914,7 +939,7 @@ namespace JoesScanner.Services
             return (false, null);
         }
 
-        private async IAsyncEnumerable<CallItem> PublishRecentRecoveryAsync(string baseUrl, LiveCallIndex liveCalls,
+        private async IAsyncEnumerable<CallItem> PublishRecentRecoveryAsync(string baseUrl, LiveCallIndex liveCalls, RecordingMetadataScope metadataScope,
             RecordingPlaybackAccess.HistoryGrant grant, IncomingRows batch, DateTimeOffset since, Func<bool> inScope,
             [EnumeratorCancellation] CancellationToken token)
         {
@@ -926,7 +951,7 @@ namespace JoesScanner.Services
                 var timestamp = TryParseTimestampUtc(row.StartTime, row.StartTimeUTC);
                 if (!(timestamp >= since) || !grant.Allows(timestamp))
                     continue;
-                await PersistWebSocketRowAsync(row, baseUrl, token);
+                await PersistWebSocketRowAsync(row, baseUrl, metadataScope, token);
                 if (!inScope() || !grant.IsCurrent(_settingsService))
                     yield break;
                 if (BuildCallItemFromRow(row, baseUrl, liveCalls, batch.Version, origin: RecordingOrigin.History,
@@ -989,12 +1014,19 @@ namespace JoesScanner.Services
             var itemServer = item.RecordingServer ?? state?.ServerUrl;
             if (key == null || !Uri.TryCreate(server, UriKind.Absolute, out var recorder) ||
                 recorder.UserInfo.Length != 0 || recorder.Query.Length != 0 || recorder.Fragment.Length != 0 ||
-                !MatchesEndpoint(server) || string.IsNullOrWhiteSpace(item.BackendId) ||
+                !MatchesEndpoint(server) || _recorderId != null && item.ServerId != _recorderId ||
+                string.IsNullOrWhiteSpace(item.BackendId) ||
                 itemServer != null && RecordingStorageReference.ServerKey(itemServer) != key ||
                 state != null && (state.Id != item.BackendId || RecordingStorageReference.ServerKey(state.ServerUrl) != key))
                 return null;
 
+            RequireLookupOwner(item, server);
+            var version = LiveCallState.NextVersion();
+            var before = state?.Read();
+            var priorUrl = before?.AudioUrl ?? item.AudioUrl;
             recordedAt ??= item.RecordingTimeUtc;
+            if (recordedAt == null && before?.RecordingUnixSeconds is { } secondSeen)
+                recordedAt = DateTimeOffset.FromUnixTimeSeconds(secondSeen);
             var access = item.RecordingAccess;
             var protectedServer = access?.Protected == true || HostedServerRules.RequiresApiFirewallCredentials(_settingsService, server);
             RecordingPlaybackAccess.HistoryGrant? grant = null;
@@ -1007,14 +1039,13 @@ namespace JoesScanner.Services
                     throw RecordingPlaybackAccess.VerificationRequired();
             }
 
-            var version = LiveCallState.NextVersion();
-            var priorUrl = state?.Read().AudioUrl ?? item.AudioUrl;
-            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _customOperation?.Token ?? default);
             deadline.CancelAfter(TimeSpan.FromSeconds(20));
             var token = deadline.Token;
 
             void Validate()
             {
+                _customOperation?.Validate();
                 token.ThrowIfCancellationRequested();
                 if (!MatchesEndpoint(server) || grant == null &&
                     HostedServerRules.RequiresApiFirewallCredentials(_settingsService, server))
@@ -1074,7 +1105,8 @@ namespace JoesScanner.Services
                 if (row == null)
                 {
                     Validate();
-                    if (state?.Read().AudioUrl is { } observed && observed != priorUrl)
+                    var recovered = state?.Read();
+                    if (recovered?.AudioUrl is { } observed && (recovered.AudioOrder?.LocalChange ?? 0) > (before?.AudioOrder?.LocalChange ?? 0))
                         return observed;
                     var reason = recordedAt == null ? "The recording has no stored time and was absent from the bounded lookup."
                         : "The recorder did not return this recording in the bounded time lookup.";
@@ -1083,11 +1115,21 @@ namespace JoesScanner.Services
 
                 var snapshot = ToLiveSnapshot(row, server);
                 Validate();
+                if (recordedAt == null && snapshot.EffectiveAvailability == RecordingAudioAvailability.Missing)
+                    return null;
                 if (state == null)
                     return snapshot.AudioUrl;
-                state.ObserveRecoveredAudio(snapshot, version, priorUrl);
+                if (_customOperation is { } owner)
+                    owner.Apply(() => state.ObserveRecoveredAudio(snapshot, version, priorUrl), token);
+                else
+                    state.ObserveRecoveredAudio(snapshot, version, priorUrl);
                 var latest = state.Read().AudioUrl;
-                return latest != priorUrl ? latest : snapshot.AudioUrl;
+                return snapshot.EffectiveAvailability != RecordingAudioAvailability.Unknown || latest != priorUrl
+                    ? latest : null;
+            }
+            catch (OperationCanceledException) when (_customOperation?.Token.IsCancellationRequested == true)
+            {
+                throw new RecordingAccessException("The recorder configuration changed during lookup.");
             }
             catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested &&
                 (deadline.IsCancellationRequested || ex.InnerException is TimeoutException))
@@ -1195,14 +1237,30 @@ namespace JoesScanner.Services
             }
         }
 
+        private void RequireLookupOwner(CallItem item, string server)
+        {
+            if (_customOperation == null || _recorderId is not { } id)
+                return;
+            _customOperation.Validate();
+            if (item.ServerId != id ||
+                item.RecordingAccess?.Account != RecordingPlaybackAccess.RecorderAccountKey(_settingsService, id, server))
+                throw new RecordingAccessException("The recording belongs to another recorder login.");
+            _customOperation.Validate();
+        }
+
         public async Task RefreshCallMetadataAsync(IReadOnlyList<CallItem> calls, CancellationToken cancellationToken)
         {
             var baseUrl = Endpoint;
-            var targets = new Dictionary<string, LiveCallState>(StringComparer.OrdinalIgnoreCase);
+            using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _customOperation?.Token ?? default);
+            cancellationToken = lifetime.Token;
+            var targets = new Dictionary<string, CallItem>(StringComparer.OrdinalIgnoreCase);
             foreach (var call in calls)
             {
                 if (call.LiveState is { } state && state.ServerUrl == baseUrl)
-                    targets.TryAdd(state.Id, state);
+                {
+                    RequireLookupOwner(call, baseUrl);
+                    targets.TryAdd(state.Id, call);
+                }
             }
             if (targets.Count == 0)
                 return;
@@ -1222,8 +1280,14 @@ namespace JoesScanner.Services
                     return;
                 if (!AllowsHistoryRow(grant, row))
                     continue;
-                if (row.DT_RowId?.Trim() is { } id && targets.TryGetValue(id, out var state))
-                    state.Observe(ToLiveSnapshot(row, state.ServerUrl), version);
+                if (row.DT_RowId?.Trim() is not { } id || !targets.TryGetValue(id, out var target) ||
+                    target.LiveState is not { } state)
+                    continue;
+                var snapshot = ToLiveSnapshot(row, state.ServerUrl);
+                if (target.RecordingTimeUtc is { } expected && snapshot.RecordingUnixSeconds is { } actual &&
+                    actual != expected.ToUnixTimeSeconds())
+                    continue;
+                ObserveRecorderRow(state, snapshot, version, out _, cancellationToken);
             }
         }
 
@@ -1247,19 +1311,13 @@ namespace JoesScanner.Services
 
             rawId = liveCalls.OriginalId(rawId);
             var state = liveCalls.Find(rawId) ?? new LiveCallState(baseUrl, rawId);
-            state.Observe(ToLiveSnapshot(r, baseUrl), version);
+            var observation = ToLiveSnapshot(r, baseUrl);
+            if (state.Read().RecordingUnixSeconds is { } known && observation.RecordingUnixSeconds is { } actual && known != actual)
+                return null;
+            ObserveRecorderRow(state, observation, version, out _);
             liveCalls.Track(state);
             var snapshot = state.Read();
             var metadata = snapshot.Metadata;
-
-            var audioUrl = snapshot.AudioUrl ?? string.Empty;
-
-            var debugInfo = string.Empty;
-            if (string.IsNullOrWhiteSpace(audioUrl))
-            {
-                debugInfo = AppendDebug(debugInfo, "No audio URL from server");
-                debugInfo = AppendDebug(debugInfo, "No audio URL built from server data");
-            }
 
             var item = new CallItem
             {
@@ -1277,9 +1335,8 @@ namespace JoesScanner.Services
                 VoiceReceiver = metadata.Receiver ?? string.Empty,
                 CardMetadata = metadata,
                 Transcription = snapshot.Transcription ?? string.Empty,
-                AudioUrl = audioUrl,
-                DebugInfo = debugInfo
             };
+            item.ApplyRecordingAudio(snapshot);
 
             ApplyAddressDetection(item);
             return item;
@@ -1294,7 +1351,7 @@ namespace JoesScanner.Services
             // this as an existing-only observation in the active account scope.
             var known = liveCalls.Find(id);
             var state = known ?? new LiveCallState(server, liveCalls.OriginalId(id));
-            return ObserveExistingCall(row, state, version, known != null);
+            return ObserveExistingCall(row, state, version);
         }
 
         private void RequireHistoricalAdmission(CallItem item, LiveCallIndex liveCalls, string? windowId, string server)
@@ -1317,9 +1374,17 @@ namespace JoesScanner.Services
             }
         }
 
-        private static LiveCallSnapshot ToLiveSnapshot(CallRow row, string serverUrl) =>
-            row.ToLiveSnapshot(ParseTimestamp(row.StartTime, row.StartTimeUTC), NormalizeCallText(row.CallText))
-                with { AudioUrl = BuildLiveAudioUrl(row.AudioFilename, serverUrl) };
+        private static LiveCallSnapshot ToLiveSnapshot(CallRow row, string serverUrl)
+        {
+            var recorded = TryParseTimestampUtc(row.StartTime, row.StartTimeUTC);
+            return row.ToLiveSnapshot(recorded?.LocalDateTime, NormalizeCallText(row.CallText)) with
+            {
+                AudioUrl = BuildLiveAudioUrl(row.AudioFilename, serverUrl),
+                RecordingUnixSeconds = recorded?.ToUnixTimeSeconds(),
+                Availability = recorded.HasValue && row.HasEmptyAudioField && !row.IsUpdateNotification
+                    ? RecordingAudioAvailability.Missing : RecordingAudioAvailability.Unknown
+            };
+        }
 
         private static string? BuildLiveAudioUrl(string? filename, string serverUrl)
         {
@@ -1337,12 +1402,28 @@ namespace JoesScanner.Services
                 : null;
         }
 
-        private CallItem? ObserveExistingCall(CallRow row, LiveCallState? state, long version, bool trackAudioChange = true)
+        private bool ObserveRecorderRow(LiveCallState state, LiveCallSnapshot snapshot, long version,
+            out string? transcript, CancellationToken token = default)
+        {
+            if (_customOperation == null)
+            {
+                token.ThrowIfCancellationRequested();
+                return state.Observe(snapshot, version, out transcript);
+            }
+            string? observedText = null;
+            var changed = false;
+            _customOperation.Apply(() => changed = state.Observe(snapshot, version, out observedText), token);
+            transcript = observedText;
+            return changed;
+        }
+
+        private CallItem? ObserveExistingCall(CallRow row, LiveCallState? state, long version)
         {
             if (state == null)
                 return null;
-            var previousAudio = state.Read().AudioUrl;
-            if (!state.Observe(ToLiveSnapshot(row, state.ServerUrl), version, out var transcript))
+            var previous = state.Read();
+            var changed = ObserveRecorderRow(state, ToLiveSnapshot(row, state.ServerUrl), version, out var transcript);
+            if (!changed && ReferenceEquals(state.Read(), previous))
                 return null;
 
             var item = new CallItem
@@ -1351,7 +1432,7 @@ namespace JoesScanner.Services
                 LiveState = state,
                 RecordingTimeUtc = TryParseTimestampUtc(row.StartTime, row.StartTimeUTC),
                 IsLiveUpdate = true,
-                AudioReferenceChanged = trackAudioChange && state.Read().AudioUrl != previousAudio,
+                IsOrderingUpdate = !changed,
                 Transcription = transcript ?? string.Empty
             };
             if (transcript != null)
@@ -1405,7 +1486,7 @@ namespace JoesScanner.Services
                 durationSeconds = dur;
 
             // Prefer StartTimeUTC if present; fall back to StartTime (some endpoints only include StartTime).
-            var startUtc = !string.IsNullOrWhiteSpace(r.StartTimeUTC) ? r.StartTimeUTC : r.StartTime;
+            var startUtc = TryParseTimestampUtc(r.StartTime, r.StartTimeUTC)?.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture);
 
             var now = DateTimeOffset.UtcNow;
 
@@ -1442,7 +1523,7 @@ namespace JoesScanner.Services
             };
         }
 
-        private async Task PersistWebSocketRowAsync(CallRow row, string serverKey, CancellationToken cancellationToken)
+        private async Task PersistWebSocketRowAsync(CallRow row, string serverKey, RecordingMetadataScope metadataScope, CancellationToken cancellationToken)
         {
             try
             {
@@ -1452,13 +1533,13 @@ namespace JoesScanner.Services
 
                 if (row.IsUpdateNotification)
                 {
-                    await _localCallsRepository.MarkTranscriptionUpdateNotifiedAsync(serverKey, rawId, cancellationToken);
+                    await _localCallsRepository.MarkTranscriptionUpdateNotifiedAsync(metadataScope, rawId, cancellationToken);
                     return;
                 }
 
                 var record = MapToDbRecord(row, serverKey);
                 if (record != null)
-                    await _localCallsRepository.UpsertCallsAsync(serverKey, new[] { record }, cancellationToken);
+                    await _localCallsRepository.UpsertCallsAsync(metadataScope, new[] { record }, cancellationToken);
             }
             catch
             {
@@ -1507,31 +1588,26 @@ namespace JoesScanner.Services
             }
         }
 
+        internal static Uri? GetRecorderWebSocketUri(string baseUrl)
+        {
+            if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var endpoint) ||
+                endpoint.Scheme is not ("http" or "https") || endpoint.UserInfo.Length != 0)
+                return null;
+
+            return new UriBuilder(endpoint)
+            {
+                Scheme = endpoint.Scheme == "https" ? "wss" : "ws",
+                Path = endpoint.AbsolutePath.TrimEnd('/') + "/Calls",
+                Query = string.Empty,
+                Fragment = string.Empty
+            }.Uri;
+        }
+
         private async Task<WebSocket?> TryOpenWebSocketAsync(string baseUrl, bool validateLiveness, CancellationToken cancellationToken)
         {
-            if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var baseUri))
+            var wsUri = GetRecorderWebSocketUri(baseUrl);
+            if (wsUri == null)
                 return null;
-
-            var builder = new UriBuilder(baseUri);
-
-            if (string.Equals(builder.Scheme, "https", StringComparison.OrdinalIgnoreCase))
-            {
-                builder.Scheme = "wss";
-            }
-            else if (string.Equals(builder.Scheme, "http", StringComparison.OrdinalIgnoreCase))
-            {
-                builder.Scheme = "ws";
-            }
-            else
-            {
-                return null;
-            }
-
-            builder.Path = "/Calls";
-            builder.Query = string.Empty;
-            builder.Fragment = string.Empty;
-
-            var wsUri = builder.Uri;
 
             var ws = new ClientWebSocket();
             // Keepalive helps prevent intermediate proxies from timing out idle connections.
@@ -1633,7 +1709,7 @@ namespace JoesScanner.Services
         }
 
         private async IAsyncEnumerable<CallItem> StreamConnectionAsync(
-            WebSocket? ws, string baseUrl, string callsUrl, LiveCallIndex liveCalls, LiveStreamRecovery? recovery,
+            WebSocket? ws, string baseUrl, string callsUrl, LiveCallIndex liveCalls, RecordingMetadataScope metadataScope, LiveStreamRecovery? recovery,
             LiveStreamRecovery.Window? window, DateTimeOffset? foregroundFloor, DateTimeOffset socketOpenedAfter,
             RecordingPlaybackAccess.HistoryGrant? historyGrant, Func<bool> inScope,
             [EnumeratorCancellation] CancellationToken cancellationToken)
@@ -1697,13 +1773,13 @@ namespace JoesScanner.Services
                         if (batch.Grant is { } grant)
                         {
                             var reconciled = true;
-                            await foreach (var call in PublishRecentRecoveryAsync(baseUrl, liveCalls, grant,
+                            await foreach (var call in PublishRecentRecoveryAsync(baseUrl, liveCalls, metadataScope, grant,
                                 batch, window!.Since, inScope, token))
                             {
                                 if (recovery!.IsDurable)
                                     RequireHistoricalAdmission(call, liveCalls, window.Id, baseUrl);
                                 yield return call;
-                                reconciled &= !recovery!.IsDurable || call.WasDurablyAdmitted;
+                                reconciled &= !recovery!.IsDurable || call.WasReconciled;
                             }
                             batch.Consumed.SetResult(reconciled && inScope() && grant.IsCurrent(_settingsService));
                         }
@@ -1822,6 +1898,9 @@ namespace JoesScanner.Services
                     if (!inScope())
                         yield break;
                     var recordedAt = TryParseTimestampUtc(row.StartTime, row.StartTimeUTC);
+                    if (recordedAt is { } instant && row.DT_RowId?.Trim() is { } rowId &&
+                        liveCalls.Find(rowId)?.Read().RecordingUnixSeconds is { } known && known != instant.ToUnixTimeSeconds())
+                        continue;
                     // A hosted socket can replay complete historical rows. Apply
                     // its entitlement check even when only an existing row may be updated.
                     var origin = !protectedRecorder || recordedAt >= socketOpenedAfter
@@ -1840,7 +1919,7 @@ namespace JoesScanner.Services
 
                     var existingOnly = history && !listeningBaseline && foregroundFloor is { } floor && recordedAt < floor;
                     if (!existingOnly)
-                        await PersistWebSocketRowAsync(row, baseUrl, token);
+                        await PersistWebSocketRowAsync(row, baseUrl, metadataScope, token);
                     if (!Authorized())
                         continue;
 
@@ -1855,7 +1934,7 @@ namespace JoesScanner.Services
                         else if (id is { Length: > 0 })
                         {
                             var update = new LiveCallState(baseUrl, liveCalls.OriginalId(id));
-                            update.Observe(ToLiveSnapshot(row, baseUrl), batch.Version);
+                            ObserveRecorderRow(update, ToLiveSnapshot(row, baseUrl), batch.Version, out _, token);
                             call = new CallItem
                             {
                                 BackendId = update.Id, RecordingServer = baseUrl, LiveState = update,
@@ -1996,6 +2075,7 @@ namespace JoesScanner.Services
         // Maps a JSON row from the DataTables response into a CallRow object. from the DataTables response into a CallRow object.
         private static CallRow ParseRow(JsonElement e)
         {
+            var audio = ReadAudioFilename(e, out var explicitlyEmpty);
             var row = new CallRow
             {
                 DT_RowId = GetString(e, "DT_RowId"),
@@ -2006,12 +2086,43 @@ namespace JoesScanner.Services
                 Date = GetString(e, "Date"),
                 AudioStartPos = GetString(e, "AudioStartPos"),
                 CallText = GetString(e, "CallText"),
-                AudioFilename = GetString(e, "AudioFilename")
+                HasEmptyAudioField = explicitlyEmpty,
+                AudioFilename = audio
             };
-            if (string.IsNullOrWhiteSpace(row.AudioFilename))
-                row.AudioFilename = GetString(e, "AudioUrl");
             row.ReadCardFields(e, GetString);
             return row;
+        }
+
+        // An absent or malformed field in a partial response is inconclusive.
+        private static string? ReadAudioFilename(JsonElement row, out bool explicitlyEmpty)
+        {
+            var found = false;
+            var malformed = false;
+            string? filename = null, url = null;
+            foreach (var field in row.EnumerateObject())
+            {
+                if (!field.Name.Equals("AudioFilename", StringComparison.OrdinalIgnoreCase) &&
+                    !field.Name.Equals("AudioUrl", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                found = true;
+                if (field.Value.ValueKind == JsonValueKind.Null)
+                    continue;
+                if (field.Value.ValueKind != JsonValueKind.String)
+                {
+                    malformed = true;
+                    continue;
+                }
+                var text = field.Value.GetString();
+                if (!string.IsNullOrWhiteSpace(text))
+                {
+                    if (field.Name.Equals("AudioFilename", StringComparison.OrdinalIgnoreCase))
+                        filename = text;
+                    else
+                        url = text;
+                }
+            }
+            explicitlyEmpty = found && !malformed && filename == null && url == null;
+            return filename ?? url;
         }
 
         private static bool IsTruthy(string? value)
@@ -2022,37 +2133,6 @@ namespace JoesScanner.Services
             return string.Equals(value, "true", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(value, "1", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase);
-        }
-
-        // Parses timestamps from either ISO 8601 or Unix seconds and converts them to local time.
-        private static DateTime? ParseTimestamp(string? startTime, string? startTimeUtc)
-        {
-            var value = !string.IsNullOrWhiteSpace(startTimeUtc) ? startTimeUtc : startTime;
-
-            if (string.IsNullOrWhiteSpace(value))
-                return null;
-
-            try
-            {
-                // ISO 8601.
-                if (value.Contains("T", StringComparison.Ordinal))
-                {
-                    var dto = DateTimeOffset.Parse(value.Replace("Z", "+00:00"), null);
-                    return dto.ToLocalTime().DateTime;
-                }
-
-                // Unix seconds.
-                if (double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds))
-                {
-                    var dto = DateTimeOffset.FromUnixTimeSeconds((long)seconds).ToLocalTime();
-                    return dto.DateTime;
-                }
-            }
-            catch
-            {
-            }
-
-            return null;
         }
 
         // Safely gets a string representation of a JSON property, handling various value kinds.
@@ -2082,19 +2162,6 @@ namespace JoesScanner.Services
                 JsonValueKind.Null or JsonValueKind.Undefined => null,
                 _ => prop.ToString()
             };
-        }
-
-        // Combines debug messages into a single string separated by " | ".
-        private static string AppendDebug(string existing, string message)
-        {
-            if (string.IsNullOrWhiteSpace(message))
-                return existing ?? string.Empty;
-
-            if (string.IsNullOrWhiteSpace(existing))
-                return message;
-
-            // Combine multiple debug messages in a compact way.
-            return existing + " | " + message;
         }
 
         // Thrown when the server responds with an authentication failure.
@@ -2320,6 +2387,7 @@ namespace JoesScanner.Services
             public string? Date { get; set; }
             public string? AudioStartPos { get; set; }
             public string? CallText { get; set; }
+            public bool HasEmptyAudioField { get; init; }
             public string? AudioFilename { get; set; }
         }
     }

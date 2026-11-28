@@ -59,16 +59,21 @@ internal static partial class MobileRecoveryTests
             imported.RecordingTimeUtc, imported.RecordingAccess!, currentLive: true, requireAccount: false,
             token.Token, new FixedClock(Now)));
 
-        replacement.Send(Row("fallback-replay", Now, "late.mp3"));
+        replacement.Send(Row("fallback-replay", Now, "reused.mp3"));
         replacement.Send(Row("next-live", Now, "next.mp3"));
+        Check(await reader.MoveNextAsync() && reader.Current is { BackendId: "next-live", RecordingAccess.Origin: RecordingOrigin.Live } &&
+            polls > 1 && imported.LiveState!.Read().AudioUrl == null && repository.Ids.Count(id => id == "fallback-replay") == 1,
+            "An unrelated timestamp cannot update the historical recording or stop valid Live delivery.");
+        subscription.Tier = 2;
+        ((SettingsStub)(object)settings).SubscriptionTier = 2;
+        replacement.Send(Row("fallback-replay", old.AddMinutes(1), "late.mp3"));
         Check(await reader.MoveNextAsync() && reader.Current.IsLiveUpdate &&
               ReferenceEquals(reader.Current.LiveState, imported.LiveState) &&
-              imported.RecordingAccess?.Origin == RecordingOrigin.History,
+              imported.RecordingAccess?.Origin == RecordingOrigin.History &&
+              imported.LiveState!.Read().AudioUrl == settings.ServerUrl.TrimEnd('/') + "/late.mp3",
             "A later WebSocket update must preserve the identity and historical provenance of the fallback row.");
-        Check(await reader.MoveNextAsync() && reader.Current.BackendId == "next-live" && polls > 1,
-            "Live delivery stopped after reconnect.");
         Check(repository.Ids.Count(id => id == "fallback-replay") == 2,
-            "Only the Premium import and later WebSocket update may reach the cache.");
+            "Only the Premium import and an entitled update for the same recording may reach the cache.");
     }
 
     internal static async Task HistoricalMetadataCatchup()
@@ -269,7 +274,7 @@ internal static partial class MobileRecoveryTests
         public Task<(HistoryLookupData?, DateTime?)> GetAsync(string serverKey, CancellationToken token = default) =>
             Task.FromResult<(HistoryLookupData?, DateTime?)>((null, null));
 
-        public Task UpsertAsync(string serverKey, HistoryLookupData data, DateTime fetchedUtc, CancellationToken token = default) =>
+        public Task UpsertAsync(string serverKey, HistoryLookupData data, DateTime fetchedUtc, CancellationToken token = default, Func<Action, bool>? publish = null) =>
             Task.CompletedTask;
     }
 }

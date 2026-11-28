@@ -602,6 +602,8 @@ private void OnAlertDismissInvoked(object? sender, EventArgs e)
                 if (recorder != _viewModel.CurrentHistoryRecorder || GetActiveNavigation() is not { } navigation)
                     return;
 
+                if (_viewModel.LookupAccess is not { Retired: false } access)
+                    return;
                 var selected = _viewModel.SelectedTalkgroups;
                 var items = _viewModel.Talkgroups.Concat(selected)
                     .Where(item => item.Value.Length != 0 && !item.Value.Contains(','))
@@ -613,7 +615,7 @@ private void OnAlertDismissInvoked(object? sender, EventArgs e)
                 }
                 var picker = new HistoryTalkgroupPicker(items, selected);
                 await navigation.PushModalAsync(picker, animated: true);
-                if (await picker.Result is { } choices)
+                if (await picker.Result is { } choices && !access.Retired && access == _viewModel.LookupAccess)
                     _viewModel.SelectTalkgroupFilters(recorder, choices);
             }
             catch (Exception ex)
@@ -646,6 +648,8 @@ private void OnAlertDismissInvoked(object? sender, EventArgs e)
                     }
                 }
 
+                if (_viewModel.LookupAccess is not { Retired: false } access)
+                    return;
                 _isDropdownOpen = true;
 
                 const string cancel = "Cancel";
@@ -678,7 +682,7 @@ private void OnAlertDismissInvoked(object? sender, EventArgs e)
                 }
 
                 var selected = choiceEntries.FirstOrDefault(x => string.Equals(x.Display, choice, StringComparison.Ordinal))?.Item;
-                if (selected == null || recorder != _viewModel.CurrentHistoryRecorder)
+                if (selected == null || access.Retired || access != _viewModel.LookupAccess || recorder != _viewModel.CurrentHistoryRecorder)
                     return;
 
                 var current = getCurrent();

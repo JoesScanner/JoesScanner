@@ -233,7 +233,8 @@ internal static class DurableAccountIsolationTests
               await queue.GetAccessAsync(DirectoryServer, "protected-unknown", AccountA, default) == null &&
               await queue.GetAccessAsync(Unknown, "unknown-orphan", null, default) == null,
             "Ambiguous historical records must never be available to an active account or custom queue.");
-        Check((await queue.NextAsync(custom, 0, default))?.Id == "custom-pending", "Known custom recordings must remain usable.");
+        Check(await queue.NextAsync(custom, 0, default) == null,
+            "A known custom endpoint does not prove that its historical recording was received anonymously.");
         Check(await Observe(queue, b, "completed", Now, "new"), "A legacy terminal row cannot suppress an unrelated account.");
         if (version == 3)
             Check(!await Observe(queue, a, "completed", Now, "duplicate") &&
@@ -242,8 +243,8 @@ internal static class DurableAccountIsolationTests
 
         await using var reopened = await OpenAsync(paths);
         await DbBootstrapper.EnsureInitializedAsync(reopened);
-        Check(Scalar(reopened, "PRAGMA user_version") == 5 &&
-              Scalar(reopened, "SELECT schema_version FROM schema_meta") == 5 &&
+        Check(Scalar(reopened, "PRAGMA user_version") == DbBootstrapper.CurrentSchemaVersion &&
+              Scalar(reopened, "SELECT schema_version FROM schema_meta") == DbBootstrapper.CurrentSchemaVersion &&
               Scalar(reopened, "SELECT count(*) FROM pragma_foreign_key_check") == 0 &&
               Scalar(reopened, "SELECT count(*) FROM live_queue_recordings WHERE rowid BETWEEN 50 AND 57") == 6 &&
               Scalar(reopened, "SELECT count(*) FROM live_queue_recordings WHERE account_scope=':legacy'") == (version == 2 ? 5 : 2) &&

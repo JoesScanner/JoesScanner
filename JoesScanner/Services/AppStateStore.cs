@@ -54,6 +54,14 @@ internal static class AppStateStore
         return result;
     }
 
+    internal static bool TryWrite(Action<SqliteTransaction> write, Func<Action, bool> tryCommit)
+    {
+        using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction();
+        write(transaction);
+        return tryCommit(transaction.Commit);
+    }
+
     private static string? TryGetRaw(string key)
     {
         lock (Gate)

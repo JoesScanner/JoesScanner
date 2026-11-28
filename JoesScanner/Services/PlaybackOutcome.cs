@@ -23,7 +23,7 @@ internal static class PlaybackAttempt
             await play();
             if (completion?.Confirmed == true)
                 return PlaybackOutcome.Completed;
-            if (token.IsCancellationRequested)
+            if (token.IsCancellationRequested || completion?.RecorderRetired == true)
                 return PlaybackOutcome.Canceled;
             if (completion != null)
                 throw new InvalidOperationException("The native player did not confirm the end of the recording.");
@@ -32,6 +32,10 @@ internal static class PlaybackAttempt
         catch (OperationCanceledException ex) when (LivePlaybackRequests.IsExpectedCancellation(ex, token))
         {
             return completion?.Confirmed == true ? PlaybackOutcome.Completed : PlaybackOutcome.Canceled;
+        }
+        catch (Exception) when (completion?.RecorderRetired == true)
+        {
+            return completion.Confirmed ? PlaybackOutcome.Completed : PlaybackOutcome.Canceled;
         }
         catch (Exception ex)
         {

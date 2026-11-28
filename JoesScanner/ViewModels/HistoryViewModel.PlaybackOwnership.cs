@@ -379,8 +379,11 @@ namespace JoesScanner.ViewModels
         private async Task<PlaybackOutcome> PlayHistoryRecordingAsync(HistoryPlayback playback, CallItem call,
             PlaybackAudioLease? audio, Action? onStarted)
         {
-            var token = playback.Request.Token;
+            var owner = playback.Snapshot.Access.Operation;
+            using var lifetime = playback.Snapshot.Access.Link(playback.Request.Token);
+            var token = lifetime.Token;
             var completion = new PlaybackCompletion();
+            completion.Bind(owner);
             if (onStarted != null)
                 completion.OnStarted(onStarted);
             Exception? failure = null;
@@ -426,6 +429,8 @@ namespace JoesScanner.ViewModels
                     })).ConfigureAwait(false);
                 }, token, ex => failure = ex, completion).ConfigureAwait(false);
 
+                if (owner?.Token.IsCancellationRequested == true)
+                    return PlaybackOutcome.Withheld;
                 if (failure != null)
                 {
                     await PublishHistoryPlaybackAsync(playback, () =>

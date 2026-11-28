@@ -61,8 +61,6 @@ public partial class MainViewModel
             }
             _profiles = _connectionStore.Load(selected, listed?.DirectoryId, listed?.Name);
             DirectoryRecorderPolicy.For(_settingsService).Update(_profiles);
-            _filterService.ConfigureRecorderScopes(_profiles.Select(profile => (profile.Id, profile.Endpoint, profile.FilterKey)),
-                _settingsService.ServerUrl);
             foreach (var profile in _profiles.Where(profile => !profile.CredentialsMigrated))
             {
                 try
@@ -77,6 +75,21 @@ public partial class MainViewModel
                     AppLog.Add(() => $"Saved recorder credentials could not be migrated ({ex.GetType().Name}).");
                 }
             }
+            var discoveryScopes = new Dictionary<Guid, string>();
+            foreach (var profile in _profiles.Where(profile => !profile.DirectoryBlocked))
+            {
+                try
+                {
+                    var access = CallHistoryService.CaptureRecorderAccess(_settingsService, new(profile.Id, profile.Endpoint));
+                    discoveryScopes.Add(profile.Id, access.MetadataKey);
+                }
+                catch (Exception ex) when (ex is CredentialStorageException or RecordingAccessException)
+                {
+                    AppLog.Basic(() => $"Recorder discovery ownership unavailable ({ex.GetType().Name}).");
+                }
+            }
+            _filterService.ConfigureRecorderScopes(_profiles.Select(profile => (profile.Id, profile.Endpoint, profile.FilterKey)),
+                _settingsService.ServerUrl, discoveryScopes);
             SetLiveAudioRecorders(_profiles.Select(profile => (profile.Id, profile.Name, profile.Enabled)));
             Favorites.SetProfiles(_profiles);
         }
@@ -249,6 +262,8 @@ public partial class MainViewModel
                 return;
             }
 
+            if (restart is { } id)
+                DirectoryRecorderPolicy.For(_settingsService).Retire(id);
             _connections.Synchronize(profiles, _monitoring.Current!.Token, RunRecorderAsync, restart);
             if (_retryIsAutomatic && _profiles.Count(profile => profile.Enabled) > 1)
                 SetPlaybackRetry(null);
@@ -384,8 +399,7 @@ public partial class MainViewModel
     {
         try
         {
-            await _playbackOwnership.WaitForLiveReleaseAsync(CancellationToken.None).ConfigureAwait(false);
-            await FlushLiveCompletionAsync().ConfigureAwait(false);
+            await FlushLiveCompletionAsync(recorderId: scope.ServerId).ConfigureAwait(false);
             await _durableQueue.StopAsync(scope).ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -407,7 +421,7 @@ public partial class MainViewModel
     private bool IsCurrentLiveScope(DurableLiveQueue.Run scope)
     {
         if (!_recorderRuns.TryGetValue(scope.Owner, out var recorder) || recorder.Queue != scope ||
-            recorder.Entitlement?.Token.IsCancellationRequested == true || !_connections.IsCurrent(recorder.Connection))
+            scope.Operation?.Token.IsCancellationRequested == true || recorder.Entitlement?.Token.IsCancellationRequested == true || !_connections.IsCurrent(recorder.Connection))
             return false;
 
         try { return RecorderAccountIsCurrent(recorder.Connection, scope.Protected, scope.Account, recorder.AccountIdentity); }
@@ -437,6 +451,7 @@ public partial class MainViewModel
         if (!_recorderRuns.TryGetValue(connection.Generation, out var recorder))
         {
             token.ThrowIfCancellationRequested();
+            var operation = DirectoryRecorderPolicy.For(_settingsService).Capture(connection.Profile.Id, new Uri(server));
             var hosted = RequiresHostedAccount(server);
             var account = hosted ? RecordingPlaybackAccess.AccountKey(_settingsService, server, independent: true) :
                 CustomRecorderAccount(connection.Profile.Id, server);
@@ -462,8 +477,9 @@ public partial class MainViewModel
             if (!_connections.IsCurrent(connection) || !RecorderAccountIsCurrent(connection, hosted, account, identity))
                 return;
 
-            var scope = new DurableLiveQueue.Run(server, connection.Generation, tier, hosted, account, connection.Profile.Id);
-            var recovery = await LiveStreamRecovery.StartListeningAsync(_durableQueue, scope, DateTimeOffset.UtcNow, token);
+            operation.Validate();
+            var scope = new DurableLiveQueue.Run(server, connection.Generation, tier, hosted, account, connection.Profile.Id, Operation: operation);
+            var recovery = await StartRecorderRecoveryAsync(scope, DateTimeOffset.UtcNow, token);
             var entitlement = hosted ? HostedEntitlement.For(_settingsService).Protect(token, accountVersion: identity) : null;
             recorder = new RecorderRun(connection, scope, recovery, identity, entitlement);
             recovery.ObserveTransportRecovery(_lagGeneration.Capture, observation =>
@@ -494,7 +510,8 @@ public partial class MainViewModel
             return;
         }
 
-        token = recorder.Entitlement?.Token ?? token;
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(recorder.Entitlement?.Token ?? token, recorder.Queue.Operation!.Token);
+        token = lifetime.Token;
         using var revalidation = recorder.Entitlement != null ? CancellationTokenSource.CreateLinkedTokenSource(token) : null;
         var maintain = revalidation != null
             ? _subscriptionService.MaintainHostedSubscriptionAsync(server, revalidation.Token)
@@ -502,11 +519,12 @@ public partial class MainViewModel
         try
         {
             using var stream = _callStreamService.ForRecorder(server, connection.Profile.Id);
+            recorder.Queue.Operation!.Validate();
             var initial = await MainThread.InvokeOnMainThreadAsync(() => SnapshotLiveCalls()
                 .Where(item => item.ServerId == connection.Profile.Id && item.LivePlaybackOwner == connection.Generation &&
                     item.RecordingServer == server &&
                     recorder.Queue.Owns(item.RecordingAccess)).ToArray());
-            await foreach (var call in stream.GetCallStreamAsync(initial, token, recorder.Recovery).WithCancellation(token))
+            await foreach (var call in stream.GetCallStreamAsync(initial, token, recorder.Recovery, includeOrderingUpdates: true).WithCancellation(token))
             {
                 if (!IsCurrentLiveScope(recorder.Queue))
                     break;
@@ -536,13 +554,14 @@ public partial class MainViewModel
     }
 
     private async Task<string?> RefreshRecorderAudioAsync(CallItem item, string server, DateTimeOffset? recordedAt,
-        CancellationToken token)
+        CancellationToken token, RecorderOperation? owner = null)
     {
         if (item.ServerId == null)
             return await _callStreamService.RefreshRecordingAudioAsync(item, server, recordedAt, token);
         if (!CanUseRecorder(item, server))
             return null;
         using var stream = _callStreamService.ForRecorder(server, item.ServerId);
+        owner?.Validate();
         return await stream.RefreshRecordingAudioAsync(item, server, recordedAt, token);
     }
 
@@ -556,18 +575,19 @@ public partial class MainViewModel
         try
         {
             using var stream = _callStreamService.ForRecorder(scope.Server, scope.ServerId);
-            var previousAudio = candidates.Select(card => card.LiveState?.Read().AudioUrl).ToArray();
+            var previousSnapshots = candidates.Select(card => card.LiveState?.Read()).ToArray();
             await stream.RefreshCallMetadataAsync(candidates, timeout.Token);
             var playbackChanged = false;
             for (var i = 0; i < candidates.Length; i++)
             {
                 var card = candidates[i];
-                if (card.LiveState is not { } state || state.Read() is not { AudioUrl: { } audio } snapshot ||
-                    previousAudio[i] == audio)
+                if (card.LiveState is not { } state)
+                    continue;
+                var snapshot = state.Read();
+                if (ReferenceEquals(previousSnapshots[i], snapshot))
                     continue;
                 var saved = await SaveLiveObservationAsync(scope, state.Id, card.RecordingTimeUtc, snapshot, RecordingOrigin.Unknown,
-                    existingOnly: true, timeout.Token, skipAutomatic: !AudioEnabled || _filterService.ShouldMute(card),
-                    audioReferenceChanged: true);
+                    existingOnly: true, timeout.Token, skipAutomatic: !AudioEnabled || _filterService.ShouldMute(card));
                 playbackChanged |= saved.PlaybackChanged;
             }
             await MainThread.InvokeOnMainThreadAsync(() =>

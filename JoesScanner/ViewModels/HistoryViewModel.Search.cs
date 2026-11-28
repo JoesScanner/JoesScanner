@@ -14,6 +14,9 @@ public sealed partial class HistoryViewModel
     private HistoryRecorder? _historyRecorder;
     private Task? _lookupTask;
     private bool _lookupsLoaded;
+    private HistoryRecorderAccess? _selectedAccess;
+    private CancellationTokenSource? _selectedLifetime;
+    internal HistoryRecorderAccess? LookupAccess { get; private set; }
     private bool _restoringHistoryFilters;
     private IReadOnlyList<HistoryLookupItem> _selectedTalkgroups = [];
 
@@ -57,19 +60,19 @@ public sealed partial class HistoryViewModel
         await EnsureLookupsLoadedAsync();
     }
 
-    private void SelectRecorder(ScannerConnectionRow? row)
+    private void SelectRecorder(ScannerConnectionRow? row, bool startLookups = true)
     {
         var recorder = row == null ? null : new HistoryRecorder(row.Id, row.Endpoint);
-        if (ReferenceEquals(_selectedRecorder, row) && recorder == _historyRecorder)
-        {
-            if (recorder == null || _historyResults is { } results && !HasHistoryRecorderAccess(results.Snapshot.Access))
-                ClearSearchResults();
+        if (ReferenceEquals(_selectedRecorder, row) && recorder == _historyRecorder && _selectedAccess is { Retired: false })
             return;
-        }
 
         RetireHistorySearchRequests();
+        _selectedLifetime?.Dispose();
+        _selectedLifetime = null;
         _selectedRecorder = row;
         _historyRecorder = recorder;
+        _selectedAccess = null;
+        LookupAccess = null;
         _lookupsLoaded = false;
         _lookupTask = null;
         Receivers.Clear();
@@ -82,7 +85,15 @@ public sealed partial class HistoryViewModel
             try
             {
                 _historyPreferences.LastRecorder = recorder.Id;
-                stored = _historyPreferences.ReadFilters(recorder.Id);
+                var access = CallHistoryService.CaptureRecorderAccess(_settingsService, recorder);
+                _selectedAccess = access;
+                _selectedLifetime = access.Link(CancellationToken.None);
+                _selectedLifetime.Token.Register(() => _ = Task.Run(() => RunOnMainThreadAsync(() =>
+                {
+                    if (ReferenceEquals(_selectedAccess, access))
+                        SelectRecorder(_selectedRecorder);
+                })));
+                stored = _historyPreferences.ReadFilters(access);
             }
             catch (Exception ex)
             {
@@ -114,7 +125,7 @@ public sealed partial class HistoryViewModel
         NotifyLookupSelections();
         RefreshHistoryDateAccess();
         ClearSearchResults();
-        if (recorder != null && OwnsHistoryPage(_historyOwnership))
+        if (startLookups && _selectedAccess is { Retired: false } && OwnsHistoryPage(_historyOwnership))
             _ = EnsureLookupsLoadedAsync();
     }
 
@@ -184,7 +195,9 @@ public sealed partial class HistoryViewModel
     }
 
     private bool IsLookupFromCurrentRecorder(HistoryLookupItem item) =>
-        _historyRecorder is { } recorder && item.RecorderId == recorder.Id;
+        LookupAccess is { Retired: false } access && item.RecorderId == access.Recorder.Id &&
+        (Receivers.Any(option => ReferenceEquals(option, item)) || Sites.Any(option => ReferenceEquals(option, item)) ||
+         Talkgroups.Any(option => ReferenceEquals(option, item)));
 
     private HistorySearchFilters CurrentFilters() => new()
     {
@@ -198,13 +211,13 @@ public sealed partial class HistoryViewModel
 
     private void HistoryFiltersChanged()
     {
-        if (_restoringHistoryFilters || _historyRecorder is not { } recorder)
+        if (_restoringHistoryFilters || _selectedAccess is not { Retired: false } access)
             return;
 
         ClearSearchResults();
         try
         {
-            _historyPreferences.SaveFilters(recorder.Id, new(CurrentDates(), SavedHistoryChoice.From(_selectedReceiver),
+            _historyPreferences.SaveFilters(access, new(CurrentDates(), SavedHistoryChoice.From(_selectedReceiver),
                 SavedHistoryChoice.From(_selectedSite), _selectedTalkgroups.Select(SavedHistoryChoice.From).OfType<SavedHistoryChoice>().ToArray()));
         }
         catch (Exception ex)
@@ -225,7 +238,9 @@ public sealed partial class HistoryViewModel
 
     public Task EnsureLookupsLoadedAsync(bool forceReload = false)
     {
-        if (_historyRecorder is not { } recorder || _historyOwnership is not { } lease ||
+        if (_selectedAccess is not { Retired: false } && _selectedRecorder != null)
+            SelectRecorder(_selectedRecorder, startLookups: false);
+        if (_selectedAccess is not { Retired: false } || _historyRecorder is not { } recorder || _historyOwnership is not { } lease ||
             !OwnsHistoryPage(lease) || _lookupsLoaded && !forceReload)
             return Task.CompletedTask;
 
@@ -242,9 +257,11 @@ public sealed partial class HistoryViewModel
             var data = await _callHistoryService.GetRecorderLookupsAsync(recorder, force, request.Token).ConfigureAwait(false);
             await RunOnMainThreadAsync(() =>
             {
-                if (!request.CanContinue || !OwnsHistoryPage(lease) || recorder != _historyRecorder)
+                if (!request.CanContinue || !OwnsHistoryPage(lease) || recorder != _historyRecorder ||
+                    data.Access == null || data.Access != _selectedAccess || !HasHistoryRecorderAccess(data.Access))
                     return;
 
+                LookupAccess = data.Access;
                 ReplaceLookups(Receivers, data.Receivers, _selectedReceiver is { } receiver ? [receiver] : []);
                 ReplaceLookups(Sites, data.Sites, _selectedSite is { } site ? [site] : []);
                 ReplaceLookups(Talkgroups, data.Talkgroups, _selectedTalkgroups);
