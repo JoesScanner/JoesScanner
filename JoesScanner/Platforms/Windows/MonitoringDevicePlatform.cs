@@ -9,6 +9,9 @@ internal sealed partial class MonitoringDevicePlatform
     private const string AlertGroup = "ScannerMonitoring";
     private bool _registered;
 
+    internal static string NotificationAccessText() =>
+        WindowsNotificationStatus.Describe(AppNotificationManager.Default.Setting, WindowsNotificationStatus.HasHighProcessIntegrity);
+
     internal partial Task<bool> IsAllowedAsync(bool request) =>
         Task.FromResult(AppNotificationManager.Default.Setting == AppNotificationSetting.Enabled);
 

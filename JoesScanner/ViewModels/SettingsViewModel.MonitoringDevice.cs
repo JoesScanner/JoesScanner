@@ -118,8 +118,12 @@ public partial class SettingsViewModel
             return;
         try
         {
+#if WINDOWS
+            NotificationAccessText = MonitoringDevicePlatform.NotificationAccessText();
+#else
             var allowed = request ? await DeviceMonitoring.RequestNotificationAccessAsync() : await DeviceMonitoring.GetNotificationAccessAsync();
             NotificationAccessText = allowed ? "" : "Joe’s Scanner needs notification access. Check the device’s app notification settings.";
+#endif
         }
         catch (Exception ex)
         {
